@@ -1,4 +1,4 @@
-/** Upload transport defaults (not user-facing config). */
+/** Upload retry/timeout defaults. */
 export const MULTIMODAL_UPLOAD_MAX_ATTEMPTS = 3;
 export const MULTIMODAL_UPLOAD_BASE_DELAY_MS = 200;
 export const MULTIMODAL_UPLOAD_TIMEOUT_MS = 30_000;
@@ -18,7 +18,7 @@ export async function sleep(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** Full-jitter exponential backoff. Attempt is 1-based. */
+/** Full-jitter backoff delay (attempt is 1-based). */
 export function retryDelayMs(policy: RetryPolicy, attempt: number): number {
   const exp = Math.min(policy.baseDelayMs * (2 ** Math.max(0, attempt - 1)), 10_000);
   return Math.floor(Math.random() * Math.max(1, exp));

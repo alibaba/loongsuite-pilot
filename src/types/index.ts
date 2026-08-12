@@ -121,7 +121,7 @@ export interface AnalyticsConfig {
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
-  /** Global multimodal storage infra; policy is under agents.<id>.multimodal. */
+  /** Global multimodal storage. */
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
@@ -149,17 +149,17 @@ export const MULTIMODAL_UPLOAD_MODES = [
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
-/** User input */
+/** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
   return mode === 'input' || mode === 'both';
 }
 
-/** model output */
+/** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
   return mode === 'output' || mode === 'both';
 }
 
-/** Tool-result */
+/** uploadMode covers tool results. */
 export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
   return mode === 'tool' || mode === 'both';
 }
@@ -183,11 +183,7 @@ export interface MultimodalSlsConfig {
   securityToken?: string;
 }
 
-/**
- * Global multimodal storage infrastructure. Capture/upload policy is per-agent
- * under AgentConfig.multimodal.
- * storageBasePath: required oss:// for OSS; for SLS derived as sls://{project}/{logstore}.
- */
+/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
 export interface MultimodalRuntimeConfig {
   uploader: MultimodalUploaderKind;
   storageBasePath: string;
@@ -195,13 +191,10 @@ export interface MultimodalRuntimeConfig {
   sls?: MultimodalSlsConfig;
 }
 
-/**
- * config.json `agents.<id>` keys with multimodal extraction implemented.
- * Capability lives in code (not user config); expand as more agents land.
- */
+/** Agent ids with multimodal extraction implemented. */
 export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
 
-/** Per-agent multimodal policy. uploadMode=none (default) disables. */
+/** Per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
 }

@@ -2,10 +2,7 @@ import type { MultimodalRuntimeConfig, Uploader } from '../types.js';
 import { OssUploader } from './oss-uploader.js';
 import { SlsUploader } from './sls-uploader.js';
 
-/**
- * Construct the configured Uploader. Throws on missing / invalid credentials
- * so orchestrator can disable multimodal for the process (fail-open to text).
- */
+/** Build configured Uploader; throws if credentials missing. */
 export function createUploader(config: MultimodalRuntimeConfig): Uploader {
   if (config.uploader === 'oss') {
     if (!config.oss) throw new Error('multimodal.oss config is required');

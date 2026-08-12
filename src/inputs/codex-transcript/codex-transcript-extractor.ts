@@ -163,7 +163,7 @@ function extractCodexTurn(
   let cwd = opts.cwd;
   let developerInstructions = opts.developerInstructions;
   const blobToUri = opts.blobToUri;
-  // Default both when blobToUri is provided without mode (unit tests / callers).
+  // Default both when blobToUri is set without mode.
   const uploadMode = opts.uploadMode ?? (blobToUri ? 'both' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
@@ -615,7 +615,7 @@ function transcriptToolOutput(
       }),
     };
   }
-  // Codex may return read-image tool results as content-part arrays with input_image.
+  // Tool results may include input_image parts.
   if (Array.isArray(payload.output)) {
     const parts = extractMessageParts(payload.output, blobToUri, timestampMs, recordOffset);
     return { callId, output: parts as unknown as JsonValue };
@@ -642,12 +642,7 @@ type TranscriptMessagePart =
   | { type: 'text'; content: string }
   | { type: 'uri'; mime_type: string; modality: 'image'; uri: string };
 
-/**
- * Build GenAI message parts from Codex transcript content blocks.
- * Preserves order: input_text → text, input_image data-URL → uri (write-time blobToUri).
- * Then collapses Codex `<image…>` / `</image>` wrapper texts around uri parts.
- * Prompt summaries still use extractMessageText only.
- */
+/** Codex content blocks → GenAI parts (text + uri). */
 function transcriptInputMessage(
   role: string,
   content: unknown,
@@ -702,7 +697,6 @@ function extractMessageParts(
         mime_type: dataMatch[1] || 'image/unknown',
         modality: 'image',
         time_unix_ms: Math.max(0, timestampMs),
-        // Stable across partial-turn replays; callers may cache by this instead of re-decoding.
         ...(typeof recordOffset === 'number' ? { reuseKey: `${recordOffset}:${partIndex}` } : {}),
       });
       if (!result) continue;

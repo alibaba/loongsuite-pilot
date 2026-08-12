@@ -32,10 +32,7 @@ interface SlsEndpoint {
   host: string;
 }
 
-/**
- * Minimal SLS PutObject client (Auth V1 / LOG ak:hmac-sha1).
- * Independent from SlsFlusher / @alicloud/log.
- */
+/** SLS PutObject (Auth V1). */
 export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsPutObjectResult> {
   try {
     const endpoint = normalizeSlsEndpoint(params.endpoint);
@@ -102,7 +99,7 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsPutOb
   }
 }
 
-/** Parse sls://project/logstore (no object-key prefix). */
+/** Parse sls://project/logstore. */
 export function parseSlsStorageBasePath(storageBasePath: string): {
   project: string;
   logstore: string;
@@ -130,7 +127,7 @@ export function tryParseSlsStorageBasePath(storageBasePath: string): {
   }
 }
 
-/** Exported for unit tests (deterministic signing). */
+/** For tests (deterministic signing). */
 export function buildV1PutRequest(args: {
   endpoint: SlsEndpoint;
   project: string;
@@ -169,7 +166,7 @@ export function buildV1PutRequest(args: {
   }
   Object.assign(headers, metadataHeaders(args.meta));
 
-  // Auth V1 PutObject: Content-MD5 is omitted from the signature and request headers.
+  // Content-MD5 omitted from Auth V1 signature.
   const stringToSign = [
     'PUT',
     '', // empty Content-MD5
@@ -182,7 +179,7 @@ export function buildV1PutRequest(args: {
     .update(stringToSign, 'utf8')
     .digest('base64');
   headers.Authorization = `LOG ${args.accessKeyId}:${signature}`;
-  // Set after signing; not part of the signature.
+  // Set after signing.
   headers['x-log-date'] = headers.Date;
 
   return { url, headers };
@@ -216,7 +213,7 @@ function normalizeObjectKey(objectKey: string): string {
   return key;
 }
 
-/** Percent-encode object key; keep `/` and unreserved `-_.~`. */
+/** Percent-encode object key (keep `/` and `-_.~`). */
 function objectNameEncode(objectKey: string): string {
   return encodeURIComponent(objectKey)
     .replace(/[!'()*]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
@@ -224,7 +221,7 @@ function objectNameEncode(objectKey: string): string {
     .replace(/%2F/g, '/');
 }
 
-/** Canonicalize signed headers: x-acs-* and x-log-* except x-log-meta-*. */
+/** Canonicalize x-acs-* / x-log-* signed headers. */
 function canonicalizedLogHeaders(headers: Record<string, string>): string {
   const items: Array<[string, string]> = [];
   for (const [name, value] of Object.entries(headers)) {

@@ -117,6 +117,7 @@ describe('multimodal resolve helpers', () => {
       mime_type: 'image/png',
       size: bytes.length,
     });
+    expect(stated?.mtimeMs).toEqual(expect.any(Number));
     expect(stated?.resolvedPath).toBe(path.resolve(file));
 
     const loaded = await readImagePathBytes(stated!);

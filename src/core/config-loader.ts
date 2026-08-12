@@ -308,12 +308,7 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
 const MULTIMODAL_UPLOADER_KIND_SET = new Set<string>(MULTIMODAL_UPLOADER_KINDS);
 
-/**
- * Build global multimodal storage infra from config.json only.
- * Capture/uploadMode is per-agent under agents.<id>.multimodal.
- * OSS requires storageBasePath (oss://...); SLS derives sls://{project}/{logstore}.
- * Missing / invalid infra → undefined (fail-open to text; inputs omit blob→uri conversion).
- */
+/** Parse global multimodal storage config; invalid → undefined. */
 function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
   const block = file?.multimodal;
   if (!block || typeof block !== 'object') return undefined;
@@ -342,7 +337,6 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
 
     if (uploader === 'sls') {
       const sls = buildMultimodalSlsConfig(block);
-      // SLS base path is composed from project/logstore (not user storageBasePath).
       return {
         uploader,
         storageBasePath: `sls://${sls.project}/${sls.logstore}`,

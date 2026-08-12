@@ -148,7 +148,7 @@ export class Orchestrator extends EventEmitter {
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
-  /** Shared multimodal processor when infra + agents opt in; also used for Input wiring. */
+  /** Shared multimodal processor (null when disabled). */
   private multimodalProcessor: MultimodalProcessor | null = null;
 
   constructor(config: AnalyticsConfig) {
@@ -214,8 +214,6 @@ export class Orchestrator extends EventEmitter {
       logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
     }
 
-    // Multimodal: shared Processor/Uploader when infra + at least one agent opts in.
-    // Per-input enablement is wired at registration (Input caches; no per-entry gate).
     const multimodalConfig = this.config.multimodal;
     const agentsWantMultimodal = anyAgentMultimodalEnabled(this.config.agents);
     this.multimodalProcessor = null;

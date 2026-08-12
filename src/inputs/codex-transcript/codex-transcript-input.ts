@@ -144,7 +144,7 @@ export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
   spanContextDir?: string;
-  /** Cached multimodal policy; when enabled, extractor write-time converts images to uri. */
+  /** Multimodal options (enabled + processor). */
   multimodal?: {
     enabled: boolean;
     uploadMode?: MultimodalUploadMode;
@@ -163,10 +163,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly includeMultimodal: boolean;
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
-  /**
-   * Partial-turn replay cache: filePath + recordOffset:partIndex → uri result.
-   * Avoids re-decode/sha256 of the same input_image across wakeup cycles.
-   */
+  /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private wakeupWatcher: FSWatcher | null = null;
   private processedTerminalTurnIdsLoaded = false;
@@ -184,7 +181,6 @@ export class CodexTranscriptInput extends BaseInput {
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
-    // Wire processor when enabled; extractor gates blobToUri per entry point by uploadMode.
     const includeMultimodal = opts.multimodal?.enabled === true && !!processor;
     super({
       stateStore: opts.stateStore,
@@ -1910,10 +1906,7 @@ export class CodexTranscriptInput extends BaseInput {
     };
   }
 
-  /**
-   * blob→uri with partial-replay cache.
-   * `transcriptPath` scopes reuseKey so the same byte offset in different rollouts does not collide.
-   */
+  /** blob→uri with per-transcript replay cache. */
   private blobToUri(transcriptPath: string): BlobToUriFn {
     return (params) => {
       if (!this.multimodalProcessor) return null;
