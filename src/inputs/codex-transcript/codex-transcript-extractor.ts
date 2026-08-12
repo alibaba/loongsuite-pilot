@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { MAX_MULTIMODAL_PARTS } from '../../multimodal/types.js';
+import { MAX_MULTIMODAL_PARTS, type BlobToUriFn } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesTool,
@@ -36,21 +36,13 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   };
 }
 
-/** Write-time multimodal hook: raw base64 in → optimistic uri out (or null to drop). */
-export type CodexBlobToUri = (params: {
-  content: string;
-  mime_type: string;
-  modality: 'image';
-  time_unix_ms?: number;
-}) => { uri: string; mime_type: string; modality?: string; size?: number } | null;
-
 export function extractCodexTerminalTurn(
   records: Record<string, unknown>[],
   meta: CodexTranscriptMeta | null,
   fallbackSessionId: string,
   expectedTurnId: string,
   opts: {
-    blobToUri?: CodexBlobToUri;
+    blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
   } = {},
 ): CodexExtractedTranscriptTurn | null {
@@ -71,7 +63,7 @@ export function extractCodexPartialTurn(
     model?: string;
     cwd?: string;
     developerInstructions?: string;
-    blobToUri?: CodexBlobToUri;
+    blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
   } = {},
 ): CodexExtractedTranscriptTurn | null {
@@ -96,7 +88,7 @@ export function extractCodexPartialTurnWithBoundaries(
     model?: string;
     cwd?: string;
     developerInstructions?: string;
-    blobToUri?: CodexBlobToUri;
+    blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
   } = {},
 ): CodexPartialTurnExtraction | null {
@@ -125,7 +117,7 @@ function extractCodexTurn(
   expectedTurnId: string,
   opts: {
     requireTerminal: boolean;
-    blobToUri?: CodexBlobToUri;
+    blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
     startedAtMs?: number;
     model?: string;
@@ -555,7 +547,7 @@ function transcriptToolCall(
 function transcriptToolOutput(
   itemType: string | undefined,
   payload: Record<string, unknown>,
-  blobToUri: CodexBlobToUri | undefined,
+  blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
 ): { callId: string; output?: JsonValue } | null {
   if (itemType !== 'function_call_output' && itemType !== 'custom_tool_call_output' && itemType !== 'tool_search_output') return null;
@@ -600,14 +592,14 @@ type TranscriptMessagePart =
 
 /**
  * Build GenAI message parts from Codex transcript content blocks.
- * Preserves order: input_text → text, input_image data-URL → uri (write-time toUri).
+ * Preserves order: input_text → text, input_image data-URL → uri (write-time blobToUri).
  * Then collapses Codex `<image…>` / `</image>` wrapper texts around uri parts.
  * Prompt summaries still use extractMessageText only.
  */
 function transcriptInputMessage(
   role: string,
   content: unknown,
-  blobToUri: CodexBlobToUri | undefined,
+  blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
 ): { role: string; parts: TranscriptMessagePart[] } | null {
   const parts = extractMessageParts(content, blobToUri, timestampMs);
@@ -616,7 +608,7 @@ function transcriptInputMessage(
 
 function extractMessageParts(
   content: unknown,
-  blobToUri: CodexBlobToUri | undefined,
+  blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
 ): TranscriptMessagePart[] {
   if (typeof content === 'string' && content) {

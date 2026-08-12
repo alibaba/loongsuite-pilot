@@ -1,15 +1,71 @@
-import type { BlobPart } from './types.js';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import type { BlobPart, PathBytes, PathStat } from './types.js';
 
-/** Decode blob `content` as raw base64. Returns null on failure. */
+const IMAGE_EXT_TO_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+};
+
+export type { PathBytes, PathStat };
+
+/** Decode blob `content` as raw base64. */
 export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   const base64 = typeof part.content === 'string' ? part.content.trim() : '';
   if (!base64) return null;
 
   try {
     const bytes = Buffer.from(base64, 'base64');
-    // Buffer.from is lenient; reject empty / clearly non-base64 garbage.
     if (bytes.length === 0) return null;
     return { bytes };
+  } catch {
+    return null;
+  }
+}
+
+/** True when the path has a known image file extension. */
+export function isImageFilePath(filePath: string): boolean {
+  return mimeFromImagePath(filePath) !== null;
+}
+
+/** MIME type from image extension. */
+export function mimeFromImagePath(filePath: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  const bare = trimmed.split(/[?#]/)[0] ?? trimmed;
+  const ext = path.extname(bare).toLowerCase();
+  return IMAGE_EXT_TO_MIME[ext] ?? null;
+}
+
+/** Stat a local image path. */
+export async function statImagePath(filePath: string): Promise<PathStat | null> {
+  const mime = mimeFromImagePath(filePath);
+  if (!mime) return null;
+
+  const resolvedPath = path.resolve(filePath.trim().split(/[?#]/)[0] ?? filePath.trim());
+  let stat;
+  try {
+    stat = await fs.stat(resolvedPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) return null;
+  return { resolvedPath, mime_type: mime, size: stat.size };
+}
+
+/** Read bytes for a stated local image path. */
+export async function readImagePathBytes(stated: PathStat): Promise<PathBytes | null> {
+  try {
+    const bytes = await fs.readFile(stated.resolvedPath);
+    return { bytes, mime_type: stated.mime_type, size: bytes.length };
   } catch {
     return null;
   }

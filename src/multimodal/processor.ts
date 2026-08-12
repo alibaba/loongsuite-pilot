@@ -1,10 +1,20 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
-import { decodeBlobContent, extFromMime, joinStorageUri, yyyymmddFromUnixMs } from './resolve.js';
+import {
+  decodeBlobContent,
+  extFromMime,
+  isImageFilePath,
+  joinStorageUri,
+  readImagePathBytes,
+  statImagePath,
+  yyyymmddFromUnixMs,
+} from './resolve.js';
 import type {
   BlobToUriParams,
-  BlobToUriResult,
   Uploader,
+  UriConvertMeta,
+  UriResult,
 } from './types.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
@@ -13,20 +23,16 @@ import {
   MAX_MULTIMODAL_PENDING_UPLOADS,
   MULTIMODAL_SHUTDOWN_TIMEOUT_MS,
 } from './types.js';
+import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
 
 /**
- * Blob → uri service. Input owns message structure; this layer only
- * validates/hashes, returns an optimistic uri, and enqueues async upload.
+ * Multimodal conversion service shared across agents.
  *
- * Queue backpressure lives here; post-success idempotency lives in Uploader
- * (`successKeys`). `pendingKeys` skips a second enqueue while the same
- * targetPath is already uploading, so concurrent identical blobs do not
- * double-PUT.
- *
- * Lifecycle: after `shutdown()` starts, `toUri` rejects new blobs. Shutdown
- * best-effort drains in-flight uploads then closes the Uploader (idempotent).
+ * Two public entry points :
+ * - `blobToUri`: raw base64 blob → decode → bytes → uri + upload
+ * - `pathToUri`: local image path → read bytes → uri + upload
  */
 export class MultimodalProcessor {
   private readonly pending = new Set<Promise<void>>();
@@ -35,6 +41,10 @@ export class MultimodalProcessor {
   private pendingBytes = 0;
   private shuttingDown = false;
   private readonly storageBasePath: string;
+  /** Absolute local path → uri result (incl. null misses); shared across collect cycles. */
+  private readonly pathUriCache = new LruMap<UriResult | null>(MULTIMODAL_LRU_LIMIT);
+  /** In-flight path reads so concurrent pathToUri for the same path share one IO. */
+  private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
 
   constructor(
     storageBasePath: string,
@@ -48,11 +58,76 @@ export class MultimodalProcessor {
   }
 
   /**
-   * Synchronously returns a storage uri (or null if the blob is invalid).
-   * Upload runs in the background; failure / queue-full only logs a warning
-   * (uri may dangle).
+   * Local image path → storage uri. Path-level LRU + in-flight dedupe.
+   * Reads file bytes directly (no base64 encode/decode).
    */
-  toUri(params: BlobToUriParams): BlobToUriResult | null {
+  async pathToUri(filePath: string, timeUnixMs?: number): Promise<UriResult | null> {
+    if (this.shuttingDown) {
+      logger.warn('multimodal pathToUri rejected', { reason: 'shutting_down' });
+      return null;
+    }
+
+    const trimmed = filePath.trim().split(/[?#]/)[0] ?? '';
+    if (!trimmed || !isImageFilePath(trimmed)) return null;
+    const key = path.resolve(trimmed);
+
+    if (this.pathUriCache.has(key)) {
+      return this.pathUriCache.get(key) ?? null;
+    }
+
+    const inflight = this.pathUriInflight.get(key);
+    if (inflight) return inflight;
+
+    const pending = (async (): Promise<UriResult | null> => {
+      try {
+        const stated = await statImagePath(key);
+        if (!stated) {
+          this.pathUriCache.set(key, null);
+          return null;
+        }
+        if (stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) {
+          logger.warn('multimodal path rejected', {
+            reason: 'size_limit',
+            size: stated.size,
+          });
+          this.pathUriCache.set(key, null);
+          return null;
+        }
+
+        const loaded = await readImagePathBytes(stated);
+        if (!loaded) {
+          this.pathUriCache.set(key, null);
+          return null;
+        }
+        const result = this.bytesToUri(loaded.bytes, {
+          mime_type: loaded.mime_type,
+          modality: 'image',
+          ...(typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0
+            ? { time_unix_ms: timeUnixMs }
+            : {}),
+        });
+        this.pathUriCache.set(key, result);
+        return result;
+      } catch (err) {
+        logger.warn('multimodal pathToUri failed', { error: String(err) });
+        this.pathUriCache.set(key, null);
+        return null;
+      }
+    })();
+
+    this.pathUriInflight.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      this.pathUriInflight.delete(key);
+    }
+  }
+
+  /**
+   * Raw base64 blob → storage uri. Upload runs in the background; failure /
+   * queue-full only logs a warning (uri may dangle).
+   */
+  blobToUri(params: BlobToUriParams): UriResult | null {
     try {
       if (this.shuttingDown) {
         logger.warn('multimodal blob rejected', { reason: 'shutting_down' });
@@ -74,108 +149,122 @@ export class MultimodalProcessor {
         mime_type: params.mime_type,
         modality: params.modality,
       });
-      if (!decoded || decoded.bytes.length > MAX_MULTIMODAL_DATA_SIZE) {
-        logger.warn('multimodal blob rejected', {
-          reason: !decoded ? 'decode_failed' : 'size_limit',
-          size: decoded?.bytes.length,
-        });
+      if (!decoded) {
+        logger.warn('multimodal blob rejected', { reason: 'decode_failed' });
         return null;
       }
 
-      const mime = params.mime_type || 'application/octet-stream';
-      const sha256 = createHash('sha256').update(decoded.bytes).digest('hex');
-      const day = yyyymmddFromUnixMs(params.time_unix_ms);
-      const targetPath = `${day}/${sha256}.${extFromMime(mime)}`;
-      const uri = joinStorageUri(this.storageBasePath, targetPath);
-      const size = decoded.bytes.length;
-
-      const result: BlobToUriResult = {
-        uri,
-        mime_type: mime,
-        ...(params.modality ? { modality: params.modality } : {}),
-        size,
-        sha256,
-      };
-
-      // Same key already uploading — return optimistic uri, do not double-enqueue.
-      if (this.pendingKeys.has(targetPath)) {
-        logger.debug('multimodal upload skipped (in-flight)', { uri });
-        return result;
-      }
-
-      // Optimistic uri even when the upload queue is full (may dangle).
-      if (this.pending.size >= MAX_MULTIMODAL_PENDING_UPLOADS) {
-        logger.warn('multimodal upload queue full, skipping enqueue', {
-          reason: 'queue_full',
-          uri,
-          pending: this.pending.size,
-          limit: MAX_MULTIMODAL_PENDING_UPLOADS,
-        });
-        return result;
-      }
-      if (
-        MAX_MULTIMODAL_PENDING_BYTES > 0
-        && this.pendingBytes + size > MAX_MULTIMODAL_PENDING_BYTES
-      ) {
-        logger.warn('multimodal upload queue bytes limit exceeded, skipping enqueue', {
-          reason: 'queue_bytes_limit',
-          uri,
-          pendingBytes: this.pendingBytes,
-          incoming: size,
-          limit: MAX_MULTIMODAL_PENDING_BYTES,
-        });
-        return result;
-      }
-
-      this.pendingKeys.add(targetPath);
-      this.pendingBytes += size;
-      const uploadPromise = this.uploader.upload({
-        targetPath,
-        contentType: mime,
-        meta: {
-          mime_type: mime,
-        },
-        data: decoded.bytes,
-        expectedSize: size,
-      }).then(ok => {
-        if (!ok) {
-          logger.warn('multimodal upload failed (uri may be dangling)', {
-            uri,
-            size,
-          });
-        }
-      }).catch(err => {
-        logger.warn('multimodal upload failed (uri may be dangling)', {
-          uri,
-          error: String(err),
-        });
-      });
-      this.pending.add(uploadPromise);
-      void uploadPromise.finally(() => {
-        this.pending.delete(uploadPromise);
-        this.pendingKeys.delete(targetPath);
-        this.pendingBytes = Math.max(0, this.pendingBytes - size);
-      });
-
-      return result;
+      return this.bytesToUri(decoded.bytes, params);
     } catch (err) {
-      logger.warn('multimodal toUri failed', { error: String(err) });
+      logger.warn('multimodal blobToUri failed', { error: String(err) });
       return null;
     }
   }
 
   /**
-   * Stop accepting new blobs, wait briefly for in-flight uploads, then close
-   * the uploader. Idempotent: later calls return immediately. Timed-out
-   * uploads may still finish in the background; the uploader refuses new work
-   * after close.
+   * Shared path after bytes are available: hash → optimistic uri → enqueue upload.
+   * `bytes` is the payload; meta reuses UriConvertMeta .
    */
+  private bytesToUri(bytes: Buffer, meta: UriConvertMeta = {}): UriResult | null {
+    if (this.shuttingDown) {
+      logger.warn('multimodal blob rejected', { reason: 'shutting_down' });
+      return null;
+    }
+
+    if (!bytes || bytes.length === 0 || bytes.length > MAX_MULTIMODAL_DATA_SIZE) {
+      logger.warn('multimodal blob rejected', {
+        reason: !bytes || bytes.length === 0 ? 'decode_failed' : 'size_limit',
+        size: bytes?.length,
+      });
+      return null;
+    }
+
+    const mime = meta.mime_type || 'application/octet-stream';
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const day = yyyymmddFromUnixMs(meta.time_unix_ms);
+    const targetPath = `${day}/${sha256}.${extFromMime(mime)}`;
+    const uri = joinStorageUri(this.storageBasePath, targetPath);
+    const size = bytes.length;
+
+    const result: UriResult = {
+      uri,
+      mime_type: mime,
+      ...(meta.modality ? { modality: meta.modality } : {}),
+      size,
+      sha256,
+    };
+
+    // Same key already uploading — return optimistic uri, do not double-enqueue.
+    if (this.pendingKeys.has(targetPath)) {
+      logger.debug('multimodal upload skipped (in-flight)', { uri });
+      return result;
+    }
+
+    // Optimistic uri even when the upload queue is full (may dangle).
+    if (this.pending.size >= MAX_MULTIMODAL_PENDING_UPLOADS) {
+      logger.warn('multimodal upload queue full, skipping enqueue', {
+        reason: 'queue_full',
+        uri,
+        pending: this.pending.size,
+        limit: MAX_MULTIMODAL_PENDING_UPLOADS,
+      });
+      return result;
+    }
+    if (
+      MAX_MULTIMODAL_PENDING_BYTES > 0
+      && this.pendingBytes + size > MAX_MULTIMODAL_PENDING_BYTES
+    ) {
+      logger.warn('multimodal upload queue bytes limit exceeded, skipping enqueue', {
+        reason: 'queue_bytes_limit',
+        uri,
+        pendingBytes: this.pendingBytes,
+        incoming: size,
+        limit: MAX_MULTIMODAL_PENDING_BYTES,
+      });
+      return result;
+    }
+
+    this.pendingKeys.add(targetPath);
+    this.pendingBytes += size;
+    const uploadPromise = this.uploader.upload({
+      targetPath,
+      contentType: mime,
+      meta: {
+        mime_type: mime,
+      },
+      data: bytes,
+      expectedSize: size,
+    }).then(ok => {
+      if (!ok) {
+        logger.warn('multimodal upload failed (uri may be dangling)', {
+          uri,
+          size,
+        });
+      }
+    }).catch(err => {
+      logger.warn('multimodal upload failed (uri may be dangling)', {
+        uri,
+        error: String(err),
+      });
+    });
+    this.pending.add(uploadPromise);
+    void uploadPromise.finally(() => {
+      this.pending.delete(uploadPromise);
+      this.pendingKeys.delete(targetPath);
+      this.pendingBytes = Math.max(0, this.pendingBytes - size);
+    });
+
+    return result;
+  }
+
   async shutdown(timeoutMs = MULTIMODAL_SHUTDOWN_TIMEOUT_MS): Promise<void> {
     if (this.shuttingDown) {
       logger.debug('multimodal shutdown skipped (already in progress or done)');
       return;
     }
     this.shuttingDown = true;
+    this.pathUriCache.clear();
+    this.pathUriInflight.clear();
 
     if (this.pending.size > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;

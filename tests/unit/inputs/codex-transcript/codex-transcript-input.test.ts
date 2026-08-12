@@ -9,6 +9,7 @@ import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transc
 import { extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
+import type { BlobToUriFn, BlobToUriParams } from '../../../../src/multimodal/types.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -1946,20 +1947,18 @@ describe('Codex transcript multimodal extraction', () => {
     return { timestamp, type, payload };
   }
 
-  function fakeBlobToUri(input: {
-    content: string;
-    mime_type: string;
-    modality: 'image';
-  }) {
+  const fakeBlobToUri: BlobToUriFn = (input: BlobToUriParams) => {
+    const mimeType = input.mime_type ?? 'image/png';
     const bytes = Buffer.from(input.content, 'base64');
     const digest = createHash('sha256').update(bytes).digest('hex');
     return {
-      uri: `oss://test/${digest}.${input.mime_type === 'image/jpeg' ? 'jpg' : 'png'}`,
-      mime_type: input.mime_type,
-      modality: 'image' as const,
+      uri: `oss://test/${digest}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
+      mime_type: mimeType,
+      modality: 'image',
       size: bytes.length,
+      sha256: digest,
     };
-  }
+  };
 
   function userContentItem(content: unknown[]): TurnBodyItem {
     return {
@@ -2130,13 +2129,13 @@ describe('Codex transcript multimodal extraction', () => {
         type: 'uri',
         mime_type: 'image/png',
         modality: 'image',
-        uri: fakeBlobToUri({ content: png1, mime_type: 'image/png', modality: 'image' }).uri,
+        uri: fakeBlobToUri({ content: png1, mime_type: 'image/png', modality: 'image' })!.uri,
       },
       {
         type: 'uri',
         mime_type: 'image/png',
         modality: 'image',
-        uri: fakeBlobToUri({ content: png2, mime_type: 'image/png', modality: 'image' }).uri,
+        uri: fakeBlobToUri({ content: png2, mime_type: 'image/png', modality: 'image' })!.uri,
       },
       { type: 'text', content: 'compare these' },
     ]);
@@ -2184,7 +2183,7 @@ describe('Codex transcript multimodal extraction', () => {
         type: 'uri',
         mime_type: 'image/jpeg',
         modality: 'image',
-        uri: fakeBlobToUri({ content: jpeg, mime_type: 'image/jpeg', modality: 'image' }).uri,
+        uri: fakeBlobToUri({ content: jpeg, mime_type: 'image/jpeg', modality: 'image' })!.uri,
       },
     ]);
   });

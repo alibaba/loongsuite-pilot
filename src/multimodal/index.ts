@@ -8,8 +8,12 @@ export { MultimodalProcessor } from './processor.js';
 export {
   decodeBlobContent,
   extFromMime,
+  isImageFilePath,
   joinStorageUri,
+  mimeFromImagePath,
   modalityFromMime,
+  readImagePathBytes,
+  statImagePath,
   yyyymmddFromUnixMs,
   yyyymmddUTC,
 } from './resolve.js';
@@ -22,14 +26,21 @@ export { createUploader } from './uploader/factory.js';
 export { OssUploader } from './uploader/oss-uploader.js';
 export { SlsUploader } from './uploader/sls-uploader.js';
 export type {
+  BlobPart,
+  BlobToUriFn,
   BlobToUriParams,
-  BlobToUriResult,
   MultimodalMetadataItem,
   MultimodalRuntimeConfig,
+  PathBytes,
+  PathStat,
+  PathToUriFn,
   UploadItem,
   UploadMode,
   Uploader,
   UploaderKind,
+  UriConvertMeta,
+  UriPart,
+  UriResult,
 } from './types.js';
 export {
   MAX_MULTIMODAL_BASE64_CHARS,
