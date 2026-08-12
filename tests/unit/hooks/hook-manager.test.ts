@@ -27,6 +27,17 @@ describe('HookManager', () => {
     expect(def.useNestedFormat).toBe(true);
   });
 
+  it('builds QwenWorkCN hooks with an independent entrypoint', () => {
+    const [def] = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot');
+
+    expect(def.agentId).toBe('qwen-work-cn');
+    expect(def.settingsPath).toContain('.qwenworkcn/settings.json');
+    expect(def.hookJsonPath).toEqual(['hooks', 'Stop']);
+    expect(def.hookCommand).toContain('qwenworkcn-loongsuite-pilot-hook');
+    expect(def.hookCommand).not.toContain('qoderwork');
+    expect(def.useNestedFormat).toBe(true);
+  });
+
   it('replaces the legacy Qoder Work hook command during install', async () => {
     const settingsPath = path.join(tmpDir, '.qoderwork', 'settings.json');
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });

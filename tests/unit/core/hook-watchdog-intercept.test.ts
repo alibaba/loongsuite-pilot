@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   HookWatchdog,
   stripMarkerBlock,
@@ -242,7 +244,7 @@ describe('HookWatchdog intercept targets', () => {
 describe('HookWatchdog.defaultInterceptTargets', () => {
   it('returns targets array (structure test only, no real exec)', () => {
     const targets = HookWatchdog.defaultInterceptTargets('/tmp/test-pilot');
-    expect(targets.length).toBeGreaterThanOrEqual(2); // at least rc targets; qoderwork-env only on macOS
+    expect(targets.length).toBeGreaterThanOrEqual(2); // rc targets always; runtime env targets only on macOS
     for (const t of targets) {
       expect(t.id).toBeDefined();
       expect(typeof t.check).toBe('function');
@@ -255,6 +257,34 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     expect(ids).toContain('claude-code-rc');
     if (process.platform === 'darwin') {
       expect(ids).toContain('qoderwork-env');
+      expect(ids).toContain('qwenworkcn-env');
+    }
+  });
+
+  it('keeps macOS runtime targets aligned with installer product families', () => {
+    const defs = HookWatchdog.macRuntimeInterceptDefs();
+    expect(defs).toEqual([
+      {
+        id: 'qoderwork-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
+      },
+      {
+        id: 'qwenworkcn-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
+        agentIds: ['qwen-work-cn'],
+        appNames: ['QwenWorkCN.app'],
+      },
+    ]);
+
+    const installer = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
+    for (const def of defs) {
+      expect(installer).toContain(def.envName);
+      expect(installer).toContain(def.plistLabel);
+      for (const appName of def.appNames) expect(installer).toContain(appName);
     }
   });
 
@@ -267,7 +297,13 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
   });
 
   it('wires the isAgentEnabled gate to the right agent id per target', () => {
-    const disabled = new Set(['claude-code', 'qoder', 'qoder-work']);
+    const disabled = new Set([
+      'claude-code',
+      'qoder',
+      'qoder-work',
+      'qoder-work-cn',
+      'qwen-work-cn',
+    ]);
     const targets = HookWatchdog.defaultInterceptTargets(
       '/tmp/test-pilot',
       (id) => !disabled.has(id),
@@ -277,8 +313,27 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     expect(byId['claude-code-rc'].enabled?.()).toBe(false); // → claude-code
     expect(byId['qodercli-rc'].enabled?.()).toBe(false);    // → qoder
     if (process.platform === 'darwin') {
-      expect(byId['qoderwork-env'].enabled?.()).toBe(false); // → qoder-work
+      expect(byId['qoderwork-env'].enabled?.()).toBe(false); // → qoder-work family
+      expect(byId['qwenworkcn-env'].enabled?.()).toBe(false); // → qwen-work-cn
     }
+  });
+
+  it.runIf(process.platform === 'darwin')('keeps QoderWorkCN and QwenWorkCN gates independent', () => {
+    const qoderCnOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
+      '/tmp/test-pilot',
+      id => id === 'qoder-work-cn',
+    ).map(t => [t.id, t]));
+
+    expect(qoderCnOnly['qoderwork-env'].enabled?.()).toBe(true);
+    expect(qoderCnOnly['qwenworkcn-env'].enabled?.()).toBe(false);
+
+    const qwenOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
+      '/tmp/test-pilot',
+      id => id === 'qwen-work-cn',
+    ).map(t => [t.id, t]));
+
+    expect(qwenOnly['qoderwork-env'].enabled?.()).toBe(false);
+    expect(qwenOnly['qwenworkcn-env'].enabled?.()).toBe(true);
   });
 });
 

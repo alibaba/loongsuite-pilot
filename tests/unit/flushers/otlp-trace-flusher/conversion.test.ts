@@ -55,10 +55,11 @@ describe('OtlpTraceFlusher - conversion', () => {
 
   it('passes handler from per-agent convert state', async () => {
     const entry = {
-      'event.name': 'llm.response',
+      'event.name': 'other',
       'gen_ai.agent.type': 'codex',
       'gen_ai.turn.id': 't2',
-      'gen_ai.response.finish_reasons': ['stop'],
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
     } as unknown as AgentActivityEntry;
 
     await flusher.send(entry);

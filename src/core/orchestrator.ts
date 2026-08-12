@@ -34,6 +34,9 @@ import { QoderWorkLogInput, resolveQoderWorkRoot } from '../inputs/qoder-work-lo
 import { QoderWorkTraceInput as QoderWorkCNTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
+import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
+import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
+import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
@@ -98,6 +101,9 @@ export class Orchestrator extends EventEmitter {
     'qoder-work-cn-hook': 'qoder-work-cn',
     'qoder-work-cn-log': 'qoder-work-cn',
     'qoder-work-cn-sqlite': 'qoder-work-cn',
+    'qwen-work-cn-trace': 'qwen-work-cn',
+    'qwen-work-cn-hook': 'qwen-work-cn',
+    'qwen-work-cn-sqlite': 'qwen-work-cn',
     'qoder-cli-hook': 'qoder',
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
@@ -679,6 +685,24 @@ export class Orchestrator extends EventEmitter {
         }
       }
     }
+
+    const qwenWorkCNAvailable = await QwenWorkCNInput.checkAvailability();
+    if (qwenWorkCNAvailable) {
+      const defs = HookManager.buildQwenWorkCNHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            logger.info('qwen-work-cn hook registered');
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              'qwen-work-cn hook install failed',
+              { input_name: 'qwen-work-cn' });
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -936,6 +960,75 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['qoder-work-cn-sqlite']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['qoder-work-cn-sqlite']?.pollInterval,
+      }),
+    );
+
+    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
+    const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
+    const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
+    const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
+      stateStore: this.stateStore,
+      logDir: qwenWorkCNLogDir,
+      segmentsRoot: qwenWorkCNSegmentsRoot,
+      interceptFile: qwenWorkCNInterceptFile,
+    });
+    this.inputManager.registerInput(qwenWorkCNTraceInput);
+    const qwenWorkCNTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qwen-work-cn-trace',
+        listenerCfg['qwen-work-cn-trace']?.enabled ?? true,
+      );
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNTraceInput, {
+        watchPaths: QwenWorkCNTraceInput.getWatchPaths({
+          logDir: qwenWorkCNLogDir,
+          segmentsRoot: qwenWorkCNSegmentsRoot,
+          interceptFile: qwenWorkCNInterceptFile,
+        }),
+        isAvailable: QwenWorkCNTraceInput.checkAvailability,
+        enabled: qwenWorkCNTraceEnabled,
+        pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      }),
+    );
+
+    // Keep the standalone Hook listener as an explicit fallback when the
+    // richer trace merger is disabled. This mirrors the QoderWorkCN lifecycle
+    // and makes the qwen-work-cn-hook listener setting effective.
+    const qwenWorkCNHookInput = new QwenWorkCNInput({
+      stateStore: this.stateStore,
+      logDir: qwenWorkCNLogDir,
+      pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+    });
+    this.inputManager.registerInput(qwenWorkCNHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNHookInput, {
+        watchPaths: [qwenWorkCNLogDir],
+        isAvailable: QwenWorkCNInput.checkAvailability,
+        enabled: () => !qwenWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-hook',
+            listenerCfg['qwen-work-cn-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+      }),
+    );
+
+    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qwenWorkCNSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
+        watchPaths: QwenWorkCNSqliteInput.getWatchPaths(),
+        isAvailable: QwenWorkCNSqliteInput.checkAvailability,
+        enabled: () => !qwenWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-sqlite',
+            listenerCfg['qwen-work-cn-sqlite']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-sqlite']?.pollInterval,
       }),
     );
 
