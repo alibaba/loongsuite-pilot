@@ -52,10 +52,13 @@ has_sudo_noninteractive() {
 
 # Run a privileged command, escalating only when needed.
 # As root: exec directly — sudo may be absent (e.g. container images) and is
-#   redundant anyway. As non-root: prefix with sudo (interactive escalation OK).
+#   redundant anyway. As non-root: default to interactive sudo; restart self-heal
+#   opts into sudo -n through a dynamically scoped internal flag.
 maybe_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
+    elif [ "${_PILOT_SUDO_NONINTERACTIVE:-false}" = "true" ]; then
+        sudo -n "$@"
     else
         sudo "$@"
     fi
@@ -270,6 +273,10 @@ detect_init_system() {
         local saved
         saved=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
         case "$saved" in
+            systemd)
+                echo "systemd-system"
+                return
+                ;;
             launchd|systemd-user|systemd-system|initd)
                 echo "$saved"
                 return
@@ -646,32 +653,36 @@ cmd_restart_collector() {
     case "$(uname -s)" in
         Darwin)
             if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-                echo "✅ collector restarted (launchd)"
-                _restarted=true
+                if launchctl start "$SERVICE_LABEL" 2>/dev/null; then
+                    echo "✅ collector restarted (launchd)"
+                    _restarted=true
+                fi
             fi
             ;;
         Linux)
             case "$init_type" in
                 systemd-user)
                     if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
-                        systemctl --user start loongsuite-pilot.service &>/dev/null
-                        echo "✅ collector restarted (systemd user-level)"
-                        _restarted=true
+                        if systemctl --user start loongsuite-pilot.service &>/dev/null; then
+                            echo "✅ collector restarted (systemd user-level)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
                 systemd-system|systemd)
                     if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        maybe_sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ collector restarted (systemd system-level)"
-                        _restarted=true
+                        if maybe_sudo systemctl start "$sys_unit" &>/dev/null; then
+                            echo "✅ collector restarted (systemd system-level)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
                 initd)
                     if [ -f "$initd_script" ]; then
-                        maybe_sudo "$initd_script" start &>/dev/null
-                        echo "✅ collector restarted (init.d)"
-                        _restarted=true
+                        if maybe_sudo "$initd_script" start &>/dev/null; then
+                            echo "✅ collector restarted (init.d)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
             esac
@@ -685,23 +696,24 @@ cmd_restart_collector() {
         fi
     fi
     if [ "$_restarted" = false ]; then
-        # Self-healing: try to register a proper service for degraded (nohup/unknown) installs
-        case "$init_type" in
-            nohup|unknown|"")
-                local _new_init
-                _new_init=$(detect_init_system "false")
-                if [ "$_new_init" != "none" ]; then
-                    if autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
-                        sleep 1
-                        if is_running; then
-                            echo "✅ collector self-healed: registered as $_new_init"
-                            _restarted=true
-                        else
-                            echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
-                        fi
-                    fi
+        # init-type selects a service manager; it does not prove this daemon's
+        # service definition exists. Re-register the collector independently.
+        local _new_init
+        _new_init=$(detect_init_system "false")
+        if [ "$_new_init" != "none" ]; then
+            if _PILOT_SUDO_NONINTERACTIVE=true autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
+                sleep 1
+                if is_running; then
+                    echo "✅ collector self-healed: registered as $_new_init"
+                    _restarted=true
+                else
+                    echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
                 fi
-                if [ "$_restarted" = false ]; then
+            fi
+        fi
+        if [ "$_restarted" = false ]; then
+            case "$init_type" in
+                nohup|unknown|"")
                     local entry="$BOOTSTRAP_DIR/collector-daemon.js"
                     if [ ! -f "$entry" ]; then
                         echo "❌ Bootstrap script missing"
@@ -716,13 +728,13 @@ cmd_restart_collector() {
                     nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
                     echo "$!" > "$PID_FILE"
                     echo "⚠️  collector restarted (nohup fallback, self-heal failed)"
-                fi
-                ;;
-            *)
-                echo "❌ Service manager failed to restart collector (init_type=$init_type)" >&2
-                exit 1
-                ;;
-        esac
+                    ;;
+                *)
+                    echo "❌ Service manager failed to restart collector (init_type=$init_type)" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
     fi
 
     if ! is_running; then
@@ -783,31 +795,35 @@ cmd_restart_updater() {
     case "$(uname -s)" in
         Darwin)
             if launchctl list "$UPDATER_LABEL" &>/dev/null; then
-                launchctl start "$UPDATER_LABEL" 2>/dev/null || true
-                _restarted=true
+                if launchctl start "$UPDATER_LABEL" 2>/dev/null; then
+                    _restarted=true
+                fi
             fi
             ;;
         Linux)
             case "$init_type" in
                 systemd-user)
                     if systemctl --user is-enabled loongsuite-pilot-updater.service &>/dev/null; then
-                        systemctl --user start loongsuite-pilot-updater.service &>/dev/null
-                        echo "✅ updater restarted (systemd user-level)"
-                        _restarted=true
+                        if systemctl --user start loongsuite-pilot-updater.service &>/dev/null; then
+                            echo "✅ updater restarted (systemd user-level)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
                 systemd-system|systemd)
                     if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        maybe_sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ updater restarted (systemd system-level)"
-                        _restarted=true
+                        if maybe_sudo systemctl start "$sys_unit" &>/dev/null; then
+                            echo "✅ updater restarted (systemd system-level)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
                 initd)
                     if [ -f "$initd_script" ]; then
-                        maybe_sudo "$initd_script" start &>/dev/null
-                        echo "✅ updater restarted (init.d)"
-                        _restarted=true
+                        if maybe_sudo "$initd_script" start &>/dev/null; then
+                            echo "✅ updater restarted (init.d)"
+                            _restarted=true
+                        fi
                     fi
                     ;;
             esac
@@ -822,23 +838,24 @@ cmd_restart_updater() {
         fi
     fi
     if [ "$_restarted" = false ]; then
-        # Self-healing: try to register a proper service for degraded installs
-        case "$init_type" in
-            nohup|unknown|"")
-                local _new_init
-                _new_init=$(detect_init_system "false")
-                if [ "$_new_init" != "none" ]; then
-                    if autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
-                        sleep 1
-                        if updater_process_exists; then
-                            echo "✅ updater self-healed: registered as $_new_init"
-                            _restarted=true
-                        else
-                            echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
-                        fi
-                    fi
+        # init-type is shared by collector/updater, so a concrete value does not
+        # prove the updater service itself was registered. Repair it independently.
+        local _new_init
+        _new_init=$(detect_init_system "false")
+        if [ "$_new_init" != "none" ]; then
+            if _PILOT_SUDO_NONINTERACTIVE=true autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
+                sleep 1
+                if updater_process_exists; then
+                    echo "✅ updater self-healed: registered as $_new_init"
+                    _restarted=true
+                else
+                    echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
                 fi
-                if [ "$_restarted" = false ]; then
+            fi
+        fi
+        if [ "$_restarted" = false ]; then
+            case "$init_type" in
+                nohup|unknown|"")
                     local entry="$BOOTSTRAP_DIR/updater-daemon.js"
                     if [ ! -f "$entry" ]; then
                         echo "❌ Updater bootstrap script missing"
@@ -853,13 +870,13 @@ cmd_restart_updater() {
                     nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
                     echo "$!" > "$UPDATER_PID_FILE"
                     echo "⚠️  updater restarted (nohup fallback, self-heal failed)"
-                fi
-                ;;
-            *)
-                echo "❌ Service manager failed to restart updater (init_type=$init_type)" >&2
-                return 1
-                ;;
-        esac
+                    ;;
+                *)
+                    echo "❌ Service manager failed to restart updater (init_type=$init_type)" >&2
+                    return 1
+                    ;;
+            esac
+        fi
     fi
 
     if ! updater_process_exists; then
@@ -1412,8 +1429,14 @@ INITEOF
         "$tmp_script"
     rm -f "${tmp_script}.bak"
 
-    maybe_sudo install -m 755 "$tmp_script" "$script_path"
-    rm -f "$tmp_script"
+    local install_status=0
+    maybe_sudo install -m 755 "$tmp_script" "$script_path" || install_status=$?
+    local cleanup_status=0
+    rm -f "$tmp_script" || cleanup_status=$?
+    if [ "$install_status" -ne 0 ]; then
+        return "$install_status"
+    fi
+    return "$cleanup_status"
 }
 
 _write_initd_updater_script() {
@@ -1544,8 +1567,14 @@ INITEOF
         "$tmp_script"
     rm -f "${tmp_script}.bak"
 
-    maybe_sudo install -m 755 "$tmp_script" "$script_path"
-    rm -f "$tmp_script"
+    local install_status=0
+    maybe_sudo install -m 755 "$tmp_script" "$script_path" || install_status=$?
+    local cleanup_status=0
+    rm -f "$tmp_script" || cleanup_status=$?
+    if [ "$install_status" -ne 0 ]; then
+        return "$install_status"
+    fi
+    return "$cleanup_status"
 }
 
 _register_initd_boot() {
@@ -1572,35 +1601,35 @@ autostart_install_collector_only() {
     local interactive="${1:-true}"
 
     local init_system
-    init_system=$(detect_init_system "$interactive")
+    init_system=$(detect_init_system "$interactive") || return 1
     local target_user
-    target_user=$(whoami)
+    target_user=$(whoami) || return 1
 
     case "$init_system" in
         launchd)
             launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
-            _write_launchd_plist
-            launchctl load -w "$LAUNCHD_PLIST"
-            echo "launchd" > "$INIT_TYPE_FILE"
+            _write_launchd_plist || return 1
+            launchctl load -w "$LAUNCHD_PLIST" || return 1
+            echo "launchd" > "$INIT_TYPE_FILE" || return 1
             ;;
         systemd-user)
-            _write_systemd_user_unit
-            systemctl --user daemon-reload &>/dev/null
-            systemctl --user enable --now loongsuite-pilot.service &>/dev/null
+            _write_systemd_user_unit || return 1
+            systemctl --user daemon-reload &>/dev/null || return 1
+            systemctl --user enable --now loongsuite-pilot.service &>/dev/null || return 1
             enable_linger || true
-            echo "systemd-user" > "$INIT_TYPE_FILE"
+            echo "systemd-user" > "$INIT_TYPE_FILE" || return 1
             ;;
         systemd-system)
-            _write_systemd_system_unit "$target_user"
-            maybe_sudo systemctl daemon-reload &>/dev/null
-            maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
-            echo "systemd-system" > "$INIT_TYPE_FILE"
+            _write_systemd_system_unit "$target_user" || return 1
+            maybe_sudo systemctl daemon-reload &>/dev/null || return 1
+            maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null || return 1
+            echo "systemd-system" > "$INIT_TYPE_FILE" || return 1
             ;;
         initd)
-            _write_initd_script "$target_user"
+            _write_initd_script "$target_user" || return 1
             _register_initd_boot "loongsuite-pilot-${target_user}"
             maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
-            echo "initd" > "$INIT_TYPE_FILE"
+            echo "initd" > "$INIT_TYPE_FILE" || return 1
             ;;
         *)
             return 1
@@ -1612,35 +1641,35 @@ autostart_install_updater_only() {
     local interactive="${1:-true}"
 
     local init_system
-    init_system=$(detect_init_system "$interactive")
+    init_system=$(detect_init_system "$interactive") || return 1
     local target_user
-    target_user=$(whoami)
+    target_user=$(whoami) || return 1
 
     case "$init_system" in
         launchd)
             launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
-            _write_launchd_updater_plist
-            launchctl load -w "$UPDATER_PLIST"
-            echo "launchd" > "$INIT_TYPE_FILE"
+            _write_launchd_updater_plist || return 1
+            launchctl load -w "$UPDATER_PLIST" || return 1
+            echo "launchd" > "$INIT_TYPE_FILE" || return 1
             ;;
         systemd-user)
-            _write_systemd_user_updater_unit
-            systemctl --user daemon-reload &>/dev/null
-            systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
+            _write_systemd_user_updater_unit || return 1
+            systemctl --user daemon-reload &>/dev/null || return 1
+            systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null || return 1
             enable_linger || true
-            echo "systemd-user" > "$INIT_TYPE_FILE"
+            echo "systemd-user" > "$INIT_TYPE_FILE" || return 1
             ;;
         systemd-system)
-            _write_systemd_system_updater_unit "$target_user"
-            maybe_sudo systemctl daemon-reload &>/dev/null
-            maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
-            echo "systemd-system" > "$INIT_TYPE_FILE"
+            _write_systemd_system_updater_unit "$target_user" || return 1
+            maybe_sudo systemctl daemon-reload &>/dev/null || return 1
+            maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || return 1
+            echo "systemd-system" > "$INIT_TYPE_FILE" || return 1
             ;;
         initd)
-            _write_initd_updater_script "$target_user"
+            _write_initd_updater_script "$target_user" || return 1
             _register_initd_boot "loongsuite-pilot-updater-${target_user}"
             maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
-            echo "initd" > "$INIT_TYPE_FILE"
+            echo "initd" > "$INIT_TYPE_FILE" || return 1
             ;;
         *)
             return 1
