@@ -85,6 +85,31 @@ describe('MinimaxCodeRolloutInput', () => {
     }
   });
 
+  it('Round 14: on win32 + 仅 sessionDir (无 sessionDirWindows) → 用 sessionDir 覆盖 Windows 默认', () => {
+    // Round 14 fix (PR #233, copilot suppressed comment): the Round 12
+    // implementation gave sessionDirWindows absolute priority on
+    // Windows and IGNORED opts.sessionDir, which contradicted the
+    // option comment ("falls back to `sessionDir` if absent"). A
+    // caller that wants to override the rollout directory on Windows
+    // — e.g. a unit test using TMPDIR, or a custom data-dir
+    // deployment — was silently overridden to the Windows default.
+    // Now the precedence is consistent on both platforms:
+    // sessionDirWindows ?? sessionDir ?? platform-default.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const input = new MinimaxCodeRolloutInput({
+        stateStore,
+        sessionDir: 'C:\\custom\\user-supplied',
+      });
+      const sessionDir = (input as any).sessionDir;
+      expect(sessionDir).toBe('C:\\custom\\user-supplied');
+      expect(sessionDir).not.toBe('%APPDATA%/MiniMax/rollout');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
   it('Round 12: on POSIX + 无 sessionDir → 用 POSIX 默认 (~/.minimax-code/rollout)', () => {
     // resolveHome expands `~` to the user's home dir, so we check
     // the resolved path ends with the expected suffix instead of

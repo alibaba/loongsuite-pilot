@@ -148,18 +148,33 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // override, so on Windows the input would have tried to read
     // `~/.minimax-code/rollout` (which does not exist on the official
     // MiniMax Code 3.0.60 Windows desktop client) and missed all
-    // rollout records. Now we fall back to the platform-appropriate
-    // default: `DEFAULT_SESSION_DIR_WINDOWS` on Windows, the POSIX
-    // `DEFAULT_SESSION_DIR` elsewhere. `opts.sessionDirWindows` and
-    // `opts.sessionDir` still take precedence over the defaults when
-    // explicitly provided.
+    // rollout records.
+    //
+    // Round 14 fix (PR #233, copilot suppressed comment): the Round 12
+    // fix overcorrected — it gave `sessionDirWindows` absolute
+    // priority on Windows and IGNORED `opts.sessionDir`, which
+    // contradicts the option comment ("falls back to `sessionDir`
+    // if absent"). A test or special-purpose caller that sets
+    // `sessionDir` on Windows (e.g. a unit test using TMPDIR, or
+    // a custom data dir) would be silently overridden. Now the
+    // precedence is consistent on both platforms:
+    //   1. opts.sessionDirWindows (Windows-specific override, wins)
+    //   2. opts.sessionDir (cross-platform override, second)
+    //   3. DEFAULT_SESSION_DIR_WINDOWS on win32, else DEFAULT_SESSION_DIR
+    // The only behavior change from Round 12 is that `opts.sessionDir`
+    // once again overrides the Windows default when no
+    // `sessionDirWindows` is provided. The Round 12 Orchestrator
+    // scenario (no overrides at all) still gets
+    // DEFAULT_SESSION_DIR_WINDOWS on Windows, which was the
+    // original fix.
     super({
       stateStore: opts.stateStore,
       sessionDir: resolveHome(
         opts.sessionDirWindows
+          ?? opts.sessionDir
           ?? (process.platform === 'win32'
             ? DEFAULT_SESSION_DIR_WINDOWS
-            : (opts.sessionDir ?? DEFAULT_SESSION_DIR)),
+            : DEFAULT_SESSION_DIR),
       ),
       filePattern: opts.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts.pollIntervalMs
