@@ -86,22 +86,12 @@ export interface CodexPendingTerminalTurn {
   sourceRecordCount?: number;
 }
 
-/**
- * Progress of the copied-history prefix probe for fork/subagent rollouts.
- *
- * The prefix can be larger than one cycle's scan window, so its boundary has to
- * be searched across cycles. The probe deliberately keeps its own offset: the
- * collection offset must not move while probing, otherwise abandoning the probe
- * would leave the skipped range marked as consumed and the data would be lost
- * instead of collected.
- */
-export interface CodexCopiedPrefixProbe {
-  /** How far the probe has read; independent of the collection offset. */
-  scanOffset: number;
-  /** Whether an ancestor session_meta proved a copied prefix exists. */
-  sawForeignMeta: boolean;
-  /** Set once the prefix was skipped, found absent, or abandoned. */
-  settled?: boolean;
+/** Exact first-turn bootstrap for a fork/subagent rollout. */
+export interface CodexForkBootstrap {
+  /** Hook-provided first turn owned by this rollout. */
+  turnId?: string;
+  /** How far the append-only rollout has been searched for that turn. */
+  searchOffset: number;
 }
 
 export interface CodexTranscriptCheckpoint {
@@ -119,8 +109,8 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Cross-cycle state of the copied-history prefix probe; see the interface. */
-  copiedPrefixProbe?: CodexCopiedPrefixProbe;
+  /** Present until a lifecycle Hook identifies this rollout's first owned turn. */
+  forkBootstrap?: CodexForkBootstrap;
   /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];
 }

@@ -322,10 +322,51 @@ async function writeSpanContext(
   return marker;
 }
 
-async function writeTranscriptNamed(sessionDir: string, name: string, text: string): Promise<string> {
+async function writeTranscriptNamed(
+  sessionDir: string,
+  name: string,
+  text: string,
+  options: { bootstrapFork?: boolean } = {},
+): Promise<string> {
   const transcript = path.join(sessionDir, '2026', '06', '24', name);
   await fs.mkdir(path.dirname(transcript), { recursive: true });
   await fs.writeFile(transcript, text, 'utf8');
+  // Most fixture rollouts are already terminal when written. Mirror the
+  // corresponding Stop/SubagentStop marker so unrelated parser/linker tests
+  // exercise normal collection after the production fork bootstrap.
+  if (options.bootstrapFork !== false) {
+    const records = text.trimEnd().split('\n').flatMap(line => {
+      try {
+        return [JSON.parse(line) as { type?: string; payload?: Record<string, unknown> }];
+      } catch {
+        return [];
+      }
+    });
+    const owner = records[0];
+    const ownerId = owner?.type === 'session_meta' && typeof owner.payload?.id === 'string'
+      ? owner.payload.id
+      : undefined;
+    const isFork = typeof owner?.payload?.forked_from_id === 'string'
+      || owner?.payload?.thread_source === 'subagent'
+      || owner?.payload?.source !== undefined;
+    const ownedTurnId = records.flatMap(item => (
+      item.type === 'event_msg'
+      && item.payload?.type === 'task_started'
+      && typeof item.payload.turn_id === 'string'
+        ? [item.payload.turn_id]
+        : []
+    )).at(-1);
+    if (ownerId && isFork && ownedTurnId) {
+      await writeWakeupMarker(path.join(path.dirname(sessionDir), 'wakeups'), ownerId, {
+        session_id: ownerId,
+        turn_id: ownedTurnId,
+        initial_turn_id: ownedTurnId,
+        transcript_path: transcript,
+        hook_event: owner?.payload?.thread_source === 'subagent' ? 'subagent-stop' : 'stop',
+        received_at: new Date().toISOString(),
+      });
+    }
+  }
   return transcript;
 }
 
@@ -614,7 +655,7 @@ describe('CodexTranscriptInput', () => {
   it('forces a reliably linked active child to finalize when the parent reaches task_complete', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-parent-barrier-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
     const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
     const parentLines = parentFixture.trimEnd().split('\n');
     const parentTerminal = parentLines.pop()!;
@@ -673,7 +714,7 @@ describe('CodexTranscriptInput', () => {
   it('releases the parent when a reliable child cannot be rebuilt and emits that child independently later', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-missing-child-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
     const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
     const parentLines = parentFixture.trimEnd().split('\n');
     const parentTerminal = parentLines.pop()!;
@@ -706,6 +747,13 @@ describe('CodexTranscriptInput', () => {
     });
 
     await fs.appendFile(childTranscript, childLines.slice(1).join('\n') + '\n', 'utf8');
+    await writeWakeupMarker(wakeupDir, CHILD_FIXTURES[0].threadId, {
+      session_id: CHILD_FIXTURES[0].threadId,
+      turn_id: CHILD_FIXTURES[0].turnId,
+      initial_turn_id: CHILD_FIXTURES[0].turnId,
+      transcript_path: childTranscript,
+      hook_event: 'subagent-stop',
+    });
     await processTranscriptOnce(input, childTranscript);
 
     expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
@@ -1936,7 +1984,7 @@ describe('CodexTranscriptInput', () => {
       .toBe(transcriptSize);
   });
 
-  it('skips copied history, consumes a control abort, and emits new fork work in one cycle', async () => {
+  it('skips copied history and emits new fork work in one cycle', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-control-abort-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
@@ -1977,10 +2025,8 @@ describe('CodexTranscriptInput', () => {
     };
     expect(checkpoint.activeTurn).toBeNull();
     expect(checkpoint.pendingTerminal).toBeNull();
-    expect(checkpoint.emittedTerminalTurnIds).toEqual(
-      expect.arrayContaining([historyTurnId, controlTurnId, forkTurnId]),
-    );
-    expect(globalProcessedTurnIds(stateStore)).toContain(controlTurnId);
+    expect(checkpoint.emittedTerminalTurnIds).toEqual([forkTurnId]);
+    expect(globalProcessedTurnIds(stateStore)).not.toContain(controlTurnId);
 
     await stateStore.save();
     const restarted = await createDormantInput(root);
@@ -2006,7 +2052,7 @@ describe('CodexTranscriptInput', () => {
     expect(responsesForTurn(restarted.entries, restartedTurnId)).toHaveLength(1);
     expect((transcriptCheckpoint(restarted.stateStore, secondFork) as {
       emittedTerminalTurnIds?: string[];
-    }).emittedTerminalTurnIds).toContain(controlTurnId);
+    }).emittedTerminalTurnIds).toEqual([restartedTurnId]);
     expect(debug).not.toHaveBeenCalledWith(
       'processed terminal Codex turn without observable entries',
       expect.objectContaining({ turnId: controlTurnId }),
@@ -2756,6 +2802,137 @@ describe('CodexTranscriptInput', () => {
       ];
     };
 
+    it('keeps a fork rollout pending until an initial-turn Hook arrives', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-await-hook-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const child = 'cccccccc-0001-4001-8001-000000000001';
+      const parent = 'aaaaaaaa-0001-4001-8001-000000000001';
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${child}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: child, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          record('2026-06-01T00:00:00.000Z', 'session_meta', { id: parent, model_provider: 'openai' }),
+          ...turnBlock('parent-turn-awaiting', '2026-06-01T00:00:10.000Z'),
+          ...turnBlock('child-turn-awaiting', '2026-08-05T10:00:10.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+
+      await processTranscriptOnce(input, transcript);
+
+      expect(entries).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: 0,
+        forkBootstrap: { searchOffset: 0 },
+      });
+    });
+
+    it('resumes an exact-turn search when the Hook fires before task_started is appended', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-hook-before-turn-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
+      const child = 'cccccccc-0002-4002-8002-000000000002';
+      const parent = 'aaaaaaaa-0002-4002-8002-000000000002';
+      const turnId = 'child-turn-late-write';
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${child}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: child, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          record('2026-06-01T00:00:00.000Z', 'session_meta', { id: parent, model_provider: 'openai' }),
+          ...turnBlock('parent-turn-before-hook', '2026-06-01T00:00:10.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      await writeWakeupMarker(wakeupDir, child, {
+        session_id: child,
+        turn_id: turnId,
+        initial_turn_id: turnId,
+        transcript_path: transcript,
+        hook_event: 'user-prompt-submit',
+      });
+
+      await processTranscriptOnce(input, transcript);
+      const pending = transcriptCheckpoint(stateStore, transcript) as {
+        scanOffset: number;
+        forkBootstrap: { turnId: string; searchOffset: number };
+      };
+      expect(pending.scanOffset).toBe(0);
+      expect(pending.forkBootstrap.turnId).toBe(turnId);
+      expect(pending.forkBootstrap.searchOffset).toBeGreaterThan(0);
+
+      await fs.appendFile(transcript, [
+        record('2026-08-05T10:00:05.000Z', 'event_msg', { type: 'thread_settings_applied' }),
+        record('2026-08-05T10:00:10.000Z', 'event_msg', { type: 'task_started', turn_id: turnId }),
+        record('2026-08-05T10:00:11.000Z', 'turn_context', { turn_id: turnId, model: 'gpt-5.5' }),
+        record('2026-08-05T10:00:12.000Z', 'response_item', {
+          type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new child work' }],
+        }),
+        record('2026-08-05T10:00:13.000Z', 'event_msg', { type: 'agent_message', message: 'done', phase: 'final' }),
+        record('2026-08-05T10:00:14.000Z', 'event_msg', tokenUsage(10, 2)),
+        record('2026-08-05T10:00:15.000Z', 'event_msg', { type: 'task_complete', turn_id: turnId }),
+      ].join('\n') + '\n', 'utf8');
+
+      await processTranscriptOnce(input, transcript); // establish checkpoint only
+      expect(responsesForTurn(entries, turnId)).toHaveLength(0);
+      await processTranscriptOnce(input, transcript); // normal poll/Stop path
+
+      expect(responsesForTurn(entries, turnId)).toHaveLength(1);
+      expect(responsesForTurn(entries, 'parent-turn-before-hook')).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+    });
+
+    it('uses the Hook turn rather than historical settings markers in a recursive fork', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-recursive-fork-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, wakeupDir } = await createDormantInput(root);
+      const child = 'cccccccc-0003-4003-8003-000000000003';
+      const parent = 'bbbbbbbb-0003-4003-8003-000000000003';
+      const grandparent = 'aaaaaaaa-0003-4003-8003-000000000003';
+      const currentTurn = 'current-fork-turn';
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${child}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: child, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          record('2026-08-04T10:00:00.000Z', 'session_meta', {
+            id: parent, forked_from_id: grandparent, model_provider: 'openai',
+          }),
+          record('2026-08-03T10:00:00.000Z', 'session_meta', { id: grandparent, model_provider: 'openai' }),
+          ...turnBlock('grandparent-turn', '2026-08-03T10:00:10.000Z'),
+          record('2026-08-03T10:01:00.000Z', 'event_msg', { type: 'thread_settings_applied' }),
+          ...turnBlock('parent-turn-a', '2026-08-04T10:00:10.000Z'),
+          record('2026-08-04T10:01:00.000Z', 'event_msg', { type: 'thread_settings_applied' }),
+          ...turnBlock('parent-turn-b', '2026-08-04T10:02:10.000Z'),
+          record('2026-08-05T10:00:05.000Z', 'event_msg', { type: 'thread_settings_applied' }),
+          ...turnBlock(currentTurn, '2026-08-05T10:00:10.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      await writeWakeupMarker(wakeupDir, child, {
+        session_id: child,
+        turn_id: currentTurn,
+        initial_turn_id: currentTurn,
+        transcript_path: transcript,
+        hook_event: 'stop',
+      });
+
+      await processTranscriptOnce(input, transcript);
+
+      expect(responsesForTurn(entries, currentTurn)).toHaveLength(1);
+      expect(responsesForTurn(entries, 'grandparent-turn')).toHaveLength(0);
+      expect(responsesForTurn(entries, 'parent-turn-a')).toHaveLength(0);
+      expect(responsesForTurn(entries, 'parent-turn-b')).toHaveLength(0);
+    });
+
     it('drops the copied ancestor prefix of a resume/fork rollout, keeps the child turn', async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-fork-'));
       tempDirs.push(root);
@@ -2806,7 +2983,7 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, 'parent-turn')).toHaveLength(0);
     });
 
-    it('probes across cycles for a copied prefix larger than one scan window', async () => {
+    it('locates a Hook-anchored turn beyond one normal scan window', async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-big-'));
       tempDirs.push(root);
       const { input, entries, sessionDir, stateStore } = await createInput(root);
@@ -2838,11 +3015,9 @@ describe('CodexTranscriptInput', () => {
 
       expect(responsesForTurn(entries, 'big-child-turn')).toHaveLength(1);
       expect(responsesForTurn(entries, 'big-ancestor-turn')).toHaveLength(0);
-      // The boundary sits beyond the first window, so collection can only have
-      // started there by carrying probe state across cycles.
       const checkpoint = transcriptCheckpoint(stateStore, transcript);
       expect(checkpoint.scanOffset as number).toBeGreaterThan(16 * 1024 * 1024);
-      expect(checkpoint.copiedPrefixProbe).toMatchObject({ settled: true, sawForeignMeta: true });
+      expect(checkpoint.forkBootstrap).toBeUndefined();
     }, 30_000);
 
     it('does not skip a normal user session that has no copied prefix', async () => {

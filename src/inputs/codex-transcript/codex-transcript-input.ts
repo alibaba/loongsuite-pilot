@@ -32,7 +32,7 @@ import {
   type CodexPendingFusionChild,
   type CodexPendingFusionTurn,
   type CodexPendingSubagentTurn,
-  type CodexCopiedPrefixProbe,
+  type CodexForkBootstrap,
   type CodexPendingTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
@@ -56,12 +56,6 @@ const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
-/**
- * Upper bound on how far the copied-prefix probe reads before giving up.
- * Reaching it means the expected boundary marker never arrived, so the rollout
- * is collected from the start instead of being withheld indefinitely.
- */
-const MAX_COPIED_PREFIX_PROBE_BYTES = 512 * 1024 * 1024;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
@@ -133,6 +127,11 @@ interface DiscoveredSessionFile {
 interface DynamicDirectoryWalkBudget {
   remainingDirectories: number;
   remainingRolloutFiles: number;
+}
+
+interface CodexWakeupMarker {
+  initialTurnId?: string;
+  hookEvent?: string;
 }
 
 interface ParentTurnIndex {
@@ -322,63 +321,65 @@ export class CodexTranscriptInput extends BaseInput {
       : undefined;
     if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
 
-    // Fork/resume/subagent rollouts begin with a verbatim copy of ancestor
-    // history that must never be emitted (it re-reports the ancestor's events
-    // or, post owner-session fix, spawns ghost turns). Probe for the end of that
-    // prefix before collecting anything, then start collection right after it.
-    //
-    // Probing runs on its own offset and never advances the collection offset:
-    // if the probe is later abandoned, collection still starts from the top so
-    // the range is reported rather than silently dropped. Gated on a first-party
-    // fork/child indicator, so normal user sessions are never probed.
+    // A fork/subagent rollout starts with copied ancestor history. Its lifecycle
+    // Hook supplies the exact first turn owned by this rollout, so keep normal
+    // collection parked at offset zero until that task_started record appears.
+    // The independent search offset makes this safe when the Hook fires before
+    // Codex finishes appending the copied prefix or the new turn.
     const hasCopiedPrefix = ownerMeta != null && (
       ownerMeta.forkedFromId != null
       || ownerMeta.parentThreadId != null
       || ownerMeta.threadSource === 'subagent'
     );
-    const probe = checkpoint.copiedPrefixProbe;
     if (
       hasCopiedPrefix
-      && probe?.settled !== true
       && checkpoint.scanOffset === 0
       && checkpoint.activeTurn === null
       && checkpoint.pendingTerminal === null
     ) {
-      const probeStart = probe?.scanOffset ?? 0;
-      const result = await probeCopiedPrefix(
-        filePath,
-        ownerMeta!.threadId,
-        probeStart,
-        stat.size,
-        probe?.sawForeignMeta ?? false,
-      );
+      const marker = await this.readWakeupMarker(ownerMeta!.threadId, filePath);
+      const markerTurnId = marker?.initialTurnId;
+      let bootstrap: CodexForkBootstrap = checkpoint.forkBootstrap ?? { searchOffset: 0 };
+      if (markerTurnId && bootstrap.turnId !== markerTurnId) {
+        bootstrap = { turnId: markerTurnId, searchOffset: 0 };
+      }
+      checkpoint.forkBootstrap = bootstrap;
       checkpointChanged = true;
-      if (result.kind === 'found') {
-        this.logger.info('skipped copied fork/subagent history prefix', {
-          transcriptPath: filePath,
-          skippedBytes: result.endOffset,
-          threadSource: ownerMeta!.threadSource,
-          forkedFromId: ownerMeta!.forkedFromId,
-          parentThreadId: ownerMeta!.parentThreadId,
-        });
-        checkpoint.scanOffset = result.endOffset;
-        checkpoint.copiedPrefixProbe = { scanOffset: result.endOffset, sawForeignMeta: true, settled: true };
-      } else if (result.kind === 'absent') {
-        // No prefix to drop: leave the collection offset at the start.
-        checkpoint.copiedPrefixProbe = { scanOffset: probeStart, sawForeignMeta: false, settled: true };
-      } else if (result.nextOffset >= MAX_COPIED_PREFIX_PROBE_BYTES) {
-        // The expected marker never arrived. Stop probing and collect from the
-        // start: duplicate reporting is recoverable, dropped data is not.
-        this.logger.warn('copied history prefix boundary not found within limit; collecting from start', {
-          transcriptPath: filePath,
-          probedBytes: result.nextOffset,
-        });
-        checkpoint.copiedPrefixProbe = { scanOffset: result.nextOffset, sawForeignMeta: true, settled: true };
-      } else {
-        // Boundary lies beyond this cycle: remember how far the probe read and
-        // continue next cycle without collecting or emitting anything.
-        checkpoint.copiedPrefixProbe = { scanOffset: result.nextOffset, sawForeignMeta: true };
+      if (!bootstrap.turnId) {
         this.saveCheckpoint(key, checkpoint);
+        return 0;
+      }
+
+      const located = await findTurnStartOffset(
+        filePath,
+        bootstrap.turnId,
+        bootstrap.searchOffset,
+        stat.size,
+      );
+      if (located.startOffset === null) {
+        checkpoint.forkBootstrap = {
+          turnId: bootstrap.turnId,
+          searchOffset: located.nextOffset,
+        };
+        this.saveCheckpoint(key, checkpoint);
+        return 0;
+      }
+
+      checkpoint.scanOffset = located.startOffset;
+      checkpoint.forkBootstrap = undefined;
+      this.logger.info('anchored fork/subagent rollout at its first owned turn', {
+        transcriptPath: filePath,
+        turnId: bootstrap.turnId,
+        skippedBytes: located.startOffset,
+        hookEvent: marker?.hookEvent,
+        threadSource: ownerMeta!.threadSource,
+        forkedFromId: ownerMeta!.forkedFromId,
+        parentThreadId: ownerMeta!.parentThreadId,
+      });
+      // The start Hook only establishes the checkpoint. A later terminal Hook
+      // or the regular poll performs the existing incremental scan.
+      this.saveCheckpoint(key, checkpoint);
+      if (marker?.hookEvent === 'user-prompt-submit' || marker?.hookEvent === 'subagent-start') {
         return 0;
       }
     }
@@ -1454,6 +1455,39 @@ export class CodexTranscriptInput extends BaseInput {
     return resourceAttributes;
   }
 
+  private async readWakeupMarker(
+    sessionId: string,
+    transcriptPath: string,
+  ): Promise<CodexWakeupMarker | undefined> {
+    const markerPath = path.join(this.wakeupDir, `${safeWakeupSessionPart(sessionId)}.json`);
+    let record: Record<string, unknown> | null = null;
+    try {
+      record = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+    } catch {
+      return undefined;
+    }
+    if (!record || stringValue(record.session_id) !== sessionId) return undefined;
+
+    const recordedTranscriptPath = stringValue(record.transcript_path);
+    if (recordedTranscriptPath) {
+      try {
+        const [recordedRealPath, transcriptRealPath] = await Promise.all([
+          fs.realpath(recordedTranscriptPath),
+          fs.realpath(transcriptPath),
+        ]);
+        if (recordedRealPath !== transcriptRealPath) return undefined;
+      } catch {
+        if (path.resolve(recordedTranscriptPath) !== path.resolve(transcriptPath)) return undefined;
+      }
+    }
+    const initialTurnId = stringValue(record.initial_turn_id);
+    const hookEvent = stringValue(record.hook_event);
+    return {
+      ...(initialTurnId ? { initialTurnId } : {}),
+      ...(hookEvent ? { hookEvent } : {}),
+    };
+  }
+
   private async readTurnSpanAttributes(
     sessionId: string,
     turnId: string,
@@ -1821,15 +1855,14 @@ export class CodexTranscriptInput extends BaseInput {
       // so recover them through the normal independent terminal path.
       pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
     }
-    const probeRecord = asRecord(value.copiedPrefixProbe);
-    // A probe spanning several cycles must survive restarts, otherwise the rest
-    // of the copied prefix would be collected as if it were real content.
-    const copiedPrefixProbe: CodexCopiedPrefixProbe | null = probeRecord
-      && typeof probeRecord.scanOffset === 'number'
+    const bootstrapRecord = asRecord(value.forkBootstrap);
+    const forkBootstrap: CodexForkBootstrap | null = bootstrapRecord
+      && typeof bootstrapRecord.searchOffset === 'number'
       ? {
-          scanOffset: probeRecord.scanOffset,
-          sawForeignMeta: probeRecord.sawForeignMeta === true,
-          ...(probeRecord.settled === true ? { settled: true } : {}),
+          searchOffset: bootstrapRecord.searchOffset,
+          ...(typeof bootstrapRecord.turnId === 'string'
+            ? { turnId: bootstrapRecord.turnId }
+            : {}),
         }
       : null;
     return {
@@ -1845,7 +1878,7 @@ export class CodexTranscriptInput extends BaseInput {
       ownerSessionMetaOffset: typeof value.ownerSessionMetaOffset === 'number'
         ? value.ownerSessionMetaOffset
         : null,
-      ...(copiedPrefixProbe ? { copiedPrefixProbe } : {}),
+      ...(forkBootstrap ? { forkBootstrap } : {}),
       emittedTerminalTurnIds: Array.isArray(value.emittedTerminalTurnIds)
         ? value.emittedTerminalTurnIds.filter((item): item is string => typeof item === 'string')
           .slice(0, MAX_EMITTED_TERMINAL_TURNS)
@@ -2108,72 +2141,27 @@ async function findOwnerSessionMetaOffset(
   return ownerOffset;
 }
 
-/**
- * Outcome of one probe cycle over a rollout's copied-history prefix.
- *
- * `absent` — no copied prefix (or no boundary exists at all): collect normally.
- * `found` — the prefix ends at `endOffset`; collection starts there.
- * `probing` — the boundary is past this cycle's window; resume from
- *   `nextOffset` on a later cycle without collecting anything.
- */
-type CopiedPrefixProbeResult =
-  | { kind: 'absent' }
-  | { kind: 'found'; endOffset: number }
-  | { kind: 'probing'; nextOffset: number };
-
-/**
- * Probe for the end of a fork/resume/subagent rollout's copied-history prefix.
- *
- * Codex spawns (subagent) and Desktop resume/fork produce a new rollout that
- * begins with a verbatim copy of the ancestor's history, then appends the
- * child's own `thread_settings_applied` marker before any real new turn (see
- * codex-rs `record_initial_history`, ForkPersistence::Copied). The copied
- * region therefore spans from file start up to the first
- * `event_msg/thread_settings_applied`. Emitting it re-reports the ancestor's
- * events (colliding event.id) or, after the owner-session fix, spawns ghost
- * turns; either way it must be dropped.
- *
- * The prefix can exceed one scan window, so probing is resumable via
- * `startOffset` and `foreignMetaConfirmed`. An ancestor session_meta
- * (id != owner) somewhere before the marker is what proves the prefix is real;
- * codex writes it inside the copied history rather than in the header, so the
- * probe must keep reading to find it. Without that evidence, or when EOF is
- * reached with no marker (older codex builds, truncated files), the rollout is
- * collected untouched rather than withheld.
- */
-async function probeCopiedPrefix(
+/** Locate the Hook-provided first task owned by a forked rollout. */
+async function findTurnStartOffset(
   filePath: string,
-  ownerThreadId: string,
+  turnId: string,
   startOffset: number,
   fileSize: number,
-  foreignMetaConfirmed: boolean,
-): Promise<CopiedPrefixProbeResult> {
-  const scanEnd = Math.min(fileSize, startOffset + MAX_SCAN_BYTES_PER_FILE_CYCLE);
-  let sawForeignMeta = foreignMetaConfirmed;
-  let boundaryEndOffset: number | null = null;
-  const { nextOffset } = await scanJsonLines(filePath, startOffset, scanEnd, line => {
+): Promise<{ startOffset: number | null; nextOffset: number }> {
+  let turnStartOffset: number | null = null;
+  const { nextOffset } = await scanJsonLines(filePath, startOffset, fileSize, line => {
     const payload = asRecord(line.record.payload);
-    if (line.record.type === 'session_meta') {
-      const metaId = payload ? stringValue(payload.id) : undefined;
-      if (metaId && ownerThreadId && metaId !== ownerThreadId) sawForeignMeta = true;
-      return undefined;
-    }
-    if (line.record.type === 'event_msg' && payload?.type === 'thread_settings_applied') {
-      // The first settings marker delimits the prefix. Reaching it without
-      // ancestor metadata means there is nothing to drop; either way the probe
-      // stops here, so a mid-stream settings change is never mistaken for it.
-      if (sawForeignMeta) boundaryEndOffset = line.endOffset;
+    if (
+      line.record.type === 'event_msg'
+      && payload?.type === 'task_started'
+      && stringValue(payload.turn_id) === turnId
+    ) {
+      turnStartOffset = line.startOffset;
       return false;
     }
     return undefined;
   });
-  if (boundaryEndOffset !== null) return { kind: 'found', endOffset: boundaryEndOffset };
-  // No ancestor metadata seen so far: no evidence of a copied prefix, so collect
-  // normally instead of withholding the rollout while probing further.
-  if (!sawForeignMeta) return { kind: 'absent' };
-  // Prefix confirmed but no marker: at EOF this rollout simply has none.
-  if (nextOffset >= fileSize) return { kind: 'absent' };
-  return { kind: 'probing', nextOffset };
+  return { startOffset: turnStartOffset, nextOffset };
 }
 
 function selectOwnerSessionMetaOffset(
