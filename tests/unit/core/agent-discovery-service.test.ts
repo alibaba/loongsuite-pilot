@@ -312,7 +312,7 @@ describe('AgentDiscoveryService', () => {
       expect(stopped).toEqual([{ id: 'test-agent', reason: 'shutdown' }]);
     });
 
-    it('does not emit or change state on a single exception while running', async () => {
+    it('does not emit or change state when the detection probe throws once', async () => {
       const availableFn = vi.fn().mockResolvedValue(true);
       const entry = makeEntry({ isAvailable: availableFn });
       const svc = new AgentDiscoveryService([entry]);
@@ -325,8 +325,8 @@ describe('AgentDiscoveryService', () => {
       availableFn.mockRejectedValue(new Error('probe hiccup'));
       await svc.refresh('test');
 
-      // Probe threw once: the input is still running, so state is retained and
-      // no stop event is emitted. entry.stop() must not have been called.
+      // A throwing probe leaves the entry untouched: still running, no stop
+      // event, and entry.stop() never called.
       expect(svc.getStates()['test-agent']).toBe('running');
       expect(stopped).toHaveLength(0);
       expect(entry.stop).not.toHaveBeenCalled();
@@ -352,9 +352,33 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
 
-    it('stops with unexpected reason and error summary after threshold consecutive exceptions', async () => {
+    it('never stops the data plane when the detection probe keeps throwing', async () => {
       const availableFn = vi.fn().mockResolvedValue(true);
       const entry = makeEntry({ isAvailable: availableFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      // A broken probe says nothing about input health: the entry must keep
+      // running and collecting no matter how long the probe stays broken.
+      availableFn.mockRejectedValue(new Error('probe broken'));
+      for (let i = 0; i < 10; i++) {
+        vi.setSystemTime(Date.now() + 120_000);
+        await svc.refresh(`probe-fail-${i}`);
+      }
+
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(stopped).toHaveLength(0);
+      expect(entry.stop).not.toHaveBeenCalled();
+      await svc.stop();
+    });
+
+    it('stops with unexpected reason and error summary after sustained lifecycle failures', async () => {
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const entry = makeEntry({ start: startFn, runOnActive: true });
       const svc = new AgentDiscoveryService([entry]);
       const stopped: Array<{ id: string; reason: string; summary?: string }> = [];
       svc.on('agent:stopped', (id: string, reason: string, summary?: string) =>
@@ -363,13 +387,19 @@ describe('AgentDiscoveryService', () => {
       await svc.start();
       expect(svc.getStates()['test-agent']).toBe('running');
 
-      availableFn.mockRejectedValue(new Error('persistent failure'));
+      startFn.mockRejectedValue(new Error('persistent failure'));
       await svc.refresh('poll-1');
       await svc.refresh('poll-2');
       expect(stopped).toHaveLength(0);
       expect(svc.getStates()['test-agent']).toBe('running');
 
+      // Count is reached, but the window has not elapsed yet.
       await svc.refresh('poll-3');
+      expect(stopped).toHaveLength(0);
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      vi.setSystemTime(Date.now() + 61_000);
+      await svc.refresh('poll-4');
       expect(svc.getStates()['test-agent']).toBe('idle');
       expect(entry.stop).toHaveBeenCalledTimes(1);
       expect(stopped).toHaveLength(1);
@@ -379,26 +409,50 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
 
-    it('resets the error counter when a poll succeeds between exceptions', async () => {
-      const availableFn = vi.fn().mockResolvedValue(true);
-      const entry = makeEntry({ isAvailable: availableFn });
+    it('does not stop on a rapid burst of lifecycle failures inside the time window', async () => {
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const entry = makeEntry({ start: startFn, runOnActive: true });
       const svc = new AgentDiscoveryService([entry]);
       const stopped: Array<{ id: string; reason: string }> = [];
       svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
 
       await svc.start();
 
-      availableFn.mockRejectedValue(new Error('boom'));
+      // Simulates unthrottled fs.watch callbacks firing back-to-back: the
+      // count threshold alone must not be enough to trip the alarm.
+      startFn.mockRejectedValue(new Error('burst'));
+      for (let i = 0; i < 20; i++) {
+        await svc.refresh(`burst-${i}`);
+      }
+
+      expect(stopped).toHaveLength(0);
+      expect(svc.getStates()['test-agent']).toBe('running');
+      await svc.stop();
+    });
+
+    it('resets the error counter and window when a poll succeeds between failures', async () => {
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const entry = makeEntry({ start: startFn, runOnActive: true });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+
+      startFn.mockRejectedValue(new Error('boom'));
+      vi.setSystemTime(Date.now() + 61_000);
       await svc.refresh('err-1');
       await svc.refresh('err-2');
       expect(stopped).toHaveLength(0);
 
-      availableFn.mockResolvedValue(true);
+      startFn.mockResolvedValue(undefined);
       await svc.refresh('recover');
       expect(svc.getStates()['test-agent']).toBe('running');
 
-      // Counter reset: two more exceptions must not reach the threshold.
-      availableFn.mockRejectedValue(new Error('boom again'));
+      // Counter and window both reset: two more failures must not stop it,
+      // even though plenty of wall-clock time has passed overall.
+      startFn.mockRejectedValue(new Error('boom again'));
+      vi.setSystemTime(Date.now() + 61_000);
       await svc.refresh('err-3');
       await svc.refresh('err-4');
       expect(stopped).toHaveLength(0);
@@ -422,27 +476,26 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
 
-    it('does not double-start after an unexpected stop', async () => {
-      const availableFn = vi.fn().mockResolvedValue(true);
+    it('restarts cleanly after an unexpected stop without a redundant start', async () => {
       const startFn = vi.fn().mockResolvedValue(undefined);
-      const entry = makeEntry({ isAvailable: availableFn, start: startFn });
+      const entry = makeEntry({ start: startFn, runOnActive: true });
       const svc = new AgentDiscoveryService([entry]);
 
       await svc.start();
       expect(startFn).toHaveBeenCalledTimes(1);
 
-      availableFn.mockRejectedValue(new Error('boom'));
+      startFn.mockRejectedValue(new Error('boom'));
       await svc.refresh('e1');
       await svc.refresh('e2');
+      vi.setSystemTime(Date.now() + 61_000);
       await svc.refresh('e3');
       expect(svc.getStates()['test-agent']).toBe('idle');
 
-      // Recovered: a full idle → running start cycle runs exactly once more,
-      // never a redundant start() while already running.
-      availableFn.mockResolvedValue(true);
+      // Probe is healthy, so the entry self-heals on the next poll via a full
+      // idle → running cycle rather than staying permanently silent.
+      startFn.mockResolvedValue(undefined);
       await svc.refresh('recover');
       expect(svc.getStates()['test-agent']).toBe('running');
-      expect(startFn).toHaveBeenCalledTimes(2);
       await svc.stop();
     });
 
