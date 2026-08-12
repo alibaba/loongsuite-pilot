@@ -293,6 +293,27 @@ describe('SlsFlusher', () => {
       expect(logGroup.tags).toContainEqual({ __service_name__: 'loongsuite-pilot-claude-code' });
     });
 
+    it('uses one exact serviceName for different agent types and all endpoints', async () => {
+      const config = makeConfig({
+        serviceName: 'shared-service',
+        serviceNamePrefix: 'legacy-prefix',
+        endpoints: [
+          { name: 'user', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'inner', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', serviceName: 'managed-svc' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.OpenCode }));
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      for (const call of mockPostLogStoreLogs.mock.calls) {
+        expect(call[2].tags).toContainEqual({ __service_name__: 'shared-service' });
+      }
+    });
+
     it('uses per-endpoint serviceName override for its own __service_name__', async () => {
       const config = makeConfig({
         serviceNamePrefix: 'user-svc',

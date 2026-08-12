@@ -72,6 +72,24 @@ describe('PluginInjectStrategy', () => {
     }
   });
 
+  it('creates and injects the first OpenCode config from the shipped agent definition', async () => {
+    const definitionUrl = new URL('../../../agents.d/opencode.json', import.meta.url);
+    const definition = JSON.parse(await fs.readFile(definitionUrl, 'utf8')) as AgentDefinition;
+    definition.pluginInject!.configPaths = definition.pluginInject!.configPaths.map((configPath) =>
+      configPath.replace(/^~\//, `${tmpDir}/`),
+    );
+
+    const result = await strategy.deploy(definition);
+
+    expect(result.success).toBe(true);
+    const firstConfigPath = path.join(tmpDir, '.config', 'opencode', 'opencode.jsonc');
+    const config = JSON.parse(await fs.readFile(firstConfigPath, 'utf8'));
+    expect(config.plugin).toEqual([
+      `file://${path.join(dataDir, 'plugins', 'opencode', 'plugin.mjs')}`,
+    ]);
+    expect(await strategy.needsDeploy(definition)).toBe(false);
+  });
+
   it('does not create a missing config during a read-only health check', async () => {
     expect(await strategy.needsDeploy(piDefinition())).toBe(true);
     await expect(fs.access(settingsPath)).rejects.toThrow();

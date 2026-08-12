@@ -105,6 +105,9 @@ export interface AnalyticsConfig {
   userId: string;
   collectLog: boolean;
   collectTrace: boolean;
+  /** Exact service.name shared by every agent and backend. */
+  serviceName?: string;
+  /** Legacy base name; agent type is appended when serviceName is unset. */
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
@@ -168,6 +171,8 @@ export interface OtlpTraceFlusherConfig {
   protocol: 'http/protobuf';
   // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
+  /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
+  appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
   debug?: boolean;
@@ -193,6 +198,8 @@ export interface SlsFlusherConfig {
   endpoints: SlsEndpoint[];
   batchMaxSize: number;
   flushIntervalMs: number;
+  /** Exact __service_name__ shared by every agent and endpoint. */
+  serviceName?: string;
   serviceNamePrefix: string;
 }
 

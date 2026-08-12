@@ -65,6 +65,7 @@ export class SlsFlusher extends BaseFlusher {
   private alarmManager: AlarmManager | null = null;
 
   private readonly serviceName: string;
+  private readonly serviceNamePrefix: string;
   private readonly userAgent: string;
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
@@ -73,7 +74,8 @@ export class SlsFlusher extends BaseFlusher {
     this.failedLogWriter = new SlsFailureLogWriter(
       path.join(dataDir, 'logs', 'sls-failed-logs'),
     );
-    this.serviceName = config.serviceNamePrefix || '';
+    this.serviceName = config.serviceName || '';
+    this.serviceNamePrefix = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
       this.endpointCounters.set(ep.name, {
@@ -170,14 +172,15 @@ export class SlsFlusher extends BaseFlusher {
     await Promise.all(tasks);
   }
 
-  /** Per-endpoint service name: managed endpoints may override the shared prefix. */
+  /** Exact global name wins; otherwise managed endpoints may override the shared prefix. */
   private effectiveServiceName(endpoint?: SlsEndpoint): string {
-    return endpoint?.serviceName || this.serviceName;
+    return this.serviceName || endpoint?.serviceName || this.serviceNamePrefix;
   }
 
   private resolveServiceName(endpoint?: SlsEndpoint, agentType?: string): string {
     const base = this.effectiveServiceName(endpoint);
     if (!base) return '';
+    if (this.serviceName) return this.serviceName;
     return agentType ? `${base}-${agentType}` : base;
   }
 

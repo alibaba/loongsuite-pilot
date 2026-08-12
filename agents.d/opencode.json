@@ -7,6 +7,7 @@
     "commands": ["opencode"]
   },
   "pluginInject": {
+    "createIfMissing": true,
     "configPaths": [
       "~/.config/opencode/opencode.jsonc",
       "~/.config/opencode/opencode.json",
