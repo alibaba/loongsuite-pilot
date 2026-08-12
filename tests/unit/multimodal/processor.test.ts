@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MultimodalProcessor } from '../../../src/multimodal/processor.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
@@ -9,13 +12,28 @@ import {
 import { FakeUploader } from './fake-uploader.js';
 
 const STORAGE_BASE = 'oss://bucket/pilot-mm';
+const tmpDirs: string[] = [];
 
-describe('MultimodalProcessor.toUri', () => {
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function writeTempPng(name: string, content: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mm-proc-'));
+  tmpDirs.push(dir);
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, Buffer.from(content));
+  return file;
+}
+
+describe('MultimodalProcessor.blobToUri', () => {
   it('returns optimistic uri and enqueues upload', async () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     const bytes = Buffer.from('png-bytes');
-    const result = processor.toUri({
+    const result = processor.blobToUri({
       content: bytes.toString('base64'),
       mime_type: 'image/png',
       modality: 'image',
@@ -37,7 +55,7 @@ describe('MultimodalProcessor.toUri', () => {
     const uploader = new FakeUploader();
     uploader.failNext = true;
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
-    const result = processor.toUri({
+    const result = processor.blobToUri({
       content: Buffer.from('x').toString('base64'),
       mime_type: 'image/png',
       time_unix_ms: 1_700_000_000_000,
@@ -51,28 +69,28 @@ describe('MultimodalProcessor.toUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     const huge = Buffer.alloc(MAX_MULTIMODAL_DATA_SIZE + 1, 1).toString('base64');
-    expect(processor.toUri({ content: huge, mime_type: 'image/png' })).toBeNull();
+    expect(processor.blobToUri({ content: huge, mime_type: 'image/png' })).toBeNull();
     expect(uploader.items).toHaveLength(0);
   });
 
   it('rejects empty content', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
-    expect(processor.toUri({ content: '', mime_type: 'image/png' })).toBeNull();
+    expect(processor.blobToUri({ content: '', mime_type: 'image/png' })).toBeNull();
   });
 
   it('rejects overlong base64 strings before decode', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     const huge = 'A'.repeat(MAX_MULTIMODAL_BASE64_CHARS + 1);
-    expect(processor.toUri({ content: huge, mime_type: 'image/png' })).toBeNull();
+    expect(processor.blobToUri({ content: huge, mime_type: 'image/png' })).toBeNull();
     expect(uploader.items).toHaveLength(0);
   });
 
   it('rejects content that cannot decode to bytes', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
-    expect(processor.toUri({ content: '!!!!', mime_type: 'image/png' })).toBeNull();
+    expect(processor.blobToUri({ content: '!!!!', mime_type: 'image/png' })).toBeNull();
     expect(uploader.items).toHaveLength(0);
   });
 
@@ -80,7 +98,7 @@ describe('MultimodalProcessor.toUri', () => {
     const uploader = new FakeUploader();
     uploader.throwOnUpload = true;
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
-    const result = processor.toUri({
+    const result = processor.blobToUri({
       content: Buffer.from('boom').toString('base64'),
       mime_type: 'image/png',
       time_unix_ms: 1_700_000_000_000,
@@ -99,7 +117,7 @@ describe('MultimodalProcessor.toUri', () => {
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
     for (let i = 0; i < MAX_MULTIMODAL_PENDING_UPLOADS; i++) {
-      const result = processor.toUri({
+      const result = processor.blobToUri({
         content: Buffer.from(`img-${i}`).toString('base64'),
         mime_type: 'image/png',
         time_unix_ms: 1_700_000_000_000,
@@ -107,7 +125,7 @@ describe('MultimodalProcessor.toUri', () => {
       expect(result).not.toBeNull();
     }
 
-    const overflow = processor.toUri({
+    const overflow = processor.blobToUri({
       content: Buffer.from('overflow').toString('base64'),
       mime_type: 'image/png',
       time_unix_ms: 1_700_000_000_000,
@@ -140,14 +158,14 @@ describe('MultimodalProcessor.toUri', () => {
       uploader.hold = hold;
       const processor = new ProcessorWithTinyBudget(STORAGE_BASE, uploader);
 
-      const first = processor.toUri({
+      const first = processor.blobToUri({
         content: Buffer.alloc(40, 1).toString('base64'),
         mime_type: 'image/png',
         time_unix_ms: 1_700_000_000_000,
       });
       expect(first).not.toBeNull();
 
-      const overflow = processor.toUri({
+      const overflow = processor.blobToUri({
         content: Buffer.alloc(40, 2).toString('base64'),
         mime_type: 'image/png',
         time_unix_ms: 1_700_000_000_000,
@@ -179,8 +197,8 @@ describe('MultimodalProcessor.toUri', () => {
       time_unix_ms: 1_700_000_000_000,
     };
 
-    const first = processor.toUri(params);
-    const second = processor.toUri(params);
+    const first = processor.blobToUri(params);
+    const second = processor.blobToUri(params);
     expect(first?.uri).toBe(second?.uri);
     expect(first?.sha256).toBe(second?.sha256);
 
@@ -193,7 +211,7 @@ describe('MultimodalProcessor.toUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     const shutdown = processor.shutdown(1000);
-    expect(processor.toUri({
+    expect(processor.blobToUri({
       content: Buffer.from('late').toString('base64'),
       mime_type: 'image/png',
     })).toBeNull();
@@ -218,7 +236,7 @@ describe('MultimodalProcessor.toUri', () => {
     uploader.hold = hold;
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    expect(processor.toUri({
+    expect(processor.blobToUri({
       content: Buffer.from('drain-me').toString('base64'),
       mime_type: 'image/png',
       time_unix_ms: 1_700_000_000_000,
@@ -243,7 +261,7 @@ describe('MultimodalProcessor.toUri', () => {
     uploader.hold = hold;
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    expect(processor.toUri({
+    expect(processor.blobToUri({
       content: Buffer.from('slow').toString('base64'),
       mime_type: 'image/png',
       time_unix_ms: 1_700_000_000_000,
@@ -252,7 +270,7 @@ describe('MultimodalProcessor.toUri', () => {
     await processor.shutdown(20);
     expect(uploader.shutdownCalls).toBe(1);
     expect(uploader.closed).toBe(true);
-    expect(processor.toUri({
+    expect(processor.blobToUri({
       content: Buffer.from('after').toString('base64'),
       mime_type: 'image/png',
     })).toBeNull();
@@ -269,6 +287,67 @@ describe('MultimodalProcessor.toUri', () => {
     await processor.shutdown(100);
     expect(uploader.shutdownCalls).toBe(1);
     expect(uploader.closed).toBe(true);
+  });
+});
+
+describe('MultimodalProcessor.pathToUri', () => {
+  it('reads a local image as bytes and returns uri', async () => {
+    const file = writeTempPng('logo.png', 'png-bytes');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    const result = await processor.pathToUri(file, 1_700_000_000_000);
+    expect(result).not.toBeNull();
+    expect(result!.mime_type).toBe('image/png');
+    expect(result!.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\/20231114\/[a-f0-9]{64}\.png$/);
+
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('LRU-caches path→uri so the same path is uploaded once', async () => {
+    const file = writeTempPng('dup.png', 'same-bytes');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    const a = await processor.pathToUri(file);
+    const b = await processor.pathToUri(path.join(path.dirname(file), '.', 'dup.png'));
+    expect(a?.uri).toBe(b?.uri);
+
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('shares one in-flight read for concurrent pathToUri calls', async () => {
+    const file = writeTempPng('race.png', 'race');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    const [a, b] = await Promise.all([
+      processor.pathToUri(file),
+      processor.pathToUri(file),
+    ]);
+    expect(a?.uri).toBe(b?.uri);
+
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('caches null for missing / non-image paths until eviction', async () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(await processor.pathToUri('/no/such/image.png')).toBeNull();
+    expect(await processor.pathToUri('/no/such/image.png')).toBeNull();
+    expect(uploader.items).toHaveLength(0);
+    await processor.shutdown(100);
+  });
+
+  it('rejects pathToUri after shutdown', async () => {
+    const file = writeTempPng('late.png', 'late');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    await processor.shutdown(100);
+    expect(await processor.pathToUri(file)).toBeNull();
   });
 });
 

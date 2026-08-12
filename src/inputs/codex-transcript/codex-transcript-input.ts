@@ -17,9 +17,9 @@ import {
   extractCodexPartialTurnWithBoundaries,
   extractCodexTranscriptMeta,
   sessionIdFromTranscriptPath,
-  type CodexBlobToUri,
 } from './codex-transcript-extractor.js';
 import type { MultimodalProcessor } from '../../multimodal/processor.js';
+import type { BlobToUriFn } from '../../multimodal/types.js';
 import { attachMultimodalMetadataForEntry } from '../../multimodal/rewrite.js';
 import {
   MAX_EMITTED_TERMINAL_TURNS,
@@ -1145,7 +1145,7 @@ export class CodexTranscriptInput extends BaseInput {
     model?: string;
     cwd?: string;
     developerInstructions?: string;
-    blobToUri?: CodexBlobToUri;
+    blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
   } {
     return {
@@ -1161,9 +1161,9 @@ export class CodexTranscriptInput extends BaseInput {
     };
   }
 
-  private readonly blobToUri: CodexBlobToUri = (params) => {
+  private readonly blobToUri: BlobToUriFn = (params) => {
     if (!this.multimodalProcessor) return null;
-    return this.multimodalProcessor.toUri(params);
+    return this.multimodalProcessor.blobToUri(params);
   };
 }
 

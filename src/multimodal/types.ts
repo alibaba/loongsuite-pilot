@@ -6,6 +6,8 @@ export type {
   MultimodalUploaderKind as UploaderKind,
 } from '../types/index.js';
 
+// ─── Upload ───────────────────────────────────────────────────────────────────
+
 export interface UploadItem {
   /** Relative object key: YYYYMMDD/<sha256>.ext */
   targetPath: string;
@@ -21,17 +23,18 @@ export interface Uploader {
   shutdown(): Promise<void>;
 }
 
-/** Raw base64 payload for MultimodalProcessor.toUri. */
-export interface BlobToUriParams {
-  content: string;
+// ─── Shared (blob + path → uri) ───────────────────────────────────────────────
+
+/** Optional metadata for write-time uri conversion. */
+export interface UriConvertMeta {
   mime_type?: string;
   modality?: string;
-  /** Event time (unix ms) for object-key date directory; falls back to now. */
+  /** Unix ms for object-key date directory. */
   time_unix_ms?: number;
 }
 
-/** Optimistic uri result; upload may still be in flight. */
-export interface BlobToUriResult {
+/** Result of blobToUri / pathToUri. */
+export interface UriResult {
   uri: string;
   mime_type: string;
   modality?: string;
@@ -39,15 +42,7 @@ export interface BlobToUriResult {
   sha256: string;
 }
 
-/** GenAI blob part (legacy carrier; Inputs should prefer write-time uri). */
-export interface BlobPart {
-  type: 'blob';
-  mime_type?: string;
-  modality?: string;
-  content: string;
-}
-
-/** GenAI uri part after toUri. */
+/** On-event GenAI uri part. */
 export interface UriPart {
   type: 'uri';
   mime_type?: string;
@@ -55,32 +50,61 @@ export interface UriPart {
   uri: string;
 }
 
-/**
- * Attached on entries as gen_ai.input.multimodal_metadata.
- * Built from uri parts on the entry (mime/modality already on the part;
- * content hash lives in the uri path).
- */
+/** Summary item for gen_ai.input.multimodal_metadata. */
 export interface MultimodalMetadataItem {
   uri: string;
   mime_type: string;
   modality?: string;
 }
 
-/** Hard limits (not config-driven). */
+// ─── Blob (base64) ────────────────────────────────────────────────────────────
+
+/** Input for MultimodalProcessor.blobToUri. */
+export interface BlobToUriParams extends UriConvertMeta {
+  /** Raw base64 (not a data-URL). */
+  content: string;
+}
+
+/** Injected: base64 → uri (e.g. Codex). */
+export type BlobToUriFn = (params: BlobToUriParams) => UriResult | null;
+
+/** On-event GenAI blob part (legacy carrier). */
+export interface BlobPart {
+  type: 'blob';
+  mime_type?: string;
+  modality?: string;
+  content: string;
+}
+
+// ─── Path (local file) ────────────────────────────────────────────────────────
+
+/** Injected: local path → uri (e.g. Qoder IDE). */
+export type PathToUriFn = (
+  filePath: string,
+  timeUnixMs?: number,
+) => Promise<UriResult | null>;
+
+/** Local image path after stat. */
+export interface PathStat {
+  resolvedPath: string;
+  mime_type: string;
+  size: number;
+}
+
+/** Local file bytes before bytes → uri. */
+export interface PathBytes {
+  bytes: Buffer;
+  mime_type: string;
+  size: number;
+}
+
+// ─── Limits ───────────────────────────────────────────────────────────────────
+
 export const MAX_MULTIMODAL_PARTS = 10;
 export const MAX_MULTIMODAL_DATA_SIZE = 30 * 1024 * 1024;
-/** Max in-flight upload tasks; when full, still return uri but skip enqueue. */
 export const MAX_MULTIMODAL_PENDING_UPLOADS = 1024;
-/**
- * Max total bytes held by in-flight uploads (sum of decoded payload sizes).
- * When exceeded, still return uri but skip enqueue. 0 would mean unlimited.
- */
 export const MAX_MULTIMODAL_PENDING_BYTES = 1024 * 1024 * 1024;
-/**
- * Max base64 character length before decode (~4/3 of MAX_MULTIMODAL_DATA_SIZE + padding).
- * Avoids allocating huge Buffers from oversized strings.
- */
+/** ~4/3 of MAX_MULTIMODAL_DATA_SIZE + padding. */
 export const MAX_MULTIMODAL_BASE64_CHARS = Math.ceil(MAX_MULTIMODAL_DATA_SIZE * 4 / 3) + 16;
-/** Best-effort wait for in-flight uploads on shutdown; leftover uris may dangle. */
 export const MULTIMODAL_SHUTDOWN_TIMEOUT_MS = 1_500;
 export const MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';
