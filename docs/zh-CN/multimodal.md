@@ -2,12 +2,12 @@
 
 [English](../multimodal.md) | 简体中文
 
-LoongSuite Pilot 可以把 Agent 消息/工具结果中的内联媒体（当前为图片 base64）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留图像内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
+LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图像：内联 base64 或本地路径读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留图像内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
 
 多模态与消息内容采集是两层不同控制：
 
 - `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`）。
-- `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把媒体 blob 转为 `uri`。
+- `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
 
 开启多模态还需要全局 `config.multimodal` 对象存储基础设施，见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 
@@ -16,8 +16,8 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的内联媒体（当前�
 | 项 | 现状 |
 |----|------|
 | 媒体类型 | **仅图像**。音频、视频等后续再支持。 |
-| 已实现 Agent | **仅 `codex`**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
-| 判定依据（Codex） | transcript 中的 `input_image` **base64 data-URL**。文本里出现的文件路径本身不会产生多模态数据。 |
+| 已实现 Agent | **`codex`**、**`qoder`（IDE）**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
+| 判定依据 | 因 Agent 而异：Codex 依赖 transcript 内联 base64；Qoder IDE 依赖 SQLite 附件路径与 transcript/工具结果中的图像路径（读盘后转 `uri`）。 |
 
 ## 如何开启
 
@@ -26,7 +26,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的内联媒体（当前�
 1. 全局 `config.multimodal`（uploader、凭证、`storageBasePath` 等）。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
-示例（Codex）：
+示例（Codex + Qoder IDE）：
 
 ```json
 {
@@ -41,6 +41,11 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的内联媒体（当前�
   },
   "agents": {
     "codex": {
+      "enabled": true,
+      "captureMessageContent": true,
+      "multimodal": { "uploadMode": "both" }
+    },
+    "qoder": {
       "enabled": true,
       "captureMessageContent": true,
       "multimodal": { "uploadMode": "both" }
@@ -76,6 +81,7 @@ loongsuite-pilot restart
 | Agent | 是否生效 | 采集内容 |
 |-------|----------|----------|
 | `codex` | 是 | 见下方 [Codex](#codex)。 |
+| `qoder`（IDE） | 是 | 见下方 [Qoder IDE](#qoder-ide)。**不含 Qoder CLI。** |
 | 其他 | 否 | 配置 `uploadMode` 目前无效，等待对应 extractor 落地。 |
 
 ### Codex
@@ -94,6 +100,23 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 
 - Prompt 或回复文本中出现图像路径，不等于会采到多模态图片；必须以 transcript 里的 base64 `input_image` 为准。
 - `captureMessageContent: false` 时，多模态摘要字段会与其他消息内容一并剥离。
+
+### Qoder IDE
+
+Qoder IDE（`qoder` / `qoder-idea`）在 `qoder-trace` 采集路径上，于 IDE token 富化之后做写时转换：检测到图像本地路径后走 `MultimodalProcessor.pathToUri`（读盘 bytes → uri）→ 事件中的 `uri` part。配置键为 `agents.qoder.multimodal`；**仅 IDE 分支生效，Qoder CLI 回合不会转换**。失败 fail-open，不影响原有文本/token 采集。
+
+| `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
+|--------------|--------------------|---------------------|
+| `none` | 不转换 | — |
+| `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image） | 粘贴 / @ 图像；挂到对应 `llm.request` / 用户 `messages_delta` |
+| `tool` | `tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | Read 读图、ImageGen 生成图；结果改写为 text + `uri` parts |
+| `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名） | 助手回复中嵌入已读/生成图 |
+| `both` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
+
+注意：
+
+- 仅 Glob 发现、未实际视觉读取的路径不会采集。
+- 同一路径在 tool 与 output 同时出现时，进程内路径缓存避免重复读盘；对象上传仍按内容 sha256 去重。
 
 ## 输出形态（简述）
 
