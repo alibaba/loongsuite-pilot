@@ -35,7 +35,13 @@ function Convert-NodePath {
     if ($candidate -match '^/([A-Za-z])/(.*)$') {
         $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
     }
-    if (-not [System.IO.Path]::HasExtension($candidate) -and (Test-Path -LiteralPath "$candidate.exe")) {
+    # -match, not [System.IO.Path]::HasExtension(): a static method call on a
+    # non-core type throws under ConstrainedLanguage mode (WDAC), and the catch at
+    # the bottom of this file would swallow it into a silent empty result. The regex
+    # is HasExtension's contract: a dot after the last separator that is not the
+    # final character. Trailing dot ("node.") and a dotted parent directory
+    # ("v18.20.4/node") both correctly yield no match.
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
         $candidate = "$candidate.exe"
     }
     return $candidate

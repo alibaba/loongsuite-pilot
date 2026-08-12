@@ -1,4 +1,4 @@
-# loongsuite-pilot.ps1 — Service management for loongsuite-pilot (Windows)
+# loongsuite-pilot.ps1 -- Service management for loongsuite-pilot (Windows)
 # Uses Windows Task Scheduler for autostart (analogous to macOS launchd)
 #
 # Usage:
@@ -504,7 +504,7 @@ function Install-CollectorTask {
     # Kill any collector daemon left running under the OLD task registration BEFORE we
     # delete/re-create the task. Deleting a task does not stop its running child, and the
     # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
-    # new registration — so without this reap the orphan keeps running alongside the new
+    # new registration -- so without this reap the orphan keeps running alongside the new
     # instance and both write the same output (duplicate-collection incident root cause).
     Stop-OrphanProcesses -Match "collector-daemon"
 
@@ -602,7 +602,7 @@ function Cmd-Run {
 
     # Windows has no exec(2): node runs as our child, so it publishes its own pid file
     # (see src/index.ts) instead of us recording the wrapper pid here. Export the data
-    # dir so node's env-first resolution writes $DATA_DIR\loongsuite-pilot.pid — the exact
+    # dir so node's env-first resolution writes $DATA_DIR\loongsuite-pilot.pid -- the exact
     # path stop/status read.
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
@@ -702,7 +702,7 @@ function Cmd-Start {
         }
     }
 
-    # No background fallback — Task Scheduler registration is required.
+    # No background fallback -- Task Scheduler registration is required.
     $staleTask = Get-ScheduledTask `
         -TaskName $TASK_NAME_COLLECTOR `
         -TaskPath "$TASK_FOLDER\" `
@@ -827,7 +827,7 @@ function Cmd-RestartCollector {
                 }
                 $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
                 # node publishes its own pid file on Windows (see src/index.ts); export the
-                # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here —
+                # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here --
                 # $proc.Id would be the wrapper pid, not node's.
                 Start-Process -FilePath "powershell.exe" `
                     -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
@@ -926,7 +926,7 @@ function Cmd-RestartUpdater {
                 $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
                 # node publishes its own pid file on Windows (see src/updater/index.ts); export
                 # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
-                # Set-Content — $proc.Id would be the wrapper pid, not node's.
+                # Set-Content -- $proc.Id would be the wrapper pid, not node's.
                 Start-Process -FilePath "powershell.exe" `
                     -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
                     -WorkingDirectory $CACHE_DIR `
@@ -1045,7 +1045,9 @@ function Cmd-Info {
 
     Write-Host ""
     if (Test-Path $CONFIG_FILE) {
-        Get-Content $CONFIG_FILE
+        # -Encoding UTF8: node writes config.json as UTF-8 with no BOM, and 5.1's
+        # BOM sniffing then falls back to ANSI, printing a Chinese prefix as mojibake.
+        Get-Content $CONFIG_FILE -Encoding UTF8
     }
 }
 
@@ -1063,9 +1065,20 @@ function Remove-HermesPluginForRollback {
     $state = $null
     if (Test-Path $stateFile) {
         try {
-            $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+            # -Encoding UTF8 on the read too: node writes this file as UTF-8 without a
+            # BOM, and 5.1's Get-Content falls back to the ANSI codepage when there is no
+            # BOM to sniff. Without it a non-ASCII targetDir comes back mangled and the
+            # plugin at that path goes uncleaned.
+            $state = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
             $recorded = $state.'hermes-agent'.targetDir
-            if ($recorded -and [System.IO.Path]::IsPathRooted([string]$recorded)) {
+            # Regex instead of [System.IO.Path]::IsPathRooted: System.IO.Path is not a
+            # Constrained-Language core type, so the call throws under CLM (WDAC). The
+            # catch below would swallow it and reset $state, silently leaving a plugin
+            # installed at a custom targetDir uncleaned. Matches a drive-absolute path
+            # (C:\ or C:/) or a UNC share (\\server\share); deliberately rejects the
+            # drive-relative "C:dir" and root-relative "\dir" forms that IsPathRooted
+            # accepts, since neither is safe to use as an absolute delete target.
+            if ($recorded -and ([string]$recorded) -match '^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])') {
                 $pluginDir = [string]$recorded
             }
         } catch {
@@ -1076,13 +1089,27 @@ function Remove-HermesPluginForRollback {
     $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
     if (-not (Test-Path $marker)) { return }
     try {
-        $meta = Get-Content $marker -Raw | ConvertFrom-Json
+        # Same as above: the marker is written by node (directory-plugin-strategy) as
+        # BOM-less UTF-8.
+        $meta = Get-Content $marker -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") { return }
         Remove-Item $pluginDir -Recurse -Force
         if ($state -and $state.'hermes-agent') {
-            $state.PSObject.Properties.Remove('hermes-agent')
+            # Select-Object -ExcludeProperty (a cmdlet) instead of
+            # $state.PSObject.Properties.Remove(): PSMemberInfoCollection is not a
+            # Constrained-Language core type, so the method call throws under CLM (WDAC)
+            # and the state file would keep a stale hermes-agent entry. -Property * is
+            # required alongside -ExcludeProperty on PowerShell 5.1.
+            $pruned = $state | Select-Object -Property * -ExcludeProperty 'hermes-agent'
             $tmp = "$stateFile.tmp"
-            $state | ConvertTo-Json -Depth 20 | Set-Content $tmp
+            # -Encoding UTF8 is required: Set-Content on PowerShell 5.1 defaults to the
+            # ANSI codepage, while the node side reads and writes deployed-agents.json as
+            # UTF-8 (readJsonFile / writeJsonFile). A targetDir under a non-ASCII user
+            # profile would round-trip as mojibake. 5.1 has no utf8NoBOM, so this writes a
+            # BOM -- readJsonFile strips a leading BOM for exactly this reason. Without
+            # that strip JSON.parse throws, readJsonFile swallows it and returns null, and
+            # the whole deployment state silently resets to empty.
+            $pruned | ConvertTo-Json -Depth 20 | Set-Content $tmp -Encoding UTF8
             Move-Item -Force $tmp $stateFile
         }
         Write-Host "   Removed Hermes plugin not supported by rollback target: $pluginDir"
@@ -1177,7 +1204,7 @@ function Cmd-Worker {
 # ============================================================
 # CMD: help
 # ============================================================
-# Manage span-attributes.json — user-defined attributes injected into trace
+# Manage span-attributes.json -- user-defined attributes injected into trace
 # spans (not the event log). The collector re-reads the file per turn, so
 # changes take effect without a restart.
 function Cmd-SpanAttr {
@@ -1197,7 +1224,7 @@ const fs = require("fs");
 const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
 const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
 const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
-function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, "")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
 function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
 if (op === "set") {
   if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
