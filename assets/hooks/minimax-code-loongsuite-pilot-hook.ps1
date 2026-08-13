@@ -89,7 +89,20 @@ function Test-NodeSuitable {
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
+    # Round 19 fix (PR #233, copilot suppressed comment): the
+    # previous implementation hard-coded the pin file path to
+    # "$env:USERPROFILE\.loongsuite-pilot\node-bin" and ignored
+    # $env:LOONGSUITE_PILOT_DATA_DIR. If Pilot is installed/used
+    # with a non-default data dir, the hook would fail to find
+    # the pinned Node binary even though one exists under the
+    # configured data dir (and every other part of the script
+    # already honors LOONGSUITE_PILOT_DATA_DIR — the dataDir
+    # resolution at line 27 uses it). Fall back to the default
+    # only when $env:LOONGSUITE_PILOT_DATA_DIR is unset,
+    # matching the dataDir resolution pattern.
+    $pilotDataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR }
+                    else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
+    $pinFile = Join-Path $pilotDataDir "node-bin"
     if (Test-Path $pinFile) {
         $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }

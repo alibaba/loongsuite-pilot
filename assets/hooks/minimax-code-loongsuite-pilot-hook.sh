@@ -82,8 +82,20 @@ node_is_suitable() {
   return 0
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
 NODE_BIN=""
+# Round 19 fix (PR #233, copilot suppressed comment): the previous
+# implementation hard-coded the pin file path to
+# "$HOME/.loongsuite-pilot/node-bin" and ignored
+# LOONGSUITE_PILOT_DATA_DIR. If Pilot is installed/used with a
+# non-default data dir, the hook would fail to find the pinned
+# Node binary even though one exists under the configured data
+# dir (and every other part of the script already honors
+# LOONGSUITE_PILOT_DATA_DIR — the dataDir resolution at line 27
+# uses it). Fall back to the default only when
+# LOONGSUITE_PILOT_DATA_DIR is unset, matching the dataDir
+# resolution pattern.
+PILOT_DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+NODE_PIN_FILE="$PILOT_DATA_DIR/node-bin"
 
 # 1. pinned node
 if [[ -f "$NODE_PIN_FILE" ]]; then
