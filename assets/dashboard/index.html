@@ -92,16 +92,22 @@
   <main>
     <header>
       <div>
-        <h1>LoongSuite Pilot Dashboard</h1>
+        <h1 data-i18n="pageHeading">LoongSuite Pilot Dashboard</h1>
       </div>
       <div class="toolbar">
-        <span id="status-dot" class="dot"></span>
-        <span id="status-text">连接中...</span>
-        <label class="status">刷新
-          <select id="refresh-select">
-            <option value="5000">5 秒</option>
-            <option value="10000" selected>10 秒</option>
-            <option value="30000">30 秒</option>
+        <span id="status-dot" class="dot" aria-hidden="true"></span>
+        <span id="status-text" data-i18n="statusConnecting">连接中...</span>
+        <label class="status"><span data-i18n="refreshLabel">刷新</span>
+          <select id="refresh-select" data-i18n-aria-label="refreshAriaLabel" aria-label="刷新间隔">
+            <option value="5000" data-i18n="refresh5Seconds">5 秒</option>
+            <option value="10000" data-i18n="refresh10Seconds" selected>10 秒</option>
+            <option value="30000" data-i18n="refresh30Seconds">30 秒</option>
+          </select>
+        </label>
+        <label class="status"><span data-i18n="languageLabel">语言</span>
+          <select id="language-select" data-i18n-aria-label="languageAriaLabel" aria-label="界面语言">
+            <option value="zh-CN" data-i18n="languageChinese">中文</option>
+            <option value="en" data-i18n="languageEnglish">English</option>
           </select>
         </label>
       </div>
@@ -110,36 +116,189 @@
     <div id="notice" class="notice"></div>
 
     <section class="section cards">
-      <div class="card"><div class="label">今日 Token</div><div id="tokens" class="value">--</div><div id="token-detail" class="subvalue">--</div></div>
-      <div class="card"><div class="label">今日 Session</div><div id="sessions" class="value">--</div><div class="subvalue">去重会话数</div></div>
-      <div class="card"><div class="label">今日 Request</div><div id="requests" class="value">--</div><div class="subvalue">LLM 请求数</div></div>
-      <div class="card"><div class="label">今日 Tool Call</div><div id="tools" class="value">--</div><div class="subvalue">工具调用数</div></div>
+      <div class="card"><div class="label" data-i18n="todayTokens">今日 Token</div><div id="tokens" class="value">--</div><div id="token-detail" class="subvalue">--</div></div>
+      <div class="card"><div class="label" data-i18n="todaySessions">今日 Session</div><div id="sessions" class="value">--</div><div class="subvalue" data-i18n="uniqueSessions">去重会话数</div></div>
+      <div class="card"><div class="label" data-i18n="todayRequests">今日 Request</div><div id="requests" class="value">--</div><div class="subvalue" data-i18n="llmRequests">LLM 请求数</div></div>
+      <div class="card"><div class="label" data-i18n="todayToolCalls">今日 Tool Call</div><div id="tools" class="value">--</div><div class="subvalue" data-i18n="toolCalls">工具调用数</div></div>
     </section>
 
     <section class="section">
-      <h2>Agent 分布</h2>
+      <h2 data-i18n="agentDistribution">Agent 分布</h2>
       <div id="agent-grid" class="agent-grid"></div>
     </section>
 
     <section class="section two-columns">
-      <div class="panel"><h2>最近 30 天 Token</h2><div id="token-trend"></div></div>
-      <div class="panel"><h2>最近 30 天 Session</h2><div id="session-trend"></div></div>
+      <div class="panel"><h2 data-i18n="tokenTrendHeading">最近 30 天 Token</h2><div id="token-trend"></div></div>
+      <div class="panel"><h2 data-i18n="sessionTrendHeading">最近 30 天 Session</h2><div id="session-trend"></div></div>
     </section>
 
     <section class="section two-columns">
-      <div class="panel"><h2>模型分布</h2><div id="models" class="list"></div></div>
-      <div class="panel"><h2>服务商分布</h2><div id="providers" class="list"></div></div>
+      <div class="panel"><h2 data-i18n="modelDistribution">模型分布</h2><div id="models" class="list"></div></div>
+      <div class="panel"><h2 data-i18n="providerDistribution">服务商分布</h2><div id="providers" class="list"></div></div>
     </section>
 
-    <section class="section panel"><h2>仓库活动</h2><div id="repos" class="list"></div></section>
+    <section class="section panel"><h2 data-i18n="repositoryActivity">仓库活动</h2><div id="repos" class="list"></div></section>
   </main>
 
   <script>
     const DEFAULT_REFRESH_MS = 10000;
+    const LANGUAGE_STORAGE_KEY = 'loongsuite-pilot.dashboard.language';
+    const messages = {
+      'zh-CN': {
+        pageTitle: 'LoongSuite Pilot Dashboard',
+        pageHeading: 'LoongSuite Pilot Dashboard',
+        refreshLabel: '刷新',
+        refreshAriaLabel: '刷新间隔',
+        refresh5Seconds: '5 秒',
+        refresh10Seconds: '10 秒',
+        refresh30Seconds: '30 秒',
+        languageLabel: '语言',
+        languageAriaLabel: '界面语言',
+        languageChinese: '中文',
+        languageEnglish: 'English',
+        todayTokens: '今日 Token',
+        todaySessions: '今日 Session',
+        todayRequests: '今日 Request',
+        todayToolCalls: '今日 Tool Call',
+        uniqueSessions: '去重会话数',
+        llmRequests: 'LLM 请求数',
+        toolCalls: '工具调用数',
+        agentDistribution: 'Agent 分布',
+        tokenTrendHeading: '最近 30 天 Token',
+        sessionTrendHeading: '最近 30 天 Session',
+        modelDistribution: '模型分布',
+        providerDistribution: '服务商分布',
+        repositoryActivity: '仓库活动',
+        tokenLabel: 'Token',
+        sessionLabel: 'Session',
+        eventLabel: 'Event',
+        inputLabel: '输入',
+        outputLabel: '输出',
+        cacheReadLabel: '缓存读取',
+        agentEventShare: '事件数占比 {percentage}% · 占今日全部 Agent 事件',
+        noAgentData: '暂时没有检测到 Agent Token 数据',
+        noData: '暂无数据',
+        noRepositoryData: '暂无仓库活动数据',
+        trendDescription: '最近 30 天 {label}趋势',
+        trendPointDescription: '{day}，{label} {value}',
+        repositorySessions: '{value} 个 Session',
+        repositoryEvents: '{value} 个 Event',
+        statusConnecting: '连接中...',
+        statusReady: '数据生成于 {time} · 每 {seconds} 秒读取',
+        statusWaiting: '等待统计结果',
+        summaryNotReady: 'metrics-summary.json 尚未生成，Pilot 启动后通常会在几秒内写入。',
+        statusReadFailed: '读取失败',
+        summaryHttpError: '读取 metrics-summary.json 失败：HTTP {status}',
+        summaryReadError: '读取 metrics-summary.json 失败：{message}',
+      },
+      en: {
+        pageTitle: 'LoongSuite Pilot Dashboard',
+        pageHeading: 'LoongSuite Pilot Dashboard',
+        refreshLabel: 'Refresh',
+        refreshAriaLabel: 'Refresh interval',
+        refresh5Seconds: '5 seconds',
+        refresh10Seconds: '10 seconds',
+        refresh30Seconds: '30 seconds',
+        languageLabel: 'Language',
+        languageAriaLabel: 'Interface language',
+        languageChinese: '中文',
+        languageEnglish: 'English',
+        todayTokens: "Today's Tokens",
+        todaySessions: "Today's Sessions",
+        todayRequests: "Today's Requests",
+        todayToolCalls: "Today's Tool Calls",
+        uniqueSessions: 'Unique sessions',
+        llmRequests: 'LLM requests',
+        toolCalls: 'Tool calls',
+        agentDistribution: 'Agent Distribution',
+        tokenTrendHeading: 'Tokens · Last 30 Days',
+        sessionTrendHeading: 'Sessions · Last 30 Days',
+        modelDistribution: 'Model Distribution',
+        providerDistribution: 'Provider Distribution',
+        repositoryActivity: 'Repository Activity',
+        tokenLabel: 'Token',
+        sessionLabel: 'Session',
+        eventLabel: 'Event',
+        inputLabel: 'Input',
+        outputLabel: 'Output',
+        cacheReadLabel: 'Cache read',
+        agentEventShare: '{percentage}% of all Agent events today',
+        noAgentData: 'No Agent token data detected yet',
+        noData: 'No data yet',
+        noRepositoryData: 'No repository activity yet',
+        trendDescription: '30-day {label} trend',
+        trendPointDescription: '{day}, {label} {value}',
+        repositorySessions: '{value} sessions',
+        repositoryEvents: '{value} events',
+        statusConnecting: 'Connecting...',
+        statusReady: 'Generated at {time} · reading every {seconds} seconds',
+        statusWaiting: 'Waiting for metrics',
+        summaryNotReady: 'metrics-summary.json is not ready yet. Pilot normally writes it within a few seconds of startup.',
+        statusReadFailed: 'Read failed',
+        summaryHttpError: 'Failed to read metrics-summary.json: HTTP {status}',
+        summaryReadError: 'Failed to read metrics-summary.json: {message}',
+      },
+    };
+
+    function normalizeLanguage(language) {
+      return typeof language === 'string' && language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+    }
+
+    function detectBrowserLanguage(languages, language) {
+      const candidates = [
+        ...(Array.isArray(languages) ? languages : []),
+        language,
+      ];
+      return candidates.some(candidate => normalizeLanguage(candidate) === 'zh-CN') ? 'zh-CN' : 'en';
+    }
+
+    function isSupportedLanguage(language) {
+      return language === 'zh-CN' || language === 'en';
+    }
+
+    function getLocalStorage() {
+      try {
+        return window.localStorage;
+      } catch {
+        return null;
+      }
+    }
+
+    function readStoredLanguage(storage) {
+      try {
+        const language = storage?.getItem(LANGUAGE_STORAGE_KEY);
+        return isSupportedLanguage(language) ? language : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function writeStoredLanguage(storage, language) {
+      try {
+        storage?.setItem(LANGUAGE_STORAGE_KEY, language);
+      } catch {
+        // Storage can be unavailable in private or locked-down browser contexts.
+      }
+    }
+
+    const storage = getLocalStorage();
+    let currentLanguage = readStoredLanguage(storage)
+      ?? detectBrowserLanguage(navigator.languages, navigator.language);
     let refreshMs = DEFAULT_REFRESH_MS;
     let refreshTimer;
+    let currentSummary = null;
+    let viewState = { kind: 'connecting' };
     const $ = (id) => document.getElementById(id);
-    const count = (value) => new Intl.NumberFormat().format(Number(value) || 0);
+
+    function translate(key, values = {}) {
+      const template = messages[currentLanguage]?.[key] ?? messages.en[key] ?? key;
+      return Object.entries(values).reduce(
+        (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+        template,
+      );
+    }
+
+    const count = (value) => new Intl.NumberFormat(currentLanguage).format(Number(value) || 0);
     function tokenCount(value) {
       const numeric = Number(value);
       if (!Number.isFinite(numeric)) return count(0);
@@ -148,8 +307,28 @@
       const useBillions = magnitude >= 1_000_000_000;
       const divisor = useBillions ? 1_000_000_000 : 1_000_000;
       const suffix = useBillions ? 'B' : 'M';
-      const compact = (numeric / divisor).toFixed(2).replace(/\.?0+$/, '');
+      const compact = new Intl.NumberFormat(currentLanguage, {
+        maximumFractionDigits: 2,
+        useGrouping: false,
+      })
+        .format(numeric / divisor);
       return `${compact}${suffix}`;
+    }
+    const percentage = (value) => new Intl.NumberFormat(currentLanguage, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }).format((Number(value) || 0) * 100);
+    function formatTime(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value ?? '') : date.toLocaleTimeString(currentLanguage);
+    }
+    function formatDay(value) {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ''));
+      if (!match) return String(value ?? '');
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return new Intl.DateTimeFormat(currentLanguage, {
+        year: 'numeric', month: 'short', day: 'numeric',
+      }).format(date);
     }
     const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -166,20 +345,48 @@
       $('notice').classList.toggle('show', Boolean(text));
     }
 
+    function renderViewState() {
+      if (viewState.kind === 'ready' && currentSummary) {
+        setStatus(true, translate('statusReady', {
+          time: formatTime(currentSummary.generatedAt),
+          seconds: count(refreshMs / 1000),
+        }));
+        setNotice('');
+        return;
+      }
+      if (viewState.kind === 'waiting') {
+        setStatus(false, translate('statusWaiting'));
+        setNotice(translate('summaryNotReady'));
+        return;
+      }
+      if (viewState.kind === 'http-error') {
+        setStatus(false, translate('statusReadFailed'));
+        setNotice(translate('summaryHttpError', { status: viewState.status }));
+        return;
+      }
+      if (viewState.kind === 'read-error') {
+        setStatus(false, translate('statusReadFailed'));
+        setNotice(translate('summaryReadError', { message: viewState.message }));
+        return;
+      }
+      setStatus(false, translate('statusConnecting'));
+      setNotice('');
+    }
+
     function renderAgents(agentShares) {
       if (!agentShares.length) {
-        $('agent-grid').innerHTML = '<div class="panel empty agent-empty">暂时没有检测到 Agent Token 数据</div>';
+        $('agent-grid').innerHTML = `<div class="panel empty agent-empty">${escapeHtml(translate('noAgentData'))}</div>`;
         return;
       }
       $('agent-grid').innerHTML = agentShares.map((agent) => `
         <article class="agent-card" data-agent-type="${escapeHtml(agent.agentType)}">
           <div class="agent-title">${escapeHtml(agent.agentType)}</div>
           <div class="kv">
-            <div><div class="label">Token</div><div class="value">${tokenCount(agent.tokens)}</div></div>
-            <div><div class="label">Session</div><div class="value">${count(agent.sessions)}</div></div>
-            <div><div class="label">Event</div><div class="value">${count(agent.events)}</div></div>
+            <div><div class="label">${escapeHtml(translate('tokenLabel'))}</div><div class="value">${tokenCount(agent.tokens)}</div></div>
+            <div><div class="label">${escapeHtml(translate('sessionLabel'))}</div><div class="value">${count(agent.sessions)}</div></div>
+            <div><div class="label">${escapeHtml(translate('eventLabel'))}</div><div class="value">${count(agent.events)}</div></div>
           </div>
-          <div class="subvalue">事件数占比 ${(Number(agent.share) * 100).toFixed(1)}% · 占今日全部 Agent 事件</div>
+          <div class="subvalue">${escapeHtml(translate('agentEventShare', { percentage: percentage(agent.share) }))}</div>
         </article>
       `).join('');
     }
@@ -189,7 +396,7 @@
       const wrap = bar.closest('.trend-wrap');
       const tooltip = wrap?.querySelector('.trend-tooltip');
       if (!tooltip) return;
-      tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.day)}</span><strong>${escapeHtml(bar.dataset.label)} ${escapeHtml(bar.dataset.formattedValue)}</strong>`;
+      tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.displayDay)}</span><strong>${escapeHtml(bar.dataset.label)} ${escapeHtml(bar.dataset.formattedValue)}</strong>`;
       tooltip.setAttribute('aria-hidden', 'false');
       tooltip.classList.add('show');
 
@@ -221,22 +428,25 @@
         ? activeElement.dataset.day
         : null;
       if (!points.length) {
-        container.innerHTML = '<div class="empty">暂无数据</div>';
+        container.innerHTML = `<div class="empty">${escapeHtml(translate('noData'))}</div>`;
         return;
       }
       const shown = points.slice(-30);
       const max = Math.max(1, ...shown.map((point) => Number(point.value) || 0));
       container.innerHTML = `
         <div class="trend-wrap">
-          <div class="trend" role="group" aria-label="最近 30 天 ${escapeHtml(valueLabel)}趋势">${shown.map((point) => {
+          <div class="trend" role="group" aria-label="${escapeHtml(translate('trendDescription', { label: valueLabel }))}">${shown.map((point) => {
           const height = Math.max(2, Math.round(((Number(point.value) || 0) / max) * 150));
           const formattedValue = valueFormatter(point.value);
-          const ariaLabel = `${point.day}，${valueLabel} ${formattedValue}`;
-          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${escapeHtml(target)}-tooltip" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-formatted-value="${escapeHtml(formattedValue)}"><span class="trend-bar-fill" style="height:${height}px"></span></button>`;
+          const displayDay = formatDay(point.day);
+          const ariaLabel = translate('trendPointDescription', {
+            day: displayDay, label: valueLabel, value: formattedValue,
+          });
+          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${escapeHtml(target)}-tooltip" data-day="${escapeHtml(point.day)}" data-display-day="${escapeHtml(displayDay)}" data-label="${escapeHtml(valueLabel)}" data-formatted-value="${escapeHtml(formattedValue)}"><span class="trend-bar-fill" style="height:${height}px"></span></button>`;
         }).join('')}</div>
           <div id="${escapeHtml(target)}-tooltip" class="trend-tooltip" role="tooltip" aria-hidden="true"></div>
         </div>
-        <div class="trend-labels"><span>${escapeHtml(shown[0]?.day || '')}</span><span>${escapeHtml(shown[shown.length - 1]?.day || '')}</span></div>`;
+        <div class="trend-labels"><span>${escapeHtml(formatDay(shown[0]?.day))}</span><span>${escapeHtml(formatDay(shown[shown.length - 1]?.day))}</span></div>`;
       const bars = [...container.querySelectorAll('.trend-bar')];
       bars.forEach((bar) => {
         bar.addEventListener('mouseenter', showTrendTooltip);
@@ -251,54 +461,79 @@
 
     function renderShares(target, shares, nameKey, valueKey, valueFormatter) {
       if (!shares.length) {
-        $(target).innerHTML = '<div class="empty">暂无数据</div>';
+        $(target).innerHTML = `<div class="empty">${escapeHtml(translate('noData'))}</div>`;
         return;
       }
       $(target).innerHTML = shares.map((entry) => `
         <div class="list-row">
           <div class="list-name" title="${escapeHtml(entry[nameKey])}">${escapeHtml(entry[nameKey])}<div class="bar"><span style="width:${Math.max(1, Math.min(100, Number(entry.share) * 100))}%"></span></div></div>
-          <span>${valueFormatter(entry[valueKey])}</span><span>${(Number(entry.share) * 100).toFixed(1)}%</span>
+          <span>${valueFormatter(entry[valueKey])}</span><span>${percentage(entry.share)}%</span>
         </div>`).join('');
     }
 
     function renderRepos(repos) {
       $('repos').innerHTML = repos.length ? repos.map((repo) => `
-        <div class="list-row"><div class="list-name" title="${escapeHtml(repo.repo)}">${escapeHtml(repo.repo)}</div><span>${count(repo.sessions)} sessions</span><span>${count(repo.events)} events</span></div>
-      `).join('') : '<div class="empty">暂无仓库活动数据</div>';
+        <div class="list-row"><div class="list-name" title="${escapeHtml(repo.repo)}">${escapeHtml(repo.repo)}</div><span>${escapeHtml(translate('repositorySessions', { value: count(repo.sessions) }))}</span><span>${escapeHtml(translate('repositoryEvents', { value: count(repo.events) }))}</span></div>
+      `).join('') : `<div class="empty">${escapeHtml(translate('noRepositoryData'))}</div>`;
     }
 
-    function render(summary) {
+    function renderSummary(summary) {
       const today = summary.ranges.today;
       $('tokens').textContent = tokenCount(today.totalTokens);
-      $('token-detail').textContent = `输入 ${tokenCount(today.inputTokens)} · 输出 ${tokenCount(today.outputTokens)} · 缓存读取 ${tokenCount(today.cacheReadTokens)}`;
+      $('token-detail').textContent = `${translate('inputLabel')} ${tokenCount(today.inputTokens)} · ${translate('outputLabel')} ${tokenCount(today.outputTokens)} · ${translate('cacheReadLabel')} ${tokenCount(today.cacheReadTokens)}`;
       $('sessions').textContent = count(today.totalSessions);
       $('requests').textContent = count(today.totalRequests);
       $('tools').textContent = count(today.totalToolCalls);
       // Agent cards are intentionally derived only from agentShares. New agent
       // types therefore appear without a dashboard code change.
       renderAgents(Array.isArray(today.agentShares) ? today.agentShares : []);
-      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : [], 'Token', tokenCount);
-      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : [], 'Session', count);
+      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : [], translate('tokenLabel'), tokenCount);
+      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : [], translate('sessionLabel'), count);
       renderShares('models', Array.isArray(today.modelShares) ? today.modelShares : [], 'model', 'totalTokens', tokenCount);
       renderShares('providers', Array.isArray(today.providerShares) ? today.providerShares : [], 'provider', 'totalTokens', tokenCount);
       renderRepos(Array.isArray(today.repoShares) ? today.repoShares : []);
-      setStatus(true, `数据生成于 ${new Date(summary.generatedAt).toLocaleTimeString()} · 每 ${refreshMs / 1000} 秒读取`);
-      setNotice('');
+    }
+
+    function applyLanguage(language, persist = false) {
+      currentLanguage = isSupportedLanguage(language) ? language : normalizeLanguage(language);
+      if (persist) writeStoredLanguage(storage, currentLanguage);
+      document.documentElement.lang = currentLanguage;
+      document.title = translate('pageTitle');
+      document.querySelectorAll('[data-i18n]').forEach((element) => {
+        element.textContent = translate(element.dataset.i18n);
+      });
+      document.querySelectorAll('[data-i18n-aria-label]').forEach((element) => {
+        element.setAttribute('aria-label', translate(element.dataset.i18nAriaLabel));
+      });
+      $('language-select').value = currentLanguage;
+      if (currentSummary) renderSummary(currentSummary);
+      renderViewState();
     }
 
     async function refresh() {
       try {
         const response = await fetch('/metrics-summary.json', { cache: 'no-store' });
         if (response.status === 503) {
-          setStatus(false, '等待统计结果');
-          setNotice('metrics-summary.json 尚未生成，Pilot 启动后通常会在几秒内写入。');
+          viewState = { kind: 'waiting' };
+          renderViewState();
           return;
         }
-        if (!response.ok) throw new Error(`读取 metrics-summary.json 失败：HTTP ${response.status}`);
-        render(await response.json());
+        if (!response.ok) {
+          viewState = { kind: 'http-error', status: response.status };
+          renderViewState();
+          return;
+        }
+        const summary = await response.json();
+        renderSummary(summary);
+        currentSummary = summary;
+        viewState = { kind: 'ready' };
+        renderViewState();
       } catch (error) {
-        setStatus(false, '读取失败');
-        setNotice(error instanceof Error ? error.message : String(error));
+        viewState = {
+          kind: 'read-error',
+          message: error instanceof Error ? error.message : String(error),
+        };
+        renderViewState();
       }
     }
 
@@ -312,9 +547,15 @@
       if (!Number.isFinite(value) || value <= 0) return;
       refreshMs = value;
       restartTimer();
+      renderViewState();
       void refresh();
     });
 
+    $('language-select').addEventListener('change', (event) => {
+      applyLanguage(event.target.value, true);
+    });
+
+    applyLanguage(currentLanguage);
     void refresh();
     restartTimer();
   </script>

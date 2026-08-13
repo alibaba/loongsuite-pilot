@@ -49,6 +49,10 @@ Dashboard 前端只请求 `GET /metrics-summary.json`，服务端会原样返回
 
 Agent 卡片来自 `ranges.today.agentShares`，因此新增 Agent 类型会自动出现，无需维护固定清单。
 
+页面首次打开时会根据浏览器语言自动选择中文或英文；右上角可随时切换，文案、状态、错误、
+图表辅助说明以及数字和时间会立即按所选语言重绘。语言偏好会在浏览器允许时保存到
+`localStorage`，禁用浏览器存储不影响 Dashboard 使用。
+
 ## 全面健康检查
 
 ```bash
