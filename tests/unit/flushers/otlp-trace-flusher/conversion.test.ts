@@ -55,10 +55,11 @@ describe('OtlpTraceFlusher - conversion', () => {
 
   it('passes handler from per-agent convert state', async () => {
     const entry = {
-      'event.name': 'llm.response',
+      'event.name': 'other',
       'gen_ai.agent.type': 'codex',
       'gen_ai.turn.id': 't2',
-      'gen_ai.response.finish_reasons': ['stop'],
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
     } as unknown as AgentActivityEntry;
 
     await flusher.send(entry);
@@ -109,6 +110,21 @@ describe('OtlpTraceFlusher - conversion', () => {
       'custom.attr': 'hello',
       'agentteams.worker.name': 'local-worker',
       'agentteams.instance.id': 'example-instance',
+    });
+  });
+
+  it('uses an explicit PI system and framework for a registered custom Agent resource', () => {
+    const records = [{
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
+    }] as unknown as AgentActivityEntry[];
+    const identity = (flusher as any).resolveAgentResourceIdentity('acme-code', records);
+    const resource = (flusher as any).buildResource('acme-code', 'test-pilot', {}, identity);
+
+    expect(resource.attributes).toMatchObject({
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
     });
   });
 

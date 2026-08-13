@@ -105,6 +105,9 @@ export interface AnalyticsConfig {
   userId: string;
   collectLog: boolean;
   collectTrace: boolean;
+  /** Exact service.name shared by every agent and backend. */
+  serviceName?: string;
+  /** Legacy base name; agent type is appended when serviceName is unset. */
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
@@ -168,6 +171,8 @@ export interface OtlpTraceFlusherConfig {
   protocol: 'http/protobuf';
   // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
+  /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
+  appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
   debug?: boolean;
@@ -181,6 +186,26 @@ export interface OtlpTraceFlusherConfig {
 
 export type SlsMode = 'ak' | 'webtracking' | 'apiKey';
 
+export interface SlsTimeoutConfig {
+  /** Overall request timeout in ms (default 30000). Acts as a hard cap when phase timeouts are set. */
+  timeoutMs?: number;
+  /** DNS + TCP + TLS connection timeout in ms (default 10000). Only effective for webtracking mode. */
+  connectTimeoutMs?: number;
+  /** Timeout waiting for response headers in ms (default 30000). Only effective for webtracking mode. */
+  headersTimeoutMs?: number;
+  /** Timeout reading response body in ms (default 15000). Only effective for webtracking mode. */
+  bodyTimeoutMs?: number;
+}
+
+export interface SlsRetryConfig {
+  /** Max number of retry attempts (default 3). */
+  retryMaxAttempts?: number;
+  /** Base delay for exponential backoff in ms (default 1000). */
+  retryBaseDelayMs?: number;
+  /** Whether to add random jitter to backoff delay (default true). */
+  retryJitter?: boolean;
+}
+
 export interface SlsFlusherConfig {
   enabled: boolean;
   /** 上报模式：'ak' 使用 AK/SK 签名，'apiKey' 使用 Bearer API Key，'webtracking' 使用 WebTracking */
@@ -193,7 +218,15 @@ export interface SlsFlusherConfig {
   endpoints: SlsEndpoint[];
   batchMaxSize: number;
   flushIntervalMs: number;
+  /** Exact __service_name__ shared by every agent and endpoint. */
+  serviceName?: string;
   serviceNamePrefix: string;
+  /** Timeout configuration for SLS requests. */
+  timeout?: SlsTimeoutConfig;
+  /** Retry configuration for failed SLS requests. */
+  retry?: SlsRetryConfig;
+  /** Max concurrent flush tasks (default 3). Controls how many endpoint buckets flush in parallel. */
+  flushConcurrency?: number;
 }
 
 export interface SlsEndpoint {

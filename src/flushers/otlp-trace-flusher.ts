@@ -92,6 +92,7 @@ interface ResolvedOtlpEndpoint {
   headers: Record<string, string>;
   compression: CompressionAlgorithm;
   serviceName: string;
+  appendAgentTypeToServiceName: boolean;
 }
 
 interface AgentExportState {
@@ -110,6 +111,11 @@ const RESERVED_RESOURCE_KEYS = new Set([
 ]);
 
 type ResourceProjectionValue = string | number | boolean;
+
+interface AgentResourceIdentity {
+  system: string;
+  framework: string;
+}
 
 const SENSITIVE_RESOURCE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
 
@@ -199,6 +205,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       headers: ep.headers ?? {},
       compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
       serviceName: ep.serviceName || cfg.serviceName,
+      appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
     }));
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
@@ -375,7 +382,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // Fan out to every backend; each endpoint belongs to exactly one serviceName
     // group, so the spans reach each backend once.
-    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    const serviceNames = [...new Set(
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+    )];
     await Promise.all(
       serviceNames.map((serviceName) =>
         this.exportInBatches(this.getOrCreateExportState(agentType, serviceName), agentType, spans),
@@ -386,6 +395,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // A fused child shares the parent's turn buffer. Its stop closes only the
+    // child lifecycle; the delayed root response remains the turn boundary.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
+      if (entry['gen_ai.agent.scope'] === 'subagent') return false;
+      // A `stop` closes one Codex model wave, not necessarily the surrounding
+      // transcript turn. The transcript input stamps this status only when it
+      // has observed task_complete / turn_aborted, which is the lifecycle
+      // boundary that is safe to flush.
+      const turnStatus = entry['agent.codex.turn_status'];
+      if (turnStatus !== 'completed' && turnStatus !== 'interrupted') return false;
+      return entry['gen_ai.turn.end'] === true;
+    }
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
     // stable end-of-run boundary in every supported version (>=2026.5.12).
@@ -464,10 +485,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
   ): Promise<void> {
     if (records.length === 0) return;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
+    const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
     // service names). Each service name owns an independent convert state, so the
     // common single-name case still converts exactly once.
-    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    const serviceNames = [...new Set(
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+    )];
     await Promise.all(
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
@@ -477,6 +501,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           serviceName,
           records,
           projectedResourceAttributes,
+          resourceIdentity,
           convertKey,
         ));
         this.convertLocks.set(convertKey, current.catch(() => {}));
@@ -490,9 +515,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
     serviceName: string,
     records: AgentActivityEntry[],
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
+    resourceIdentity: AgentResourceIdentity,
     convertKey: string,
   ): Promise<void> {
-    const convertState = this.getOrCreateConvertState(agentType, serviceName, projectedResourceAttributes, convertKey);
+    const convertState = this.getOrCreateConvertState(
+      agentType,
+      serviceName,
+      projectedResourceAttributes,
+      resourceIdentity,
+      convertKey,
+    );
     const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
 
@@ -660,6 +692,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     agentType: string,
     serviceName: string,
     projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
+    resourceIdentity: AgentResourceIdentity = {
+      system: resolveAgentSystem(agentType),
+      framework: agentType,
+    },
     key = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes),
   ): AgentConvertState {
     let state = this.agentConvertStates.get(key);
@@ -669,7 +705,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return state;
     }
 
-    const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes);
+    const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
     const inMem = new InMemorySpanExporter();
     const idGenerator = new ReservedToolSpanIdGenerator();
     const provider = new BasicTracerProvider({
@@ -847,6 +883,29 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return `${agentType}|${serviceName}|${this.stableJson(projectedResourceAttributes)}`;
   }
 
+  private resolveAgentResourceIdentity(
+    agentType: string,
+    records: AgentActivityEntry[],
+  ): AgentResourceIdentity {
+    let system: string | undefined;
+    let framework: string | undefined;
+    for (const record of records) {
+      system ??= this.nonEmptyString(record['gen_ai.agent.system']);
+      framework ??= this.nonEmptyString(record['gen_ai.framework']);
+      if (system && framework) break;
+    }
+    return {
+      system: system ?? resolveAgentSystem(agentType),
+      // Preserve the existing resource value for Agents that do not emit an
+      // explicit framework. Registered PI SDK Agents emit `pi` explicitly.
+      framework: framework ?? agentType,
+    };
+  }
+
+  private nonEmptyString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  }
+
   private stableJson(value: Record<string, ResourceProjectionValue>): string {
     const sorted: Record<string, ResourceProjectionValue> = {};
     for (const key of Object.keys(value).sort()) {
@@ -919,7 +978,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (state) return state;
 
     const exporters = this.endpoints
-      .filter((ep) => ep.serviceName === serviceName)
+      .filter((endpoint) => this.resolveEndpointServiceName(endpoint, agentType) === serviceName)
       .map((ep) => ({
         name: ep.name,
         exporter: this.exporterFactory({
@@ -935,10 +994,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return state;
   }
 
+  private resolveEndpointServiceName(endpoint: ResolvedOtlpEndpoint, agentType: string): string {
+    return endpoint.appendAgentTypeToServiceName
+      ? `${endpoint.serviceName}-${agentType}`
+      : endpoint.serviceName;
+  }
+
   private buildResource(
     agentType: string,
     serviceName: string,
     projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
+    resourceIdentity: AgentResourceIdentity = {
+      system: resolveAgentSystem(agentType),
+      framework: agentType,
+    },
   ): Resource {
     const userAttrs: Record<string, string> = {};
     if (this.cfg.resourceAttributes) {
@@ -968,18 +1037,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     return new Resource({
-      'service.name': `${serviceName}-${agentType}`,
+      'service.name': serviceName,
       'service.version': this.pilotVersion,
       'service.instance.id': this.instanceId,
       'service.namespace': 'loongsuite-pilot',
       'host.name': os.hostname(),
       'gen_ai.agent.type': agentType,
-      'gen_ai.agent.system': resolveAgentSystem(agentType),
+      'gen_ai.agent.system': resourceIdentity.system,
       // ARMS GenAI semconv recommends gen_ai.framework on every span. The
       // converter library doesn't set it on span attributes, so we set it on
       // the Resource — OTel resources propagate to all spans of the trace,
       // which CMS reads the same way as span-level gen_ai.framework.
-      'gen_ai.framework': agentType,
+      'gen_ai.framework': resourceIdentity.framework,
       ...userAttrs,
       ...projectedAttrs,
     });

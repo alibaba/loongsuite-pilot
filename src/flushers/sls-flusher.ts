@@ -1,11 +1,12 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
+import { Agent as UndiciAgent } from 'undici';
 import { BaseFlusher } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
 } from '../normalization/entry-builder.js';
-import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
+import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint, SlsTimeoutConfig, SlsRetryConfig } from '../types/index.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
@@ -30,6 +31,11 @@ const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
 const FLUSH_INTERVAL_MS = 2000;
+const DEFAULT_FLUSH_CONCURRENCY = 3;
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_HEADERS_TIMEOUT_MS = 30_000;
+const DEFAULT_BODY_TIMEOUT_MS = 15_000;
+const DEFAULT_OVERALL_TIMEOUT_MS = 30_000;
 
 interface QueuedLog {
   content: Record<string, string>;
@@ -54,6 +60,15 @@ export interface EndpointCounter {
   logstore: string;
 }
 
+const MAX_BACKOFF_MS = 60_000;
+
+/** Compute backoff delay with optional full-jitter, capped at MAX_BACKOFF_MS. */
+export function computeBackoff(baseMs: number, attempt: number, jitter: boolean): number {
+  const exponential = Math.min(baseMs * 2 ** attempt, MAX_BACKOFF_MS);
+  if (!jitter) return exponential;
+  return Math.round(exponential * (0.5 + Math.random() * 0.5));
+}
+
 export class SlsFlusher extends BaseFlusher {
   readonly name = 'sls';
   private readonly config: SlsFlusherConfig;
@@ -65,7 +80,16 @@ export class SlsFlusher extends BaseFlusher {
   private alarmManager: AlarmManager | null = null;
 
   private readonly serviceName: string;
+  private readonly serviceNamePrefix: string;
   private readonly userAgent: string;
+
+  private readonly resolvedTimeoutMs: number;
+  private readonly resolvedRetryMaxAttempts: number;
+  private readonly resolvedRetryBaseDelayMs: number;
+  private readonly resolvedRetryJitter: boolean;
+  private readonly resolvedFlushConcurrency: number;
+  private readonly dispatcher: UndiciAgent | undefined;
+  private flushing = false;
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
@@ -73,8 +97,27 @@ export class SlsFlusher extends BaseFlusher {
     this.failedLogWriter = new SlsFailureLogWriter(
       path.join(dataDir, 'logs', 'sls-failed-logs'),
     );
-    this.serviceName = config.serviceNamePrefix || '';
+    this.serviceName = config.serviceName || '';
+    this.serviceNamePrefix = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
+
+    const tc = config.timeout ?? {};
+    const rc = config.retry ?? {};
+    this.resolvedTimeoutMs = tc.timeoutMs ?? DEFAULT_OVERALL_TIMEOUT_MS;
+    this.resolvedRetryMaxAttempts = Math.max(1, rc.retryMaxAttempts ?? RETRY_MAX_ATTEMPTS);
+    this.resolvedRetryBaseDelayMs = rc.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
+    this.resolvedRetryJitter = rc.retryJitter !== false;
+    this.resolvedFlushConcurrency = Math.max(1, config.flushConcurrency ?? DEFAULT_FLUSH_CONCURRENCY);
+
+    const hasPhaseTimeouts = tc.connectTimeoutMs != null || tc.headersTimeoutMs != null || tc.bodyTimeoutMs != null;
+    if (hasPhaseTimeouts) {
+      this.dispatcher = new UndiciAgent({
+        connect: { timeout: tc.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS },
+        headersTimeout: tc.headersTimeoutMs ?? DEFAULT_HEADERS_TIMEOUT_MS,
+        bodyTimeout: tc.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS,
+      });
+    }
+
     for (const ep of config.endpoints) {
       this.endpointCounters.set(ep.name, {
         inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
@@ -133,51 +176,77 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async flush(): Promise<void> {
-    const batches = Array.from(this.queue.entries());
-    this.queue.clear();
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      const batches = Array.from(this.queue.entries());
+      this.queue.clear();
 
-    if (batches.length > 0) {
-      logger.debug('flush dispatching', {
-        buckets: batches.length,
-        totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
-      });
-    }
+      if (batches.length > 0) {
+        logger.debug('flush dispatching', {
+          buckets: batches.length,
+          totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
+        });
+      }
 
-    const tasks = batches
-      .filter(([, logs]) => logs.length > 0)
-      .map(([, logs]) => {
-        const endpoint = logs[0].endpoint;
-        const counter = this.endpointCounters.get(endpoint.name);
-        const startMs = Date.now();
-        const send = this.flushEndpoint(endpoint, logs);
-        return send.then(() => {
-          if (counter) {
-            counter.outEntries += logs.length;
-            counter.totalDelayMs += Date.now() - startMs;
-            counter.lastFlushTime = formatTime(new Date());
-          }
-        }).catch(err => {
-          if (counter) {
-            counter.outFailed += logs.length;
-            counter.totalDelayMs += Date.now() - startMs;
-          }
-          logger.error('SLS endpoint flush failed', {
-            endpoint: endpoint.name,
-            error: String(err),
+      const pending = batches
+        .filter(([, logs]) => logs.length > 0)
+        .map(([, logs]) => () => {
+          const endpoint = logs[0].endpoint;
+          const counter = this.endpointCounters.get(endpoint.name);
+          const startMs = Date.now();
+          const send = this.flushEndpoint(endpoint, logs);
+          return send.then(() => {
+            if (counter) {
+              counter.outEntries += logs.length;
+              counter.totalDelayMs += Date.now() - startMs;
+              counter.lastFlushTime = formatTime(new Date());
+            }
+          }).catch(err => {
+            if (counter) {
+              counter.outFailed += logs.length;
+              counter.totalDelayMs += Date.now() - startMs;
+            }
+            logger.error('SLS endpoint flush failed', {
+              endpoint: endpoint.name,
+              error: String(err),
+            });
           });
         });
-      });
-    await Promise.all(tasks);
+
+      await this.runWithConcurrency(pending, this.resolvedFlushConcurrency);
+    } finally {
+      this.flushing = false;
+    }
   }
 
-  /** Per-endpoint service name: managed endpoints may override the shared prefix. */
+  private async runWithConcurrency(
+    tasks: Array<() => Promise<void>>,
+    concurrency: number,
+  ): Promise<void> {
+    let idx = 0;
+    const execute = async (): Promise<void> => {
+      while (idx < tasks.length) {
+        const task = tasks[idx++];
+        await task();
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(concurrency, tasks.length) },
+      () => execute(),
+    );
+    await Promise.all(workers);
+  }
+
+  /** Exact global name wins; otherwise managed endpoints may override the shared prefix. */
   private effectiveServiceName(endpoint?: SlsEndpoint): string {
-    return endpoint?.serviceName || this.serviceName;
+    return this.serviceName || endpoint?.serviceName || this.serviceNamePrefix;
   }
 
   private resolveServiceName(endpoint?: SlsEndpoint, agentType?: string): string {
     const base = this.effectiveServiceName(endpoint);
     if (!base) return '';
+    if (this.serviceName) return this.serviceName;
     return agentType ? `${base}-${agentType}` : base;
   }
 
@@ -224,7 +293,7 @@ export class SlsFlusher extends BaseFlusher {
 
     const client = this.getAkClient(endpoint);
     let lastErr: unknown;
-    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       try {
         await client.postLogStoreLogs(
           endpoint.project,
@@ -240,8 +309,8 @@ export class SlsFlusher extends BaseFlusher {
         return;
       } catch (err) {
         lastErr = err;
-        if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
-        const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+        if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
+        const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
         logger.warn('SLS ak send retrying', {
           endpoint: endpoint.name,
           attempt: attempt + 1,
@@ -298,7 +367,7 @@ export class SlsFlusher extends BaseFlusher {
     };
 
     let lastErr: unknown;
-    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       try {
         await postApiKeyLogStoreLogs(
           {
@@ -306,7 +375,7 @@ export class SlsFlusher extends BaseFlusher {
             project: endpoint.project,
             logstore: endpoint.logstore,
             apiKey: endpoint.apiKey ?? '',
-            timeoutMs: WEBTRACKING_TIMEOUT_MS,
+            timeoutMs: this.resolvedTimeoutMs,
             maxRetries: 1,
           },
           logGroup,
@@ -321,8 +390,8 @@ export class SlsFlusher extends BaseFlusher {
         return;
       } catch (err) {
         lastErr = err;
-        if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
-        const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+        if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
+        const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
         logger.warn('SLS apiKey send retrying', {
           endpoint: endpoint.name,
           attempt: attempt + 1,
@@ -400,9 +469,9 @@ export class SlsFlusher extends BaseFlusher {
     const url = `${base}/logstores/${endpoint.logstore}/track`;
 
     let lastErr: unknown;
-    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       try {
-        const resp = await fetch(url, {
+        const fetchOptions: Record<string, unknown> = {
           method: 'POST',
           headers: {
             'x-log-apiversion': '0.6.0',
@@ -411,13 +480,17 @@ export class SlsFlusher extends BaseFlusher {
             'user-agent': this.userAgent,
           },
           body: raw,
-          signal: AbortSignal.timeout(WEBTRACKING_TIMEOUT_MS),
-        });
+          signal: AbortSignal.timeout(this.resolvedTimeoutMs),
+        };
+        if (this.dispatcher) {
+          fetchOptions.dispatcher = this.dispatcher;
+        }
+        const resp = await fetch(url, fetchOptions as RequestInit);
 
         if (!resp.ok) {
           const text = await resp.text();
           const err = new HttpError(resp.status, text);
-          if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === RETRY_MAX_ATTEMPTS - 1) {
+          if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === this.resolvedRetryMaxAttempts - 1) {
             throw err;
           }
           lastErr = err;
@@ -432,10 +505,10 @@ export class SlsFlusher extends BaseFlusher {
       } catch (err) {
         lastErr = err;
         if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
-        if (attempt === RETRY_MAX_ATTEMPTS - 1) break;
+        if (attempt === this.resolvedRetryMaxAttempts - 1) break;
       }
 
-      const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+      const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
       logger.warn('SLS webtracking retrying', {
         endpoint: endpoint.name,
         attempt: attempt + 1,
@@ -487,7 +560,13 @@ export class SlsFlusher extends BaseFlusher {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    await this.flush();
+    try {
+      await this.flush();
+    } finally {
+      if (this.dispatcher) {
+        await this.dispatcher.close();
+      }
+    }
   }
 
   override async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void> {
@@ -514,7 +593,7 @@ export class SlsFlusher extends BaseFlusher {
               project: endpoint.project,
               logstore: endpoint.logstore,
               apiKey: endpoint.apiKey ?? '',
-              timeoutMs: WEBTRACKING_TIMEOUT_MS,
+              timeoutMs: this.resolvedTimeoutMs,
               maxRetries: 1,
             },
             {

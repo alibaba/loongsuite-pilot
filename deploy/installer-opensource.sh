@@ -38,8 +38,8 @@ DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
 # Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
 NODE_VERSION="${LOONGSUITE_PILOT_NODE_VERSION:-22.22.2}"
-NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node}"
-NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules}"
+NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node}"
+NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules}"
 
 
 # ============================================================
@@ -476,6 +476,16 @@ ensure_node_modules() {
     rm -rf "$tmp"
     return 0
 }
+
+run_npm() {
+    # npm shipped with the managed runtime is a symlink to npm-cli.js, whose
+    # `#!/usr/bin/env node` shebang resolves node through PATH. The runtime's bin dir
+    # is not on PATH, so calling "$NPM_BIN" directly dies with
+    # "env: node: No such file or directory" on hosts without a system node — exactly
+    # the hosts the managed runtime exists for. Mirrors the .ps1 npm fallback, which
+    # already prepends the node dir.
+    PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" "$@"
+}
 # <<< managed-node-runtime <<<
 
 check_deps() {
@@ -538,8 +548,8 @@ check_deps() {
         exit 1
     fi
 
-    msg "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)" \
-        "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)"
+    msg "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)" \
+        "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)"
     msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
     echo ""
 }
@@ -598,7 +608,7 @@ probe_agents() {
         return 0
     }
     local count
-    count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
     msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     echo ""
 }
@@ -614,18 +624,18 @@ select_agents() {
     fi
 
     local agent_count
-    agent_count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    agent_count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
     if [ "$agent_count" = "0" ]; then
         return 0
     fi
 
     # Non-interactive: auto-select all detected agents
     if [ ! -t 0 ]; then
-        SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
+        SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
-" "$PROBE_RESULT" 2>/dev/null || true)
+" 2>/dev/null || true)
         msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
             "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
         echo ""
@@ -633,9 +643,9 @@ process.stdout.write(detected.join(','));
     fi
 
     # Interactive menu
-    "$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const lang = process.argv[2];
+    printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const lang = process.argv[1];
 const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
@@ -653,7 +663,7 @@ if (lang === 'zh') {
   console.log('    Default selection (detected): ' + defaults.join(','));
   console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
 }
-" "$PROBE_RESULT" "$LANG_MODE"
+" "$LANG_MODE"
 
     # Read user input (Node readline handles UTF-8 editing; normalize Chinese punctuation).
     # Prompt must go to stderr so it is visible and not captured by $().
@@ -673,9 +683,9 @@ rl.question('    > ', (answer) => {
     }
 
     # Compute final selection: empty input = detected agents, otherwise use exact input
-    SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const input = (process.argv[2] || '').replace(/[，、；]/g, ',');
+    SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -684,7 +694,7 @@ if (!input.trim()) {
 }
 const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
 process.stdout.write(ids.join(','));
-" "$PROBE_RESULT" "$select_input" 2>/dev/null || true)
+" "$select_input" 2>/dev/null || true)
 
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
@@ -871,7 +881,7 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
             msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
             return 1
         fi
@@ -945,7 +955,10 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
+    printf '%s' "$PROBE_RESULT" | \
+        LP_SLS_API_KEY="$SLS_API_KEY" \
+        LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
+        "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -1016,7 +1029,7 @@ const cmsLicenseKey = '${CMS_LICENSE_KEY}';
 const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
-const selectedAgents = '${SELECTED_AGENTS}';
+const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 
@@ -1048,7 +1061,7 @@ if (maskMode) {
 if (selectedAgents) {
   config.agents = config.agents || {};
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(process.argv[1] || '[]');
+  const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     config.agents[agent.id].enabled = selected.includes(agent.id);
@@ -1056,7 +1069,7 @@ if (selectedAgents) {
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-" -- "$PROBE_RESULT"
+"
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -1218,41 +1231,43 @@ remove_qodercli_token_intercept() {
 }
 
 # ============================================================
-# QoderWork runtime wrapper: intercept token usage via QODER_WORKER_RUNTIME_PATH
+# QoderWork-family runtime wrapper: intercept token usage via the SDK-wide
+# QODER_WORKER_RUNTIME_PATH and QwenWorkCN-specific
+# QW_QODER_WORKER_RUNTIME_PATH override.
 #
-# QoderWork runs its agent SDK in a Node.js worker_thread (not Bun), so the
-# qodercli BUN_OPTIONS --preload trick does not apply. The SDK honors
-# QODER_WORKER_RUNTIME_PATH as the worker entry; our wrapper installs a
-# JSON.parse hook then imports the real runtime. On macOS we set this via
-# launchctl setenv so the GUI-launched app inherits it. Linux/Windows are
+# These desktop apps run the agent SDK in a Node.js worker_thread (not Bun), so
+# the qodercli BUN_OPTIONS --preload trick does not apply. The wrapper installs
+# a JSON.parse hook then imports the verified host runtime. On macOS we set the
+# variables via launchctl so GUI-launched apps inherit them. Linux/Windows are
 # skipped (Electron env injection there is tracked separately).
 # ============================================================
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
-    # Not selected: clean up any stale env/plist from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then remove_qoderwork_runtime_wrapper; return 0; fi
-    # Cover system-wide (/Applications) and per-user (~/Applications) installs;
-    # the wrapper's RUNTIME_CANDIDATES handles both locations symmetrically.
-    if [ ! -d "/Applications/QoderWork.app" ] && [ ! -d "$HOME/Applications/QoderWork.app" ]; then return 0; fi
+    local wants_qoder_family=false
+    local wants_qwen_work_cn=false
+    if echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then wants_qoder_family=true; fi
+    if echo "$SELECTED_AGENTS" | grep -q 'qwen-work-cn'; then wants_qwen_work_cn=true; fi
+    if [ "$wants_qoder_family" != "true" ] && [ "$wants_qwen_work_cn" != "true" ]; then
+        remove_qoderwork_runtime_wrapper
+        return 0
+    fi
 
     local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
     if [ ! -f "$wrapper_script" ]; then return 0; fi
 
-    msg "==> 配置 QoderWork token 采集..." "==> Configuring QoderWork token intercept..."
+    msg "==> 配置 QoderWork 系列 token 采集..." "==> Configuring QoderWork-family token intercept..."
 
-    # (1) Set immediately for the current launchd session so QoderWork can pick
-    # up the env without waiting for a re-login.
-    launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
-
-    # (2) Persist across reboots via a LaunchAgent plist. launchctl setenv on
-    # its own is session-scoped — a macOS reboot would otherwise silently drop
-    # the env and the wrapper would stop being injected. The plist contains a
-    # one-shot RunAtLoad job that re-runs `launchctl setenv` on every user
-    # login (when launchd auto-loads agents from ~/Library/LaunchAgents).
     local plist_dir="$HOME/Library/LaunchAgents"
-    local plist_path="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
     mkdir -p "$plist_dir"
-    cat > "$plist_path" << PLIST
+
+    if [ "$wants_qoder_family" = "true" ] && {
+        [ -d "/Applications/QoderWork.app" ] || [ -d "$HOME/Applications/QoderWork.app" ] ||
+        [ -d "/Applications/QoderWork CN.app" ] || [ -d "$HOME/Applications/QoderWork CN.app" ] ||
+        [ -d "/Applications/QoderWorkCN.app" ] || [ -d "$HOME/Applications/QoderWorkCN.app" ];
+    }; then
+        local qoder_plist_path="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
+        launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+        cat > "$qoder_plist_path" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1271,20 +1286,61 @@ inject_qoderwork_runtime_wrapper() {
 </dict>
 </plist>
 PLIST
+        launchctl unload "$qoder_plist_path" 2>/dev/null || true
+        launchctl load "$qoder_plist_path" 2>/dev/null || true
+        msg "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork/QoderWorkCN)" \
+            "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork/QoderWorkCN)"
+    else
+        local stale_qoder_plist="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
+        launchctl unload "$stale_qoder_plist" 2>/dev/null || true
+        rm -f "$stale_qoder_plist"
+        if launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+            launchctl unsetenv QODER_WORKER_RUNTIME_PATH
+        fi
+    fi
 
-    # (3) Reload now so the plist (and any updated path) is registered
-    # idempotently. unload-before-load avoids "already loaded" errors when
-    # upgrading the path. Errors are non-fatal — current-session setenv above
-    # already covers the immediate use case.
-    launchctl unload "$plist_path" 2>/dev/null || true
-    launchctl load "$plist_path" 2>/dev/null || true
+    # QwenWorkCN checks this product-specific override before falling back to
+    # the SDK-wide QODER_WORKER_RUNTIME_PATH. Setting it prevents another
+    # Qoder-family application from deciding QwenWorkCN's worker entry.
+    if [ "$wants_qwen_work_cn" = "true" ] && {
+        [ -d "/Applications/QwenWorkCN.app" ] || [ -d "$HOME/Applications/QwenWorkCN.app" ];
+    }; then
+        local qwen_plist_path="$plist_dir/com.loongsuite-pilot.qwenworkcn-env.plist"
+        launchctl setenv QW_QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+        cat > "$qwen_plist_path" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.loongsuite-pilot.qwenworkcn-env</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/launchctl</string>
+        <string>setenv</string>
+        <string>QW_QODER_WORKER_RUNTIME_PATH</string>
+        <string>$wrapper_script</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+        launchctl unload "$qwen_plist_path" 2>/dev/null || true
+        launchctl load "$qwen_plist_path" 2>/dev/null || true
+        msg "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN 优先)" \
+            "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN priority)"
+    else
+        local stale_qwen_plist="$plist_dir/com.loongsuite-pilot.qwenworkcn-env.plist"
+        launchctl unload "$stale_qwen_plist" 2>/dev/null || true
+        rm -f "$stale_qwen_plist"
+        if launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+            launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH
+        fi
+    fi
 
-    msg "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH" \
-        "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH"
-    msg "    ✅ LaunchAgent 已注册 (重启 macOS 后自动恢复 env)" \
-        "    ✅ LaunchAgent registered (auto-restores env after macOS reboot)"
-    msg "    ⚠️  请完全退出并重新打开 QoderWork 以生效" \
-        "    ⚠️  Please fully quit and restart QoderWork for changes to take effect"
+    msg "    ⚠️  请完全退出并重新打开对应应用以生效" \
+        "    ⚠️  Fully quit and restart the corresponding app for changes to take effect"
     echo ""
 }
 
@@ -1293,13 +1349,15 @@ remove_qoderwork_runtime_wrapper() {
 
     # Unload + remove the LaunchAgent plist so the env stops auto-restoring on
     # next login.
-    local plist_path="$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist"
-    if [ -f "$plist_path" ]; then
-        launchctl unload "$plist_path" 2>/dev/null || true
-        rm -f "$plist_path"
-        msg "    已清理 LaunchAgent (qoderwork-env)" \
-            "    Cleaned up LaunchAgent (qoderwork-env)"
-    fi
+    local plist_path
+    for plist_path in \
+        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist" \
+        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist"; do
+        if [ -f "$plist_path" ]; then
+            launchctl unload "$plist_path" 2>/dev/null || true
+            rm -f "$plist_path"
+        fi
+    done
 
     # Drop the env from the current session too (conservative grep avoids
     # touching env values the user set manually to a non-loongsuite path).
@@ -1307,6 +1365,11 @@ remove_qoderwork_runtime_wrapper() {
         launchctl unsetenv QODER_WORKER_RUNTIME_PATH
         msg "    已清理 QODER_WORKER_RUNTIME_PATH" \
             "    Cleaned up QODER_WORKER_RUNTIME_PATH"
+    fi
+    if launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+        launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH
+        msg "    已清理 QW_QODER_WORKER_RUNTIME_PATH" \
+            "    Cleaned up QW_QODER_WORKER_RUNTIME_PATH"
     fi
 }
 
@@ -1979,8 +2042,10 @@ remove_hook_configs() {
         "$HOME/.qoder-cn/settings.json"
         "$HOME/.qoderwork/settings.json"
         "$HOME/.qoderworkcn/settings.json"
+        "$HOME/.qwenworkcn/settings.json"
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
+        "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
         "$HOME/.zcode/cli/config.json"
@@ -2205,8 +2270,6 @@ try {
 # ============================================================
 remove_pi_coding_agent_extension() {
     local cfg="$HOME/.pi/agent/settings.json"
-    [ -f "$cfg" ] || return 0
-
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -2216,25 +2279,107 @@ remove_pi_coding_agent_extension() {
     local result
     result=$(node -e "
 const fs = require('fs');
-const f = process.argv[1];
-const isOurs = s => typeof s === 'string' && (
-  s.includes('loongsuite-pilot-pi-coding-agent') ||
-  s.includes('plugins/pi-coding-agent/index.mjs')
-);
+const path = require('path');
+const defaultConfig = process.argv[1];
+const dataDir = process.argv[2];
+const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-coding-agent', 'plugins/pi-coding-agent/index.mjs'] }];
+const resolveValue = value => typeof value === 'string'
+  ? value.replace(/^~(?=[\\/])/, process.env.HOME || '').replaceAll('\$PILOT_DATA', dataDir)
+  : value;
+const stripJsoncComments = text => {
+  let result = '';
+  let index = 0;
+  let inString = false;
+  let escape = false;
+  while (index < text.length) {
+    const ch = text[index];
+    if (inString) {
+      result += ch;
+      if (escape) escape = false;
+      else if (ch.charCodeAt(0) === 92) escape = true;
+      else if (ch === '\"') inString = false;
+      index++;
+      continue;
+    }
+    if (ch === '\"') {
+      inString = true;
+      result += ch;
+      index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '/') {
+      index += 2;
+      while (index < text.length && text[index] !== '\n') index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '*') {
+      index += 2;
+      while (index + 1 < text.length && !(text[index] === '*' && text[index + 1] === '/')) index++;
+      index += 2;
+      continue;
+    }
+    result += ch;
+    index++;
+  }
+  return result;
+};
+const comparable = value => typeof value === 'string'
+  ? value.split(String.fromCharCode(92)).join('/')
+  : '';
+const localDir = path.join(dataDir, 'agents.d.local');
 try {
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data.extensions.length;
-  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
-  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-  process.stdout.write('cleaned');
+  for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
+    if (!name.endsWith('.json')) continue;
+    let def;
+    try { def = JSON.parse(fs.readFileSync(path.join(localDir, name), 'utf8')); } catch { continue; }
+    if (def?.piSdk?.schemaVersion !== 1 || !def?.pluginInject?.pluginId?.startsWith('loongsuite-pilot-pi-sdk-')) continue;
+    const spec = resolveValue(def.pluginInject.pluginSpec);
+    for (const configPath of def.pluginInject.configPaths || []) {
+      targets.push({
+        configPath: resolveValue(configPath),
+        markers: [def.pluginInject.pluginId, spec, 'plugins/pi-coding-agent/agents/'].filter(Boolean),
+      });
+    }
+  }
+  let cleaned = 0;
+  let skipped = 0;
+  for (const target of targets) {
+    if (!target.configPath || !fs.existsSync(target.configPath)) continue;
+    try {
+      const raw = fs.readFileSync(target.configPath, 'utf-8');
+      const data = JSON.parse(stripJsoncComments(raw));
+      if (!Array.isArray(data.extensions)) continue;
+      const before = data.extensions.length;
+      data.extensions = data.extensions.filter(entry => {
+        const value = comparable(entry);
+        return !target.markers.some(marker => value === comparable(marker) || value.includes(comparable(marker)));
+      });
+      if (data.extensions.length === before) continue;
+      if (raw !== JSON.stringify(data, null, 2) + '\n') {
+        try {
+          fs.copyFileSync(target.configPath, target.configPath + '.bak', fs.constants.COPYFILE_EXCL);
+        } catch (e) {
+          if (e?.code !== 'EEXIST') throw e;
+        }
+      }
+      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      cleaned++;
+    } catch {
+      skipped++;
+    }
+  }
+  process.stdout.write(cleaned > 0 ? (skipped > 0 ? 'partial' : 'cleaned') : (skipped > 0 ? 'skipped' : 'nochange'));
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" 2>/dev/null) || result="error"
+" "$cfg" "$DATA_DIR" 2>/dev/null) || result="error"
 
     case "$result" in
         cleaned)
-            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            msg "    ✅ 已清理 Pi / PI SDK Agent 扩展配置" "    ✅ Cleaned Pi / PI SDK Agent extension configs" ;;
+        partial)
+            msg "    ⚠️  已清理可读取的 Pi 配置，部分损坏配置需手动清理" \
+                "    ⚠️  Cleaned readable Pi configs; some invalid configs need manual cleanup" ;;
+        skipped)
+            msg "    ⚠️  Pi 配置损坏，需手动清理" "    ⚠️  Invalid Pi configs skipped (manual cleanup needed)" ;;
         nochange)
             : ;;
         *)
@@ -2314,7 +2459,7 @@ try {
 # their configuration remain semantically unchanged.
 remove_openclaw_plugin() {
     local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
-    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local managed_path="$DATA_DIR/plugins/openclaw"
     local configs=()
     [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
     configs+=(
@@ -2337,17 +2482,18 @@ remove_openclaw_plugin() {
         fi
 
         local result
-        result=$(node -e "
+        result=$(PILOT_OC_CONFIG="$cfg" PILOT_OC_MANAGED="$managed_path" node 2>/dev/null <<'NODE'
 const fs = require('fs');
-const f = process.argv[1];
-const managed = process.argv[2].replaceAll('\\\\', '/');
+const f = process.env.PILOT_OC_CONFIG;
+const managed = process.env.PILOT_OC_MANAGED.replaceAll('\\', '/');
 const entryStr = value => typeof value === 'string'
   ? value
   : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
 const isOurs = value => {
-  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const normalized = entryStr(value).replaceAll('\\', '/');
   const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
   return plain === managed ||
+    plain === managed + '/plugin.mjs' ||
     normalized.includes('loongsuite-pilot-openclaw') ||
     normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
 };
@@ -2374,10 +2520,11 @@ try {
     }
   }
   if (!changed) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write('cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+NODE
+) || result="error"
 
         case "$result" in
             cleaned)

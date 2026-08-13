@@ -11,12 +11,12 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
 ```json
 {
   "collectTrace": true,
+  "serviceName": "my-agent-service",
   "otlpTrace": {
     "endpoint": "https://otel-collector.example.com",
     "headers": {
       "Authorization": "Bearer token"
     },
-    "serviceName": "loongsuite-pilot",
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
@@ -30,9 +30,10 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
 | Setting | Description |
 |---------|-------------|
 | `collectTrace` | Master switch for trace export. |
+| `serviceName` | Exact `service.name` shared by every agent, OTLP backend, and SLS backend. |
 | `otlpTrace.endpoint` | OTLP HTTP base URL. Pilot auto-appends `/v1/traces` if the path does not already end with it. |
 | `otlpTrace.headers` | Headers sent to the OTLP endpoint. |
-| `otlpTrace.serviceName` | Service name attached to exported spans. |
+| `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
 | `otlpTrace.captureMessageContent` | Whether trace export may include message content. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
@@ -43,6 +44,7 @@ Environment variables:
 | Variable | Description |
 |----------|-------------|
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace export. |
+| `LOONGSUITE_PILOT_SERVICE_NAME` | Exact service name shared by all agents and reporting backends. |
 | `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP trace endpoint. |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | JSON string for OTLP headers. |
 
@@ -119,7 +121,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 
 | Field | Applies to | Description |
 |-------|-----------|-------------|
-| `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). |
+| `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). A user-configured top-level `serviceName` overrides this prefix. |
 | `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
 | `otlp[].endpoint` | otlp | OTLP HTTP base URL (`/v1/traces` auto-appended). |
 | `otlp[].headers` | otlp | Request headers (e.g. auth token). |
@@ -129,7 +131,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 | `cms[].project` | cms | Sent as `x-arms-project`. Extracted from the endpoint hostname if omitted. |
 | `cms[].workspace` | cms | Sent as `x-cms-workspace`. |
 
-Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). When `serviceNamePrefix` is set here, managed backends report under `<serviceNamePrefix>-<agent>` while user backends keep the user prefix; spans are then converted once per distinct `service.name` (typically twice — user and managed). Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
+Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). When `serviceNamePrefix` is set here, managed backends report under `<serviceNamePrefix>-<agent>` while user backends keep the user prefix; spans are then converted once per distinct `service.name` (typically twice — user and managed). If the user sets top-level `serviceName`, that exact value is used instead for every user and managed backend. Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
 
 ## Backend Examples
 

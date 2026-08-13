@@ -45,8 +45,10 @@ Pilot is designed to answer practical questions:
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
+| Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
+| Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
+| MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
@@ -208,10 +210,12 @@ To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enabl
 
 [Output Schema](docs/output-event-schema.md) - Normalized event names, fields, provider values, and finish reasons
 
-[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agentBuild From Source
+[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
+
+## Build From Source
 
 ```bash
-git clone https://github.com/loongsuite/loongsuite-pilot.git
+git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 npm install
 npm run build

@@ -8,6 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  isPiSdkRegistryBusyError,
+} from '../pi-sdk/pi-sdk-agent-registry.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
@@ -33,6 +37,9 @@ import { QoderWorkLogInput, resolveQoderWorkRoot } from '../inputs/qoder-work-lo
 import { QoderWorkTraceInput as QoderWorkCNTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
+import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
+import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
+import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
@@ -99,6 +106,9 @@ export class Orchestrator extends EventEmitter {
     'qoder-work-cn-hook': 'qoder-work-cn',
     'qoder-work-cn-log': 'qoder-work-cn',
     'qoder-work-cn-sqlite': 'qoder-work-cn',
+    'qwen-work-cn-trace': 'qwen-work-cn',
+    'qwen-work-cn-hook': 'qwen-work-cn',
+    'qwen-work-cn-sqlite': 'qwen-work-cn',
     'qoder-cli-hook': 'qoder',
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
@@ -206,6 +216,7 @@ export class Orchestrator extends EventEmitter {
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
+    await this.restoreRegisteredPiSdkWrappers();
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
@@ -326,6 +337,33 @@ export class Orchestrator extends EventEmitter {
 
     this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
     this.legacySlsFailedLogCleanupService.start();
+  }
+
+  private async restoreRegisteredPiSdkWrappers(): Promise<void> {
+    try {
+      const restoredWrappers = await ensureRegisteredPiSdkWrappers(this.dataDir);
+      if (restoredWrappers > 0) {
+        logger.info('restored generated PI SDK Agent wrappers', { count: restoredWrappers });
+      }
+    } catch (err) {
+      // Keep unrelated Agent integrations available when a retained PI SDK
+      // registration cannot be restored. The registry helper already bounded
+      // retries for transient lock contention; surface the final degradation
+      // through both local diagnostics and the normal Pilot alarm pipeline.
+      const registryBusy = isPiSdkRegistryBusyError(err);
+      logger.error('failed to restore generated PI SDK Agent wrappers', {
+        error: String(err),
+        registryBusy,
+      });
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM',
+        '2',
+        registryBusy
+          ? 'PI SDK Agent wrapper restore skipped because the registry remained busy after bounded retries'
+          : 'PI SDK Agent wrapper restore failed during startup; inspect local Pilot logs and run agent doctor',
+        { input_name: 'pi-coding-agent-log' },
+      );
+    }
   }
 
   async stop(): Promise<void> {
@@ -455,7 +493,7 @@ export class Orchestrator extends EventEmitter {
     for (const def of defs) {
       if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
 
-      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+      const pluginPath = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
 
       targets.push({
         id: `plugin-inject:${def.id}`,
@@ -463,8 +501,12 @@ export class Orchestrator extends EventEmitter {
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
-          // a missing file, or fail repeatedly when no config file exists.
-          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          // a missing asset, or fail repeatedly when no config file exists.
+          if (
+            pluginPath
+            && !(await fileExists(pluginPath))
+            && !(await directoryExists(pluginPath))
+          ) return false;
           return detectAgent(def.detection);
         },
         check: async () => {
@@ -476,6 +518,10 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove injected plugin for ${def.id}`);
         },
       });
     }
@@ -511,9 +557,9 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Resolve a plugin spec to a local file path for existence checks.
+   * Resolve a plugin spec to a local filesystem path for existence checks.
    * Returns null for non-file specs (e.g. npm package names), which skips the
-   * plugin-file precondition gate.
+   * plugin-asset precondition gate.
    */
   private resolvePluginSpecPath(spec: string): string | null {
     const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
@@ -665,6 +711,24 @@ export class Orchestrator extends EventEmitter {
             this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
               `qoder-work-cn hook install failed: ${def.hookJsonPath.join('.')}`,
               { input_name: 'qoder-work-cn' });
+          }
+        }
+      }
+    }
+
+    const qwenWorkCNAvailable = await QwenWorkCNInput.checkAvailability();
+    if (qwenWorkCNAvailable) {
+      const defs = HookManager.buildQwenWorkCNHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            logger.info('qwen-work-cn hook registered');
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              'qwen-work-cn hook install failed',
+              { input_name: 'qwen-work-cn' });
           }
         }
       }
@@ -929,6 +993,75 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
+    const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
+    const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
+    const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
+      stateStore: this.stateStore,
+      logDir: qwenWorkCNLogDir,
+      segmentsRoot: qwenWorkCNSegmentsRoot,
+      interceptFile: qwenWorkCNInterceptFile,
+    });
+    this.inputManager.registerInput(qwenWorkCNTraceInput);
+    const qwenWorkCNTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qwen-work-cn-trace',
+        listenerCfg['qwen-work-cn-trace']?.enabled ?? true,
+      );
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNTraceInput, {
+        watchPaths: QwenWorkCNTraceInput.getWatchPaths({
+          logDir: qwenWorkCNLogDir,
+          segmentsRoot: qwenWorkCNSegmentsRoot,
+          interceptFile: qwenWorkCNInterceptFile,
+        }),
+        isAvailable: QwenWorkCNTraceInput.checkAvailability,
+        enabled: qwenWorkCNTraceEnabled,
+        pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      }),
+    );
+
+    // Keep the standalone Hook listener as an explicit fallback when the
+    // richer trace merger is disabled. This mirrors the QoderWorkCN lifecycle
+    // and makes the qwen-work-cn-hook listener setting effective.
+    const qwenWorkCNHookInput = new QwenWorkCNInput({
+      stateStore: this.stateStore,
+      logDir: qwenWorkCNLogDir,
+      pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+    });
+    this.inputManager.registerInput(qwenWorkCNHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNHookInput, {
+        watchPaths: [qwenWorkCNLogDir],
+        isAvailable: QwenWorkCNInput.checkAvailability,
+        enabled: () => !qwenWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-hook',
+            listenerCfg['qwen-work-cn-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+      }),
+    );
+
+    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qwenWorkCNSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
+        watchPaths: QwenWorkCNSqliteInput.getWatchPaths(),
+        isAvailable: QwenWorkCNSqliteInput.checkAvailability,
+        enabled: () => !qwenWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-sqlite',
+            listenerCfg['qwen-work-cn-sqlite']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-sqlite']?.pollInterval,
+      }),
+    );
+
     // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
     const qoderTraceInput = new QoderTraceInput({
@@ -1124,13 +1257,19 @@ export class Orchestrator extends EventEmitter {
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
+      // The physical JSONL stream is shared by the built-in PI integration and
+      // every registered high-level SDK Agent. Admission therefore has to be
+      // checked against the identity on each record, not only once for the
+      // shared input, or disabling one Agent would still export its records
+      // while another PI integration keeps the input alive.
+      agentEnabled: agentType => this.isAgentGatedEnabled(agentType),
     });
     this.inputManager.registerInput(piCodingAgentLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
         watchPaths: [piCodingAgentLogDir],
         isAvailable: async () => directoryExists(piCodingAgentLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+        enabled: () => this.isAnyPiSdkAgentEnabled() &&
           this.agentControlManager.resolveEnabled(
             'pi-coding-agent-log',
             listenerCfg['pi-coding-agent-log']?.enabled ?? true,
@@ -1348,6 +1487,19 @@ export class Orchestrator extends EventEmitter {
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;
+  }
+
+  /**
+   * The PI JSONL input is shared by the built-in PI CLI and every registered
+   * high-level PI SDK Agent. Keep it alive when at least one of those logical
+   * Agents is enabled; tying it only to `pi-coding-agent` would drop custom
+   * Agent records when the built-in integration is disabled.
+   */
+  private isAnyPiSdkAgentEnabled(): boolean {
+    const definitions = this.deploymentManager?.getDefinitions?.() ?? [];
+    const piDefinitions = definitions.filter(def => def.id === 'pi-coding-agent' || def.piSdk?.schemaVersion === 1);
+    if (piDefinitions.length === 0) return this.isAgentGatedEnabled('pi-coding-agent');
+    return piDefinitions.some(def => this.isAgentGatedEnabled(def.id));
   }
 
   /**

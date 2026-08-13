@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   isProcessAlive,
   readProcessCommand,
@@ -18,8 +19,14 @@ import {
 // input/output pipeline.
 //
 // The lockfile lives at a caller-chosen path (e.g. <dataDir>/collector.lock)
-// and holds JSON `{ pid, startedAt }`. It is published atomically (temp file + hardlink)
+// and holds JSON `{ pid, startedAt, ownerId }`. It is published atomically (temp file + hardlink)
 // so a peer never observes a created-but-empty lockfile — see `writeOwnLock`.
+
+// Distinguish a lock genuinely held by another async operation in this process
+// from a stale lock left by an older process whose pid has since been recycled
+// to us. A pid alone cannot make that distinction; the per-acquisition ownerId
+// and this process-local map can.
+const activeLockOwners = new Map<string, string>();
 
 export interface SingleInstanceLock {
   /** Absolute path of the lockfile this handle owns. */
@@ -42,6 +49,7 @@ export interface LockAcquireResult {
 interface LockPayload {
   pid: number;
   startedAt: number;
+  ownerId?: string;
 }
 
 function readLock(lockPath: string): LockPayload | null {
@@ -77,8 +85,15 @@ function readLock(lockPath: string): LockPayload | null {
 //     branch 2, so they are never aged out here.
 const UNREADABLE_HOLDER_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h — generous; only breaks true deadlocks
 
-function isStale(lock: LockPayload | null, patterns?: readonly ProcessCommandPattern[]): boolean {
+function isStale(
+  lockPath: string,
+  lock: LockPayload | null,
+  patterns?: readonly ProcessCommandPattern[],
+): boolean {
   if (!lock) return true;
+  if (lock.pid === process.pid) {
+    return !lock.ownerId || activeLockOwners.get(lockPath) !== lock.ownerId;
+  }
   if (!isProcessAlive(lock.pid)) return true;
   if (!patterns || patterns.length === 0) return false;
   const command = readProcessCommand(lock.pid);
@@ -91,8 +106,8 @@ function isStale(lock: LockPayload | null, patterns?: readonly ProcessCommandPat
   return !isCommandMatch(command, patterns);
 }
 
-function writeOwnLock(lockPath: string): void {
-  const payload = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
+function writeOwnLock(lockPath: string, ownerId: string): void {
+  const payload = JSON.stringify({ pid: process.pid, startedAt: Date.now(), ownerId });
   // Atomic publish: write the full payload to a temp file, then hardlink it into place.
   // link(2) is atomic and fails with EEXIST when a holder already exists, so a concurrent
   // reader never observes a created-but-empty lockfile. `openSync(..,'wx')` + `writeSync`
@@ -118,16 +133,20 @@ function writeOwnLock(lockPath: string): void {
   }
 }
 
-function makeHandle(lockPath: string): SingleInstanceLock {
+function makeHandle(lockPath: string, ownerId: string): SingleInstanceLock {
   let released = false;
+  activeLockOwners.set(lockPath, ownerId);
   return {
     path: lockPath,
     release(): void {
       if (released) return;
       released = true;
+      if (activeLockOwners.get(lockPath) === ownerId) {
+        activeLockOwners.delete(lockPath);
+      }
       try {
         const existing = readLock(lockPath);
-        if (existing && existing.pid === process.pid) {
+        if (existing && existing.pid === process.pid && existing.ownerId === ownerId) {
           fs.unlinkSync(lockPath);
         }
       } catch {
@@ -153,6 +172,7 @@ export function acquireSingleInstanceLock(
   lockPath: string,
   patterns?: readonly ProcessCommandPattern[],
 ): LockAcquireResult {
+  lockPath = path.resolve(lockPath);
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   } catch {
@@ -161,15 +181,16 @@ export function acquireSingleInstanceLock(
 
   const attempt = (): LockAcquireResult | 'retry' => {
     try {
-      writeOwnLock(lockPath);
-      return { lock: makeHandle(lockPath) };
+      const ownerId = randomUUID();
+      writeOwnLock(lockPath, ownerId);
+      return { lock: makeHandle(lockPath, ownerId) };
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') {
         // Unexpected fs error: fail closed (do not run) but report no holder.
         return { lock: null };
       }
       const existing = readLock(lockPath);
-      if (isStale(existing, patterns)) {
+      if (isStale(lockPath, existing, patterns)) {
         // Holder is gone — drop the stale file and try once more to take over.
         try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
         return 'retry';

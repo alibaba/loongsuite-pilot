@@ -422,6 +422,37 @@ describe('claude-code-hook-processor v2 端到端', () => {
     // 2 tool calls
     expect(toolCalls.length).toBe(2);
 
+    expect(llmRequests[1]['gen_ai.input.messages_delta']).toEqual([
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'tu_1',
+          name: 'Read',
+          arguments: { file_path: '/a' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'tu_1', response: 'aaa' }],
+      },
+    ]);
+    expect(llmRequests[2]['gen_ai.input.messages_delta']).toEqual([
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'tu_2',
+          name: 'Bash',
+          arguments: { command: 'echo hi' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'tu_2', response: 'hi' }],
+      },
+    ]);
+
     // Tool tu_1 in step s1, tu_2 in step s2
     const t1 = toolCalls.find((r) => r['gen_ai.tool.call.id'] === 'tu_1');
     const t2 = toolCalls.find((r) => r['gen_ai.tool.call.id'] === 'tu_2');

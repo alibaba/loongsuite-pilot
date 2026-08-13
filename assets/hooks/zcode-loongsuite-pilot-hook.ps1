@@ -1,4 +1,4 @@
-# ZCode hook entrypoint (Windows) — delegates to zcode-hook-processor.mjs.
+# ZCode hook entrypoint (Windows) -- delegates to zcode-hook-processor.mjs.
 #
 # Usage (registered in ~/.zcode/cli/config.json by pilot HookStrategy):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File $PILOT_DATA\hooks\zcode-loongsuite-pilot-hook.ps1 <subcommand>
@@ -7,6 +7,9 @@
 #   stop  -> read stdin, emit ENTRY/AGENT envelope (no messages)
 #
 # Fail-open: any error outputs "{}" and exits 0, never blocks zcode.
+# NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+# script using the system ANSI code page; any non-ASCII byte here can corrupt
+# parsing and abort the whole script.
 
 param(
     [Parameter(Position=0)]
@@ -40,33 +43,21 @@ function Write-ErrorLog {
         $Timestamp = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $EscapedMsg = $Message.Replace('\', '\\').Replace('"', '\"')
         $Line = "{`"time`":`"$Timestamp`",`"gen_ai.agent.type`":`"zcode`",`"stage`":`"$Stage`",`"error.type`":`"shell_$Stage`",`"error.message`":`"$EscapedMsg`"}"
-        Add-Content -Path $LogFile -Value $Line -ErrorAction SilentlyContinue
+        Add-Content -Path $LogFile -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
     } catch {
         # Swallow logging errors per fail-open contract
     }
 }
 
-# Fail-open: stdin check — if no stdin data, return empty result
-try {
-    $stdin = [System.Console]::In
-    if ($stdin.Peek() -lt 0) {
-        Write-Output $EmptyResult
-        exit 0
-    }
-} catch {
-    Write-Output $EmptyResult
-    exit 0
-}
-
 # Verify processor exists
 if (-not (Test-Path $Processor)) {
-    Write-Host "[zcode-hook] processor not found: $Processor" -ForegroundColor Red
+    Write-Host "[zcode-hook] processor not found: $Processor"
     Write-ErrorLog -Stage "missing_processor" -Message "hook processor not found: $Processor"
     Write-Output $EmptyResult
     exit 0
 }
 
-# Find node binary — prefer pinned, then common locations
+# Find node binary -- prefer pinned, then common locations
 $MinNodeMajor = 18
 
 function Test-NodeSuitable {
@@ -126,24 +117,28 @@ if (-not $NodeBin) {
 }
 
 if (-not $NodeBin) {
-    Write-Host "[zcode-hook] node >= $MinNodeMajor not found" -ForegroundColor Red
+    Write-Host "[zcode-hook] node >= $MinNodeMajor not found"
     Write-ErrorLog -Stage "missing_node" -Message "node >= $MinNodeMajor not found"
     Write-Output $EmptyResult
     exit 0
 }
 
-# Execute processor — pipe stdin through
+# CLM/WDAC-safe stdin check: [Console]::IsInputRedirected is a property get
+# (allowed under Constrained Language Mode). If stdin is not redirected (no
+# piped data), return empty result immediately.
+if (-not [Console]::IsInputRedirected) {
+    Write-Output $EmptyResult
+    exit 0
+}
+
+# Execute processor -- CLM/WDAC-safe passthrough: node inherits this
+# process's stdin (fd0) and reads it directly; PowerShell never touches the
+# bytes.
 try {
-    $result = & $NodeBin $Processor $Subcommand 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[zcode-hook] processor failed (subcommand=$Subcommand)" -ForegroundColor Red
-        Write-ErrorLog -Stage "processor_failed" -Message "hook processor exited non-zero (subcommand=$Subcommand)"
-        Write-Output $EmptyResult
-    } else {
-        Write-Output $result
-    }
+    $result = & $NodeBin $Processor $Subcommand 2>$null
+    if ($result) { Write-Output $result } else { Write-Output $EmptyResult }
 } catch {
-    Write-Host "[zcode-hook] processor exception: $_" -ForegroundColor Red
+    Write-Host "[zcode-hook] processor exception: $_"
     Write-ErrorLog -Stage "processor_exception" -Message "hook processor threw exception: $_"
     Write-Output $EmptyResult
 }

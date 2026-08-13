@@ -316,8 +316,8 @@ export async function buildWorkBuddyEvents(
       const resultPart: Record<string, JsonValue> = {
         type: 'tool_call_response',
         id: callId,
+        response: output ?? null,
       };
-      if (output !== undefined) resultPart.result = output;
       pendingDelta.push({
         role: 'tool',
         parts: [resultPart],

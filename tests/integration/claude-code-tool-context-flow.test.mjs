@@ -246,6 +246,39 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
     expect(toolSpan).toBeDefined();
     expect(toolSpan.spanContext().traceId).toBe(upstreamTraceId);
     expect(toolSpan.spanContext().spanId).toBe(received.parentSpanId);
+
+    const llmSpans = exportedSpans
+      .filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM')
+      .sort((a, b) => {
+        const seconds = a.startTime[0] - b.startTime[0];
+        return seconds || a.startTime[1] - b.startTime[1];
+      });
+    expect(llmSpans).toHaveLength(2);
+
+    const secondInput = JSON.parse(String(
+      llmSpans[1].attributes['gen_ai.input.messages'],
+    ));
+    const assistantIndex = secondInput.findIndex((message) =>
+      message.role === 'assistant'
+      && message.parts.some((part) =>
+        part.type === 'tool_call' && part.id === toolUseId));
+    const toolIndex = secondInput.findIndex((message) =>
+      message.role === 'tool'
+      && message.parts.some((part) =>
+        part.type === 'tool_call_response' && part.id === toolUseId));
+
+    expect(assistantIndex).toBeGreaterThanOrEqual(0);
+    expect(toolIndex).toBeGreaterThan(assistantIndex);
+    expect(secondInput[assistantIndex].parts).toContainEqual({
+      type: 'tool_call',
+      id: toolUseId,
+      name: 'Bash',
+      arguments: payload.tool_input,
+    });
+    expect(secondInput[toolIndex].parts).toContainEqual(expect.objectContaining({
+      type: 'tool_call_response',
+      id: toolUseId,
+    }));
   });
 
   test('disabled propagation leaves the downstream process without hidden inherited context', () => {

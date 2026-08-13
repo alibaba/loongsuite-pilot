@@ -49,6 +49,16 @@ describe('sh installer variants wire the managed node runtime', () => {
       expect(sh).toContain('ensure_node_modules "$modules_ver"');
       expect(sh).toContain('install --production --no-optional');
     });
+    it.skipIf(!present)(`${f} runs npm with the node bin dir on PATH`, () => {
+      // npm from the managed runtime is a symlink to npm-cli.js, whose
+      // `#!/usr/bin/env node` shebang needs node on PATH. Calling "$NPM_BIN"
+      // directly breaks the npm install fallback on hosts without a system node.
+      expect(sh).toMatch(/run_npm\(\)\s*\{/);
+      expect(sh).toContain('PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" "$@"');
+      expect(sh).toContain('run_npm install --production --no-optional');
+      expect(sh).not.toContain('"$NPM_BIN" install');
+      expect(sh).not.toContain('npm $("$NPM_BIN" --version)');
+    });
     it.skipIf(!present)(`${f} prints an explicit notice before the npm install fallback`, () => {
       const noticePos = sh.indexOf('预编译 node_modules 不可用，回退 npm install');
       const npmPos = sh.indexOf('install --production --no-optional');
@@ -92,6 +102,14 @@ describe('ps1 installer variants wire the managed node runtime', () => {
     it.skipIf(!present)(`${f} keeps npm install as the node_modules fallback`, () => {
       expect(ps1).toContain('Ensure-NodeModules $modulesVer');
       expect(ps1).toMatch(/install --omit=dev/);
+    });
+    it.skipIf(!present)(`${f} prepends the node dir to PATH for the npm fallback`, () => {
+      // Windows counterpart of run_npm in the sh installers.
+      const fallback = ps1.slice(ps1.indexOf('Prebuilt node_modules unavailable'));
+      const pathPos = fallback.indexOf('$env:PATH = "$nodeDir;$env:PATH"');
+      const npmPos = fallback.search(/install --omit=dev/);
+      expect(pathPos).toBeGreaterThan(-1);
+      expect(npmPos).toBeGreaterThan(pathPos);
     });
     it.skipIf(!present)(`${f} prints an explicit notice before the npm install fallback`, () => {
       const noticePos = ps1.indexOf('预编译 node_modules 不可用，回退 npm install');

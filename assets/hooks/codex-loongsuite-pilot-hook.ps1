@@ -36,14 +36,22 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "codex-error-$day.jsonl"
-        $record = [ordered]@{
+        # Plain @{}, never [ordered]@{}: on a WDAC machine this hook runs in
+        # ConstrainedLanguage mode, where the accelerator-converts-an-@{}-literal shape
+        # can throw (see the CLM header in deploy/installer.ps1 -- [pscustomobject] does
+        # exactly that on 5.1 despite being documented as allowed). The catch below would
+        # swallow it, so the symptom is an error log that is never written on precisely
+        # the machines where it is needed. Key order is cosmetic in a JSONL log line.
+        $record = @{
             time = (Get-Date).ToUniversalTime().ToString("o")
             "gen_ai.agent.type" = "codex"
             stage = $Stage
             "error.type" = "ps1_$Stage"
             "error.message" = $Message
         }
-        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress)
+        # Explicit UTF8: Add-Content defaults to the ANSI codepage, which garbles
+        # non-ASCII paths and messages in the record.
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
     } catch {}
 }
 
@@ -59,7 +67,13 @@ function Convert-NodePath {
     if ($candidate -match '^/([A-Za-z])/(.*)$') {
         $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
     }
-    if (-not [System.IO.Path]::HasExtension($candidate) -and (Test-Path -LiteralPath "$candidate.exe")) {
+    # -match, not [System.IO.Path]::HasExtension(): a static method call on a
+    # non-core type throws under ConstrainedLanguage mode (WDAC), and the catch at
+    # the bottom of this file would swallow it into a silent empty result. The regex
+    # is HasExtension's contract: a dot after the last separator that is not the
+    # final character. Trailing dot ("node.") and a dotted parent directory
+    # ("v18.20.4/node") both correctly yield no match.
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
         $candidate = "$candidate.exe"
     }
     return $candidate

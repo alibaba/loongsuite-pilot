@@ -26,16 +26,17 @@ describe('acquireSingleInstanceLock', () => {
     const payload = JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
     expect(payload.pid).toBe(process.pid);
     expect(typeof payload.startedAt).toBe('number');
+    expect(typeof payload.ownerId).toBe('string');
   });
 
   it('refuses a second acquisition while a live holder exists', () => {
-    // Our own pid is alive, so a lockfile pointing at it must block a peer.
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    const first = acquireSingleInstanceLock(lockPath);
+    expect(first.lock).not.toBeNull();
 
     const { lock, holderPid } = acquireSingleInstanceLock(lockPath);
     expect(lock).toBeNull();
     expect(holderPid).toBe(process.pid);
+    first.lock!.release();
   });
 
   it('takes over a stale lock left by a dead process', () => {
@@ -66,7 +67,11 @@ describe('acquireSingleInstanceLock', () => {
     expect(lock).not.toBeNull();
 
     // A peer takes over the lockfile (simulating crash recovery after our exit).
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, startedAt: Date.now() }));
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid + 1,
+      startedAt: Date.now(),
+      ownerId: 'peer-owner',
+    }));
     lock!.release();
 
     // Our release must NOT wipe the peer's lock.
@@ -87,18 +92,46 @@ describe('acquireSingleInstanceLock', () => {
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
   });
 
+  it('takes over a stale lock from an older process instance that reused our pid', () => {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid,
+      startedAt: Date.now(),
+      ownerId: 'older-process-instance',
+    }));
+
+    const { lock } = acquireSingleInstanceLock(lockPath, [readProcessCommand(process.pid)]);
+
+    expect(lock).not.toBeNull();
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).ownerId).not.toBe('older-process-instance');
+    lock!.release();
+  });
+
   it('with patterns, still refuses when the live pid runs a matching command', () => {
     const selfCmd = readProcessCommand(process.pid);
     // Guard: if the host `ps`/CIM lookup yields nothing we fail conservative
     // (treated as held) which this positive case cannot distinguish; skip then.
     if (!selfCmd) return;
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    const first = acquireSingleInstanceLock(lockPath, [selfCmd]);
+    expect(first.lock).not.toBeNull();
 
-    // The whole real command string is a trivially-matching substring pattern.
+    // The process-local owner token must win even when the test command is a
+    // valid holder pattern, preserving same-process mutual exclusion.
     const { lock, holderPid } = acquireSingleInstanceLock(lockPath, [selfCmd]);
     expect(lock).toBeNull();
     expect(holderPid).toBe(process.pid);
+    first.lock!.release();
+  });
+
+  it('release does not delete a successor lock owned by the same pid', () => {
+    const first = acquireSingleInstanceLock(lockPath);
+    expect(first.lock).not.toBeNull();
+    const successor = { pid: process.pid, startedAt: Date.now(), ownerId: 'successor-owner' };
+    fs.writeFileSync(lockPath, JSON.stringify(successor));
+
+    first.lock!.release();
+
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8'))).toEqual(successor);
   });
 
   it('release is idempotent and deletes our own lockfile', () => {

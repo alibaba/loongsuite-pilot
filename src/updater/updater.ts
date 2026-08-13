@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import * as crypto from 'node:crypto';
@@ -24,13 +24,37 @@ const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
 const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
 
+// ── Managed Node.js runtime (mirrors deploy/installer-opensource.sh) ──
+// Existing installs that predate the managed runtime run the updater (and hence
+// this deploy path) on the system node — process.execPath is the system node,
+// the node-bin pin points at it, and no runtime/ directory exists. Adopting the
+// managed runtime here lets an auto-upgrade migrate such installs onto the
+// pinned node + prebuilt node_modules, and keeps the node ABI consistent with
+// the prebuilt native addons. When the platform has no managed artifact (or a
+// download/verify step fails) we fall back to the running node + npm install,
+// i.e. the historical behaviour. Overridable via the same env vars the
+// installer honours, so both channels resolve the same OSS objects.
+const MANAGED_NODE_VERSION = process.env.LOONGSUITE_PILOT_NODE_VERSION ?? '22.22.2';
+const MANAGED_NODE_DEPS_BASE = (
+  process.env.LOONGSUITE_PILOT_NODE_DEPS_URL ??
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node'
+).replace(/\/+$/, '');
+const MANAGED_NODE_MODULES_BASE = (
+  process.env.LOONGSUITE_PILOT_NODE_MODULES_URL ??
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules'
+).replace(/\/+$/, '');
+const MANAGED_NODE_DOWNLOAD_TIMEOUT_MS = 10 * 60_000; // mirrors installer curl --max-time 600
+const ARCHIVE_EXTRACT_TIMEOUT_MS = 2 * 60_000;
+
 /**
  * Build an env for child processes that ensures node/npm are on PATH.
  * Only the spawned child sees the modified PATH; current process is untouched.
+ * Defaults to the running node; pass the managed node bin to prefer it (its
+ * directory also holds the matching npm, so `npm` resolves to the right one).
  */
-function buildChildEnv(): NodeJS.ProcessEnv {
+function buildChildEnv(nodeBin: string = process.execPath): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  const nodeDir = path.dirname(process.execPath);
+  const nodeDir = path.dirname(nodeBin);
   const currentPath = env.PATH ?? '';
   if (!currentPath.split(path.delimiter).includes(nodeDir)) {
     env.PATH = nodeDir + path.delimiter + currentPath;
@@ -62,12 +86,15 @@ export interface LocalVersion {
 
 export interface UpdaterPaths {
   cacheDir: string;
+  dataDir: string;
   versionsDir: string;
   currentFile: string;
   previousFile: string;
   bootstrapDir: string;
   loongsuitePilotBin: string;
   runtimeFile: string;
+  // Where the CLI wrapper reads the pinned node runtime (its NODE_PIN_FILE).
+  nodePinFile: string;
 }
 
 function homeDir(): string {
@@ -92,26 +119,33 @@ function defaultPaths(): UpdaterPaths {
   const home = homeDir();
   const cacheDir = path.join(home, '.loongsuite-pilot');
   const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? cacheDir);
+  // The CLI wrapper reads the pin from CACHE_DIR (LOONGSUITE_PILOT_CACHE_DIR),
+  // which defaults to the same directory; honour the override to stay in lockstep.
+  const pinDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR ?? cacheDir);
   return {
     cacheDir,
+    dataDir,
     versionsDir: path.join(cacheDir, 'versions'),
     currentFile: path.join(cacheDir, 'current'),
     previousFile: path.join(cacheDir, 'previous'),
     bootstrapDir: path.join(cacheDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
+    nodePinFile: path.join(pinDir, 'node-bin'),
   };
 }
 
 export function buildPaths(baseDir: string): UpdaterPaths {
   return {
     cacheDir: baseDir,
+    dataDir: baseDir,
     versionsDir: path.join(baseDir, 'versions'),
     currentFile: path.join(baseDir, 'current'),
     previousFile: path.join(baseDir, 'previous'),
     bootstrapDir: path.join(baseDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(baseDir),
+    nodePinFile: path.join(baseDir, 'node-bin'),
   };
 }
 
@@ -512,18 +546,32 @@ export class Updater {
       await fs.mkdir(versionsDir, { recursive: true });
       await fs.cp(extractedDir, stagingDir, { recursive: true });
 
-      const childEnv = buildChildEnv();
+      // Provision the managed Node.js runtime when the platform supports it, so an
+      // auto-upgrade migrates a system-node install onto the pinned runtime. When
+      // unavailable, managedNodeBin is null and we keep using the running node.
+      const managedNodeBin = await this.ensureManagedNode();
+      const nodeBin = managedNodeBin ?? process.execPath;
+      const childEnv = buildChildEnv(nodeBin);
 
-      logger.info('running npm install', { PATH: childEnv.PATH });
-      await execFileAsync('npm', ['install', '--production', '--no-optional'], {
-        cwd: stagingDir,
-        env: childEnv,
-        timeout: NPM_INSTALL_TIMEOUT_MS,
-        shell: process.platform === 'win32',
-      });
+      // Prebuilt node_modules are ABI-tied to the managed node, so only adopt them
+      // once the managed runtime is in place; otherwise fall back to npm install.
+      let usedPrebuiltModules = false;
+      if (managedNodeBin) {
+        usedPrebuiltModules = await this.ensureNodeModules(stagingDir, manifest.version);
+      }
 
-      logger.info('checking sqlite3 runtime');
-      await execFileAsync(process.execPath, ['-e', "require('sqlite3')"], {
+      if (!usedPrebuiltModules) {
+        logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
+        await execFileAsync('npm', ['install', '--production', '--no-optional'], {
+          cwd: stagingDir,
+          env: childEnv,
+          timeout: NPM_INSTALL_TIMEOUT_MS,
+          shell: process.platform === 'win32',
+        });
+      }
+
+      logger.info('checking sqlite3 runtime', { node: nodeBin });
+      await execFileAsync(nodeBin, ['-e', "require('sqlite3')"], {
         cwd: stagingDir,
         env: childEnv,
         timeout: 30_000,
@@ -532,7 +580,7 @@ export class Updater {
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
-          await execFileAsync(process.execPath, [postinstallScript], {
+          await execFileAsync(nodeBin, [postinstallScript], {
             cwd: stagingDir,
             env: childEnv,
             timeout: 30_000,
@@ -556,6 +604,16 @@ export class Updater {
 
         await this.writePointerFile(currentFile, dirName);
         await this.syncInstalledScripts(targetDir);
+        // Repoint the CLI wrapper at the managed runtime only after activation, so
+        // the collector/updater restart (and any future launch) runs on it. Skipped
+        // when we fell back to system node, preserving the existing pin. When the
+        // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
+        // pointers back below: the activated version's node_modules are ABI-tied to the
+        // managed node, and leaving the pin on the old node would crash-loop the
+        // collector on mismatched native addons with no self-heal.
+        if (managedNodeBin) {
+          await this.pinNodeRuntime(managedNodeBin);
+        }
         activated = true;
       } catch (err) {
         logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
@@ -591,6 +649,264 @@ export class Updater {
     const hasRoot = await fs.access(path.join(dir, 'package.json'))
       .then(() => true).catch(() => false);
     return hasRoot ? dir : null;
+  }
+
+  // ── Managed Node.js runtime helpers (mirror deploy/installer-opensource.sh) ──
+
+  /**
+   * Resolve the managed-node OS/arch tuple, or null when this platform has no
+   * managed artifact (win-arm64, linux-musl, or anything outside the matrix) —
+   * in which case the caller falls back to the running node + npm install.
+   */
+  private managedNodePlatform(): { os: string; arch: string } | null {
+    let os: string;
+    switch (process.platform) {
+      case 'darwin': os = 'darwin'; break;
+      case 'linux': os = 'linux'; break;
+      case 'win32': os = 'win'; break;
+      default:
+        logger.info('managed node: unsupported platform, using system node', { platform: process.platform });
+        return null;
+    }
+    let arch: string;
+    switch (process.arch) {
+      case 'arm64': arch = 'arm64'; break;
+      case 'x64': arch = 'x64'; break;
+      default:
+        logger.info('managed node: unsupported arch, using system node', { arch: process.arch });
+        return null;
+    }
+    if (os === 'win' && arch === 'arm64') {
+      logger.info('managed node: no win-arm64 artifact, using system node');
+      return null;
+    }
+    if (os === 'linux' && this.isMuslLibc()) {
+      logger.info('managed node: no linux-musl artifact, using system node');
+      return null;
+    }
+    return { os, arch };
+  }
+
+  private isMuslLibc(): boolean {
+    try {
+      const header = (process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } })?.header;
+      if (header) return !header.glibcVersionRuntime;
+    } catch { /* fall through to loader probe */ }
+    try {
+      return readdirSync('/lib').some((f) => f.startsWith('ld-musl-'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ensure the pinned managed Node.js runtime exists under <dataDir>/runtime and
+   * return its node binary, or null to signal "use the system node". Idempotent:
+   * a present runtime of the right version is reused without re-downloading.
+   */
+  private async ensureManagedNode(): Promise<string | null> {
+    const platform = this.managedNodePlatform();
+    if (!platform) return null;
+    const { os: osName, arch } = platform;
+
+    const runtimeDir = path.join(this.paths.dataDir, 'runtime');
+    const nodeDir = path.join(runtimeDir, `node-v${MANAGED_NODE_VERSION}-${osName}-${arch}`);
+    let tmp = '';
+
+    try {
+      const existing = await this.resolveManagedNodeBin(nodeDir, osName);
+      if (existing && await this.nodeReportsVersion(existing, `v${MANAGED_NODE_VERSION}`)) {
+        return existing;
+      }
+
+      const ext = osName === 'win' ? 'zip' : 'tar.gz';
+      const archive = `node-v${MANAGED_NODE_VERSION}-${osName}-${arch}.${ext}`;
+      const base = `${MANAGED_NODE_DEPS_BASE}/${MANAGED_NODE_VERSION}`;
+      tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-node-'));
+
+      logger.info('downloading managed node', { version: MANAGED_NODE_VERSION, os: osName, arch });
+      await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
+      await this.downloadFile(`${base}/SHASUMS256.txt`, path.join(tmp, 'SHASUMS256.txt'));
+      if (!await this.verifyChecksum(path.join(tmp, archive), path.join(tmp, 'SHASUMS256.txt'), archive)) {
+        return null;
+      }
+
+      await fs.mkdir(runtimeDir, { recursive: true });
+      await fs.rm(nodeDir, { recursive: true, force: true });
+      await this.extractArchive(path.join(tmp, archive), runtimeDir, ext);
+
+      const bin = await this.resolveManagedNodeBin(nodeDir, osName);
+      if (!bin) {
+        logger.warn('managed node: extracted archive has no usable node binary, using system node', { nodeDir });
+        await fs.rm(nodeDir, { recursive: true, force: true }).catch(() => {});
+        return null;
+      }
+      if (osName === 'darwin') {
+        await execFileAsync('xattr', ['-dr', 'com.apple.quarantine', nodeDir]).catch(() => {});
+      }
+      logger.info('managed node ready', { bin });
+      return bin;
+    } catch (err) {
+      logger.warn('managed node provisioning failed, using system node', { error: String(err) });
+      return null;
+    } finally {
+      if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Download and unpack prebuilt node_modules into <versionDir>/node_modules,
+   * returning true on success. false means the caller should npm install instead.
+   */
+  private async ensureNodeModules(versionDir: string, appVersion: string): Promise<boolean> {
+    const platform = this.managedNodePlatform();
+    if (!platform) return false;
+    const { os: osName, arch } = platform;
+
+    const modulesDir = path.join(versionDir, 'node_modules');
+    const stamp = `${appVersion} ${osName} ${arch}`;
+    const archive = `node-modules-${osName}-${arch}.tar.gz`;
+    const base = `${MANAGED_NODE_MODULES_BASE}/${appVersion}`;
+    let tmp = '';
+
+    try {
+      // Stage inside versionsDir (same filesystem as versionDir) so the final
+      // rename can't hit EXDEV across a separate tmpfs.
+      tmp = await fs.mkdtemp(path.join(this.paths.versionsDir, '.pilot-nm-'));
+
+      logger.info('downloading prebuilt node_modules', { appVersion, os: osName, arch });
+      await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
+      await this.downloadFile(`${base}/SHASUMS256.txt`, path.join(tmp, 'SHASUMS256.txt'));
+      if (!await this.verifyChecksum(path.join(tmp, archive), path.join(tmp, 'SHASUMS256.txt'), archive)) {
+        return false;
+      }
+
+      const stage = path.join(tmp, 'stage');
+      await fs.mkdir(stage, { recursive: true });
+      await execFileAsync('tar', ['-xzf', path.join(tmp, archive), '-C', stage], {
+        timeout: ARCHIVE_EXTRACT_TIMEOUT_MS,
+      });
+      const stagedModules = path.join(stage, 'node_modules');
+      if (!await fs.access(stagedModules).then(() => true).catch(() => false)) {
+        logger.warn('prebuilt node_modules archive has no node_modules/, falling back to npm install');
+        return false;
+      }
+      await fs.writeFile(path.join(stagedModules, '.pilot-modules-version'), stamp + '\n');
+      await fs.rm(modulesDir, { recursive: true, force: true });
+      await fs.rename(stagedModules, modulesDir);
+      logger.info('prebuilt node_modules installed', { appVersion });
+      return true;
+    } catch (err) {
+      logger.warn('prebuilt node_modules provisioning failed, falling back to npm install', { error: String(err) });
+      return false;
+    } finally {
+      if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  private async resolveManagedNodeBin(nodeDir: string, osName: string): Promise<string | null> {
+    // Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    const candidates = osName === 'win'
+      ? [path.join(nodeDir, 'bin', 'node.exe'), path.join(nodeDir, 'node.exe')]
+      : [path.join(nodeDir, 'bin', 'node')];
+    for (const c of candidates) {
+      if (await fs.access(c).then(() => true).catch(() => false)) return c;
+    }
+    return null;
+  }
+
+  private async nodeReportsVersion(nodeBin: string, want: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync(nodeBin, ['--version'], { timeout: 10_000 });
+      return stdout.trim() === want;
+    } catch {
+      return false;
+    }
+  }
+
+  private async downloadFile(url: string, dest: string): Promise<void> {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(MANAGED_NODE_DOWNLOAD_TIMEOUT_MS) });
+    if (!resp.ok) throw new Error(`download failed: ${resp.status} ${resp.statusText} (${url})`);
+    if (!resp.body) throw new Error(`download returned empty body (${url})`);
+    await pipeline(Readable.fromWeb(resp.body as any), createWriteStream(dest));
+  }
+
+  /**
+   * Verify <archive> against a "<sha256>  <name>" line in <shasumsFile>. Accepts
+   * sha256sum binary-mode lines ("<hash> *<name>"). Returns false (never throws)
+   * so a bad/missing sum degrades to the system-node fallback.
+   */
+  private async verifyChecksum(archive: string, shasumsFile: string, name: string): Promise<boolean> {
+    try {
+      const content = await fs.readFile(shasumsFile, 'utf-8');
+      let expected: string | null = null;
+      for (const raw of content.split(/\r?\n/)) {
+        const line = raw.trim();
+        const sep = line.search(/\s/);
+        if (sep < 0) continue;
+        let file = line.slice(sep).trim();
+        if (file.startsWith('*')) file = file.slice(1);
+        if (file === name) {
+          expected = line.slice(0, sep);
+          break;
+        }
+      }
+      if (!expected) {
+        logger.warn('managed node: SHASUMS256.txt has no entry', { name });
+        return false;
+      }
+      const actual = await computeSha256(archive);
+      if (expected !== actual) {
+        logger.warn('managed node: sha256 mismatch', { name, expected, actual });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      logger.warn('managed node: checksum verification error', { name, error: String(err) });
+      return false;
+    }
+  }
+
+  private async extractArchive(archive: string, destDir: string, ext: string): Promise<void> {
+    if (ext === 'zip') {
+      // Expand-Archive is always available on Windows; mirrors installer .ps1.
+      const q = (s: string) => s.replace(/'/g, "''");
+      await execFileAsync('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        `Expand-Archive -LiteralPath '${q(archive)}' -DestinationPath '${q(destDir)}' -Force`,
+      ], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
+    } else {
+      await execFileAsync('tar', ['-xzf', archive, '-C', destDir], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
+    }
+  }
+
+  private async pinNodeRuntime(nodeBin: string): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(this.paths.nodePinFile), { recursive: true });
+      await this.writePointerFile(this.paths.nodePinFile, nodeBin);
+      logger.info('pinned managed node runtime', { nodeBin, pin: this.paths.nodePinFile });
+    } catch (err) {
+      // The freshly activated version ships node_modules compiled against the managed
+      // node ABI. If the CLI wrapper cannot be repointed at that runtime, the collector
+      // restarts on the old (system) node and crash-loops on ABI-mismatched native
+      // addons — a state the version-only self-heal cannot detect or repair. Surface it
+      // (event + alarm) and rethrow so the caller rolls the pointers back to the
+      // previous, ABI-consistent install rather than marking the upgrade successful.
+      void this.metrics?.writeEvent('managed_node_pin_failed', {
+        error: String(err),
+        node_bin: nodeBin,
+        pin: this.paths.nodePinFile,
+      });
+      void this.metrics?.writeAlarm(
+        'UPDATER_NODE_PIN_ALARM', '2',
+        `failed to pin managed node runtime at ${this.paths.nodePinFile}: ${String(err)}`,
+      );
+      logger.error('failed to pin managed node runtime, aborting activation', {
+        error: String(err),
+        pin: this.paths.nodePinFile,
+      });
+      throw err;
+    }
   }
 
   private async writeHeartbeat(): Promise<void> {

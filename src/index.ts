@@ -6,6 +6,7 @@ import { createLogger, initFileLogging, flushLogsSync } from './utils/logger.js'
 import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
 import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
 import { handleWorkerCli } from './local-workers/worker-cli.js';
+import { handlePiSdkAgentCli } from './pi-sdk/pi-sdk-agent-cli.js';
 import { acquireSingleInstanceLock } from './utils/single-instance-lock.js';
 import { COLLECTOR_PROCESS_PATTERNS, writePidFileSync, removeOwnPidFileSync } from './utils/pid-utils.js';
 
@@ -13,6 +14,9 @@ const logger = createLogger('Main');
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (await handlePiSdkAgentCli(argv)) {
+    return;
+  }
   if (await handleWorkerCli(argv)) {
     return;
   }

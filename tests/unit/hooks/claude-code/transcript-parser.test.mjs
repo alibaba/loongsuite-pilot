@@ -144,6 +144,20 @@ describe('parseClaudeTranscript', () => {
     const result = parseClaudeTranscript(file, 0);
     expect(result.turns.length).toBe(1);
     expect(result.turns[0].llmCalls.length).toBe(2);
+    expect(result.turns[0].llmCalls[0].input_messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'text', text: 'do it' }],
+    }]);
+    expect(result.turns[0].llmCalls[1].input_messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }],
+      },
+    ]);
   });
 
   test('tool_result request_start_time 不跨 promptId 污染下一轮', () => {
@@ -237,6 +251,29 @@ describe('parseClaudeTranscript', () => {
     const llm2 = result.turns[0].llmCalls[1];
     expect(llm2.declaredToolIds).toEqual([]);
     expect(llm2.request_start_time).toBe('2026-06-04T02:57:53.000Z');
+    expect(llm2.input_messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'reading...' },
+          { type: 'tool_use', id: 'read_1', name: 'Read', input: { file_path: '/a.txt' } },
+          { type: 'tool_use', id: 'read_2', name: 'Read', input: { file_path: '/b.txt' } },
+          { type: 'tool_use', id: 'read_3', name: 'Read', input: { file_path: '/c.txt' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_1', content: 'aaa' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_2', content: 'bbb' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_3', content: 'ccc' }],
+      },
+    ]);
   });
 
   test('msg.id 缺失的 end_turn assistant 被正确解析', () => {

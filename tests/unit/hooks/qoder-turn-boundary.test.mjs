@@ -87,8 +87,8 @@ function writeTranscript(rows) {
   fs.writeFileSync(transcriptPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
 }
 
-function runProcessor() {
-  return spawnSync('node', [PROCESSOR, '--agent-id', 'qoder', '--log-prefix', 'qoder'], {
+function runProcessor(agentId = 'qoder') {
+  return spawnSync('node', [PROCESSOR, '--agent-id', agentId, '--log-prefix', agentId], {
     input: JSON.stringify({
       session_id: 'session-ide',
       transcript_path: transcriptPath,
@@ -100,8 +100,8 @@ function runProcessor() {
   });
 }
 
-function readHistory() {
-  const historyDir = path.join(dataDir, 'logs', 'qoder', 'history');
+function readHistory(agentId = 'qoder') {
+  const historyDir = path.join(dataDir, 'logs', agentId, 'history');
   if (!fs.existsSync(historyDir)) return [];
   return fs.readdirSync(historyDir)
     .filter(file => file.endsWith('.jsonl'))
@@ -134,6 +134,31 @@ describe('qoder-hook-processor turn boundary markers', () => {
 
     // Both markers share one turn, and the events in between carry neither.
     expect(starts[0]['gen_ai.turn.id']).toBe(ends[0]['gen_ai.turn.id']);
+    for (const record of records.slice(1, -1)) {
+      expect(record['gen_ai.turn.start']).toBeUndefined();
+      expect(record['gen_ai.turn.end']).toBeUndefined();
+    }
+  });
+
+  it('marks a qoder-cn turn the same way', () => {
+    writeTranscript(ideTurnRows());
+
+    expect(runProcessor('qoder-cn').status).toBe(0);
+    const records = readHistory('qoder-cn');
+    expect(records.length).toBeGreaterThan(0);
+    expect(new Set(records.map(r => r['gen_ai.agent.type']))).toEqual(new Set(['qoder-cn']));
+
+    const starts = records.filter(r => r['gen_ai.turn.start'] === true);
+    const ends = records.filter(r => r['gen_ai.turn.end'] === true);
+    expect(starts).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+
+    expect(starts[0]['event.name']).toBe('other');
+    expect(records[0]).toBe(starts[0]);
+    expect(ends[0]['event.name']).toBe('llm.response');
+    expect(records[records.length - 1]).toBe(ends[0]);
+    expect(starts[0]['gen_ai.turn.id']).toBe(ends[0]['gen_ai.turn.id']);
+
     for (const record of records.slice(1, -1)) {
       expect(record['gen_ai.turn.start']).toBeUndefined();
       expect(record['gen_ai.turn.end']).toBeUndefined();

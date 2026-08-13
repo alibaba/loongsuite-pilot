@@ -156,10 +156,20 @@ export abstract class BaseHookInput extends BaseInput {
     if (stat.size <= offset) return { entries, offset: stat.size };
 
     const handle = await fs.open(logFile, 'r');
+    let checkpointOffset = offset;
     try {
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      const snapshot = buf.subarray(0, bytesRead);
+      // A hook/plugin process may still be appending the final JSONL record
+      // after stat() returns. Parse and checkpoint only bytes ending in a
+      // newline; otherwise a transient half-line would be rejected as invalid
+      // JSON and the persisted offset would skip its remaining bytes forever.
+      const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (lastNewline < 0) return { entries, offset };
+      const completeLength = lastNewline + 1;
+      checkpointOffset = offset + completeLength;
+      const text = snapshot.subarray(0, completeLength).toString('utf-8');
 
       const lines = text.split('\n').filter(l => l.trim().length > 0);
 
@@ -176,7 +186,7 @@ export abstract class BaseHookInput extends BaseInput {
       await handle.close();
     }
 
-    return { entries, offset: stat.size };
+    return { entries, offset: checkpointOffset };
   }
 
   private async listHookLogFiles(): Promise<string[]> {

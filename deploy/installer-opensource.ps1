@@ -77,8 +77,8 @@ $PERMANENT_DIR = Join-Path $CACHE_DIR "package"
 $_OSS_BASE_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
 # Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
 if ($env:LOONGSUITE_PILOT_NODE_VERSION) { $script:NODE_VERSION = $env:LOONGSUITE_PILOT_NODE_VERSION } else { $script:NODE_VERSION = "22.22.2" }
-if ($env:LOONGSUITE_PILOT_NODE_DEPS_URL) { $script:NODE_DEPS_BASE = $env:LOONGSUITE_PILOT_NODE_DEPS_URL } else { $script:NODE_DEPS_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node" }
-if ($env:LOONGSUITE_PILOT_NODE_MODULES_URL) { $script:NODE_MODULES_BASE = $env:LOONGSUITE_PILOT_NODE_MODULES_URL } else { $script:NODE_MODULES_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules" }
+if ($env:LOONGSUITE_PILOT_NODE_DEPS_URL) { $script:NODE_DEPS_BASE = $env:LOONGSUITE_PILOT_NODE_DEPS_URL } else { $script:NODE_DEPS_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node" }
+if ($env:LOONGSUITE_PILOT_NODE_MODULES_URL) { $script:NODE_MODULES_BASE = $env:LOONGSUITE_PILOT_NODE_MODULES_URL } else { $script:NODE_MODULES_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules" }
 
 
 # ============================================================
@@ -428,6 +428,10 @@ function Check-Deps {
     # Pin node binary path
     if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
     Set-Content -Path (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN
+    # Hook entrypoints can always derive DataDir from their deployed location,
+    # while GUI agents do not necessarily inherit the installer's CacheDir.
+    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+    Set-Content -Path (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN
 
     # Derive npm
     $npmPath = Join-Path (Split-Path $script:NODE_BIN) "npm.cmd"
@@ -1281,7 +1285,9 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoder-cn\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
+        (Join-Path $env:USERPROFILE ".qwenworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
+        (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
         (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
         (Join-Path $env:USERPROFILE ".zcode\cli\config.json")
@@ -1437,7 +1443,6 @@ function Remove-HermesPlugin {
 # ============================================================
 function Remove-PiCodingAgentExtension {
     $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
-    if (-not (Test-Path $cfg)) { return }
     $short = $cfg.Replace($env:USERPROFILE, "~")
 
     if (-not $script:NODE_BIN) {
@@ -1447,24 +1452,104 @@ function Remove-PiCodingAgentExtension {
 
     $result = & $script:NODE_BIN -e @'
 const fs = require('fs');
-const f = process.argv[1];
-const isOurs = s => typeof s === 'string' && (
-  s.includes('loongsuite-pilot-pi-coding-agent') ||
-  s.includes('plugins/pi-coding-agent/index.mjs')
-);
+const path = require('path');
+const defaultConfig = process.argv[1];
+const dataDir = process.argv[2];
+const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-coding-agent', 'plugins/pi-coding-agent/index.mjs'] }];
+const resolveValue = value => typeof value === 'string'
+  ? value.replace(/^~(?=[\\/])/, process.env.USERPROFILE || '').replaceAll('$PILOT_DATA', dataDir)
+  : value;
+const stripJsoncComments = text => {
+  let result = '';
+  let index = 0;
+  let inString = false;
+  let escape = false;
+  while (index < text.length) {
+    const ch = text[index];
+    if (inString) {
+      result += ch;
+      if (escape) escape = false;
+      else if (ch.charCodeAt(0) === 92) escape = true;
+      else if (ch === '"') inString = false;
+      index++;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '/') {
+      index += 2;
+      while (index < text.length && text[index] !== '\n') index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '*') {
+      index += 2;
+      while (index + 1 < text.length && !(text[index] === '*' && text[index + 1] === '/')) index++;
+      index += 2;
+      continue;
+    }
+    result += ch;
+    index++;
+  }
+  return result;
+};
+const comparable = value => typeof value === 'string'
+  ? value.split(String.fromCharCode(92)).join('/')
+  : '';
+const localDir = path.join(dataDir, 'agents.d.local');
 try {
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data.extensions.length;
-  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
-  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-  process.stdout.write('cleaned');
+  for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
+    if (!name.endsWith('.json')) continue;
+    let def;
+    try { def = JSON.parse(fs.readFileSync(path.join(localDir, name), 'utf8')); } catch { continue; }
+    if (def?.piSdk?.schemaVersion !== 1 || !def?.pluginInject?.pluginId?.startsWith('loongsuite-pilot-pi-sdk-')) continue;
+    const spec = resolveValue(def.pluginInject.pluginSpec);
+    for (const configPath of def.pluginInject.configPaths || []) {
+      targets.push({
+        configPath: resolveValue(configPath),
+        markers: [def.pluginInject.pluginId, spec, 'plugins/pi-coding-agent/agents/'].filter(Boolean),
+      });
+    }
+  }
+  let cleaned = 0;
+  let skipped = 0;
+  for (const target of targets) {
+    if (!target.configPath || !fs.existsSync(target.configPath)) continue;
+    try {
+      const raw = fs.readFileSync(target.configPath, 'utf-8');
+      const data = JSON.parse(stripJsoncComments(raw));
+      if (!Array.isArray(data.extensions)) continue;
+      const before = data.extensions.length;
+      data.extensions = data.extensions.filter(entry => {
+        const value = comparable(entry);
+        return !target.markers.some(marker => value === comparable(marker) || value.includes(comparable(marker)));
+      });
+      if (data.extensions.length === before) continue;
+      if (raw !== JSON.stringify(data, null, 2) + '\n') {
+        try {
+          fs.copyFileSync(target.configPath, target.configPath + '.bak', fs.constants.COPYFILE_EXCL);
+        } catch (e) {
+          if (e?.code !== 'EEXIST') throw e;
+        }
+      }
+      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      cleaned++;
+    } catch {
+      skipped++;
+    }
+  }
+  process.stdout.write(cleaned > 0 ? (skipped > 0 ? 'partial' : 'cleaned') : (skipped > 0 ? 'skipped' : 'nochange'));
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg 2>$null
+'@ $cfg $DATA_DIR 2>$null
 
     switch ($result) {
-        "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+        "cleaned"  { Msg "    ✅ 已清理 Pi / PI SDK Agent 扩展配置" "    ✅ Cleaned Pi / PI SDK Agent extension configs" }
+        "partial"  { Msg "    ⚠️  已清理可读取的 Pi 配置，部分损坏配置需手动清理" `
+                         "    ⚠️  Cleaned readable Pi configs; some invalid configs need manual cleanup" }
+        "skipped"  { Msg "    ⚠️  Pi 配置损坏，需手动清理" "    ⚠️  Invalid Pi configs skipped (manual cleanup needed)" }
         "nochange" { }
         default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
     }
@@ -1543,20 +1628,11 @@ function Remove-OpenClawPlugin {
         (Join-Path $env:USERPROFILE ".openclaw\openclaw.json"),
         (Join-Path $env:USERPROFILE ".openclaw\config.json")
     )
-    $managedPath = Join-Path $DataDir "plugins\openclaw\plugin.mjs"
-
-    foreach ($cfg in ($configs | Select-Object -Unique)) {
-        if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg.Replace($env:USERPROFILE, "~")
-        if (-not $script:NODE_BIN) {
-            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-            continue
-        }
-
-        $result = & $script:NODE_BIN -e @'
+    $managedPath = Join-Path $DataDir "plugins\openclaw"
+    $cleanupScript = @'
 const fs = require('fs');
-const f = process.argv[1];
-const managed = process.argv[2].replaceAll('\\', '/');
+const f = process.env.PILOT_OC_CONFIG;
+const managed = process.env.PILOT_OC_MANAGED.replaceAll('\\', '/');
 const entryStr = value => typeof value === 'string'
   ? value
   : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
@@ -1564,6 +1640,7 @@ const isOurs = value => {
   const normalized = entryStr(value).replaceAll('\\', '/');
   const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
   return plain === managed ||
+    plain === managed + '/plugin.mjs' ||
     normalized.includes('loongsuite-pilot-openclaw') ||
     normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
 };
@@ -1593,7 +1670,31 @@ try {
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write('cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg $managedPath 2>$null
+'@
+
+    foreach ($cfg in ($configs | Select-Object -Unique)) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $hadConfigEnv = Test-Path Env:PILOT_OC_CONFIG
+        $hadManagedEnv = Test-Path Env:PILOT_OC_MANAGED
+        $previousConfigEnv = $env:PILOT_OC_CONFIG
+        $previousManagedEnv = $env:PILOT_OC_MANAGED
+        try {
+            $env:PILOT_OC_CONFIG = $cfg
+            $env:PILOT_OC_MANAGED = $managedPath
+            $result = $cleanupScript | & $script:NODE_BIN 2>$null
+            if ($LASTEXITCODE -ne 0) { $result = "error" }
+        } finally {
+            if ($hadConfigEnv) { $env:PILOT_OC_CONFIG = $previousConfigEnv }
+            else { Remove-Item Env:PILOT_OC_CONFIG -ErrorAction SilentlyContinue }
+            if ($hadManagedEnv) { $env:PILOT_OC_MANAGED = $previousManagedEnv }
+            else { Remove-Item Env:PILOT_OC_MANAGED -ErrorAction SilentlyContinue }
+        }
 
         switch ($result) {
             "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }

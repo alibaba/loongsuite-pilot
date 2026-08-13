@@ -6,14 +6,18 @@
 
 ## 支持的 Agent ID
 
-这些 ID 可用于安装参数、`agent-control.json` 和 `config.json`。
+这些 ID 用于标识受支持的集成。大多数 ID 可直接用于安装参数、
+`agent-control.json` 和 `config.json`；复用采集链路或输出类型不同的情况会在说明中标出。
 
 | Agent | ID | 说明 |
 |-------|----|------|
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
+| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
+| Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
+| MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.5.12 及以上稳定版本；采集原生 LLM、ReAct、工具、Token、错误和取消事件。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
@@ -24,7 +28,7 @@
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
-| Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
+| Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
@@ -38,9 +42,10 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 ## OpenClaw 兼容性与生命周期
 
-Pilot 支持 OpenClaw `>=2026.5.12` 的稳定版本。预发布版本或更早版本会在
-修改 OpenClaw 配置前被拒绝。部署时，Pilot 会把自身模块路径加入
-`plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
+Pilot 支持 OpenClaw `>=2026.5.12`。插件包会声明这一最低宿主版本，
+OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的宿主会跳过插件并
+输出诊断，Pilot 不再通过启动 OpenClaw CLI 获取版本。部署时，Pilot 会把
+插件包目录加入 `plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
 
 ```json
 {
@@ -57,8 +62,8 @@ Pilot 支持 OpenClaw `>=2026.5.12` 的稳定版本。预发布版本或更早�
 
 原生会话生命周期 Hook 通过 `allowConversationAccess` 提供每次 LLM 调用的
 消息和用量，因此该权限是必需的。迁移旧版插件数组配置前，Pilot 会创建
-权限受限的备份；升级和卸载只替换或删除 Pilot 自己的路径与条目，保留其他
-插件及其配置。
+权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
+卸载会同时清理新旧两种路径和 Pilot 自己的条目，并保留其他插件及其配置。
 
 注入的插件会把 append-only 源事件写入
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，

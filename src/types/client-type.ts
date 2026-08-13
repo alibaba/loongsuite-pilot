@@ -10,6 +10,7 @@ export enum ClientType {
   QoderIdea = 'qoder-idea',
   QoderWork = 'qoder-work',
   QoderWorkCN = 'qoder-work-cn',
+  QwenWorkCN = 'qwen-work-cn',
   Kiro = 'kiro',
   KiroCli = 'kiro-cli',
   Antigravity = 'antigravity',
