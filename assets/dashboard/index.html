@@ -241,15 +241,14 @@
     };
 
     function normalizeLanguage(language) {
-      return typeof language === 'string' && language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+      return typeof language === 'string' && language.trim().toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
     }
 
     function detectBrowserLanguage(languages, language) {
-      const candidates = [
-        ...(Array.isArray(languages) ? languages : []),
-        language,
-      ];
-      return candidates.some(candidate => normalizeLanguage(candidate) === 'zh-CN') ? 'zh-CN' : 'en';
+      const preferredLanguage = Array.isArray(languages)
+        ? languages.find(candidate => typeof candidate === 'string' && candidate.trim())
+        : undefined;
+      return normalizeLanguage(preferredLanguage ?? language);
     }
 
     function isSupportedLanguage(language) {

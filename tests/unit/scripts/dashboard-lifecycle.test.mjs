@@ -311,11 +311,14 @@ describe('dashboard static page', () => {
 
     expect(normalizeLanguage('zh')).toBe('zh-CN');
     expect(normalizeLanguage('zh-Hant-TW')).toBe('zh-CN');
+    expect(normalizeLanguage(' zh-TW ')).toBe('zh-CN');
     expect(normalizeLanguage('en-US')).toBe('en');
-    expect(detectBrowserLanguage(['en-US', 'zh-CN'], 'en-US')).toBe('zh-CN');
+    expect(detectBrowserLanguage(['en-US', 'zh-CN'], 'zh-CN')).toBe('en');
+    expect(detectBrowserLanguage(['zh-TW', 'en-US'], 'en-US')).toBe('zh-CN');
+    expect(detectBrowserLanguage(['', '  ', 'fr-FR'], 'zh-CN')).toBe('en');
     expect(detectBrowserLanguage(['fr-FR'], 'fr-FR')).toBe('en');
     expect(detectBrowserLanguage([], 'zh-SG')).toBe('zh-CN');
-    expect(detectBrowserLanguage(['en-US'], 'zh-CN')).toBe('zh-CN');
+    expect(detectBrowserLanguage(undefined, 'en-US')).toBe('en');
   });
 
   it('persists language safely and tolerates unavailable localStorage', () => {
@@ -364,17 +367,59 @@ describe('dashboard static page', () => {
     class FakeElement {
       constructor(dataset = {}) {
         this.dataset = dataset;
-        this.classList = { toggle: vi.fn() };
+        this.classList = { toggle: vi.fn(), add: vi.fn(), remove: vi.fn() };
         this.listeners = {};
         this.attributes = {};
-        this.innerHTML = '';
+        this.style = {};
+        this._innerHTML = '';
+        this.innerHTMLWrites = 0;
+        this.trendBars = [];
+        this.tooltip = null;
         this.textContent = '';
         this.value = '';
+      }
+      get innerHTML() { return this._innerHTML; }
+      set innerHTML(value) {
+        this._innerHTML = value;
+        this.innerHTMLWrites += 1;
+        this.trendBars = [];
+        this.tooltip = null;
+        if (!value.includes('class="trend-bar"')) return;
+
+        const wrap = new FakeElement();
+        const tooltip = new FakeElement();
+        wrap.getBoundingClientRect = () => ({ left: 0, right: 600, height: 160 });
+        wrap.querySelector = selector => selector === '.trend-tooltip' ? tooltip : null;
+        tooltip.getBoundingClientRect = () => ({ width: 120, height: 40 });
+        this.tooltip = tooltip;
+
+        for (const buttonMatch of value.matchAll(/<button type="button" class="trend-bar"([^>]*)>/g)) {
+          const attributes = Object.fromEntries(
+            [...buttonMatch[1].matchAll(/([\w-]+)="([^"]*)"/g)]
+              .map(([, name, attributeValue]) => [name, attributeValue]),
+          );
+          const bar = new FakeElement({
+            day: attributes['data-day'],
+            displayDay: attributes['data-display-day'],
+            label: attributes['data-label'],
+            formattedValue: attributes['data-formatted-value'],
+          });
+          const fill = new FakeElement();
+          fill.getBoundingClientRect = () => ({ left: 20, width: 10, top: 60 });
+          bar.attributes = attributes;
+          bar.closest = selector => selector === '.trend-wrap' ? wrap : null;
+          bar.querySelector = selector => selector === '.trend-bar-fill' ? fill : null;
+          this.trendBars.push(bar);
+        }
       }
       addEventListener(name, handler) { this.listeners[name] = handler; }
       setAttribute(name, value) { this.attributes[name] = value; }
       contains() { return false; }
-      querySelectorAll() { return []; }
+      matches() { return false; }
+      closest() { return null; }
+      querySelector() { return null; }
+      querySelectorAll(selector) { return selector === '.trend-bar' ? this.trendBars : []; }
+      getBoundingClientRect() { return { left: 0, right: 0, top: 0, width: 0, height: 0 }; }
     }
 
     const ids = [
@@ -398,6 +443,7 @@ describe('dashboard static page', () => {
     };
     const writes = [];
     const window = {
+      innerWidth: 1280,
       localStorage: {
         getItem: () => null,
         setItem: (...args) => writes.push(args),
@@ -437,28 +483,72 @@ describe('dashboard static page', () => {
             totalSessions: 2,
             totalRequests: 3,
             totalToolCalls: 4,
-            agentShares: [],
-            modelShares: [],
-            providerShares: [],
-            repoShares: [],
+            agentShares: [{
+              agentType: '<img src=x onerror=alert(1)>',
+              sessions: 1,
+              events: 2,
+              tokens: 1500000,
+              share: 0.5,
+            }],
+            modelShares: [{
+              model: '<script>alert(1)</script>',
+              totalTokens: 1500000,
+              share: 1,
+            }],
+            providerShares: [{ provider: 'anthropic', totalTokens: 1500000, share: 1 }],
+            repoShares: [{ repo: 'org/repo', sessions: 2, events: 3 }],
           },
         },
-        dailyTokens: [],
-        dailySessions: [],
+        dailyTokens: [{ day: '2026-08-13', value: 1500000 }],
+        dailySessions: [{ day: '2026-08-13', value: 2 }],
       }),
     });
     await new Promise(resolveWait => setImmediate(resolveWait));
 
-    expect(elements['agent-grid'].innerHTML).toContain('No Agent token data detected yet');
+    expect(elements['agent-grid'].innerHTML).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(elements['agent-grid'].innerHTML).not.toContain('<img src=x');
+    expect(elements['agent-grid'].innerHTML).toContain('% of all Agent events today');
+    expect(elements.models.innerHTML).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(elements.models.innerHTML).not.toContain('<script>alert(1)</script>');
+    expect(elements.providers.innerHTML).toContain('anthropic');
+    expect(elements.repos.innerHTML).toContain('2 sessions');
+    expect(elements.repos.innerHTML).toContain('3 events');
+    expect(elements['token-trend'].innerHTML).toContain('aria-label="30-day Token trend"');
+    const englishTokenBar = elements['token-trend'].trendBars[0];
+    expect(englishTokenBar.attributes['aria-label']).toContain('Aug');
+    expect(englishTokenBar.attributes['aria-label']).toContain('Token 1.5M');
+    englishTokenBar.listeners.mouseenter({ currentTarget: englishTokenBar });
+    expect(elements['token-trend'].tooltip.innerHTML).toContain('Aug');
+    expect(elements['token-trend'].tooltip.innerHTML).toContain('Token 1.5M');
     expect(elements['token-detail'].textContent).toContain('Input 1M');
     expect(elements['status-text'].textContent).toContain('Generated at');
     expect(fetch).toHaveBeenCalledTimes(1);
+    const englishRenderCounts = {
+      models: elements.models.innerHTMLWrites,
+      providers: elements.providers.innerHTMLWrites,
+      repos: elements.repos.innerHTMLWrites,
+    };
 
     elements['language-select'].listeners.change({ target: { value: 'zh-CN' } });
 
     expect(document.documentElement.lang).toBe('zh-CN');
     expect(heading.textContent).toBe('Agent 分布');
-    expect(elements['agent-grid'].innerHTML).toContain('暂时没有检测到 Agent Token 数据');
+    expect(elements['agent-grid'].innerHTML).toContain('事件数占比');
+    expect(elements['agent-grid'].innerHTML).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(elements['token-trend'].innerHTML).toContain('aria-label="最近 30 天 Token趋势"');
+    const chineseTokenBar = elements['token-trend'].trendBars[0];
+    expect(chineseTokenBar.attributes['aria-label']).toContain('2026年');
+    expect(chineseTokenBar.attributes['aria-label']).toContain('Token 1.5M');
+    chineseTokenBar.listeners.mouseenter({ currentTarget: chineseTokenBar });
+    expect(elements['token-trend'].tooltip.innerHTML).toContain('2026年');
+    expect(elements['token-trend'].tooltip.innerHTML).toContain('Token 1.5M');
+    expect(elements.models.innerHTML).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(elements.providers.innerHTML).toContain('anthropic');
+    expect(elements.repos.innerHTML).toContain('2 个 Session');
+    expect(elements.repos.innerHTML).toContain('3 个 Event');
+    expect(elements.models.innerHTMLWrites).toBeGreaterThan(englishRenderCounts.models);
+    expect(elements.providers.innerHTMLWrites).toBeGreaterThan(englishRenderCounts.providers);
+    expect(elements.repos.innerHTMLWrites).toBeGreaterThan(englishRenderCounts.repos);
     expect(elements['token-detail'].textContent).toContain('输入 1M');
     expect(elements['status-text'].textContent).toContain('数据生成于');
     expect(writes).toEqual([['loongsuite-pilot.dashboard.language', 'zh-CN']]);
