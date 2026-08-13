@@ -6,8 +6,6 @@ import { describe, expect, it } from 'vitest';
 
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf8');
 const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf8');
-const externalInstallerSh = readFileSync(resolve('deploy', 'installer.sh'), 'utf8');
-const externalInstallerPs1 = readFileSync(resolve('deploy', 'installer.ps1'), 'utf8');
 const opensourceInstallerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8');
 const opensourceInstallerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8');
 const dashboardHtml = readFileSync(resolve('assets', 'dashboard', 'index.html'), 'utf8');
@@ -211,10 +209,8 @@ describe('dashboard service lifecycle', () => {
     expect(runtimePs1).not.toContain('18765');
   });
 
-  it('external installers add the default port without overwriting an explicit port', () => {
+  it('public installers add the default port without overwriting an explicit port', () => {
     for (const installer of [
-      externalInstallerSh,
-      externalInstallerPs1,
       opensourceInstallerSh,
       opensourceInstallerPs1,
     ]) {
