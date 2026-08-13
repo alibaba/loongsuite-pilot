@@ -10,7 +10,7 @@
 | CLI 入口 | `~/.local/bin/loongsuite-pilot` |
 | 服务日志 | `~/.loongsuite-pilot/logs/loongsuite-pilot-service.log` |
 | 自动更新日志 | `~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log` |
-| Dashboard 地址 | `http://127.0.0.1:18765/` |
+| Dashboard 地址 | `http://127.0.0.1:8765/`（可由 `dashboard.port` 修改） |
 | Dashboard 数据 | `~/.loongsuite-pilot/logs/metrics-summary.json` |
 | Node 路径锁定 | `~/.loongsuite-pilot/node-bin` |
 
@@ -38,10 +38,10 @@ Dashboard 由采集主进程直接托管，不需要额外启动命令，也不�
 服务正常时，`status` 会显示 Dashboard 地址。默认访问：
 
 ```text
-http://127.0.0.1:18765/
+http://127.0.0.1:8765/
 ```
 
-服务固定监听 `127.0.0.1:18765`，不向局域网或公网暴露。
+服务固定监听 `127.0.0.1`，默认端口为 `8765`，可通过 `config.json` 的 `dashboard.port` 修改；不向局域网或公网暴露。
 
 Dashboard 前端只请求 `GET /metrics-summary.json`，服务端会原样返回
 `logs/metrics-summary.json`。该汇总文件由 Pilot 主进程默认生成：启动约 5 秒后首次写入，
@@ -56,7 +56,7 @@ Agent 卡片来自 `ranges.today.agentShares`，因此新增 Agent 类型会自�
 ~/.local/bin/loongsuite-pilot info
 ls -la ~/.loongsuite-pilot/logs/output/
 ls -l ~/.loongsuite-pilot/logs/metrics-summary.json
-curl -fsS http://127.0.0.1:18765/metrics-summary.json
+curl -fsS http://127.0.0.1:8765/metrics-summary.json
 ls ~/.loongsuite-pilot/sls-failed-logs/ 2>/dev/null || echo "无上报失败记录"
 ```
 

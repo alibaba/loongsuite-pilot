@@ -174,7 +174,7 @@ grep -E 'download|SHA-256|extract|npm install|update deployed|restart|removing o
 ```
 
 本地 Dashboard 属于 collector 主进程生命周期，不存在独立的 monitor 进程或重启步骤。
-collector 重启后，Dashboard 会在 `127.0.0.1:18765` 随之恢复。
+collector 重启后，Dashboard 会在 `127.0.0.1:8765`（或 `dashboard.port` 配置的端口）随之恢复。
 
 部署失败时，updater 会自动恢复 `current` / `previous` pointer 到之前的值：
 

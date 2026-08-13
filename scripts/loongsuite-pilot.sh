@@ -961,7 +961,23 @@ cmd_restart() {
     cmd_start
 }
 
+dashboard_port() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo 8765
+        return
+    }
+    "$node_bin" -e '
+const fs = require("node:fs");
+const path = process.argv[1];
+let port;
+try { port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port; } catch {}
+process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
+' "$CONFIG_FILE" 2>/dev/null || echo 8765
+}
+
 dashboard_is_available() {
+    local port="$1"
     local node_bin
     node_bin=$(resolve_node 2>/dev/null) || return 1
     "$node_bin" -e '
@@ -976,7 +992,7 @@ const finish = (code) => {
 };
 const request = http.request({
   host: "127.0.0.1",
-  port: 18765,
+  port: Number(process.argv[1]),
   path: "/metrics-summary.json",
   method: "HEAD",
 }, (response) => {
@@ -989,7 +1005,7 @@ timer = setTimeout(() => {
   request.destroy();
   finish(1);
 }, 300);
-' >/dev/null 2>&1
+' "$port" >/dev/null 2>&1
 }
 
 cmd_status() {
@@ -1004,12 +1020,14 @@ cmd_status() {
 
     if is_running; then
         local pid
+        local port
         pid=$(cat "$PID_FILE")
+        port=$(dashboard_port)
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
-        if dashboard_is_available; then
-            echo "   dashboard: http://127.0.0.1:18765/"
+        if dashboard_is_available "$port"; then
+            echo "   dashboard: http://127.0.0.1:${port}/"
         else
-            echo "   dashboard: unavailable (http://127.0.0.1:18765/)"
+            echo "   dashboard: unavailable (http://127.0.0.1:${port}/)"
         fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"

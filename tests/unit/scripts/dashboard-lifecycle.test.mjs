@@ -6,6 +6,10 @@ import { describe, expect, it } from 'vitest';
 
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf8');
 const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf8');
+const externalInstallerSh = readFileSync(resolve('deploy', 'installer.sh'), 'utf8');
+const externalInstallerPs1 = readFileSync(resolve('deploy', 'installer.ps1'), 'utf8');
+const opensourceInstallerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8');
+const opensourceInstallerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8');
 const dashboardHtml = readFileSync(resolve('assets', 'dashboard', 'index.html'), 'utf8');
 
 describe('dashboard service lifecycle', () => {
@@ -197,8 +201,26 @@ describe('dashboard service lifecycle', () => {
       expect(probe).toContain('setTimeout');
       expect(probe).toContain('}, 300)');
     }
-    expect(runtimeSh).toContain('dashboard: unavailable (http://127.0.0.1:18765/)');
-    expect(runtimePs1).toContain('dashboard: unavailable (http://127.0.0.1:18765/)');
+    expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port');
+    expect(runtimeSh).toContain('? port : 8765');
+    expect(runtimeSh).toContain('http://127.0.0.1:${port}/');
+    expect(runtimePs1).toContain('function Get-DashboardPort');
+    expect(runtimePs1).toContain('return 8765');
+    expect(runtimePs1).toContain('http://127.0.0.1:$dashboardPort/');
+    expect(runtimeSh).not.toContain('18765');
+    expect(runtimePs1).not.toContain('18765');
+  });
+
+  it('external installers add the default port without overwriting an explicit port', () => {
+    for (const installer of [
+      externalInstallerSh,
+      externalInstallerPs1,
+      opensourceInstallerSh,
+      opensourceInstallerPs1,
+    ]) {
+      expect(installer).toContain("if (config.dashboard.port === undefined) config.dashboard.port = 8765;");
+      expect(installer).not.toContain('config.dashboard.port = 8765;\nif (config.dashboard.port');
+    }
   });
 });
 
@@ -216,7 +238,7 @@ describe('dashboard static page', () => {
     expect(dashboardHtml).not.toContain('Token 占比');
     expect(dashboardHtml).toContain('事件数占比');
     expect(dashboardHtml).toContain('占今日全部 Agent 事件');
-    expect(dashboardHtml).toContain('暂时没有检测到用户的 Agent 使用数据');
+    expect(dashboardHtml).toContain('暂时没有检测到 Agent Token 数据');
     expect(dashboardHtml).toContain('.agent-empty { grid-column: 1 / -1;');
     expect(dashboardHtml).toContain('<div class="label">Event</div>');
   });

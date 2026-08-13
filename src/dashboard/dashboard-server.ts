@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('DashboardServer');
 
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
-export const DEFAULT_DASHBOARD_PORT = 18_765;
+export const DEFAULT_DASHBOARD_PORT = 8_765;
 
 export interface DashboardServerOptions {
   dataDir: string;

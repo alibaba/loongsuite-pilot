@@ -167,7 +167,7 @@ loongsuite-pilot rollback
 本地 Dashboard 会随采集服务一起启动和停止，直接打开：
 
 ```text
-http://127.0.0.1:18765/
+http://127.0.0.1:8765/
 ```
 
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。

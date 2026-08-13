@@ -159,7 +159,7 @@ loongsuite-pilot rollback
 ```
 
 本地 Dashboard 会随采集服务一起启动和停止，直接打开
-`http://127.0.0.1:18765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
+`http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
 `logs/metrics-summary.json`。
 
 macOS 菜单栏 App：

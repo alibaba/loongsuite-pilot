@@ -168,7 +168,7 @@
 
     function renderAgents(agentShares) {
       if (!agentShares.length) {
-        $('agent-grid').innerHTML = '<div class="panel empty agent-empty">暂时没有检测到用户的 Agent 使用数据</div>';
+        $('agent-grid').innerHTML = '<div class="panel empty agent-empty">暂时没有检测到 Agent Token 数据</div>';
         return;
       }
       $('agent-grid').innerHTML = agentShares.map((agent) => `

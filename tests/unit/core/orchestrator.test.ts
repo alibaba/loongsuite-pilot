@@ -30,11 +30,15 @@ vi.mock('../../../src/status-bar/index.js', () => ({
 
 const mockDashboardStart = vi.fn().mockResolvedValue(undefined);
 const mockDashboardStop = vi.fn().mockResolvedValue(undefined);
+const mockDashboardConstructor = vi.fn();
 vi.mock('../../../src/dashboard/index.js', () => ({
-  DashboardServer: vi.fn().mockImplementation(() => ({
-    start: mockDashboardStart,
-    stop: mockDashboardStop,
-  })),
+  DashboardServer: vi.fn().mockImplementation((options: unknown) => {
+    mockDashboardConstructor(options);
+    return {
+      start: mockDashboardStart,
+      stop: mockDashboardStop,
+    };
+  }),
 }));
 
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
@@ -244,6 +248,9 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       metricsSummaryIntervalMs: 60_000,
       runtimeRefreshIntervalMs: 30_000,
     },
+    dashboard: {
+      port: 8765,
+    },
     agents: {},
     ...overrides,
   };
@@ -258,6 +265,9 @@ describe('Orchestrator', () => {
   describe('startup sequence (T038)', () => {
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
+        dashboard: {
+          port: 19_001,
+        },
         statusBar: {
           enabled: false,
           metricsSummaryIntervalMs: 60_000,
@@ -269,6 +279,7 @@ describe('Orchestrator', () => {
 
       expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
       expect(mockDashboardStart).toHaveBeenCalledOnce();
+      expect(mockDashboardConstructor).toHaveBeenCalledWith(expect.objectContaining({ port: 19_001 }));
       expect(mockStatusBarSyncDesiredState).not.toHaveBeenCalled();
 
       await orch.stop();

@@ -125,7 +125,7 @@ loongsuite-pilot rollback
 The local dashboard starts and stops with the collector. Open:
 
 ```text
-http://127.0.0.1:18765/
+http://127.0.0.1:8765/
 ```
 
 The page reads `logs/metrics-summary.json` directly and does not run a second

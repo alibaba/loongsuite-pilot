@@ -943,7 +943,22 @@ function Cmd-RestartUpdater {
 # ============================================================
 # CMD: status
 # ============================================================
+function Get-DashboardPort {
+    try {
+        if (Test-Path $CONFIG_FILE) {
+            $config = Get-Content -LiteralPath $CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+            $port = $config.dashboard.port
+            if ($port -is [int] -or $port -is [long]) {
+                $numericPort = [long]$port
+                if ($numericPort -ge 1 -and $numericPort -le 65535) { return [int]$numericPort }
+            }
+        }
+    } catch {}
+    return 8765
+}
+
 function Test-DashboardAvailable {
+    param([int]$Port)
     $nodeBin = Resolve-Node
     if (-not $nodeBin) { return $false }
 
@@ -959,7 +974,7 @@ const finish = (code) => {
 };
 const request = http.request({
   host: "127.0.0.1",
-  port: 18765,
+  port: Number(process.argv[1]),
   path: "/metrics-summary.json",
   method: "HEAD",
 }, (response) => {
@@ -975,7 +990,7 @@ timer = setTimeout(() => {
 '@
 
     try {
-        & $nodeBin -e $probe *> $null
+        & $nodeBin -e $probe $Port *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -1010,10 +1025,11 @@ function Cmd-Status {
         }
     }
     if ($collectorRunning) {
-        if (Test-DashboardAvailable) {
-            Write-Host "   dashboard: http://127.0.0.1:18765/"
+        $dashboardPort = Get-DashboardPort
+        if (Test-DashboardAvailable -Port $dashboardPort) {
+            Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
         } else {
-            Write-Host "   dashboard: unavailable (http://127.0.0.1:18765/)" -ForegroundColor Yellow
+            Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
         }
     }
 

@@ -36,6 +36,23 @@ describe('ConfigLoader', () => {
   });
 
   describe('three-layer priority (T025)', () => {
+    it.each([
+      [undefined, 8765],
+      [1, 1],
+      [8765, 8765],
+      [65535, 65535],
+      [0, 8765],
+      [65536, 8765],
+      [-1, 8765],
+      [1.5, 8765],
+      ['9000', 8765],
+      [Number.NaN, 8765],
+    ])('validates dashboard.port=%s as %s', async (port, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(port === undefined ? {} : { dashboard: { port } });
+      const config = await loadConfig();
+      expect(config.dashboard.port).toBe(expected);
+    });
+
     it('env vars override config file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',

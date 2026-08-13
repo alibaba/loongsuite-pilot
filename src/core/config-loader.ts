@@ -4,6 +4,7 @@ import type {
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
+  DashboardConfig,
   FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
@@ -174,6 +175,10 @@ export interface ConfigFile {
 
   enableStatusBarApp?: boolean | string;
 
+  dashboard?: {
+    port?: number;
+  };
+
   /** User-defined attributes injected into trace spans (merged with OTEL_SPAN_ATTRIBUTES env). */
   globalSpanAttributes?: Record<string, unknown>;
 
@@ -264,6 +269,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
@@ -495,6 +501,17 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
     enabled: envBool('LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP', fallback),
     metricsSummaryIntervalMs: 60_000,
     runtimeRefreshIntervalMs: 30_000,
+  };
+}
+
+const DEFAULT_DASHBOARD_PORT = 8_765;
+
+function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
+  const port = file?.dashboard?.port;
+  return {
+    port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
+      ? port
+      : DEFAULT_DASHBOARD_PORT,
   };
 }
 

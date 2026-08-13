@@ -177,7 +177,7 @@ loongsuite-pilot rollback
 ```
 
 The local dashboard starts and stops with the collector. Open
-`http://127.0.0.1:18765/`; no separate monitor command is required. It reads the
+`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
 collector-owned `logs/metrics-summary.json` file directly.
 
 macOS menu bar app:

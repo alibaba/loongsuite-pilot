@@ -122,6 +122,7 @@ export interface AnalyticsConfig {
   fileCollection: FileCollectionToggle;
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
+  dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
@@ -309,6 +310,10 @@ export interface StatusBarConfig {
   enabled: boolean;
   metricsSummaryIntervalMs: number;
   runtimeRefreshIntervalMs: number;
+}
+
+export interface DashboardConfig {
+  port: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

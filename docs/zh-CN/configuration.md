@@ -23,6 +23,7 @@ Pilot 按以下顺序解析配置：
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
+  "dashboard": { "port": 8765 },
   "serviceName": "my-agent-service"
 }
 ```
@@ -34,6 +35,7 @@ Pilot 按以下顺序解析配置：
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
+| `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
 

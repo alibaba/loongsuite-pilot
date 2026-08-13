@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DashboardServer,
+  DEFAULT_DASHBOARD_PORT,
 } from '../../../src/dashboard/dashboard-server.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -30,6 +31,10 @@ afterEach(async () => {
 });
 
 describe('DashboardServer', () => {
+  it('defaults to port 8765', () => {
+    expect(DEFAULT_DASHBOARD_PORT).toBe(8765);
+  });
+
   it('serves only the static page and the unmodified summary file', async () => {
     const { dataDir, assetPath } = await fixture();
     const summaryPath = path.join(dataDir, 'logs', 'metrics-summary.json');
