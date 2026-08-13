@@ -210,10 +210,12 @@ To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enabl
 
 [Output Schema](docs/output-event-schema.md) - Normalized event names, fields, provider values, and finish reasons
 
-[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agentBuild From Source
+[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
+
+## Build From Source
 
 ```bash
-git clone https://github.com/loongsuite/loongsuite-pilot.git
+git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 npm install
 npm run build

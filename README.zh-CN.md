@@ -197,7 +197,7 @@ macOS 菜单栏 App：
 ## 从源码构建
 
 ```bash
-git clone https://github.com/loongsuite/loongsuite-pilot.git
+git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 npm install
 npm run build
