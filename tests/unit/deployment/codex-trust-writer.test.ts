@@ -230,7 +230,7 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
   });
 
   test('forceBypass=true 时写入 bypass_hook_trust = true', () => {
-    writeTrustedHashes({
+    const opts = {
       configPath,
       hooksJsonAbsPath: '/abs/hooks.json',
       hookEvents: HOOK_EVENTS,
@@ -238,9 +238,54 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
       eventToGroupIndex: EVENT_TO_GROUP_0,
       marker: 'otel-codex-hook',
       forceBypass: true,
-    });
+    } as const;
+    writeTrustedHashes(opts);
     const content = fs.readFileSync(configPath, 'utf-8');
     expect(content).toContain('bypass_hook_trust = true');
+    expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
+  });
+
+  test('forceBypass off -> on 需要触发重写', () => {
+    const base = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      hookEvents: HOOK_EVENTS,
+      eventToCommand: EVENT_TO_CMD,
+      eventToGroupIndex: EVENT_TO_GROUP_0,
+      marker: 'otel-codex-hook',
+    } as const;
+    writeTrustedHashes(base);
+
+    const enabled = { ...base, forceBypass: true } as const;
+    expect(verifyTrustHashes(enabled)).toEqual({
+      valid: false,
+      mismatches: ['missing bypass_hook_trust = true'],
+    });
+    expect(writeTrustedHashes(enabled)).toBe(true);
+    expect(fs.readFileSync(configPath, 'utf-8')).toContain('bypass_hook_trust = true');
+    expect(verifyTrustHashes(enabled)).toEqual({ valid: true, mismatches: [] });
+  });
+
+  test('forceBypass on -> off 需要触发重写', () => {
+    const enabled = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      hookEvents: HOOK_EVENTS,
+      eventToCommand: EVENT_TO_CMD,
+      eventToGroupIndex: EVENT_TO_GROUP_0,
+      marker: 'otel-codex-hook',
+      forceBypass: true,
+    } as const;
+    writeTrustedHashes(enabled);
+
+    const disabled = { ...enabled, forceBypass: false } as const;
+    expect(verifyTrustHashes(disabled)).toEqual({
+      valid: false,
+      mismatches: ['unexpected bypass_hook_trust = true'],
+    });
+    expect(writeTrustedHashes(disabled)).toBe(true);
+    expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('bypass_hook_trust = true');
+    expect(verifyTrustHashes(disabled)).toEqual({ valid: true, mismatches: [] });
   });
 
   test('幂等重写: 两次 write 不产生重复段', () => {
@@ -296,7 +341,9 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     ].join('\n');
     fs.writeFileSync(configPath, trustAndUserData, 'utf-8');
 
-    const removed = removeTrustBlock(configPath, 'otel-codex-hook', '/abs/hooks.json', HOOK_EVENTS);
+    const removed = removeTrustBlock(configPath, 'otel-codex-hook', [
+      '/abs/hooks.json:session_start:0:0',
+    ]);
     expect(removed).toBe(true);
     const content = fs.readFileSync(configPath, 'utf-8');
     // trust 条目 + marker 都被删
@@ -307,6 +354,31 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     // 用户的 marketplace 数据保留
     expect(content).toContain('[marketplaces.openai-bundled]');
     expect(content).toContain('source_type = "local"');
+  });
+
+  test('removeTrustBlock 不删除 marker 范围内的第三方 hook trust', () => {
+    const pilotKey = '/abs/hooks.json:session_start:0:0';
+    const thirdPartyKey = '/abs/hooks.json:session_start:1:0';
+    fs.writeFileSync(configPath, [
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${pilotKey}"]`,
+      'trusted_hash = "sha256:PILOT"',
+      '',
+      `[hooks.state."${thirdPartyKey}"]`,
+      'enabled = false',
+      'trusted_hash = "sha256:THIRD_PARTY"',
+      '',
+      '# END otel-codex-hook trust',
+    ].join('\n'), 'utf-8');
+
+    removeTrustBlock(configPath, 'otel-codex-hook', [pilotKey]);
+
+    const content = fs.readFileSync(configPath, 'utf-8');
+    expect(content).not.toContain(pilotKey);
+    expect(content).not.toContain('sha256:PILOT');
+    expect(content).toContain(`[hooks.state."${thirdPartyKey}"]`);
+    expect(content).toContain('enabled = false');
+    expect(content).toContain('sha256:THIRD_PARTY');
   });
 
   test('verify 检测 hash 不一致', () => {

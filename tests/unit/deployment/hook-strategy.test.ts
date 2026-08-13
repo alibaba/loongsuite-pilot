@@ -41,8 +41,11 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
     Stop: 'stop',
     PostToolUse: 'post_tool_use',
   },
+  installedHookStateKey: vi.fn((hooksPath: string, location: { eventKey: string; groupIndex: number; handlerIndex: number }) =>
+    `${hooksPath}:${location.eventKey}:${location.groupIndex}:${location.handlerIndex}`),
   writeTrustedHashes: vi.fn(),
   removeTrustBlock: vi.fn(),
+  removeTrustStateKeys: vi.fn(),
   verifyTrustHashes: vi.fn(() => ({ valid: true, mismatches: [] })),
 }));
 
@@ -55,6 +58,7 @@ import {
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
 import {
+  removeTrustBlock,
   verifyTrustHashes,
   writeTrustedHashes,
 } from '../../../src/deployment/codex-trust-writer.js';
@@ -1034,6 +1038,43 @@ describe('HookStrategy', () => {
 
       const result = await strategy.undeploy(makeDef());
       expect(result).toBe(false);
+    });
+
+    it('removes only exact Codex trust keys resolved before uninstall', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [
+            { hooks: [{ type: 'command', command: 'third-party' }] },
+            { hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] },
+          ],
+        },
+      });
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      });
+
+      const result = await strategy.undeploy(def);
+
+      expect(result).toBe(true);
+      expect(removeTrustBlock).toHaveBeenCalledWith(
+        '/home/.codex/config.toml',
+        'otel-codex-hook',
+        ['/home/.codex/hooks.json:stop:1:0'],
+      );
+      expect(mockHookManager.uninstallHook).toHaveBeenCalledOnce();
     });
   });
 

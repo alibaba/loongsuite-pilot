@@ -22,8 +22,10 @@ import {
   CODEX_HOOK_EVENT_KEYS,
   type InstalledCodexCommandHandler,
   type InstalledCodexHookLocation,
+  installedHookStateKey,
   writeTrustedHashes,
   removeTrustBlock,
+  removeTrustStateKeys,
   verifyTrustHashes,
 } from './codex-trust-writer.js';
 
@@ -201,6 +203,27 @@ export class HookStrategy implements DeployStrategy {
       }
 
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+      let retiredTrustKeys: string[] = [];
+      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
+        try {
+          const retiredEvents = retiredHookDefs.map(
+            definition => definition.hookJsonPath.at(-1)!,
+          );
+          const locations = await this.resolveInstalledCodexHooks(def, retiredEvents, true);
+          const hooksJsonAbsPath = path.resolve(resolveHome(hookConfig.settingsPath));
+          retiredTrustKeys = Object.values(locations).map(
+            location => installedHookStateKey(hooksJsonAbsPath, location),
+          );
+        } catch (err) {
+          // Cleanup must be conservative: if ownership cannot be proven from the
+          // installed handler, leave stale state behind rather than deleting a
+          // third-party hook's position-based trust entry.
+          logger.warn('could not resolve retired Codex hook trust ownership', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
       for (const retiredHookDef of retiredHookDefs) {
         const removed = await this.hookManager.uninstallHook(retiredHookDef);
         if (!removed) {
@@ -209,11 +232,9 @@ export class HookStrategy implements DeployStrategy {
       }
       if (hookConfig.trustToml && retiredHookDefs.length > 0) {
         const trust = hookConfig.trustToml;
-        removeTrustBlock(
+        removeTrustStateKeys(
           resolveHome(trust.configPath),
-          trust.marker,
-          path.resolve(resolveHome(hookConfig.settingsPath)),
-          retiredHookDefs.map(definition => definition.hookJsonPath.at(-1)!),
+          retiredTrustKeys,
         );
       }
 
@@ -320,6 +341,22 @@ export class HookStrategy implements DeployStrategy {
     // firing, since current events don't cover them.
     const retiredHookDefs = this.buildRetiredHookDefinitions(def);
     const hookDefs = [...this.buildHookDefinitions(def), ...retiredHookDefs];
+    let ownedTrustKeys: string[] = [];
+    if (def.hook?.trustToml) {
+      try {
+        const events = hookDefs.map(hookDef => hookDef.hookJsonPath.at(-1)!);
+        const locations = await this.resolveInstalledCodexHooks(def, events, true);
+        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
+        ownedTrustKeys = Object.values(locations).map(
+          location => installedHookStateKey(hooksJsonAbsPath, location),
+        );
+      } catch (err) {
+        logger.warn('could not resolve Codex hook trust ownership before undeploy', {
+          agentId: def.id,
+          error: String(err),
+        });
+      }
+    }
     let allOk = true;
     for (const hookDef of hookDefs) {
       const ok = await this.hookManager.uninstallHook(hookDef);
@@ -330,12 +367,7 @@ export class HookStrategy implements DeployStrategy {
       try {
         const cfg = def.hook.trustToml;
         const configPath = resolveHome(cfg.configPath);
-        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
-        const retiredEvents = retiredHookDefs.map(d => d.hookJsonPath.at(-1) as string);
-        removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, [
-          ...def.hook.events,
-          ...retiredEvents,
-        ]);
+        removeTrustBlock(configPath, cfg.marker, ownedTrustKeys);
       } catch (err) {
         logger.warn('codex trust cleanup failed (non-blocking)', { error: String(err) });
       }
@@ -347,6 +379,8 @@ export class HookStrategy implements DeployStrategy {
   /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */
   private async resolveInstalledCodexHooks(
     def: AgentDefinition,
+    eventNames: readonly string[] = def.hook!.events,
+    allowMissing = false,
   ): Promise<Record<string, InstalledCodexHookLocation>> {
     const result: Record<string, InstalledCodexHookLocation> = {};
     const hookCommand = resolveHome(def.hook!.hookCommand);
@@ -357,11 +391,14 @@ export class HookStrategy implements DeployStrategy {
       throw new Error(`installed hooks object missing: ${settingsPath}`);
     }
 
-    for (const eventName of def.hook!.events) {
+    for (const eventName of eventNames) {
       const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
       if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
       const groups = hooks[eventName];
-      if (!Array.isArray(groups)) throw new Error(`installed hook event missing: ${eventName}`);
+      if (!Array.isArray(groups)) {
+        if (allowMissing) continue;
+        throw new Error(`installed hook event missing: ${eventName}`);
+      }
       const command = formatHookCommand(
         hookCommand, eventName, def.hook!.eventSubcommand, def.id,
       );
@@ -400,6 +437,7 @@ export class HookStrategy implements DeployStrategy {
           });
         });
       });
+      if (matches.length === 0 && allowMissing) continue;
       if (matches.length !== 1) {
         throw new Error(
           `expected exactly one installed Pilot handler for ${eventName}; found ${matches.length}`,

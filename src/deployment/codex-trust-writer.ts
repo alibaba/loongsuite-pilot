@@ -292,7 +292,10 @@ export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
   const content = fs.readFileSync(opts.configPath, 'utf-8');
   const actual = new Map(parseTrustSections(content).map(section => [section.key, section.hash]));
   const mismatches: string[] = [];
-  if (!opts.forceBypass && /^\s*bypass_hook_trust\s*=\s*true\s*$/m.test(content)) {
+  const bypassPresent = /^\s*bypass_hook_trust\s*=\s*true\s*$/m.test(content);
+  if (opts.forceBypass && !bypassPresent) {
+    mismatches.push('missing bypass_hook_trust = true');
+  } else if (!opts.forceBypass && bypassPresent) {
     mismatches.push('unexpected bypass_hook_trust = true');
   }
   for (const [key, hash] of expectedTrustState(opts)) {
@@ -313,7 +316,7 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   const existing = fs.existsSync(opts.configPath)
     ? fs.readFileSync(opts.configPath, 'utf-8')
     : '';
-  if (!opts.forceBypass && verifyTrustHashes(opts).valid) return false;
+  if (verifyTrustHashes(opts).valid) return false;
 
   const begin = `# BEGIN ${opts.marker} trust`;
   const end = `# END ${opts.marker} trust`;
@@ -353,24 +356,32 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
 export function removeTrustBlock(
   configPath: string,
   marker: string,
-  _hooksJsonAbsPath?: string,
-  _hookEvents?: readonly string[],
+  ownedHookStateKeys: readonly string[] = [],
 ): boolean {
   if (!fs.existsSync(configPath)) return false;
   const before = fs.readFileSync(configPath, 'utf-8');
   const begin = `# BEGIN ${marker} trust`;
   const end = `# END ${marker} trust`;
-  const beginIndex = before.indexOf(begin);
-  const endIndex = before.indexOf(end, beginIndex + begin.length);
-  const owned = new Set<string>();
-  if (beginIndex !== -1 && endIndex !== -1) {
-    for (const section of parseTrustSections(before.slice(beginIndex, endIndex))) owned.add(section.key);
-  }
+  const owned = new Set(ownedHookStateKeys);
   let content = before.split('\n')
     .filter(line => line.trim() !== begin && line.trim() !== end)
     .filter(line => !/^\s*bypass_hook_trust\s*=/.test(line))
     .join('\n');
   content = removeExactTrustSections(content, owned).replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  if (content === before) return false;
+  fs.writeFileSync(configPath, content, 'utf-8');
+  return true;
+}
+
+/** Remove exact position-based trust entries without touching the active block markers or bypass. */
+export function removeTrustStateKeys(
+  configPath: string,
+  ownedHookStateKeys: readonly string[],
+): boolean {
+  if (!fs.existsSync(configPath) || ownedHookStateKeys.length === 0) return false;
+  const before = fs.readFileSync(configPath, 'utf-8');
+  const content = removeExactTrustSections(before, new Set(ownedHookStateKeys))
+    .replace(/\n{3,}/g, '\n\n');
   if (content === before) return false;
   fs.writeFileSync(configPath, content, 'utf-8');
   return true;
