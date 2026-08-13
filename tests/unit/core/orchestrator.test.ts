@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AnalyticsConfig } from '../../../src/types/index.js';
 
+const { mockLoggerWarn } = vi.hoisted(() => ({
+  mockLoggerWarn: vi.fn(),
+}));
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -285,6 +288,34 @@ describe('Orchestrator', () => {
       await orch.stop();
       expect(mockDashboardStop).toHaveBeenCalledOnce();
       expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
+    it('keeps starting and stops safely when the dashboard rejects', async () => {
+      mockDashboardStart.mockRejectedValueOnce(new Error('dashboard exploded'));
+      const events: string[] = [];
+      const orch = new Orchestrator(makeConfig({
+        statusBar: {
+          enabled: true,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+      orch.on('started', () => events.push('started'));
+
+      await expect(orch.start()).resolves.toBeUndefined();
+
+      expect(events).toEqual(['started']);
+      expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(true);
+      if (process.platform === 'darwin') {
+        expect(mockStatusBarSyncDesiredState).toHaveBeenCalledWith(true);
+      }
+      expect(mockLoggerWarn).toHaveBeenCalledWith('dashboard start failed (non-fatal)', {
+        error: 'Error: dashboard exploded',
+      });
+
+      await expect(orch.stop()).resolves.toBeUndefined();
+      expect(mockDashboardStop).toHaveBeenCalledOnce();
+      expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(false);
     });
 
     it('calls subsystems in correct order', async () => {

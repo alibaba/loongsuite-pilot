@@ -327,7 +327,9 @@ export class Orchestrator extends EventEmitter {
       assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
       port: this.config.dashboard.port,
     });
-    await this.dashboardServer.start();
+    await this.dashboardServer.start().catch(err => {
+      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+    });
 
     // Only the native macOS menu bar app remains optional.
     if (this.config.statusBar.enabled) {
