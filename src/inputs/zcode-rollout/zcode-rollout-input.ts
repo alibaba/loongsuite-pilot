@@ -82,17 +82,22 @@ export class ZCodeRolloutInput extends BaseInput {
     // Baseline skip: for each rollout file we haven't seen yet, initialize
     // the byteOffset to the current EOF so pilot doesn't replay history on
     // first install. Spec §1.4 + §1.5 (test: baseline skip).
+    //
+    // Use a sentinel flag (extra.initialized) rather than relying on
+    // lastOffset > 0, because a file can legitimately have lastOffset = 0
+    // after inode rotation reset. Without the sentinel, a restart would
+    // treat such a file as "never seen" and skip to EOF, dropping data.
     const files = await this.discoverRolloutFiles();
     for (const filePath of files) {
       const stateKey = this.stateKey(filePath);
       const existing = this.stateStore.get(stateKey);
-      if (existing && typeof existing.lastOffset === 'number' && existing.lastOffset > 0) {
+      if (existing.extra?.initialized === true) {
         continue; // already tracking this file
       }
       try {
         const stat = await fs.promises.stat(filePath);
         this.stateStore.setOffset(stateKey, stat.size);
-        this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
+        this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino), initialized: true } });
       } catch {
         // file may disappear — skip silently
       }
@@ -236,7 +241,12 @@ export class ZCodeRolloutInput extends BaseInput {
         // toolCalls to state — they'll be paired with the next batch's first
         // line (or emitted as placeholders if no next batch arrives).
         allEntries.push(...this.buildEntriesFromRolloutLine(record, undefined, { skipToolCalls: true }));
-        this.bufferPendingToolCalls(sid, tid, record);
+        // Guard: only buffer when sid+tid are valid. Malformed/partial records
+        // with empty sid/tid would otherwise share a single `:+` state key,
+        // corrupting pairing across sessions/turns.
+        if (sid && tid) {
+          this.bufferPendingToolCalls(sid, tid, record);
+        }
       } else {
         allEntries.push(...this.buildEntriesFromRolloutLine(record, nextRecord));
       }
