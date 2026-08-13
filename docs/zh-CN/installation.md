@@ -164,17 +164,13 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-可选本地 Dashboard：
-
-```bash
-loongsuite-pilot monitor start
-```
-
-然后打开：
+本地 Dashboard 会随采集服务一起启动和停止，直接打开：
 
 ```text
-http://127.0.0.1:8765/
+http://127.0.0.1:18765/
 ```
+
+页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
 
 ## 卸载
 

@@ -7,6 +7,36 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
+const mockRuntimeWriterStart = vi.fn();
+const mockRuntimeWriterStop = vi.fn();
+const mockMetricsSummaryStart = vi.fn();
+const mockMetricsSummaryStop = vi.fn();
+const mockStatusBarSyncDesiredState = vi.fn().mockResolvedValue(undefined);
+const mockStatusBarStop = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../src/status-bar/index.js', () => ({
+  RuntimeWriter: vi.fn().mockImplementation(() => ({
+    start: mockRuntimeWriterStart,
+    stop: mockRuntimeWriterStop,
+  })),
+  MetricsSummaryWriter: vi.fn().mockImplementation(() => ({
+    start: mockMetricsSummaryStart,
+    stop: mockMetricsSummaryStop,
+  })),
+  StatusBarAppManager: vi.fn().mockImplementation(() => ({
+    syncDesiredState: mockStatusBarSyncDesiredState,
+    stop: mockStatusBarStop,
+  })),
+}));
+
+const mockDashboardStart = vi.fn().mockResolvedValue(undefined);
+const mockDashboardStop = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../src/dashboard/index.js', () => ({
+  DashboardServer: vi.fn().mockImplementation(() => ({
+    start: mockDashboardStart,
+    stop: mockDashboardStop,
+  })),
+}));
+
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
 const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, '/home/test'));
 
@@ -67,6 +97,15 @@ vi.mock('@alicloud/log', () => ({
 
 vi.mock('axios', () => ({
   default: { post: vi.fn().mockResolvedValue({ status: 200 }) },
+}));
+
+// This suite exercises orchestration only; loading the native sqlite binding is
+// unnecessary and makes the test depend on the local Node ABI.
+vi.mock('sqlite3', () => ({
+  default: {
+    Database: vi.fn(),
+    OPEN_READONLY: 1,
+  },
 }));
 
 vi.mock('../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js', () => ({
@@ -217,6 +256,26 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
+      const orch = new Orchestrator(makeConfig({
+        statusBar: {
+          enabled: false,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+
+      await orch.start();
+
+      expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockDashboardStart).toHaveBeenCalledOnce();
+      expect(mockStatusBarSyncDesiredState).not.toHaveBeenCalled();
+
+      await orch.stop();
+      expect(mockDashboardStop).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
     it('calls subsystems in correct order', async () => {
       const callOrder: string[] = [];
       mockEnsureDir.mockImplementation(async () => { callOrder.push('ensureDir'); });

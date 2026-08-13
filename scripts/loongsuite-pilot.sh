@@ -11,16 +11,13 @@ BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
 PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
 UPDATER_PID_FILE="$DATA_DIR/loongsuite-pilot-updater.pid"
+LEGACY_MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
+LEGACY_DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
-MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
-DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
 SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
-MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
-DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
-MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
@@ -155,6 +152,33 @@ stop_pid_file() {
         fi
     fi
     rm -f "$pid_file"
+}
+
+# One-way migration cleanup for releases that managed the old sampler and
+# dashboard as standalone processes. A stale PID can be reused, so a PID-file
+# process is stopped only when its command line still names the expected script.
+# The private cleanup must not be exposed as a new `monitor` CLI command.
+cleanup_legacy_monitor_process() {
+    local pid_file="$1"
+    local script_name="$2"
+    local pid=""
+    local command_line=""
+    if [ -f "$pid_file" ]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+            if [[ "$command_line" == *"$script_name"* ]]; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$pid_file"
+    fi
+    pkill -U "$(id -u)" -f "$script_name" 2>/dev/null || true
+}
+
+cleanup_legacy_monitor_processes() {
+    cleanup_legacy_monitor_process "$LEGACY_MONITOR_PID_FILE" "monitor-loongsuite-pilot.sh"
+    cleanup_legacy_monitor_process "$LEGACY_DASHBOARD_PID_FILE" "serve-loongsuite-pilot-monitor.mjs"
 }
 
 updater_process_exists() {
@@ -419,6 +443,7 @@ cmd_run_updater() {
 # ---- User-facing commands ----
 
 cmd_start() {
+    cleanup_legacy_monitor_processes
     for arg in "$@"; do
         case "$arg" in
             --system-service)
@@ -465,7 +490,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-    cmd_monitor_stop >/dev/null 2>&1 || true
+    cleanup_legacy_monitor_processes
     autostart_remove 2>/dev/null || true
 
     local target_user
@@ -524,74 +549,9 @@ cmd_stop() {
     echo "✅ loongsuite-pilot stopped"
 }
 
-cmd_process_monitor_start() {
-    if is_pid_file_running "$MONITOR_PID_FILE"; then
-        echo "✅ loongsuite-pilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
-        return 0
-    fi
-
-    ensure_dirs
-    local script
-    script=$(resolve_script "monitor-loongsuite-pilot.sh") || {
-        echo "❌ monitor script missing"
-        exit 1
-    }
-
-    nohup bash "$script" >> "$MONITOR_LOG_FILE" 2>&1 &
-    echo "$!" > "$MONITOR_PID_FILE"
-    echo "✅ loongsuite-pilot process monitor started (PID $!)"
-}
-
-cmd_process_monitor_stop() {
-    stop_pid_file "$MONITOR_PID_FILE"
-    pkill -f "monitor-loongsuite-pilot\.sh" 2>/dev/null || true
-    echo "✅ loongsuite-pilot process monitor stopped"
-}
-
-cmd_dashboard_start() {
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then
-        echo "✅ loongsuite-pilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
-        return 0
-    fi
-
-    ensure_dirs
-    local script node_bin
-    script=$(resolve_script "serve-loongsuite-pilot-monitor.mjs") || {
-        echo "❌ dashboard script missing"
-        exit 1
-    }
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    nohup "$node_bin" "$script" >> "$DASHBOARD_LOG_FILE" 2>&1 &
-    echo "$!" > "$DASHBOARD_PID_FILE"
-    echo "✅ loongsuite-pilot dashboard started (PID $!)"
-    echo "   open http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
-}
-
-cmd_dashboard_stop() {
-    stop_pid_file "$DASHBOARD_PID_FILE"
-    pkill -f "serve-loongsuite-pilot-monitor\.mjs" 2>/dev/null || true
-    echo "✅ loongsuite-pilot dashboard stopped"
-}
-
-cmd_monitor_start() {
-    cmd_process_monitor_start
-    cmd_dashboard_start
-    echo "✅ loongsuite-pilot monitor is running"
-    echo "   dashboard: http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
-}
-
-cmd_monitor_stop() {
-    cmd_dashboard_stop
-    cmd_process_monitor_stop
-    echo "✅ loongsuite-pilot monitor stopped"
-}
-
 # Restart only the collector (used by updater after deploying a new version)
 cmd_restart_collector() {
+    cleanup_legacy_monitor_processes
     local target_user
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-${target_user}.service"
@@ -888,6 +848,7 @@ cmd_status() {
         local pid
         pid=$(cat "$PID_FILE")
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
+        echo "   dashboard: http://127.0.0.1:18765/"
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi
@@ -895,17 +856,6 @@ cmd_status() {
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
-    fi
-    local sampler_pid=""
-    local dashboard_pid=""
-    if is_pid_file_running "$MONITOR_PID_FILE"; then sampler_pid=$(cat "$MONITOR_PID_FILE"); fi
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then dashboard_pid=$(cat "$DASHBOARD_PID_FILE"); fi
-    if [ -n "$sampler_pid" ] && [ -n "$dashboard_pid" ]; then
-        echo "   monitor: running (sampler PID $sampler_pid, dashboard PID $dashboard_pid)"
-    elif [ -n "$sampler_pid" ] || [ -n "$dashboard_pid" ]; then
-        echo "   monitor: partially running (sampler PID ${sampler_pid:-stopped}, dashboard PID ${dashboard_pid:-stopped})"
-    else
-        echo "   monitor: stopped"
     fi
     autostart_status
 }
@@ -1902,22 +1852,9 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
-    echo "  monitor start   Start process resource monitor"
-    echo "  monitor stop    Stop process resource monitor"
     echo "  worker ...      Manage local remote-controlled workers"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
-}
-
-cmd_monitor() {
-    case "${1:-}" in
-        start) cmd_monitor_start ;;
-        stop)  cmd_monitor_stop ;;
-        *)
-            echo "Unknown monitor command: ${1:-}"
-            echo "Usage: loongsuite-pilot monitor <start|stop>"
-            exit 1 ;;
-    esac
 }
 
 # ---- Dispatch ----
@@ -1931,7 +1868,6 @@ case "${1:-status}" in
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
     span-attr)   shift; cmd_span_attr "$@" ;;
-    monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
     agent)               shift; cmd_agent "$@" ;;
     rollback)            cmd_rollback ;;

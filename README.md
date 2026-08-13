@@ -34,7 +34,7 @@ Pilot is designed to answer practical questions:
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
 | Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
-| Local operations         | Provides service status, restart, rollback, and optional local dashboard commands. |
+| Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
 ## Supported Agents
@@ -182,13 +182,9 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-Optional local dashboard:
-
-```bash
-loongsuite-pilot monitor start
-```
-
-Then open `http://127.0.0.1:8765/`.
+The local dashboard starts and stops with the collector. Open
+`http://127.0.0.1:18765/`; no separate monitor command is required. It reads the
+collector-owned `logs/metrics-summary.json` file directly.
 
 macOS menu bar app:
 

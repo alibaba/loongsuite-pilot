@@ -970,6 +970,9 @@ function Cmd-Status {
             Write-Host "   collector task: running without a runtime heartbeat" -ForegroundColor Yellow
         }
     }
+    if ($collectorRunning) {
+        Write-Host "   dashboard: http://127.0.0.1:18765/"
+    }
 
     # Updater status
     if (Test-PidRunning $UPDATER_PID_FILE) {

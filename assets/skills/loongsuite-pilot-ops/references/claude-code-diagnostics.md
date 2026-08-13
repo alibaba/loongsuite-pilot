@@ -338,4 +338,4 @@ ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 | 重装 pilot 后 hook 不生效 | 确认 pilot 安装脚本调用了 `otel-claude-hook install`（不能因解压跳过而 early return）。当前版本已修复为每次都全新安装 |
 | JSONL 有 LLM / Tool 但无 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` | `claude-code-fetch-intercept.mjs` 的 BUN_OPTIONS preload 未注入或当前终端未 source rc，参考第 3 步 |
 | `~/.loongsuite-pilot/intercept/claude-code/` 没有新文件 | preload 未生效；检查 shell rc 注入块、`type claude`，修复后重新 source rc / 开新终端 |
-| 监控面板 `Last activity` 显示时间早于 JSONL 末尾时间（数据已采集但 dashboard 卡住） | dashboard 是按需懒索引，单次刷新最多吃 5 MiB / 2 万行。Claude Code 单行可达 100 KB，22 MiB 文件至少要刷 5 次才能追到尾。先 `grep '\[overview\] partial index' ~/.loongsuite-pilot/logs/loongsuite-pilot-dashboard.log` 确认；命中后多刷几次 dashboard（间隔 ≥5 秒）即可。详见 `monitoring.md` 的 "Dashboard Last activity 显示落后于真实时间" 章节 |
+| Dashboard 数据超过一分钟未更新 | Dashboard 直接读取 `logs/metrics-summary.json`。先检查 `loongsuite-pilot status`、该文件修改时间和 `loongsuite-pilot-service.log` 中的 `MetricsSummaryWriter` 日志；不要通过重复刷新页面触发计算。详见 `monitoring.md` |

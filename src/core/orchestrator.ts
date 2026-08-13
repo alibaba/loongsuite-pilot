@@ -70,6 +70,7 @@ import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
+import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -143,6 +144,7 @@ export class Orchestrator extends EventEmitter {
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
+  private dashboardServer: DashboardServer | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
@@ -312,11 +314,22 @@ export class Orchestrator extends EventEmitter {
     this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
     this.runtimeWriter.start();
 
-    // Status bar metrics/native UI remain optional.
-    if (this.config.statusBar.enabled) {
-      this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
-      this.metricsSummaryWriter.start();
+    // MetricsSummaryWriter is a collector-owned source shared by every local
+    // presentation surface. It must keep running when the optional native menu
+    // bar app is disabled.
+    this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
+    this.metricsSummaryWriter.start();
 
+    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // its loopback port is unavailable. It never opens the system browser.
+    this.dashboardServer = new DashboardServer({
+      dataDir: this.dataDir,
+      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+    });
+    await this.dashboardServer.start();
+
+    // Only the native macOS menu bar app remains optional.
+    if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
         await this.statusBarAppManager.syncDesiredState(true).catch(err => {
@@ -369,6 +382,8 @@ export class Orchestrator extends EventEmitter {
     await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
+    await this.dashboardServer?.stop();
+    this.dashboardServer = null;
     this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();

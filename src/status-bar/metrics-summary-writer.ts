@@ -172,11 +172,6 @@ export class MetricsSummaryWriter {
   }
 
   start(): void {
-    if (!this.config.enabled) {
-      logger.info('metrics summary writer disabled');
-      return;
-    }
-
     this.startupTimer = setTimeout(() => {
       this.startupTimer = null;
       void this.refresh();

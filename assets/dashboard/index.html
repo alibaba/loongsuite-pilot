@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoongSuite Pilot Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: rgba(17, 24, 43, 0.9);
+      --panel-soft: rgba(21, 31, 54, 0.86);
+      --line: rgba(148, 163, 184, 0.16);
+      --text: #edf2ff;
+      --muted: #94a3b8;
+      --accent: #69e6a6;
+      --blue: #7dd3fc;
+      --warn: #fbbf24;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, #1a2a4a 0, var(--bg) 42%);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 40px; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -0.03em; }
+    h2 { margin: 0 0 14px; font-size: 17px; }
+    p { margin: 0; color: var(--muted); }
+    .toolbar, .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; }
+    .toolbar { flex-wrap: wrap; justify-content: flex-end; }
+    select {
+      background: rgba(255, 255, 255, 0.08); border: 1px solid var(--line); border-radius: 999px;
+      color: var(--text); padding: 5px 10px; font-size: 12px;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 16px var(--warn); }
+    .dot.ok { background: var(--accent); box-shadow: 0 0 16px var(--accent); }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .agent-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .section { margin-top: 18px; }
+    .card, .panel, .agent-card {
+      padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
+    }
+    .label { margin-bottom: 7px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .value { font-size: 25px; font-weight: 720; letter-spacing: -0.03em; }
+    .subvalue { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .agent-title { margin-bottom: 12px; font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+    .kv { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .kv > div { padding: 10px; border-radius: 12px; background: var(--panel-soft); }
+    .kv .value { font-size: 20px; }
+    .list { display: grid; gap: 9px; }
+    .list-row { display: grid; grid-template-columns: minmax(100px, 1fr) auto auto; gap: 14px; align-items: center; }
+    .list-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar { height: 6px; margin-top: 5px; border-radius: 999px; background: rgba(148, 163, 184, 0.13); overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--blue)); }
+    .trend { display: grid; grid-template-columns: repeat(30, minmax(3px, 1fr)); align-items: end; height: 160px; gap: 3px; }
+    .trend-bar { min-height: 2px; border-radius: 4px 4px 0 0; background: linear-gradient(var(--blue), rgba(125, 211, 252, 0.35)); }
+    .trend-labels { display: flex; justify-content: space-between; margin-top: 8px; color: var(--muted); font-size: 11px; }
+    .notice { display: none; padding: 12px 14px; border: 1px solid rgba(251,191,36,.35); border-radius: 14px; background: rgba(251,191,36,.1); color: #fde68a; font-size: 13px; }
+    .notice.show { display: block; }
+    .empty { padding: 22px 0; color: var(--muted); text-align: center; }
+    @media (max-width: 900px) { header { align-items: flex-start; flex-direction: column; } .cards, .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .two-columns { grid-template-columns: 1fr; } }
+    @media (max-width: 580px) { .cards, .agent-grid, .kv { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>LoongSuite Pilot Dashboard</h1>
+        <p>本页直接展示 <code>logs/metrics-summary.json</code>，不执行额外统计。</p>
+      </div>
+      <div class="toolbar">
+        <span id="status-dot" class="dot"></span>
+        <span id="status-text">连接中...</span>
+        <label class="status">刷新
+          <select id="refresh-select">
+            <option value="5000">5 秒</option>
+            <option value="10000" selected>10 秒</option>
+            <option value="30000">30 秒</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <div id="notice" class="notice"></div>
+
+    <section class="section cards">
+      <div class="card"><div class="label">今日 Token</div><div id="tokens" class="value">--</div><div id="token-detail" class="subvalue">--</div></div>
+      <div class="card"><div class="label">今日 Session</div><div id="sessions" class="value">--</div><div class="subvalue">去重会话数</div></div>
+      <div class="card"><div class="label">今日 Request</div><div id="requests" class="value">--</div><div class="subvalue">LLM 请求数</div></div>
+      <div class="card"><div class="label">今日 Tool Call</div><div id="tools" class="value">--</div><div class="subvalue">工具调用数</div></div>
+    </section>
+
+    <section class="section">
+      <h2>Agent 分布</h2>
+      <div id="agent-grid" class="agent-grid"></div>
+    </section>
+
+    <section class="section two-columns">
+      <div class="panel"><h2>最近 30 天 Token</h2><div id="token-trend"></div></div>
+      <div class="panel"><h2>最近 30 天 Session</h2><div id="session-trend"></div></div>
+    </section>
+
+    <section class="section two-columns">
+      <div class="panel"><h2>模型分布</h2><div id="models" class="list"></div></div>
+      <div class="panel"><h2>服务商分布</h2><div id="providers" class="list"></div></div>
+    </section>
+
+    <section class="section panel"><h2>仓库活动</h2><div id="repos" class="list"></div></section>
+  </main>
+
+  <script>
+    const DEFAULT_REFRESH_MS = 10000;
+    let refreshMs = DEFAULT_REFRESH_MS;
+    let refreshTimer;
+    const $ = (id) => document.getElementById(id);
+    const count = (value) => new Intl.NumberFormat().format(Number(value) || 0);
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[char]));
+
+    function setStatus(ok, text) {
+      $('status-dot').classList.toggle('ok', ok);
+      $('status-text').textContent = text;
+    }
+
+    function setNotice(text) {
+      $('notice').textContent = text || '';
+      $('notice').classList.toggle('show', Boolean(text));
+    }
+
+    function renderAgents(agentShares) {
+      if (!agentShares.length) {
+        $('agent-grid').innerHTML = '<div class="panel empty">今天还没有 Agent 活动</div>';
+        return;
+      }
+      $('agent-grid').innerHTML = agentShares.map((agent) => `
+        <article class="agent-card" data-agent-type="${escapeHtml(agent.agentType)}">
+          <div class="agent-title">${escapeHtml(agent.agentType)}</div>
+          <div class="kv">
+            <div><div class="label">Token</div><div class="value">${count(agent.tokens)}</div></div>
+            <div><div class="label">Session</div><div class="value">${count(agent.sessions)}</div></div>
+            <div><div class="label">Event</div><div class="value">${count(agent.events)}</div></div>
+          </div>
+          <div class="subvalue">事件占比 ${(Number(agent.share) * 100).toFixed(1)}%</div>
+        </article>
+      `).join('');
+    }
+
+    function renderTrend(target, points) {
+      if (!points.length) {
+        $(target).innerHTML = '<div class="empty">暂无数据</div>';
+        return;
+      }
+      const shown = points.slice(-30);
+      const max = Math.max(1, ...shown.map((point) => Number(point.value) || 0));
+      $(target).innerHTML = `
+        <div class="trend">${shown.map((point) => {
+          const height = Math.max(2, Math.round(((Number(point.value) || 0) / max) * 150));
+          return `<div class="trend-bar" title="${escapeHtml(point.day)}: ${count(point.value)}" style="height:${height}px"></div>`;
+        }).join('')}</div>
+        <div class="trend-labels"><span>${escapeHtml(shown[0]?.day || '')}</span><span>${escapeHtml(shown[shown.length - 1]?.day || '')}</span></div>`;
+    }
+
+    function renderShares(target, shares, nameKey, valueKey) {
+      if (!shares.length) {
+        $(target).innerHTML = '<div class="empty">暂无数据</div>';
+        return;
+      }
+      $(target).innerHTML = shares.map((entry) => `
+        <div class="list-row">
+          <div class="list-name" title="${escapeHtml(entry[nameKey])}">${escapeHtml(entry[nameKey])}<div class="bar"><span style="width:${Math.max(1, Math.min(100, Number(entry.share) * 100))}%"></span></div></div>
+          <span>${count(entry[valueKey])}</span><span>${(Number(entry.share) * 100).toFixed(1)}%</span>
+        </div>`).join('');
+    }
+
+    function renderRepos(repos) {
+      $('repos').innerHTML = repos.length ? repos.map((repo) => `
+        <div class="list-row"><div class="list-name" title="${escapeHtml(repo.repo)}">${escapeHtml(repo.repo)}</div><span>${count(repo.sessions)} sessions</span><span>${count(repo.events)} events</span></div>
+      `).join('') : '<div class="empty">暂无仓库活动数据</div>';
+    }
+
+    function render(summary) {
+      const today = summary.ranges.today;
+      $('tokens').textContent = count(today.totalTokens);
+      $('token-detail').textContent = `输入 ${count(today.inputTokens)} · 输出 ${count(today.outputTokens)} · 缓存读取 ${count(today.cacheReadTokens)}`;
+      $('sessions').textContent = count(today.totalSessions);
+      $('requests').textContent = count(today.totalRequests);
+      $('tools').textContent = count(today.totalToolCalls);
+      // Agent cards are intentionally derived only from agentShares. New agent
+      // types therefore appear without a dashboard code change.
+      renderAgents(Array.isArray(today.agentShares) ? today.agentShares : []);
+      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : []);
+      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : []);
+      renderShares('models', Array.isArray(today.modelShares) ? today.modelShares : [], 'model', 'totalTokens');
+      renderShares('providers', Array.isArray(today.providerShares) ? today.providerShares : [], 'provider', 'totalTokens');
+      renderRepos(Array.isArray(today.repoShares) ? today.repoShares : []);
+      setStatus(true, `数据生成于 ${new Date(summary.generatedAt).toLocaleTimeString()} · 每 ${refreshMs / 1000} 秒读取`);
+      setNotice('');
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/metrics-summary.json', { cache: 'no-store' });
+        if (response.status === 503) {
+          setStatus(false, '等待统计结果');
+          setNotice('metrics-summary.json 尚未生成，Pilot 启动后通常会在几秒内写入。');
+          return;
+        }
+        if (!response.ok) throw new Error(`读取 metrics-summary.json 失败：HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        setStatus(false, '读取失败');
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    function restartTimer() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(refresh, refreshMs);
+    }
+
+    $('refresh-select').addEventListener('change', (event) => {
+      const value = Number(event.target.value);
+      if (!Number.isFinite(value) || value <= 0) return;
+      refreshMs = value;
+      restartTimer();
+      void refresh();
+    });
+
+    void refresh();
+    restartTimer();
+  </script>
+</body>
+</html>
