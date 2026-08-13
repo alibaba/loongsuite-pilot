@@ -60,18 +60,22 @@
     .bar { height: 6px; margin-top: 5px; border-radius: 999px; background: rgba(148, 163, 184, 0.13); overflow: hidden; }
     .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--blue)); }
     .trend-wrap { position: relative; }
-    .trend { display: grid; grid-template-columns: repeat(30, minmax(3px, 1fr)); align-items: end; height: 160px; gap: 3px; }
+    .trend { display: grid; grid-template-columns: repeat(30, minmax(3px, 1fr)); align-items: stretch; height: 160px; gap: 3px; }
     .trend-bar {
-      min-width: 0; min-height: 2px; padding: 0; border: 0; border-radius: 4px 4px 0 0;
-      background: linear-gradient(var(--blue), rgba(125, 211, 252, 0.35)); cursor: crosshair;
+      display: flex; align-items: flex-end; min-width: 0; height: 100%; padding: 0; border: 0;
+      background: transparent; cursor: crosshair;
     }
-    .trend-bar:hover, .trend-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; filter: brightness(1.2); }
+    .trend-bar-fill {
+      display: block; width: 100%; min-height: 2px; border-radius: 4px 4px 0 0;
+      background: linear-gradient(var(--blue), rgba(125, 211, 252, 0.35)); pointer-events: none;
+    }
+    .trend-bar:hover .trend-bar-fill, .trend-bar:focus-visible .trend-bar-fill { filter: brightness(1.25); }
+    .trend-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
     .trend-tooltip {
-      position: absolute; z-index: 2; left: 0; top: 0; min-width: max-content; padding: 7px 9px;
+      position: absolute; z-index: 2; left: 4px; top: 4px; width: max-content; max-width: calc(100% - 8px); padding: 7px 9px;
       border: 1px solid rgba(125, 211, 252, .35); border-radius: 9px; background: #111a2d;
       color: var(--text); box-shadow: 0 8px 28px rgba(0, 0, 0, .35); font-size: 12px;
-      line-height: 1.45; pointer-events: none; opacity: 0; transform: translate(-50%, calc(-100% - 8px));
-      transition: opacity .12s ease;
+      line-height: 1.45; pointer-events: none; opacity: 0; transition: opacity .12s ease;
     }
     .trend-tooltip.show { opacity: 1; }
     .trend-tooltip strong { display: block; color: var(--blue); font-size: 13px; }
@@ -136,6 +140,7 @@
     let refreshTimer;
     const $ = (id) => document.getElementById(id);
     const count = (value) => new Intl.NumberFormat().format(Number(value) || 0);
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[char]));
@@ -174,12 +179,22 @@
       const tooltip = wrap?.querySelector('.trend-tooltip');
       if (!tooltip) return;
       tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.day)}</span><strong>${escapeHtml(bar.dataset.label)} ${count(bar.dataset.value)}</strong>`;
-      const barRect = bar.getBoundingClientRect();
-      const wrapRect = wrap.getBoundingClientRect();
-      tooltip.style.left = `${barRect.left - wrapRect.left + barRect.width / 2}px`;
-      tooltip.style.top = `${barRect.top - wrapRect.top}px`;
       tooltip.setAttribute('aria-hidden', 'false');
       tooltip.classList.add('show');
+
+      const fillRect = bar.querySelector('.trend-bar-fill').getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const desiredViewportLeft = fillRect.left + fillRect.width / 2 - tooltipRect.width / 2;
+      const minViewportLeft = Math.max(4, wrapRect.left + 4);
+      const maxViewportLeft = Math.min(
+        window.innerWidth - tooltipRect.width - 4,
+        wrapRect.right - tooltipRect.width - 4,
+      );
+      const desiredTop = fillRect.top - wrapRect.top - tooltipRect.height - 8;
+      const maxTop = wrapRect.height - tooltipRect.height - 4;
+      tooltip.style.left = `${clamp(desiredViewportLeft, minViewportLeft, maxViewportLeft) - wrapRect.left}px`;
+      tooltip.style.top = `${clamp(desiredTop, 4, maxTop)}px`;
     }
 
     function hideTrendTooltip(event) {
@@ -189,28 +204,37 @@
     }
 
     function renderTrend(target, points, valueLabel) {
+      const container = $(target);
+      const activeElement = document.activeElement;
+      const focusedDay = container.contains(activeElement) && activeElement.matches('.trend-bar')
+        ? activeElement.dataset.day
+        : null;
       if (!points.length) {
-        $(target).innerHTML = '<div class="empty">暂无数据</div>';
+        container.innerHTML = '<div class="empty">暂无数据</div>';
         return;
       }
       const shown = points.slice(-30);
       const max = Math.max(1, ...shown.map((point) => Number(point.value) || 0));
-      $(target).innerHTML = `
+      container.innerHTML = `
         <div class="trend-wrap">
           <div class="trend" role="group" aria-label="最近 30 天 ${escapeHtml(valueLabel)}趋势">${shown.map((point) => {
           const height = Math.max(2, Math.round(((Number(point.value) || 0) / max) * 150));
           const ariaLabel = `${point.day}，${valueLabel} ${count(point.value)}`;
-          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-value="${escapeHtml(point.value)}" style="height:${height}px"></button>`;
+          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${escapeHtml(target)}-tooltip" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-value="${escapeHtml(point.value)}"><span class="trend-bar-fill" style="height:${height}px"></span></button>`;
         }).join('')}</div>
-          <div class="trend-tooltip" role="tooltip" aria-hidden="true"></div>
+          <div id="${escapeHtml(target)}-tooltip" class="trend-tooltip" role="tooltip" aria-hidden="true"></div>
         </div>
         <div class="trend-labels"><span>${escapeHtml(shown[0]?.day || '')}</span><span>${escapeHtml(shown[shown.length - 1]?.day || '')}</span></div>`;
-      $(target).querySelectorAll('.trend-bar').forEach((bar) => {
+      const bars = [...container.querySelectorAll('.trend-bar')];
+      bars.forEach((bar) => {
         bar.addEventListener('mouseenter', showTrendTooltip);
         bar.addEventListener('mouseleave', hideTrendTooltip);
         bar.addEventListener('focus', showTrendTooltip);
         bar.addEventListener('blur', hideTrendTooltip);
       });
+      if (focusedDay) {
+        bars.find((bar) => bar.dataset.day === focusedDay)?.focus({ preventScroll: true });
+      }
     }
 
     function renderShares(target, shares, nameKey, valueKey) {

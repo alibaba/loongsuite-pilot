@@ -231,4 +231,28 @@ describe('dashboard static page', () => {
     expect(dashboardHtml).toContain("tooltip?.setAttribute('aria-hidden', 'true')");
     expect(dashboardHtml).not.toContain('class="trend-bar" title=');
   });
+
+  it('preserves focused trend days across refreshes', () => {
+    expect(dashboardHtml).toContain('const focusedDay = container.contains(activeElement)');
+    expect(dashboardHtml).toContain('bar.dataset.day === focusedDay');
+    expect(dashboardHtml).toContain('.focus({ preventScroll: true })');
+  });
+
+  it('uses a full-column hit target and clamps custom tooltips', () => {
+    expect(dashboardHtml).toContain('.trend-bar {\n      display: flex; align-items: flex-end;');
+    expect(dashboardHtml).toContain('height: 100%');
+    expect(dashboardHtml).toContain('<span class="trend-bar-fill" style="height:${height}px"></span>');
+    expect(dashboardHtml).toContain("bar.querySelector('.trend-bar-fill').getBoundingClientRect()");
+    expect(dashboardHtml).toContain('window.innerWidth - tooltipRect.width - 4');
+    expect(dashboardHtml).toContain('wrapRect.right - tooltipRect.width - 4');
+    expect(dashboardHtml).toContain('clamp(desiredTop, 4, maxTop)');
+
+    const clampMatch = dashboardHtml.match(/const clamp = \(value, min, max\) => ([^;]+);/);
+    expect(clampMatch).not.toBeNull();
+    const clamp = Function('value', 'min', 'max', `return ${clampMatch[1]};`);
+    expect(clamp(-5, 4, 100)).toBe(4);
+    expect(clamp(150, 4, 100)).toBe(100);
+    expect(clamp(20, 4, 100)).toBe(20);
+    expect(clamp(20, 40, 10)).toBe(40);
+  });
 });
