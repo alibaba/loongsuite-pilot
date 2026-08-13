@@ -17,7 +17,7 @@ Updater 守护进程（独立于 collector 的进程）
 需要更新时：
     下载 tarball → SHA-256 校验 → 解压 → npm install → postinstall
     → pointer swap (current/previous) → sync scripts
-    → restart collector → restart monitor（如在运行）→ GC old versions
+    → restart collector（Dashboard 随 collector 一起重启）→ GC old versions
 ```
 
 关键事实：
@@ -165,14 +165,16 @@ grep -E 'manifest|up to date|new version' \
 | 5. postinstall | （静默执行） | 30 秒 | hook 注入失败（非致命，会 warn 并继续） |
 | 6. pointer swap | `update deployed` | — | 文件系统权限问题 |
 | 7. restart collector | `collector restarted` / `collector restart failed` | 30 秒 | 新版本 JS 代码报错 |
-| 8. restart monitor | `monitor restarted` / `monitor restart failed` | 30 秒 | 仅在 monitor 运行中时执行 |
-| 9. GC old versions | `removing old version` | — | 保留 current + previous 两个版本 |
+| 8. GC old versions | `removing old version` | — | 保留 current + previous 两个版本 |
 
 ```bash
 # 查看最近的部署过程
 grep -E 'download|SHA-256|extract|npm install|update deployed|restart|removing old' \
   ~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log | tail -20
 ```
+
+本地 Dashboard 属于 collector 主进程生命周期，不存在独立的 monitor 进程或重启步骤。
+collector 重启后，Dashboard 会在 `127.0.0.1:18765` 随之恢复。
 
 部署失败时，updater 会自动恢复 `current` / `previous` pointer 到之前的值：
 

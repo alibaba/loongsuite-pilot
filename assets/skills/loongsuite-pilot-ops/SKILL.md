@@ -351,4 +351,4 @@ pilot 安装成功后，以下两个文档自动写入本地，可直接打开�
 | 文件 | 内容 |
 |------|------|
 | `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/diagnostics.md` | 5 步系统化诊断排查 + 常见问题速查 |
-| `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/monitoring.md` | 观测面板启停 + 全面健康检查 + 强制重启 + 版本回滚 |
+| `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/monitoring.md` | 默认本地 Dashboard 与 `metrics-summary.json` + 全面健康检查 + 强制重启 + 版本回滚 |
