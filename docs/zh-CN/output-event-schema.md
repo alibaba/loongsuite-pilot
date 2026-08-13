@@ -105,7 +105,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `text` | 文本内容。 |
 | `uri` | 已上传或乐观引用的媒体；含 `uri`、`mime_type`，可选 `modality`（例如 `image`）。 |
 
-`uri` 形如 `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` 或 `sls://project/logstore/YYYYMMDD/<sha256>.ext`。内容 hash 编码在对象路径中。上传失败时 uri 可能 dangling；Pilot 以 fail-open 方式继续采集文本。
+`uri` 形如 `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` 或 `sls://project/logstore/YYYYMMDD/<sha256>.ext`。内容 hash 编码在对象路径中。`YYYYMMDD` 按事件的**本地**日历日划分（优先取 `time_unix_ms`），非 UTC，与 Python probe 的对象路径约定一致，便于跨 midnight 边界按日期前缀查询。上传失败时 uri 可能 dangling；Pilot 以 fail-open 方式继续采集文本。
 
 ## 自定义 Agent 标识
 
