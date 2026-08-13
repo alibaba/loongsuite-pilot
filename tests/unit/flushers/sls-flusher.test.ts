@@ -521,6 +521,48 @@ describe('SlsFlusher', () => {
       expect(computeBackoff(1000, 1, false)).toBe(2000);
       expect(computeBackoff(1000, 2, false)).toBe(4000);
     });
+
+    it('caps backoff at 60s regardless of attempt number', async () => {
+      const { computeBackoff } = await import('../../../src/flushers/sls-flusher.js');
+      expect(computeBackoff(1000, 10, false)).toBe(60000);
+      expect(computeBackoff(1000, 20, false)).toBe(60000);
+    });
+
+    it('guards against zero retryMaxAttempts — still retries at least once', async () => {
+      vi.useRealTimers();
+      const fetchSpy = vi.fn().mockRejectedValue(new Error('TimeoutError'));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        retry: { retryMaxAttempts: 0, retryBaseDelayMs: 1, retryJitter: false },
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      vi.unstubAllGlobals();
+    });
+
+    it('guards against zero flushConcurrency — still processes batches', async () => {
+      const config = makeConfig({
+        flushConcurrency: 0,
+        endpoints: [
+          { name: 'ep', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      vi.useRealTimers();
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
   });
 
   describe('flush concurrency control (Proposal C)', () => {

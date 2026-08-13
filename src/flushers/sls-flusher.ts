@@ -60,9 +60,11 @@ export interface EndpointCounter {
   logstore: string;
 }
 
-/** Compute backoff delay with optional full-jitter. */
+const MAX_BACKOFF_MS = 60_000;
+
+/** Compute backoff delay with optional full-jitter, capped at MAX_BACKOFF_MS. */
 export function computeBackoff(baseMs: number, attempt: number, jitter: boolean): number {
-  const exponential = baseMs * 2 ** attempt;
+  const exponential = Math.min(baseMs * 2 ** attempt, MAX_BACKOFF_MS);
   if (!jitter) return exponential;
   return Math.round(exponential * (0.5 + Math.random() * 0.5));
 }
@@ -87,6 +89,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly resolvedRetryJitter: boolean;
   private readonly resolvedFlushConcurrency: number;
   private readonly dispatcher: UndiciAgent | undefined;
+  private flushing = false;
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
@@ -101,10 +104,10 @@ export class SlsFlusher extends BaseFlusher {
     const tc = config.timeout ?? {};
     const rc = config.retry ?? {};
     this.resolvedTimeoutMs = tc.timeoutMs ?? DEFAULT_OVERALL_TIMEOUT_MS;
-    this.resolvedRetryMaxAttempts = rc.retryMaxAttempts ?? RETRY_MAX_ATTEMPTS;
+    this.resolvedRetryMaxAttempts = Math.max(1, rc.retryMaxAttempts ?? RETRY_MAX_ATTEMPTS);
     this.resolvedRetryBaseDelayMs = rc.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
     this.resolvedRetryJitter = rc.retryJitter !== false;
-    this.resolvedFlushConcurrency = config.flushConcurrency ?? DEFAULT_FLUSH_CONCURRENCY;
+    this.resolvedFlushConcurrency = Math.max(1, config.flushConcurrency ?? DEFAULT_FLUSH_CONCURRENCY);
 
     const hasPhaseTimeouts = tc.connectTimeoutMs != null || tc.headersTimeoutMs != null || tc.bodyTimeoutMs != null;
     if (hasPhaseTimeouts) {
@@ -173,42 +176,48 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async flush(): Promise<void> {
-    const batches = Array.from(this.queue.entries());
-    this.queue.clear();
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      const batches = Array.from(this.queue.entries());
+      this.queue.clear();
 
-    if (batches.length > 0) {
-      logger.debug('flush dispatching', {
-        buckets: batches.length,
-        totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
-      });
-    }
+      if (batches.length > 0) {
+        logger.debug('flush dispatching', {
+          buckets: batches.length,
+          totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
+        });
+      }
 
-    const pending = batches
-      .filter(([, logs]) => logs.length > 0)
-      .map(([, logs]) => () => {
-        const endpoint = logs[0].endpoint;
-        const counter = this.endpointCounters.get(endpoint.name);
-        const startMs = Date.now();
-        const send = this.flushEndpoint(endpoint, logs);
-        return send.then(() => {
-          if (counter) {
-            counter.outEntries += logs.length;
-            counter.totalDelayMs += Date.now() - startMs;
-            counter.lastFlushTime = formatTime(new Date());
-          }
-        }).catch(err => {
-          if (counter) {
-            counter.outFailed += logs.length;
-            counter.totalDelayMs += Date.now() - startMs;
-          }
-          logger.error('SLS endpoint flush failed', {
-            endpoint: endpoint.name,
-            error: String(err),
+      const pending = batches
+        .filter(([, logs]) => logs.length > 0)
+        .map(([, logs]) => () => {
+          const endpoint = logs[0].endpoint;
+          const counter = this.endpointCounters.get(endpoint.name);
+          const startMs = Date.now();
+          const send = this.flushEndpoint(endpoint, logs);
+          return send.then(() => {
+            if (counter) {
+              counter.outEntries += logs.length;
+              counter.totalDelayMs += Date.now() - startMs;
+              counter.lastFlushTime = formatTime(new Date());
+            }
+          }).catch(err => {
+            if (counter) {
+              counter.outFailed += logs.length;
+              counter.totalDelayMs += Date.now() - startMs;
+            }
+            logger.error('SLS endpoint flush failed', {
+              endpoint: endpoint.name,
+              error: String(err),
+            });
           });
         });
-      });
 
-    await this.runWithConcurrency(pending, this.resolvedFlushConcurrency);
+      await this.runWithConcurrency(pending, this.resolvedFlushConcurrency);
+    } finally {
+      this.flushing = false;
+    }
   }
 
   private async runWithConcurrency(
@@ -462,7 +471,7 @@ export class SlsFlusher extends BaseFlusher {
     let lastErr: unknown;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       try {
-        const fetchOptions: RequestInit & { dispatcher?: UndiciAgent } = {
+        const fetchOptions: Record<string, unknown> = {
           method: 'POST',
           headers: {
             'x-log-apiversion': '0.6.0',
@@ -474,9 +483,9 @@ export class SlsFlusher extends BaseFlusher {
           signal: AbortSignal.timeout(this.resolvedTimeoutMs),
         };
         if (this.dispatcher) {
-          (fetchOptions as any).dispatcher = this.dispatcher;
+          fetchOptions.dispatcher = this.dispatcher;
         }
-        const resp = await fetch(url, fetchOptions);
+        const resp = await fetch(url, fetchOptions as RequestInit);
 
         if (!resp.ok) {
           const text = await resp.text();
@@ -551,9 +560,12 @@ export class SlsFlusher extends BaseFlusher {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    await this.flush();
-    if (this.dispatcher) {
-      await this.dispatcher.close();
+    try {
+      await this.flush();
+    } finally {
+      if (this.dispatcher) {
+        await this.dispatcher.close();
+      }
     }
   }
 
@@ -581,7 +593,7 @@ export class SlsFlusher extends BaseFlusher {
               project: endpoint.project,
               logstore: endpoint.logstore,
               apiKey: endpoint.apiKey ?? '',
-              timeoutMs: WEBTRACKING_TIMEOUT_MS,
+              timeoutMs: this.resolvedTimeoutMs,
               maxRetries: 1,
             },
             {

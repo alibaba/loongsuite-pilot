@@ -54,6 +54,9 @@ export interface SlsSingleConfig {
   destinationOverride?: boolean;
   batchMaxSize?: number;
   flushIntervalMs?: number;
+  timeout?: import('../types/index.js').SlsTimeoutConfig;
+  retry?: import('../types/index.js').SlsRetryConfig;
+  flushConcurrency?: number;
 }
 
 export interface InnerDataConfig {
@@ -833,6 +836,9 @@ function buildSlsConfig(
     flushIntervalMs: single?.flushIntervalMs ?? 2_000,
     serviceName,
     serviceNamePrefix,
+    timeout: single?.timeout,
+    retry: single?.retry,
+    flushConcurrency: single?.flushConcurrency,
   };
 }
 
