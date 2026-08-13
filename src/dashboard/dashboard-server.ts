@@ -75,7 +75,10 @@ export class DashboardServer {
     });
     // Dashboard requests are read-only and disposable. Close any idle/active
     // browser sockets so collector shutdown is never delayed by HTTP keep-alive.
-    server.closeAllConnections();
+    const closeAllConnections = (server as Server & {
+      closeAllConnections?: () => void;
+    }).closeAllConnections;
+    closeAllConnections?.call(server);
     await closed;
     logger.info('dashboard stopped');
   }

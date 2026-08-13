@@ -79,4 +79,22 @@ describe('DashboardServer', () => {
     await new Promise<void>(resolve => blocker.close(() => resolve()));
   });
 
+  it('stops safely when closeAllConnections is unavailable', async () => {
+    const { dataDir, assetPath } = await fixture();
+    const server = new DashboardServer({ dataDir, assetPath, port: 0 });
+    servers.push(server);
+    await server.start();
+
+    const nodeServer = (server as unknown as {
+      server: { closeAllConnections?: () => void };
+    }).server;
+    Object.defineProperty(nodeServer, 'closeAllConnections', {
+      configurable: true,
+      value: undefined,
+    });
+
+    await expect(server.stop()).resolves.toBeUndefined();
+    expect(server.running).toBe(false);
+  });
+
 });

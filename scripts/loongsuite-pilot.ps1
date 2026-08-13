@@ -943,6 +943,45 @@ function Cmd-RestartUpdater {
 # ============================================================
 # CMD: status
 # ============================================================
+function Test-DashboardAvailable {
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { return $false }
+
+    $probe = @'
+const http = require("node:http");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: 18765,
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  finish(response.statusCode === 200 || response.statusCode === 503 ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+'@
+
+    try {
+        & $nodeBin -e $probe *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
 function Cmd-Status {
     $verInfo = ""
     $versionDir = Resolve-CurrentVersion
@@ -971,7 +1010,11 @@ function Cmd-Status {
         }
     }
     if ($collectorRunning) {
-        Write-Host "   dashboard: http://127.0.0.1:18765/"
+        if (Test-DashboardAvailable) {
+            Write-Host "   dashboard: http://127.0.0.1:18765/"
+        } else {
+            Write-Host "   dashboard: unavailable (http://127.0.0.1:18765/)" -ForegroundColor Yellow
+        }
     }
 
     # Updater status

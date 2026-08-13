@@ -173,7 +173,6 @@ cleanup_legacy_monitor_process() {
         fi
         rm -f "$pid_file"
     fi
-    pkill -U "$(id -u)" -f "$script_name" 2>/dev/null || true
 }
 
 cleanup_legacy_monitor_processes() {
@@ -834,6 +833,37 @@ cmd_restart() {
     cmd_start
 }
 
+dashboard_is_available() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const http = require("node:http");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: 18765,
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  finish(response.statusCode === 200 || response.statusCode === 503 ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+' >/dev/null 2>&1
+}
+
 cmd_status() {
     local ver_info=""
     local version_dir
@@ -848,7 +878,11 @@ cmd_status() {
         local pid
         pid=$(cat "$PID_FILE")
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
-        echo "   dashboard: http://127.0.0.1:18765/"
+        if dashboard_is_available; then
+            echo "   dashboard: http://127.0.0.1:18765/"
+        else
+            echo "   dashboard: unavailable (http://127.0.0.1:18765/)"
+        fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi

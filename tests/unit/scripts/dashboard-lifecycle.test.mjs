@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf8');
+const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf8');
 const dashboardHtml = readFileSync(resolve('assets', 'dashboard', 'index.html'), 'utf8');
 
 describe('dashboard service lifecycle', () => {
@@ -27,7 +28,28 @@ describe('dashboard service lifecycle', () => {
     expect(cleanup.indexOf('ps -p "$pid" -o command=')).toBeLessThan(cleanup.indexOf('kill "$pid"'));
     expect(cleanup).toContain('[[ "$command_line" == *"$script_name"* ]]');
     expect(cleanup).toContain('rm -f "$pid_file"');
-    expect(cleanup).toContain('pkill -U "$(id -u)" -f "$script_name"');
+    expect(cleanup).not.toContain('pkill');
+  });
+
+  it('probes the dashboard before printing its URL on Unix and Windows', () => {
+    const unixProbe = runtimeSh.slice(
+      runtimeSh.indexOf('dashboard_is_available()'),
+      runtimeSh.indexOf('cmd_status()'),
+    );
+    const windowsProbe = runtimePs1.slice(
+      runtimePs1.indexOf('function Test-DashboardAvailable'),
+      runtimePs1.indexOf('function Cmd-Status'),
+    );
+
+    for (const probe of [unixProbe, windowsProbe]) {
+      expect(probe).toContain('require("node:http")');
+      expect(probe).toContain('path: "/metrics-summary.json"');
+      expect(probe).toContain('method: "HEAD"');
+      expect(probe).toContain('setTimeout');
+      expect(probe).toContain('}, 300)');
+    }
+    expect(runtimeSh).toContain('dashboard: unavailable (http://127.0.0.1:18765/)');
+    expect(runtimePs1).toContain('dashboard: unavailable (http://127.0.0.1:18765/)');
   });
 });
 
