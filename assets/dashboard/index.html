@@ -163,7 +163,7 @@
             <div><div class="label">Session</div><div class="value">${count(agent.sessions)}</div></div>
             <div><div class="label">Event</div><div class="value">${count(agent.events)}</div></div>
           </div>
-          <div class="subvalue">Token 占比 ${(Number(agent.share) * 100).toFixed(1)}%</div>
+          <div class="subvalue">事件数占比 ${(Number(agent.share) * 100).toFixed(1)}% · 占今日全部 Agent 事件</div>
         </article>
       `).join('');
     }

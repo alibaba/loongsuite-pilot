@@ -211,10 +211,11 @@ describe('dashboard static page', () => {
     expect(dashboardHtml).not.toContain('/api/metrics');
   });
 
-  it('labels agent shares as tokens and renders a full-width empty state', () => {
+  it('labels agent shares as event counts and renders a full-width empty state', () => {
     expect(dashboardHtml).not.toContain('本页直接展示');
-    expect(dashboardHtml).not.toContain('事件占比');
-    expect(dashboardHtml).toContain('Token 占比');
+    expect(dashboardHtml).not.toContain('Token 占比');
+    expect(dashboardHtml).toContain('事件数占比');
+    expect(dashboardHtml).toContain('占今日全部 Agent 事件');
     expect(dashboardHtml).toContain('暂时没有检测到用户的 Agent 使用数据');
     expect(dashboardHtml).toContain('.agent-empty { grid-column: 1 / -1;');
     expect(dashboardHtml).toContain('<div class="label">Event</div>');
@@ -227,6 +228,7 @@ describe('dashboard static page', () => {
     expect(dashboardHtml).toContain("bar.addEventListener('focus', showTrendTooltip)");
     expect(dashboardHtml).toContain("bar.addEventListener('blur', hideTrendTooltip)");
     expect(dashboardHtml).toContain("tooltip.setAttribute('aria-hidden', 'false')");
+    expect(dashboardHtml).toContain("tooltip?.setAttribute('aria-hidden', 'true')");
     expect(dashboardHtml).not.toContain('class="trend-bar" title=');
   });
 });
