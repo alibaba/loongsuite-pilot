@@ -302,6 +302,29 @@ describe('dashboard static page', () => {
     }
   });
 
+  it('places a decorative language icon between the label text and select', () => {
+    const languageControl = dashboardHtml.match(
+      /<label class="status"><span data-i18n="languageLabel">语言<\/span>([\s\S]*?)<\/label>/,
+    )?.[0];
+    expect(languageControl).toBeTruthy();
+
+    const labelIndex = languageControl.indexOf('data-i18n="languageLabel"');
+    const iconIndex = languageControl.indexOf('<svg class="language-icon"');
+    const selectIndex = languageControl.indexOf('<select id="language-select"');
+    expect(labelIndex).toBeLessThan(iconIndex);
+    expect(iconIndex).toBeLessThan(selectIndex);
+    expect(languageControl).toMatch(
+      /<svg class="language-icon" aria-hidden="true" focusable="false"[^>]*stroke="currentColor"/,
+    );
+    expect(languageControl).not.toContain('<title>');
+    expect(languageControl).toContain(
+      '<select id="language-select" data-i18n-aria-label="languageAriaLabel" aria-label="界面语言">',
+    );
+    expect(dashboardHtml).toContain(
+      '.language-icon { width: 14px; height: 14px; flex: 0 0 14px; color: inherit; }',
+    );
+  });
+
   it('detects zh browser preferences and otherwise defaults to English', () => {
     const normalizeLanguage = Function(`return (${dashboardFunctionSource('normalizeLanguage')});`)();
     const detectBrowserLanguage = Function(
