@@ -8,6 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  isPiSdkRegistryBusyError,
+} from '../pi-sdk/pi-sdk-agent-registry.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
@@ -208,6 +212,7 @@ export class Orchestrator extends EventEmitter {
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
+    await this.restoreRegisteredPiSdkWrappers();
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
@@ -328,6 +333,33 @@ export class Orchestrator extends EventEmitter {
 
     this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
     this.legacySlsFailedLogCleanupService.start();
+  }
+
+  private async restoreRegisteredPiSdkWrappers(): Promise<void> {
+    try {
+      const restoredWrappers = await ensureRegisteredPiSdkWrappers(this.dataDir);
+      if (restoredWrappers > 0) {
+        logger.info('restored generated PI SDK Agent wrappers', { count: restoredWrappers });
+      }
+    } catch (err) {
+      // Keep unrelated Agent integrations available when a retained PI SDK
+      // registration cannot be restored. The registry helper already bounded
+      // retries for transient lock contention; surface the final degradation
+      // through both local diagnostics and the normal Pilot alarm pipeline.
+      const registryBusy = isPiSdkRegistryBusyError(err);
+      logger.error('failed to restore generated PI SDK Agent wrappers', {
+        error: String(err),
+        registryBusy,
+      });
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM',
+        '2',
+        registryBusy
+          ? 'PI SDK Agent wrapper restore skipped because the registry remained busy after bounded retries'
+          : 'PI SDK Agent wrapper restore failed during startup; inspect local Pilot logs and run agent doctor',
+        { input_name: 'pi-coding-agent-log' },
+      );
+    }
   }
 
   async stop(): Promise<void> {
@@ -481,6 +513,10 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove injected plugin for ${def.id}`);
         },
       });
     }
@@ -1216,13 +1252,19 @@ export class Orchestrator extends EventEmitter {
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
+      // The physical JSONL stream is shared by the built-in PI integration and
+      // every registered high-level SDK Agent. Admission therefore has to be
+      // checked against the identity on each record, not only once for the
+      // shared input, or disabling one Agent would still export its records
+      // while another PI integration keeps the input alive.
+      agentEnabled: agentType => this.isAgentGatedEnabled(agentType),
     });
     this.inputManager.registerInput(piCodingAgentLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
         watchPaths: [piCodingAgentLogDir],
         isAvailable: async () => directoryExists(piCodingAgentLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+        enabled: () => this.isAnyPiSdkAgentEnabled() &&
           this.agentControlManager.resolveEnabled(
             'pi-coding-agent-log',
             listenerCfg['pi-coding-agent-log']?.enabled ?? true,
@@ -1389,6 +1431,19 @@ export class Orchestrator extends EventEmitter {
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;
+  }
+
+  /**
+   * The PI JSONL input is shared by the built-in PI CLI and every registered
+   * high-level PI SDK Agent. Keep it alive when at least one of those logical
+   * Agents is enabled; tying it only to `pi-coding-agent` would drop custom
+   * Agent records when the built-in integration is disabled.
+   */
+  private isAnyPiSdkAgentEnabled(): boolean {
+    const definitions = this.deploymentManager?.getDefinitions?.() ?? [];
+    const piDefinitions = definitions.filter(def => def.id === 'pi-coding-agent' || def.piSdk?.schemaVersion === 1);
+    if (piDefinitions.length === 0) return this.isAgentGatedEnabled('pi-coding-agent');
+    return piDefinitions.some(def => this.isAgentGatedEnabled(def.id));
   }
 
   /**

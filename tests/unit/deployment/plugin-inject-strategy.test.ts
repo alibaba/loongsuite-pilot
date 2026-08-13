@@ -115,6 +115,29 @@ describe('PluginInjectStrategy', () => {
     expect(after.extensions).toEqual([]);
   });
 
+  it('treats mixed Windows separators as the same injected extension', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const windowsDataDir = 'C:\\Users\\pilot\\.loongsuite-pilot';
+    strategy = new PluginInjectStrategy(windowsDataDir, tmpDir);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({
+      extensions: ['C:\\Users\\pilot\\.loongsuite-pilot/plugins/pi-coding-agent/index.mjs'],
+    }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+
+    const existing = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(existing.extensions).toHaveLength(1);
+
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [] }));
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    const injected = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(injected.extensions).toEqual([
+      'C:/Users/pilot/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs',
+    ]);
+  });
+
   it('keeps the existing OpenCode plugin/plugins auto-detection behavior', async () => {
     const configPath = path.join(tmpDir, 'opencode.json');
     await fs.writeFile(configPath, JSON.stringify({ plugins: ['existing'] }));

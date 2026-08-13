@@ -26,6 +26,18 @@ let fileLoggingInitialized = false;
 let loggerVersion = 0;
 const childCache = new Map<string, { version: number; child: pino.Logger }>();
 
+/**
+ * Keep machine-readable CLI stdout free of operational log records. This is
+ * intentionally limited to the pre-file-logging phase used by short-lived CLI
+ * commands; the collector replaces the root logger in initFileLogging().
+ */
+export function redirectRootLoggerToStderr(): void {
+  if (fileLoggingInitialized) return;
+  rootLogger = pino(pinoOpts, process.stderr);
+  loggerVersion++;
+  childCache.clear();
+}
+
 function getChild(tag: string): pino.Logger {
   const cached = childCache.get(tag);
   if (cached && cached.version === loggerVersion) return cached.child;
