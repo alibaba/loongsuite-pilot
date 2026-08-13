@@ -7,6 +7,7 @@
 #   loongsuite-pilot restart
 #   loongsuite-pilot status
 #   loongsuite-pilot info
+#   loongsuite-pilot token-usage
 #   loongsuite-pilot rollback
 #   loongsuite-pilot worker connect|list|status|disconnect|delete
 #   loongsuite-pilot help
@@ -1174,6 +1175,35 @@ function Cmd-Log {
 }
 
 # ============================================================
+# CMD: token-usage (foreground token usage CLI)
+# ============================================================
+function Cmd-TokenUsage {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Token usage CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    & $nodeBin $entry "token-usage" @SubArgs
+    exit $LASTEXITCODE
+}
+
+# ============================================================
 # CMD: worker (foreground local Worker management CLI)
 # ============================================================
 function Cmd-Worker {
@@ -1302,6 +1332,8 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  token-usage     Show token usage TUI"
+    Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     Write-Host "  rollback        Roll back to the previous version"
@@ -1320,6 +1352,8 @@ switch ($Command.ToLower()) {
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
+    "token-usage"        { Cmd-TokenUsage }
+    "tokens"             { Cmd-TokenUsage }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }
