@@ -16,8 +16,8 @@ Multimodal also requires global `config.multimodal` object-storage infrastructur
 | Item | Status |
 |------|--------|
 | Media types | **Images only**. Audio and video are future work. |
-| Implemented agents | **`codex`** and **`qoder` (IDE)**. Other agents ignore `uploadMode` until their extractors land. |
-| Detection | Agent-specific: Codex uses inline base64 data-URLs in the transcript; Qoder IDE uses SQLite attachment paths and image paths in tool results / assistant markdown (read from disk, then `uri`). |
+| Implemented agents | **`codex`** and **`qoder` (IDE and CLI)**. Other agents ignore `uploadMode` until their extractors land. |
+| Detection | Agent-specific: Codex uses inline base64 data-URLs in the transcript; Qoder IDE uses SQLite attachment paths and image paths in tool results / assistant markdown; Qoder CLI uses local paths in the transcript (paste / `@` / Read / ImageGen), read from disk, then `uri`. |
 
 ## How To Enable
 
@@ -81,7 +81,7 @@ The table below describes what multimodal collection actually captures per agent
 | Agent | Active | Collected data |
 |-------|--------|----------------|
 | `codex` | Yes | See [Codex](#codex) below. |
-| `qoder` (IDE) | Yes | See [Qoder IDE](#qoder-ide) below. **Qoder CLI is not included.** |
+| `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex
@@ -103,7 +103,7 @@ Notes:
 
 ### Qoder IDE
 
-Qoder IDE (`qoder` / `qoder-idea`) converts on the `qoder-trace` path after IDE token enrichment: detect a local image path → `MultimodalProcessor.pathToUri` (read bytes → uri) → `uri` part on the event. Policy is `agents.qoder.multimodal`; **only the IDE branch runs conversion—Qoder CLI turns are skipped**. Failures are fail-open and do not interrupt text/token collection.
+Qoder IDE (`qoder` / `qoder-idea`) converts on the `qoder-trace` path after IDE token enrichment: detect a local image path → `MultimodalProcessor.pathToUri` (read bytes → uri) → `uri` part on the event. Policy is `agents.qoder.multimodal`. Failures are fail-open and do not interrupt text/token collection.
 
 | `uploadMode` | Qoder IDE surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
@@ -117,6 +117,23 @@ Notes:
 
 - Glob-discovered paths that were never visually read are not collected.
 - The same path on tool and output surfaces is path-cached in-process to avoid re-reads; uploads remain content-addressed by sha256.
+
+### Qoder CLI
+
+Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts on the same `qoder-trace` path after CLI token enrichment. It does not query SQLite. Assistant finals usually have no embedded image, so **there is no output surface** (`uploadMode=output` is a no-op for CLI; `both` = input + tool). Fail-open.
+
+| `uploadMode` | Qoder CLI surface | Typical user action / event |
+|--------------|-------------------|-----------------------------|
+| `none` | No conversion | — |
+| `input` | `[Image: source: <path>]` (paste) and `@path` (relative paths join `agent.qoder.cwd`) on user `messages_delta` | Alt+V paste, `@` / `--attachment` |
+| `tool` | `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Path in the prompt then Read; ImageGen then Read to preview |
+| `output` | None | CLI does not embed images in the final assistant text |
+| `both` | `input` + `tool` | Paste/`@` plus tool read/generate |
+
+Notes:
+
+- Glob-only listings that were never `Read` / `ImageGen` are not collected.
+- Remote OSS URLs are not used as the source; local `pathToUri` is.
 
 ## Output Shape (Short)
 

@@ -14,11 +14,12 @@ import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
-  /** Cached multimodal policy; IDE-only extraction when enabled. */
+  /** Cached multimodal policy; IDE + CLI extraction when enabled. */
   multimodal?: {
     enabled: boolean;
     uploadMode?: MultimodalUploadMode;
@@ -98,6 +99,7 @@ export class QoderTraceInput extends BaseInput {
     // Intercept data is loaded lazily on first qoder-cli turn.
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const cliTurns: AgentActivityEntry[][] = [];
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
@@ -111,6 +113,7 @@ export class QoderTraceInput extends BaseInput {
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
@@ -132,13 +135,21 @@ export class QoderTraceInput extends BaseInput {
           entry['gen_ai.agent.type'] = ClientType.QoderIdea;
         }
       }
+    }
 
-      // IDE-only multimodal: path → base64 → uri. Fail-open; never affects CLI turns.
-      if (this.multimodalEnabled && this.multimodalProcessor) {
+    if (this.multimodalEnabled && this.multimodalProcessor) {
+      const pathToUri = (filePath: string, timeUnixMs?: number) =>
+        this.multimodalProcessor!.pathToUri(filePath, timeUnixMs);
+      for (const sessionEntries of ideSessionGroups.values()) {
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
-          pathToUri: (filePath, timeUnixMs) =>
-            this.multimodalProcessor!.pathToUri(filePath, timeUnixMs),
+          pathToUri,
+        });
+      }
+      for (const turnEntries of cliTurns) {
+        await enrichCliMultimodal(turnEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
         });
       }
     }

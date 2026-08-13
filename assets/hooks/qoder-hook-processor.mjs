@@ -718,7 +718,7 @@ export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
       sawStop = true;
     } else if (sawStop && (
       hookEvent === 'UserPromptSubmit' ||
-      (row.type === 'user' && !isToolResult(row))
+      isRealUserPrompt(row)
     )) {
       // `last_line_count` is the next unread zero-based line index. Returning
       // the prompt line itself consumes the prior Stop/session metadata while
@@ -757,7 +757,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     }
     if (triggerPromptLine < 0) {
       for (let i = triggerLimit - 1; i >= 0; i--) {
-        if (rows[i]?.type === 'user' && !isToolResult(rows[i])) {
+        if (isRealUserPrompt(rows[i])) {
           triggerPromptLine = i;
           break;
         }
@@ -774,7 +774,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
       }
       if (i >= triggerLimit && (
         hookEvent === 'UserPromptSubmit' ||
-        (rows[i]?.type === 'user' && !isToolResult(rows[i]))
+        isRealUserPrompt(rows[i])
       )) {
         return waiting('next-prompt-before-stop');
       }
@@ -792,7 +792,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     }
     if (startLine < 0) {
       for (let i = stopLine - 1; i >= 0; i--) {
-        if (rows[i]?.type === 'user' && !isToolResult(rows[i])) {
+        if (isRealUserPrompt(rows[i])) {
           startLine = i;
           break;
         }
@@ -822,7 +822,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
       }
       if (
         hookEvent === 'UserPromptSubmit' ||
-        (rows[i]?.type === 'user' && !isToolResult(rows[i]))
+        isRealUserPrompt(rows[i])
       ) {
         // The next real prompt is itself an unambiguous right boundary for the
         // completed Stop turn. Exclude it from this fixed window so its own Stop
@@ -974,7 +974,8 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   const observedTs = timestampToUnixNanos(Date.now());
 
   // Find user prompt
-  const userRow = contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const userRow = contentEvents.find(isRealUserPrompt)
+    || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
   const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
@@ -993,7 +994,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.provider.name': providerName,
         'gen_ai.request.model': userHookModel,
         'user.id': userId,
-        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
+        'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
         'agent.source': 'qoder-transcript-hook',
         'agent.qoder.raw_type': 'user',
         'agent.qoder.content_type': 'text',
@@ -1030,7 +1031,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     let inputDelta;
     let emitRequest = i > 0;
     if (i === 0 && userRow) {
-      inputDelta = [{ role: 'user', parts: [{ type: 'text', content: extractUserText(userRow) }] }];
+      inputDelta = [{ role: 'user', parts: buildUserMessageParts(extractUserText(userRow), contentEvents, agentType) }];
       emitRequest = true;
     } else if (toolResultsForNextStep.length > 0) {
       inputDelta = toolResultsForNextStep.map(tr => ({
@@ -1287,16 +1288,14 @@ function assignContentToBoundaries(boundaries, contentEvents) {
 
 /**
  * Split a list of content events into turns.
- * Each real user prompt (type === 'user' and not a tool result) starts a new
- * turn. Tool results and assistant content following a prompt belong to that
- * turn until the next real user prompt.
+ * isMeta rows stay on the preceding prompt, same as tool results.
  */
-function splitContentEventsIntoTurns(contentEvents) {
+export function splitContentEventsIntoTurns(contentEvents) {
   const turns = [];
   let currentTurn = [];
 
   for (const row of contentEvents) {
-    if (row.type === 'user' && !isToolResult(row)) {
+    if (isRealUserPrompt(row)) {
       if (currentTurn.length > 0) {
         turns.push(currentTurn);
       }
@@ -1330,6 +1329,14 @@ function isToolResult(row) {
   return Array.isArray(content) && content.length > 0 && content[0].type === 'tool_result';
 }
 
+function isMetaUser(row) {
+  return row?.isMeta === true || row?.isMeta === 'true';
+}
+
+function isRealUserPrompt(row) {
+  return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row);
+}
+
 function extractUserText(row) {
   const content = row.message?.content;
   if (typeof content === 'string') return content;
@@ -1340,6 +1347,24 @@ function extractUserText(row) {
     }
   }
   return '';
+}
+
+function isSlashCommandText(text) {
+  return text.includes('<command-name>') || text.includes('<local-command-caveat>');
+}
+
+function buildUserMessageParts(userText, contentEvents, agentType) {
+  const parts = [{ type: 'text', content: userText }];
+  if (agentType !== 'qoder-cli' || !Array.isArray(contentEvents)) return parts;
+  const seen = new Set([userText]);
+  for (const row of contentEvents) {
+    if (row.type !== 'user' || isToolResult(row)) continue;
+    const text = extractUserText(row);
+    if (!text || seen.has(text) || isSlashCommandText(text)) continue;
+    parts.push({ type: 'text', content: text });
+    seen.add(text);
+  }
+  return parts;
 }
 
 function inferVariant(row, sourceAgentId) {

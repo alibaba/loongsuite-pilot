@@ -16,8 +16,8 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 | 项 | 现状 |
 |----|------|
 | 媒体类型 | **仅图像**。音频、视频等后续再支持。 |
-| 已实现 Agent | **`codex`**、**`qoder`（IDE）**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
-| 判定依据 | 因 Agent 而异：Codex 依赖 transcript 内联 base64；Qoder IDE 依赖 SQLite 附件路径与 transcript/工具结果中的图像路径（读盘后转 `uri`）。 |
+| 已实现 Agent | **`codex`**、**`qoder`（IDE 与 CLI）**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
+| 判定依据 | 因 Agent 而异：Codex 依赖 transcript 内联 base64；Qoder IDE 依赖 SQLite 附件路径与 transcript/工具结果中的图像路径；Qoder CLI 依赖 transcript 中的本地路径（粘贴/`@`/Read/ImageGen），读盘后转 `uri`。 |
 
 ## 如何开启
 
@@ -81,7 +81,7 @@ loongsuite-pilot restart
 | Agent | 是否生效 | 采集内容 |
 |-------|----------|----------|
 | `codex` | 是 | 见下方 [Codex](#codex)。 |
-| `qoder`（IDE） | 是 | 见下方 [Qoder IDE](#qoder-ide)。**不含 Qoder CLI。** |
+| `qoder` | 是 | 见下方 [Qoder IDE](#qoder-ide) 与 [Qoder CLI](#qoder-cli)。 |
 | 其他 | 否 | 配置 `uploadMode` 目前无效，等待对应 extractor 落地。 |
 
 ### Codex
@@ -103,7 +103,7 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 
 ### Qoder IDE
 
-Qoder IDE（`qoder` / `qoder-idea`）在 `qoder-trace` 采集路径上，于 IDE token 富化之后做写时转换：检测到图像本地路径后走 `MultimodalProcessor.pathToUri`（读盘 bytes → uri）→ 事件中的 `uri` part。配置键为 `agents.qoder.multimodal`；**仅 IDE 分支生效，Qoder CLI 回合不会转换**。失败 fail-open，不影响原有文本/token 采集。
+Qoder IDE（`qoder` / `qoder-idea`）在 `qoder-trace` 采集路径上，于 IDE token 富化之后做写时转换：检测到图像本地路径后走 `MultimodalProcessor.pathToUri`（读盘 bytes → uri）→ 事件中的 `uri` part。配置键为 `agents.qoder.multimodal`。失败 fail-open，不影响原有文本/token 采集。
 
 | `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
@@ -117,6 +117,23 @@ Qoder IDE（`qoder` / `qoder-idea`）在 `qoder-trace` 采集路径上，于 IDE
 
 - 仅 Glob 发现、未实际视觉读取的路径不会采集。
 - 同一路径在 tool 与 output 同时出现时，进程内路径缓存避免重复读盘；对象上传仍按内容 sha256 去重。
+
+### Qoder CLI
+
+Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一条 `qoder-trace` 采集路径，在 CLI token 富化之后做写时转换。不查 SQLite；助手最终回复通常不含嵌入图，因此 **没有 output 表面**（`uploadMode=output` 对 CLI 无效果，`both` = input + tool）。失败 fail-open。
+
+| `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
+|--------------|--------------------|---------------------|
+| `none` | 不转换 | — |
+| `input` | 用户 `messages_delta` 中的 `[Image: source: <path>]`（粘贴）与 `@path`（相对路径拼 `agent.qoder.cwd`） | Alt+V 粘贴、`@` / `--attachment` |
+| `tool` | `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
+| `output` | 无 | CLI 终端不把图嵌进最终助手文本 |
+| `both` | `input` + `tool` | 覆盖粘贴/`@` 与工具读图/生成 |
+
+注意：
+
+- 仅 Glob 列出、未实际 `Read`/`ImageGen` 的路径不会采集。
+- OSS 预签名/匿名 URL 不作为采集源；以本地路径 `pathToUri` 为准。
 
 ## 输出形态（简述）
 
