@@ -105,7 +105,12 @@ describe('DashboardServer', () => {
 
     const response = await fetch(`${server.address}metrics-summary.json`);
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toMatchObject({
+    const responseBody = await response.text();
+    expect(responseBody).not.toContain(dataDir);
+    expect(responseBody).not.toContain('"path"');
+    const payload = JSON.parse(responseBody) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('path');
+    expect(payload).toEqual({
       error: 'metrics summary is not ready',
     });
   });

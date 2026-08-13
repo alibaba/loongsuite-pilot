@@ -161,7 +161,6 @@ export class DashboardServer {
           if (code === 'ENOENT') {
             this.sendJson(response, 503, {
               error: 'metrics summary is not ready',
-              path: this.summaryPath,
             }, method === 'HEAD');
             return;
           }
