@@ -59,12 +59,27 @@
     .list-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .bar { height: 6px; margin-top: 5px; border-radius: 999px; background: rgba(148, 163, 184, 0.13); overflow: hidden; }
     .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--blue)); }
+    .trend-wrap { position: relative; }
     .trend { display: grid; grid-template-columns: repeat(30, minmax(3px, 1fr)); align-items: end; height: 160px; gap: 3px; }
-    .trend-bar { min-height: 2px; border-radius: 4px 4px 0 0; background: linear-gradient(var(--blue), rgba(125, 211, 252, 0.35)); }
+    .trend-bar {
+      min-width: 0; min-height: 2px; padding: 0; border: 0; border-radius: 4px 4px 0 0;
+      background: linear-gradient(var(--blue), rgba(125, 211, 252, 0.35)); cursor: crosshair;
+    }
+    .trend-bar:hover, .trend-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; filter: brightness(1.2); }
+    .trend-tooltip {
+      position: absolute; z-index: 2; left: 0; top: 0; min-width: max-content; padding: 7px 9px;
+      border: 1px solid rgba(125, 211, 252, .35); border-radius: 9px; background: #111a2d;
+      color: var(--text); box-shadow: 0 8px 28px rgba(0, 0, 0, .35); font-size: 12px;
+      line-height: 1.45; pointer-events: none; opacity: 0; transform: translate(-50%, calc(-100% - 8px));
+      transition: opacity .12s ease;
+    }
+    .trend-tooltip.show { opacity: 1; }
+    .trend-tooltip strong { display: block; color: var(--blue); font-size: 13px; }
     .trend-labels { display: flex; justify-content: space-between; margin-top: 8px; color: var(--muted); font-size: 11px; }
     .notice { display: none; padding: 12px 14px; border: 1px solid rgba(251,191,36,.35); border-radius: 14px; background: rgba(251,191,36,.1); color: #fde68a; font-size: 13px; }
     .notice.show { display: block; }
     .empty { padding: 22px 0; color: var(--muted); text-align: center; }
+    .agent-empty { grid-column: 1 / -1; padding: 34px 20px; }
     @media (max-width: 900px) { header { align-items: flex-start; flex-direction: column; } .cards, .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .two-columns { grid-template-columns: 1fr; } }
     @media (max-width: 580px) { .cards, .agent-grid, .kv { grid-template-columns: 1fr; } }
   </style>
@@ -74,7 +89,6 @@
     <header>
       <div>
         <h1>LoongSuite Pilot Dashboard</h1>
-        <p>本页直接展示 <code>logs/metrics-summary.json</code>，不执行额外统计。</p>
       </div>
       <div class="toolbar">
         <span id="status-dot" class="dot"></span>
@@ -138,7 +152,7 @@
 
     function renderAgents(agentShares) {
       if (!agentShares.length) {
-        $('agent-grid').innerHTML = '<div class="panel empty">今天还没有 Agent 活动</div>';
+        $('agent-grid').innerHTML = '<div class="panel empty agent-empty">暂时没有检测到用户的 Agent 使用数据</div>';
         return;
       }
       $('agent-grid').innerHTML = agentShares.map((agent) => `
@@ -149,12 +163,32 @@
             <div><div class="label">Session</div><div class="value">${count(agent.sessions)}</div></div>
             <div><div class="label">Event</div><div class="value">${count(agent.events)}</div></div>
           </div>
-          <div class="subvalue">事件占比 ${(Number(agent.share) * 100).toFixed(1)}%</div>
+          <div class="subvalue">Token 占比 ${(Number(agent.share) * 100).toFixed(1)}%</div>
         </article>
       `).join('');
     }
 
-    function renderTrend(target, points) {
+    function showTrendTooltip(event) {
+      const bar = event.currentTarget;
+      const wrap = bar.closest('.trend-wrap');
+      const tooltip = wrap?.querySelector('.trend-tooltip');
+      if (!tooltip) return;
+      tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.day)}</span><strong>${escapeHtml(bar.dataset.label)} ${count(bar.dataset.value)}</strong>`;
+      const barRect = bar.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+      tooltip.style.left = `${barRect.left - wrapRect.left + barRect.width / 2}px`;
+      tooltip.style.top = `${barRect.top - wrapRect.top}px`;
+      tooltip.setAttribute('aria-hidden', 'false');
+      tooltip.classList.add('show');
+    }
+
+    function hideTrendTooltip(event) {
+      const tooltip = event.currentTarget.closest('.trend-wrap')?.querySelector('.trend-tooltip');
+      tooltip?.setAttribute('aria-hidden', 'true');
+      tooltip?.classList.remove('show');
+    }
+
+    function renderTrend(target, points, valueLabel) {
       if (!points.length) {
         $(target).innerHTML = '<div class="empty">暂无数据</div>';
         return;
@@ -162,11 +196,21 @@
       const shown = points.slice(-30);
       const max = Math.max(1, ...shown.map((point) => Number(point.value) || 0));
       $(target).innerHTML = `
-        <div class="trend">${shown.map((point) => {
+        <div class="trend-wrap">
+          <div class="trend" role="group" aria-label="最近 30 天 ${escapeHtml(valueLabel)}趋势">${shown.map((point) => {
           const height = Math.max(2, Math.round(((Number(point.value) || 0) / max) * 150));
-          return `<div class="trend-bar" title="${escapeHtml(point.day)}: ${count(point.value)}" style="height:${height}px"></div>`;
+          const ariaLabel = `${point.day}，${valueLabel} ${count(point.value)}`;
+          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-value="${escapeHtml(point.value)}" style="height:${height}px"></button>`;
         }).join('')}</div>
+          <div class="trend-tooltip" role="tooltip" aria-hidden="true"></div>
+        </div>
         <div class="trend-labels"><span>${escapeHtml(shown[0]?.day || '')}</span><span>${escapeHtml(shown[shown.length - 1]?.day || '')}</span></div>`;
+      $(target).querySelectorAll('.trend-bar').forEach((bar) => {
+        bar.addEventListener('mouseenter', showTrendTooltip);
+        bar.addEventListener('mouseleave', hideTrendTooltip);
+        bar.addEventListener('focus', showTrendTooltip);
+        bar.addEventListener('blur', hideTrendTooltip);
+      });
     }
 
     function renderShares(target, shares, nameKey, valueKey) {
@@ -197,8 +241,8 @@
       // Agent cards are intentionally derived only from agentShares. New agent
       // types therefore appear without a dashboard code change.
       renderAgents(Array.isArray(today.agentShares) ? today.agentShares : []);
-      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : []);
-      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : []);
+      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : [], 'Token');
+      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : [], 'Session');
       renderShares('models', Array.isArray(today.modelShares) ? today.modelShares : [], 'model', 'totalTokens');
       renderShares('providers', Array.isArray(today.providerShares) ? today.providerShares : [], 'provider', 'totalTokens');
       renderRepos(Array.isArray(today.repoShares) ? today.repoShares : []);
