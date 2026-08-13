@@ -450,7 +450,7 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(result.valid).toBe(true);
   });
 
-  test('precise installed-key repair preserves third-party state and enabled', () => {
+  test('does not inherit enabled from a different hook previously at the same key', () => {
     const location: InstalledCodexHookLocation = {
       eventName: 'SubagentStart',
       eventKey: 'subagent_start',
@@ -480,8 +480,40 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(writeTrustedHashes(opts)).toBe(true);
     const repaired = fs.readFileSync(configPath, 'utf8');
     expect(repaired).toContain('sha256:THIRD_PARTY');
-    expect(repaired).toContain('enabled = false');
+    expect(repaired).not.toContain('enabled = false');
     expect(repaired).not.toContain('sha256:STALE');
     expect(writeTrustedHashes(opts)).toBe(false);
+  });
+
+  test('preserves enabled only when key and trusted hash both match Pilot', () => {
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SubagentStart',
+      eventKey: 'subagent_start',
+      groupIndex: 0,
+      handlerIndex: 0,
+      matcher: '*',
+      handler: { type: 'command', command: 'pilot subagent-start' },
+    };
+    const key = installedHookStateKey('/abs/hooks.json', location);
+    const hash = computeInstalledHookTrustHash(location);
+    fs.writeFileSync(configPath, [
+      `[hooks.state."${key}"]`,
+      'enabled = false',
+      `trusted_hash = "${hash}"`,
+      '',
+    ].join('\n'));
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      locations: { SubagentStart: location },
+      marker: 'otel-codex-hook',
+      forceBypass: true,
+    };
+
+    expect(writeTrustedHashes(opts)).toBe(true);
+    const repaired = fs.readFileSync(configPath, 'utf8');
+    expect(repaired).toContain('bypass_hook_trust = true');
+    expect(repaired).toContain('enabled = false');
+    expect(repaired).toContain(`trusted_hash = "${hash}"`);
   });
 });

@@ -327,7 +327,10 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   const exactKeys = new Set(expected.keys());
   const enabledByKey = new Map(
     parseTrustSections(existing)
-      .filter(section => exactKeys.has(section.key) && section.enabledLine)
+      .filter(section => (
+        section.enabledLine !== undefined
+        && expected.get(section.key) === section.hash
+      ))
       .map(section => [section.key, section.enabledLine!]),
   );
 
