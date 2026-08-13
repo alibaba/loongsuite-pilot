@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -33,14 +35,17 @@ describe('dashboard service lifecycle', () => {
 
   it('repairs a stale collector PID only from the exact installed bootstrap path', () => {
     const processLookup = runtimeSh.slice(
-      runtimeSh.indexOf('find_current_user_processes_by_exact_suffix()'),
+      runtimeSh.indexOf('process_matches_installed_entry()'),
       runtimeSh.indexOf('is_pid_file_running()'),
     );
 
-    expect(processLookup).toContain('ps -U "$(id -u)" -o pid= -o ucomm= -o command=');
-    expect(processLookup).toContain('find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node');
+    expect(processLookup).toContain('[ -r "/proc/$pid/cmdline" ]');
+    expect(processLookup).toContain('[ "$argv_entry" = "$expected_entry" ]');
+    expect(processLookup).toContain('ps -U "$(id -u)" -o pid= -o ucomm=');
+    expect(processLookup).toContain('find_current_user_processes collector');
     expect(processLookup).toContain('node:node|node:nodejs');
     expect(processLookup).toContain('[[ "$command_line" == *" $expected_suffix" ]]');
+    expect(processLookup).toContain('process_matches_installed_entry "$pid" collector');
     expect(processLookup).toContain('mv -f "$pid_tmp" "$PID_FILE"');
     expect(processLookup).not.toContain('pgrep');
     expect(processLookup).not.toContain('pkill');
@@ -55,12 +60,68 @@ describe('dashboard service lifecycle', () => {
       runtimeSh.indexOf('cmd_stop()'),
       runtimeSh.indexOf('cmd_restart_collector()'),
     );
+    const restartCommand = runtimeSh.slice(
+      runtimeSh.indexOf('cmd_restart_collector()'),
+      runtimeSh.indexOf('cmd_restart_updater()'),
+    );
 
-    expect(stopHelper).toContain('find_current_user_processes_by_exact_suffix "$LOONGSUITE_PILOT_BIN run" shell');
-    expect(stopHelper).toContain('find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node');
+    expect(stopHelper).toContain('find_current_user_processes collector-wrapper');
+    expect(stopHelper).toContain('find_current_user_processes collector');
+    expect(stopHelper).toContain('process_matches_installed_entry "$pid" "$kind"');
     expect(stopHelper).toContain('for attempt in 1 2 3 4 5');
     expect(stopCommand).toContain('stop_installed_collector_processes');
+    expect(stopCommand).toContain('stop_pid_file "$PID_FILE" collector');
+    expect(stopCommand).toContain('stop_pid_file "$UPDATER_PID_FILE" updater');
+    expect(restartCommand).toContain('stop_pid_file "$PID_FILE" collector');
     expect(runtimeSh).not.toContain('pkill -f "loongsuite-pilot/bin/collector-daemon"');
+    expect(runtimeSh).not.toContain('pkill -f "loongsuite-pilot/bin/updater-daemon"');
+  });
+
+  it('rejects a reused PID and repairs it from the real Node argv entry', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'pilot-lifecycle-'));
+    const bootstrapDir = resolve(root, 'bin');
+    const entry = resolve(bootstrapDir, 'collector-daemon.js');
+    const pidFile = resolve(root, 'loongsuite-pilot.pid');
+    mkdirSync(bootstrapDir, { recursive: true });
+    writeFileSync(entry, 'setInterval(() => {}, 1000);\n');
+
+    const collector = spawn(process.execPath, [entry], { stdio: 'ignore' });
+    const reused = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', entry], {
+      stdio: 'ignore',
+    });
+    const functions = runtimeSh.slice(
+      runtimeSh.indexOf('process_matches_installed_entry()'),
+      runtimeSh.indexOf('# One-way migration cleanup'),
+    );
+    const env = {
+      ...process.env,
+      BOOTSTRAP_DIR: bootstrapDir,
+      LOONGSUITE_PILOT_BIN: resolve(root, 'loongsuite-pilot'),
+      PID_FILE: pidFile,
+    };
+
+    try {
+      await new Promise(resolveWait => setTimeout(resolveWait, 50));
+      writeFileSync(pidFile, `${reused.pid}\n`);
+      const stopped = spawnSync('bash', ['-c', `${functions}\nstop_pid_file "$PID_FILE" collector`], {
+        env,
+        encoding: 'utf8',
+      });
+      expect(stopped.status).toBe(0);
+      expect(() => process.kill(reused.pid, 0)).not.toThrow();
+
+      writeFileSync(pidFile, `${reused.pid}\n`);
+      const repaired = spawnSync('bash', ['-c', `${functions}\nis_running && cat "$PID_FILE"`], {
+        env,
+        encoding: 'utf8',
+      });
+      expect(repaired.status).toBe(0);
+      expect(repaired.stdout.trim()).toBe(String(collector.pid));
+    } finally {
+      collector.kill('SIGTERM');
+      reused.kill('SIGTERM');
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('probes the dashboard before printing its URL on Unix and Windows', () => {

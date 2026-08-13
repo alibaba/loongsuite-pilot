@@ -111,34 +111,113 @@ sync_installed_scripts_from_version() {
     mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
 }
 
-find_current_user_processes_by_exact_suffix() {
-    local expected_suffix="$1"
-    local expected_process="$2"
+process_matches_installed_entry() {
+    local pid="$1"
+    local kind="$2"
+    local expected_entry=""
+    local expected_arg=""
+    local expected_process=""
+    case "$kind" in
+        collector)
+            expected_entry="$BOOTSTRAP_DIR/collector-daemon.js"
+            expected_process=node
+            ;;
+        updater)
+            expected_entry="$BOOTSTRAP_DIR/updater-daemon.js"
+            expected_process=node
+            ;;
+        collector-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run
+            expected_process=shell
+            ;;
+        updater-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run-updater
+            expected_process=shell
+            ;;
+        *) return 1 ;;
+    esac
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
+
+    local process_name
+    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    process_name="${process_name##*/}"
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        *) return 1 ;;
+    esac
+
+    # Linux exposes the real NUL-separated argv. Require the bootstrap script
+    # to be Node argv[1] (or the installed shell script + exact subcommand), so
+    # a command which merely mentions the path cannot be mistaken for Pilot.
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_arg=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            case "$arg_index" in
+                1) argv_entry="$arg" ;;
+                2) argv_arg="$arg" ;;
+            esac
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "$argv_entry" = "$expected_entry" ] || return 1
+        if [ -n "$expected_arg" ]; then
+            [ "$argv_arg" = "$expected_arg" ] && [ "$argv_count" -eq 3 ]
+        else
+            [ "$argv_count" -eq 2 ]
+        fi
+        return
+    fi
+
+    # macOS has no /proc cmdline. Pair the exact final argv text with the
+    # process-name and uid checks above; -ww prevents path truncation.
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    local expected_suffix="$expected_entry"
+    [ -n "$expected_arg" ] && expected_suffix="$expected_suffix $expected_arg"
+    if [ "$expected_process" = shell ] && [ "$command_line" = "$expected_suffix" ]; then
+        return 0
+    fi
+    [[ "$command_line" == *" $expected_suffix" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
+    local command_executable="${command_prefix##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+find_current_user_processes() {
+    local kind="$1"
     local pid=""
     local process_name=""
-    local command_line=""
-    while read -r pid process_name command_line; do
-        [ -n "$pid" ] || continue
+    while read -r pid process_name; do
         process_name="${process_name##*/}"
-        case "$expected_process:$process_name" in
-            node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        case "$kind:$process_name" in
+            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
-        if [ "$command_line" = "$expected_suffix" ] || [[ "$command_line" == *" $expected_suffix" ]]; then
-            echo "$pid"
-        fi
-    done < <(ps -U "$(id -u)" -o pid= -o ucomm= -o command= 2>/dev/null || true)
+        process_matches_installed_entry "$pid" "$kind" && echo "$pid"
+    done < <(ps -U "$(id -u)" -o pid= -o ucomm= 2>/dev/null || true)
 }
 
 find_installed_collector_pid() {
-    find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node | head -n 1
+    find_current_user_processes collector | head -n 1
 }
 
 is_running() {
     local pid=""
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
-        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" collector; then
             return 0
         fi
         rm -f "$PID_FILE"
@@ -150,7 +229,7 @@ is_running() {
     # exact bootstrap path; another checkout or a shell inspecting the path
     # cannot match this suffix.
     pid=$(find_installed_collector_pid)
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    if process_matches_installed_entry "$pid" collector; then
         local pid_tmp="$PID_FILE.tmp.$$"
         printf '%s\n' "$pid" > "$pid_tmp"
         mv -f "$pid_tmp" "$PID_FILE"
@@ -165,25 +244,41 @@ stop_installed_collector_processes() {
     local matched
     for attempt in 1 2 3 4 5; do
         matched=false
-        while read -r pid; do
+        local kind
+        while read -r pid kind; do
             [ -n "$pid" ] || continue
-            matched=true
-            kill "$pid" 2>/dev/null || true
+            if process_matches_installed_entry "$pid" "$kind"; then
+                matched=true
+                kill "$pid" 2>/dev/null || true
+            fi
         done < <({
-            find_current_user_processes_by_exact_suffix "$LOONGSUITE_PILOT_BIN run" shell
-            find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node
+            find_current_user_processes collector-wrapper | while read -r pid; do echo "$pid collector-wrapper"; done
+            find_current_user_processes collector | while read -r pid; do echo "$pid collector"; done
         } | sort -u)
         [ "$matched" = true ] || return 0
         sleep 0.2
     done
 }
 
+stop_installed_updater_processes() {
+    local pid
+    local kind
+    while read -r pid kind; do
+        [ -n "$pid" ] || continue
+        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
+    done < <({
+        find_current_user_processes updater-wrapper | while read -r pid; do echo "$pid updater-wrapper"; done
+        find_current_user_processes updater | while read -r pid; do echo "$pid updater"; done
+    } | sort -u)
+}
+
 is_pid_file_running() {
     local pid_file="$1"
+    local kind="$2"
     if [ -f "$pid_file" ]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             return 0
         fi
         rm -f "$pid_file"
@@ -193,16 +288,17 @@ is_pid_file_running() {
 
 stop_pid_file() {
     local pid_file="$1"
-    if is_pid_file_running "$pid_file"; then
+    local kind="$2"
+    if is_pid_file_running "$pid_file" "$kind"; then
         local pid
         pid=$(cat "$pid_file")
-        kill "$pid" 2>/dev/null || true
+        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
         local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+        while process_matches_installed_entry "$pid" "$kind" && [ $count -lt 10 ]; do
             sleep 1
             count=$((count + 1))
         done
-        if kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             kill -9 "$pid" 2>/dev/null || true
         fi
     fi
@@ -577,28 +673,17 @@ cmd_stop() {
             ;;
     esac
 
-    # Stop PID-file tracked process
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    fi
+    # Recover a missing/stale PID first, then signal only a verified collector.
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
 
     # Stop updater PID-file tracked process
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
 
     # A launchd wrapper may still be between startup and exec after unload.
     # Retry exact installed paths so it cannot later become an orphan collector.
     stop_installed_collector_processes
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
+    stop_installed_updater_processes
 
     rm -f "$PID_FILE"
     echo "✅ loongsuite-pilot stopped"
@@ -635,22 +720,9 @@ cmd_restart_collector() {
             esac
             ;;
     esac
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
     stop_installed_collector_processes
-
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
 
     sleep 1
 
@@ -785,8 +857,8 @@ cmd_restart_updater() {
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
+    stop_installed_updater_processes
 
     sleep 1
 
@@ -942,7 +1014,7 @@ cmd_status() {
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi
-    if is_pid_file_running "$UPDATER_PID_FILE"; then
+    if is_pid_file_running "$UPDATER_PID_FILE" updater; then
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
