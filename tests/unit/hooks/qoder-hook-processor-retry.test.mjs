@@ -15,6 +15,7 @@ import {
   retryLockPath,
   readTranscriptSnapshot,
   selectTurnSegmentsForCollection,
+  splitContentEventsIntoTurns,
   tryAcquireRetryLock,
 } from '../../../assets/hooks/qoder-hook-processor.mjs';
 
@@ -646,5 +647,154 @@ describe('buildEventsFromBoundaries tool result matching', () => {
       1001,
       1000,
     ]);
+  });
+});
+
+describe('buildEventsFromBoundaries CLI image source parts', () => {
+  it('keeps the primary prompt and appends meta Image:source text for qoder-cli', () => {
+    const clip = '/tmp/clip.png.png';
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.318Z',
+        entrypoint: 'cli',
+        promptId: 'p1',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: '[Image #0]这个图像在讲什么？' },
+            { type: 'image', source: { type: 'url', url: 'https://example/x.png' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.529Z',
+        isMeta: true,
+        entrypoint: 'cli',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: `[Image: source: ${clip}]` }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-12T09:17:55.407Z',
+        message: {
+          role: 'assistant',
+          model: 'auto',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      },
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const boundaries = buildLlmBoundaries(progress, rows);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-cli', 'session-cli', 'qoder', {}, '/Users/me/workspace',
+    );
+    expect(records.every(r => r['gen_ai.agent.type'] === 'qoder-cli')).toBe(true);
+    const request = records.find(r => r['event.name'] === 'llm.request');
+    const parts = request['gen_ai.input.messages_delta'][0].parts;
+    expect(parts[0]).toEqual({ type: 'text', content: '[Image #0]这个图像在讲什么？' });
+    expect(parts.some(p => p.type === 'text' && p.content === `[Image: source: ${clip}]`)).toBe(true);
+  });
+
+  it('does not append Image:source parts for IDE turns', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.318Z',
+        message: { role: 'user', content: '解释这张图片' },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.529Z',
+        isMeta: true,
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: '[Image: source: /tmp/clip.png]' }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-12T09:17:55.407Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      },
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const boundaries = buildLlmBoundaries(progress, rows);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-ide', 'session-ide', 'qoder', {}, '/Users/me/workspace',
+    );
+    expect(records[0]['gen_ai.agent.type']).toBe('qoder');
+    const parts = records.find(r => r['event.name'] === 'llm.request')['gen_ai.input.messages_delta'][0].parts;
+    expect(parts).toEqual([{ type: 'text', content: '解释这张图片' }]);
+  });
+
+  it('does not start a new turn on isMeta Image:source rows', () => {
+    const prompt = {
+      type: 'user',
+      timestamp: '2026-08-12T09:17:48.318Z',
+      entrypoint: 'cli',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: '[Image #0]这个图像在讲什么？' },
+          { type: 'image', source: { type: 'url', url: 'https://example/x.png' } },
+        ],
+      },
+    };
+    const meta = {
+      type: 'user',
+      timestamp: '2026-08-12T09:17:48.529Z',
+      isMeta: true,
+      entrypoint: 'cli',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: '[Image: source: /tmp/clip.png.png]' }],
+      },
+    };
+    const assistant = {
+      type: 'assistant',
+      timestamp: '2026-08-12T09:17:55.407Z',
+      message: {
+        role: 'assistant',
+        model: 'auto',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    };
+    const turns = splitContentEventsIntoTurns([prompt, meta, assistant]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0][0]).toBe(prompt);
+    expect(turns[0]).toContain(meta);
+
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, [meta, prompt, assistant]),
+      [meta, prompt, assistant],
+      [meta, prompt, assistant],
+      'turn-meta-first',
+      'session-cli',
+      'qoder',
+      {},
+      '/tmp',
+    );
+    const parts = records.find(r => r['event.name'] === 'llm.request')['gen_ai.input.messages_delta'][0].parts;
+    expect(parts[0]).toEqual({ type: 'text', content: '[Image #0]这个图像在讲什么？' });
+    expect(parts.some(p => p.type === 'text' && p.content.includes('[Image: source:'))).toBe(true);
   });
 });

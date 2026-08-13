@@ -1349,10 +1349,6 @@ function extractUserText(row) {
   return '';
 }
 
-function isSlashCommandText(text) {
-  return text.includes('<command-name>') || text.includes('<local-command-caveat>');
-}
-
 function buildUserMessageParts(userText, contentEvents, agentType) {
   const parts = [{ type: 'text', content: userText }];
   if (agentType !== 'qoder-cli' || !Array.isArray(contentEvents)) return parts;
@@ -1360,7 +1356,7 @@ function buildUserMessageParts(userText, contentEvents, agentType) {
   for (const row of contentEvents) {
     if (row.type !== 'user' || isToolResult(row)) continue;
     const text = extractUserText(row);
-    if (!text || seen.has(text) || isSlashCommandText(text)) continue;
+    if (!text || seen.has(text)) continue;
     parts.push({ type: 'text', content: text });
     seen.add(text);
   }

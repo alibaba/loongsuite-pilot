@@ -1343,7 +1343,7 @@ describe('QoderTraceInput multimodal', () => {
   });
 
   describe('IDE gate via collect', () => {
-    it('converts IDE tool Image file paths and leaves CLI tool.result untouched', async () => {
+    it('converts IDE and CLI tool Image file paths independently', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-'));
       const imgPath = path.join(tmpDir, 'shot.png');
       await fs.writeFile(imgPath, Buffer.from('shot'));
@@ -1408,7 +1408,7 @@ describe('QoderTraceInput multimodal', () => {
         const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
         const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
         expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
-        expect(cli['gen_ai.tool.call.result']).toBe(`Image file: ${imgPath}`);
+        expect(Array.isArray(cli['gen_ai.tool.call.result'])).toBe(true);
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }
