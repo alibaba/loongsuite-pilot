@@ -229,7 +229,7 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
   });
 
-  test('forceBypass=true 时写入 bypass_hook_trust = true', () => {
+  test('removes the unsupported legacy bypass_hook_trust field', () => {
     const opts = {
       configPath,
       hooksJsonAbsPath: '/abs/hooks.json',
@@ -237,55 +237,17 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
       eventToCommand: EVENT_TO_CMD,
       eventToGroupIndex: EVENT_TO_GROUP_0,
       marker: 'otel-codex-hook',
-      forceBypass: true,
     } as const;
     writeTrustedHashes(opts);
-    const content = fs.readFileSync(configPath, 'utf-8');
-    expect(content).toContain('bypass_hook_trust = true');
-    expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
-  });
+    fs.writeFileSync(configPath, `bypass_hook_trust = true\n${fs.readFileSync(configPath, 'utf-8')}`);
 
-  test('forceBypass off -> on 需要触发重写', () => {
-    const base = {
-      configPath,
-      hooksJsonAbsPath: '/abs/hooks.json',
-      hookEvents: HOOK_EVENTS,
-      eventToCommand: EVENT_TO_CMD,
-      eventToGroupIndex: EVENT_TO_GROUP_0,
-      marker: 'otel-codex-hook',
-    } as const;
-    writeTrustedHashes(base);
-
-    const enabled = { ...base, forceBypass: true } as const;
-    expect(verifyTrustHashes(enabled)).toEqual({
+    expect(verifyTrustHashes(opts)).toEqual({
       valid: false,
-      mismatches: ['missing bypass_hook_trust = true'],
+      mismatches: ['unsupported config field bypass_hook_trust'],
     });
-    expect(writeTrustedHashes(enabled)).toBe(true);
-    expect(fs.readFileSync(configPath, 'utf-8')).toContain('bypass_hook_trust = true');
-    expect(verifyTrustHashes(enabled)).toEqual({ valid: true, mismatches: [] });
-  });
-
-  test('forceBypass on -> off 需要触发重写', () => {
-    const enabled = {
-      configPath,
-      hooksJsonAbsPath: '/abs/hooks.json',
-      hookEvents: HOOK_EVENTS,
-      eventToCommand: EVENT_TO_CMD,
-      eventToGroupIndex: EVENT_TO_GROUP_0,
-      marker: 'otel-codex-hook',
-      forceBypass: true,
-    } as const;
-    writeTrustedHashes(enabled);
-
-    const disabled = { ...enabled, forceBypass: false } as const;
-    expect(verifyTrustHashes(disabled)).toEqual({
-      valid: false,
-      mismatches: ['unexpected bypass_hook_trust = true'],
-    });
-    expect(writeTrustedHashes(disabled)).toBe(true);
+    expect(writeTrustedHashes(opts)).toBe(true);
     expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('bypass_hook_trust = true');
-    expect(verifyTrustHashes(disabled)).toEqual({ valid: true, mismatches: [] });
+    expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
   });
 
   test('幂等重写: 两次 write 不产生重复段', () => {
@@ -497,6 +459,7 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     const key = installedHookStateKey('/abs/hooks.json', location);
     const hash = computeInstalledHookTrustHash(location);
     fs.writeFileSync(configPath, [
+      'bypass_hook_trust = true',
       `[hooks.state."${key}"]`,
       'enabled = false',
       `trusted_hash = "${hash}"`,
@@ -507,12 +470,11 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
       hooksJsonAbsPath: '/abs/hooks.json',
       locations: { SubagentStart: location },
       marker: 'otel-codex-hook',
-      forceBypass: true,
     };
 
     expect(writeTrustedHashes(opts)).toBe(true);
     const repaired = fs.readFileSync(configPath, 'utf8');
-    expect(repaired).toContain('bypass_hook_trust = true');
+    expect(repaired).not.toContain('bypass_hook_trust');
     expect(repaired).toContain('enabled = false');
     expect(repaired).toContain(`trusted_hash = "${hash}"`);
   });

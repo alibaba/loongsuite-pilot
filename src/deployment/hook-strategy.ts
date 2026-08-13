@@ -161,7 +161,6 @@ export class HookStrategy implements DeployStrategy {
   private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook?.trustToml;
     if (!cfg || !def.hook) return false;
-    const forceBypass = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1';
     try {
       const locations = await this.resolveInstalledCodexHooks(def);
       return !verifyTrustHashes({
@@ -169,7 +168,6 @@ export class HookStrategy implements DeployStrategy {
         hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
         locations,
         marker: cfg.marker,
-        forceBypass,
       }).valid;
     } catch (err) {
       logger.warn('could not resolve installed Codex hooks for trust verification', {
@@ -262,8 +260,9 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
-      // Codex 类 hook 需要写 trust hash 到 config.toml(forceBypass 应急通道由 pilot
-      // config.json 的 agents.<id>.trust.forceBypass 控制 — 后续可由 hook-watchdog 读取)
+      // Codex 类 hook 需要写 trust hash 到 config.toml。
+      // Hook trust bypass 仅是 Codex 进程级 CLI 参数，不是合法的 config.toml 字段；
+      // Pilot 不拥有 Codex 启动入口，因此这里不能提供 bypass 通道。
       if (hookConfig.trustToml) {
         await this.writeCodexTrust(def);
       }
@@ -307,26 +306,19 @@ export class HookStrategy implements DeployStrategy {
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
     const locations = await this.resolveInstalledCodexHooks(def);
-    const forceBypass = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1';
 
     const changed = writeTrustedHashes({
       configPath,
       hooksJsonAbsPath,
       locations,
       marker: cfg.marker,
-      forceBypass,
     });
-
-    if (forceBypass) {
-      logger.warn('Codex trust enforcement bypass enabled via LOONGSUITE_PILOT_CODEX_FORCE_BYPASS', { agentId: def.id });
-    }
 
     const verify = verifyTrustHashes({
       configPath,
       hooksJsonAbsPath,
       locations,
       marker: cfg.marker,
-      forceBypass,
     });
     if (!verify.valid) {
       throw new Error(`codex trust hash verification failed: ${verify.mismatches.join('; ')}`);

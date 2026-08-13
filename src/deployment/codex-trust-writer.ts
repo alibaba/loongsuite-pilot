@@ -232,7 +232,6 @@ export interface InstalledTrustOpts {
   hooksJsonAbsPath: string;
   locations: Record<string, InstalledCodexHookLocation>;
   marker: string;
-  forceBypass?: boolean;
 }
 
 interface LegacyTrustOpts {
@@ -242,7 +241,6 @@ interface LegacyTrustOpts {
   eventToCommand: Record<string, string>;
   eventToGroupIndex: Record<string, number>;
   marker: string;
-  forceBypass?: boolean;
 }
 
 type TrustOpts = InstalledTrustOpts | LegacyTrustOpts;
@@ -268,7 +266,6 @@ function normalizeTrustOpts(opts: TrustOpts): InstalledTrustOpts {
     hooksJsonAbsPath: opts.hooksJsonAbsPath,
     locations,
     marker: opts.marker,
-    ...(opts.forceBypass !== undefined ? { forceBypass: opts.forceBypass } : {}),
   };
 }
 
@@ -292,11 +289,11 @@ export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
   const content = fs.readFileSync(opts.configPath, 'utf-8');
   const actual = new Map(parseTrustSections(content).map(section => [section.key, section.hash]));
   const mismatches: string[] = [];
-  const bypassPresent = /^\s*bypass_hook_trust\s*=\s*true\s*$/m.test(content);
-  if (opts.forceBypass && !bypassPresent) {
-    mismatches.push('missing bypass_hook_trust = true');
-  } else if (!opts.forceBypass && bypassPresent) {
-    mismatches.push('unexpected bypass_hook_trust = true');
+  // Pilot briefly wrote this as an emergency bypass, but Codex only supports
+  // bypassing trust via the per-invocation --dangerously-bypass-hook-trust flag.
+  // Treat the unsupported legacy field as repairable state so deployment removes it.
+  if (/^\s*bypass_hook_trust\s*=/m.test(content)) {
+    mismatches.push('unsupported config field bypass_hook_trust');
   }
   for (const [key, hash] of expectedTrustState(opts)) {
     const current = actual.get(key);
@@ -341,7 +338,6 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   content = removeExactTrustSections(content, exactKeys);
 
   const lines: string[] = [begin];
-  if (opts.forceBypass) lines.push('bypass_hook_trust = true', '');
   for (const [key, hash] of expected) {
     lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
     const enabled = enabledByKey.get(key);
@@ -376,7 +372,7 @@ export function removeTrustBlock(
   return true;
 }
 
-/** Remove exact position-based trust entries without touching the active block markers or bypass. */
+/** Remove exact position-based trust entries without touching the active block markers. */
 export function removeTrustStateKeys(
   configPath: string,
   ownedHookStateKeys: readonly string[],
