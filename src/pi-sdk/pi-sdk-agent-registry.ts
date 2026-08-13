@@ -13,6 +13,10 @@ import {
 } from '../utils/fs-utils.js';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
 import {
+  COLLECTOR_PROCESS_PATTERNS,
+  type ProcessCommandPattern,
+} from '../utils/pid-utils.js';
+import {
   isReservedPiSdkAgentId,
   isValidPiSdkAgentId,
   validatePiSdkAgentId,
@@ -21,6 +25,31 @@ import {
 export { validatePiSdkAgentId } from './pi-sdk-agent-identity.js';
 const PI_SDK_INPUT_TYPE = 'pi-sdk-jsonl';
 const PI_SDK_REGISTRY_LOCK_FILE = 'pi-sdk-registry.lock';
+const PI_SDK_WRAPPER_RETRY_DELAYS_MS = [100, 300] as const;
+
+export const PI_SDK_REGISTRY_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
+  ...COLLECTOR_PROCESS_PATTERNS,
+  /(?:^|[\s/\\])(?:dist[\\/]index\.js|src[\\/]index\.ts)\s+agent\s+(?:register|unregister)(?:\s|$)/,
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+agent\s+(?:register|unregister)(?:\s|$)/,
+];
+
+export class PiSdkRegistryBusyError extends Error {
+  readonly code = 'PI_SDK_REGISTRY_BUSY';
+
+  constructor(readonly holderPid?: number) {
+    const holder = holderPid ? ` (held by pid ${holderPid})` : '';
+    super(`PI SDK Agent registry is busy${holder}; retry the command`);
+    this.name = 'PiSdkRegistryBusyError';
+  }
+}
+
+export function isPiSdkRegistryBusyError(error: unknown): error is PiSdkRegistryBusyError {
+  return error instanceof PiSdkRegistryBusyError
+    || (typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'PI_SDK_REGISTRY_BUSY');
+}
 
 export interface PiSdkAgentRegistrationRequest {
   dataDir: string;
@@ -236,7 +265,15 @@ export async function listRegisteredPiSdkAgents(dataDirValue: string): Promise<A
  */
 export async function ensureRegisteredPiSdkWrappers(dataDirValue: string): Promise<number> {
   const dataDir = resolveAbsolutePath(dataDirValue, 'Pilot data directory');
-  return withPiSdkRegistryLock(dataDir, () => ensureRegisteredPiSdkWrappersLocked(dataDir));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await withPiSdkRegistryLock(dataDir, () => ensureRegisteredPiSdkWrappersLocked(dataDir));
+    } catch (err) {
+      const retryDelay = PI_SDK_WRAPPER_RETRY_DELAYS_MS[attempt];
+      if (!isPiSdkRegistryBusyError(err) || retryDelay === undefined) throw err;
+      await delay(retryDelay);
+    }
+  }
 }
 
 async function ensureRegisteredPiSdkWrappersLocked(dataDir: string): Promise<number> {
@@ -273,16 +310,39 @@ async function ensureRegisteredPiSdkWrappersLocked(dataDir: string): Promise<num
 
 async function withPiSdkRegistryLock<T>(dataDir: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = path.join(dataDir, PI_SDK_REGISTRY_LOCK_FILE);
-  const { lock, holderPid } = acquireSingleInstanceLock(lockPath);
+  const { lock, holderPid } = acquireSingleInstanceLock(lockPath, PI_SDK_REGISTRY_PROCESS_PATTERNS);
   if (!lock) {
-    const holder = holderPid ? ` (held by pid ${holderPid})` : '';
-    throw new Error(`PI SDK Agent registry is busy${holder}; retry the command`);
+    throw new PiSdkRegistryBusyError(holderPid);
   }
+  const releaseOnExit = () => lock.release();
+  const releaseOnSignal = (signal: 'SIGINT' | 'SIGTERM') => {
+    lock.release();
+    // Adding a signal listener suppresses Node's default termination. When this
+    // scoped cleanup listener is the only one (the short-lived Agent CLI case),
+    // re-deliver the signal after `once` has removed us so normal termination is
+    // preserved. During collector startup its existing shutdown listener remains
+    // responsible for the graceful stop.
+    if (process.listenerCount(signal) === 0) {
+      process.kill(process.pid, signal);
+    }
+  };
+  const releaseOnSigint = () => releaseOnSignal('SIGINT');
+  const releaseOnSigterm = () => releaseOnSignal('SIGTERM');
+  process.once('exit', releaseOnExit);
+  process.once('SIGINT', releaseOnSigint);
+  process.once('SIGTERM', releaseOnSigterm);
   try {
     return await operation();
   } finally {
+    process.off('exit', releaseOnExit);
+    process.off('SIGINT', releaseOnSigint);
+    process.off('SIGTERM', releaseOnSigterm);
     lock.release();
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export async function doctorPiSdkAgent(

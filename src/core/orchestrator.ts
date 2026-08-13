@@ -8,7 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
-import { ensureRegisteredPiSdkWrappers } from '../pi-sdk/pi-sdk-agent-registry.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  isPiSdkRegistryBusyError,
+} from '../pi-sdk/pi-sdk-agent-registry.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
@@ -209,16 +212,7 @@ export class Orchestrator extends EventEmitter {
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
-    try {
-      const restoredWrappers = await ensureRegisteredPiSdkWrappers(this.dataDir);
-      if (restoredWrappers > 0) {
-        logger.info('restored generated PI SDK Agent wrappers', { count: restoredWrappers });
-      }
-    } catch (err) {
-      // Keep unrelated Agent integrations available when a retained PI SDK
-      // registration cannot be restored; doctor reports the concrete failure.
-      logger.warn('failed to restore generated PI SDK Agent wrappers', { error: String(err) });
-    }
+    await this.restoreRegisteredPiSdkWrappers();
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
@@ -339,6 +333,33 @@ export class Orchestrator extends EventEmitter {
 
     this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
     this.legacySlsFailedLogCleanupService.start();
+  }
+
+  private async restoreRegisteredPiSdkWrappers(): Promise<void> {
+    try {
+      const restoredWrappers = await ensureRegisteredPiSdkWrappers(this.dataDir);
+      if (restoredWrappers > 0) {
+        logger.info('restored generated PI SDK Agent wrappers', { count: restoredWrappers });
+      }
+    } catch (err) {
+      // Keep unrelated Agent integrations available when a retained PI SDK
+      // registration cannot be restored. The registry helper already bounded
+      // retries for transient lock contention; surface the final degradation
+      // through both local diagnostics and the normal Pilot alarm pipeline.
+      const registryBusy = isPiSdkRegistryBusyError(err);
+      logger.error('failed to restore generated PI SDK Agent wrappers', {
+        error: String(err),
+        registryBusy,
+      });
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM',
+        '2',
+        registryBusy
+          ? 'PI SDK Agent wrapper restore skipped because the registry remained busy after bounded retries'
+          : 'PI SDK Agent wrapper restore failed during startup; inspect local Pilot logs and run agent doctor',
+        { input_name: 'pi-coding-agent-log' },
+      );
+    }
   }
 
   async stop(): Promise<void> {

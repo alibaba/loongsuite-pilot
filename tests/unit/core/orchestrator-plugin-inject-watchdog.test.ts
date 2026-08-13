@@ -22,9 +22,19 @@ vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
   return { ...actual, fileExists: vi.fn() };
 });
 
+vi.mock('../../../src/pi-sdk/pi-sdk-agent-registry.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/pi-sdk/pi-sdk-agent-registry.js')>();
+  return { ...actual, ensureRegisteredPiSdkWrappers: vi.fn() };
+});
+
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import { fileExists } from '../../../src/utils/fs-utils.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  PiSdkRegistryBusyError,
+} from '../../../src/pi-sdk/pi-sdk-agent-registry.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
 const DATA_DIR = '/tmp/orch-plugin-inject-test';
 
@@ -44,6 +54,11 @@ function callBuild(orch: Orchestrator) {
       cleanup?: () => Promise<void>;
     }>;
   }).buildPluginInjectInterceptTargets();
+}
+
+function callWrapperRestore(orch: Orchestrator): Promise<void> {
+  return (orch as unknown as { restoreRegisteredPiSdkWrappers: () => Promise<void> })
+    .restoreRegisteredPiSdkWrappers();
 }
 
 function pluginInjectDef(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
@@ -262,5 +277,55 @@ describe('Orchestrator PI SDK shared input gating', () => {
     const enabled = (orch as unknown as { isAnyPiSdkAgentEnabled: () => boolean }).isAnyPiSdkAgentEnabled();
 
     expect(enabled).toBe(true);
+  });
+});
+
+describe('Orchestrator PI SDK wrapper restore failure handling', () => {
+  let orch: Orchestrator;
+  let alarmManager: AlarmManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orch = new Orchestrator({ dataDir: DATA_DIR } as never);
+    alarmManager = new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test-user' });
+    (orch as unknown as { alarmManager: AlarmManager }).alarmManager = alarmManager;
+  });
+
+  it('does not record a degraded startup alarm after successful recovery', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockResolvedValue(1);
+
+    await callWrapperRestore(orch);
+
+    expect(alarmManager.serialize()).toEqual([]);
+  });
+
+  it('records a bounded-busy degradation without blocking startup', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockRejectedValue(new PiSdkRegistryBusyError(42));
+
+    await expect(callWrapperRestore(orch)).resolves.toBeUndefined();
+
+    expect(alarmManager.serialize()).toContainEqual(expect.objectContaining({
+      alarm_type: 'DEGRADED_STARTUP_ALARM',
+      alarm_level: '2',
+      alarm_message: expect.stringContaining('remained busy after bounded retries'),
+      input_name: 'pi-coding-agent-log',
+    }));
+  });
+
+  it('records a sanitized degradation for non-busy restore failures', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockRejectedValue(
+      new Error('permission denied for /Users/private/acme/settings.json'),
+    );
+
+    await expect(callWrapperRestore(orch)).resolves.toBeUndefined();
+
+    const [alarm] = alarmManager.serialize();
+    expect(alarm).toMatchObject({
+      alarm_type: 'DEGRADED_STARTUP_ALARM',
+      alarm_level: '2',
+      input_name: 'pi-coding-agent-log',
+    });
+    expect(alarm.alarm_message).not.toContain('/Users/private');
+    expect(alarm.alarm_message).toContain('run agent doctor');
   });
 });

@@ -6,11 +6,15 @@ import {
   buildPiSdkAgentDefinition,
   doctorPiSdkAgent,
   ensureRegisteredPiSdkWrappers,
+  PI_SDK_REGISTRY_PROCESS_PATTERNS,
+  PiSdkRegistryBusyError,
   listRegisteredPiSdkAgents,
   registerPiSdkAgent,
   unregisterPiSdkAgent,
 } from '../../../src/pi-sdk/pi-sdk-agent-registry.js';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
+import { acquireSingleInstanceLock } from '../../../src/utils/single-instance-lock.js';
+import { isCommandMatch } from '../../../src/utils/pid-utils.js';
 
 describe('PI SDK Agent registry', () => {
   let tmpDir: string;
@@ -28,6 +32,7 @@ describe('PI SDK Agent registry', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
@@ -160,6 +165,89 @@ describe('PI SDK Agent registry', () => {
     await expect(ensureRegisteredPiSdkWrappers(dataDir)).resolves.toBe(1);
     await expect(fs.readFile(result.wrapperPath, 'utf8')).resolves.toBe(original);
     await expect(ensureRegisteredPiSdkWrappers(dataDir)).resolves.toBe(0);
+  });
+
+  it('retries transient registry contention before restoring a wrapper', async () => {
+    const result = await registerPiSdkAgent({
+      dataDir,
+      id: 'acme-code',
+      name: 'Acme Code Agent',
+      agentDir,
+      detectionPaths: [detectionPath],
+    });
+    await fs.unlink(result.wrapperPath);
+    const blocker = acquireSingleInstanceLock(path.join(dataDir, 'pi-sdk-registry.lock'));
+    expect(blocker.lock).not.toBeNull();
+
+    const restore = ensureRegisteredPiSdkWrappers(dataDir);
+    setTimeout(() => blocker.lock!.release(), 20);
+
+    await expect(restore).resolves.toBe(1);
+    await expect(fs.readFile(result.wrapperPath, 'utf8')).resolves.toContain('createPiTelemetryExtension');
+  });
+
+  it('bounds wrapper restore retries and preserves a typed busy error', async () => {
+    vi.useFakeTimers();
+    const blocker = acquireSingleInstanceLock(path.join(dataDir, 'pi-sdk-registry.lock'));
+    expect(blocker.lock).not.toBeNull();
+
+    const restore = ensureRegisteredPiSdkWrappers(dataDir);
+    const assertion = expect(restore).rejects.toBeInstanceOf(PiSdkRegistryBusyError);
+    await vi.advanceTimersByTimeAsync(400);
+    await assertion;
+    blocker.lock!.release();
+  });
+
+  it('recognizes collector and Agent CLI processes as valid registry lock owners', () => {
+    expect(isCommandMatch(
+      '/usr/bin/node /opt/loongsuite-pilot/bin/collector-daemon.js',
+      PI_SDK_REGISTRY_PROCESS_PATTERNS,
+    )).toBe(true);
+    expect(isCommandMatch(
+      '/usr/bin/node /opt/loongsuite-pilot/versions/v1/dist/index.js agent register pi-sdk --id acme',
+      PI_SDK_REGISTRY_PROCESS_PATTERNS,
+    )).toBe(true);
+    expect(isCommandMatch(
+      'powershell.exe loongsuite-pilot.ps1 agent unregister acme-code',
+      PI_SDK_REGISTRY_PROCESS_PATTERNS,
+    )).toBe(true);
+    expect(isCommandMatch('/Applications/Example IDE.app/Contents/MacOS/Example IDE', PI_SDK_REGISTRY_PROCESS_PATTERNS)).toBe(false);
+  });
+
+  it('scopes exit and signal cleanup listeners to the registry critical section', async () => {
+    const baselineExitListeners = process.listeners('exit');
+    const baselineSigintListeners = process.listeners('SIGINT');
+    const baselineSigtermListeners = process.listeners('SIGTERM');
+    let finishDeploy!: (value: unknown) => void;
+    vi.spyOn(PluginInjectStrategy.prototype, 'deploy').mockImplementationOnce(() => new Promise(resolve => {
+      finishDeploy = resolve;
+    }) as never);
+
+    const registration = registerPiSdkAgent({
+      dataDir,
+      id: 'acme-code',
+      name: 'Acme Code Agent',
+      agentDir,
+      detectionPaths: [detectionPath],
+    });
+    await vi.waitFor(() => expect(finishDeploy).toBeTypeOf('function'));
+    expect(process.listenerCount('exit')).toBe(baselineExitListeners.length + 1);
+    expect(process.listenerCount('SIGINT')).toBe(baselineSigintListeners.length + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(baselineSigtermListeners.length + 1);
+
+    const sigintCleanup = process.listeners('SIGINT')
+      .find(listener => !baselineSigintListeners.includes(listener));
+    expect(sigintCleanup).toBeTypeOf('function');
+    sigintCleanup!();
+    const reacquired = acquireSingleInstanceLock(path.join(dataDir, 'pi-sdk-registry.lock'));
+    expect(reacquired.lock).not.toBeNull();
+    reacquired.lock!.release();
+
+    finishDeploy({ success: true, agentId: 'acme-code', deployMode: 'plugin-inject' });
+    await expect(registration).resolves.toMatchObject({ definition: { id: 'acme-code' } });
+    expect(process.listeners('exit')).toEqual(baselineExitListeners);
+    expect(process.listeners('SIGINT')).toEqual(baselineSigintListeners);
+    expect(process.listeners('SIGTERM')).toEqual(baselineSigtermListeners);
   });
 
   it('rejects unsafe, reserved, and under-specified registrations', () => {
