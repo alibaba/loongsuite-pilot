@@ -1467,12 +1467,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/collector-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1481,6 +1517,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1491,6 +1529,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1505,20 +1545,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1529,7 +1569,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi
@@ -1599,12 +1639,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run-updater"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/updater-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1613,6 +1689,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1623,6 +1701,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run-updater >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1637,20 +1717,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1661,7 +1741,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi

@@ -124,6 +124,62 @@ describe('dashboard service lifecycle', () => {
     }
   });
 
+  it('generated init.d scripts do not signal a reused PID', async () => {
+    const definitions = [
+      ['_write_initd_script()', '_write_initd_updater_script()', 'run'],
+      ['_write_initd_updater_script()', '_register_initd_boot()', 'run-updater'],
+    ];
+    const daemonUser = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+    const daemonGroup = spawnSync('id', ['-gn'], { encoding: 'utf8' }).stdout.trim();
+
+    for (const [startMarker, endMarker, command] of definitions) {
+      const root = mkdtempSync(resolve(tmpdir(), 'pilot-initd-'));
+      const daemonBin = resolve(root, 'loongsuite-pilot');
+      const pidFile = resolve(root, 'pilot.pid');
+      const section = runtimeSh.slice(runtimeSh.indexOf(startMarker), runtimeSh.indexOf(endMarker));
+      const template = section.match(/<< 'INITEOF'\n([\s\S]*?)\nINITEOF/)?.[1];
+      expect(template).toBeTruthy();
+      const replacements = {
+        USER_PLACEHOLDER: daemonUser,
+        GROUP_PLACEHOLDER: daemonGroup,
+        HOME_PLACEHOLDER: root,
+        BIN_PLACEHOLDER: daemonBin,
+        DAEMON_NAME_PLACEHOLDER: `pilot-${command}`,
+        PID_PLACEHOLDER: pidFile,
+        LOG_PLACEHOLDER: resolve(root, 'pilot.log'),
+        CONFIG_PLACEHOLDER: resolve(root, 'config.json'),
+      };
+      let initScript = template;
+      for (const [placeholder, value] of Object.entries(replacements)) {
+        initScript = initScript.replaceAll(placeholder, value);
+      }
+      const scriptPath = resolve(root, 'init-script');
+      writeFileSync(scriptPath, initScript, { mode: 0o755 });
+
+      const reused = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        env: {
+          ...process.env,
+          LOONGSUITE_PILOT_INITD_BIN: daemonBin,
+          LOONGSUITE_PILOT_INITD_COMMAND: command,
+        },
+        stdio: 'ignore',
+      });
+      try {
+        await new Promise(resolveWait => setTimeout(resolveWait, 30));
+        writeFileSync(pidFile, `${reused.pid}\n`);
+        const status = spawnSync('bash', [scriptPath, 'status'], { encoding: 'utf8' });
+        expect(status.status).toBe(1);
+
+        const stopped = spawnSync('bash', [scriptPath, 'stop'], { encoding: 'utf8' });
+        expect(stopped.status).toBe(0);
+        expect(() => process.kill(reused.pid, 0)).not.toThrow();
+      } finally {
+        reused.kill('SIGTERM');
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('probes the dashboard before printing its URL on Unix and Windows', () => {
     const unixProbe = runtimeSh.slice(
       runtimeSh.indexOf('dashboard_is_available()'),
