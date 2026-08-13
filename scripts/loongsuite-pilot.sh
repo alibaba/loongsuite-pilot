@@ -313,17 +313,61 @@ cleanup_legacy_monitor_process() {
     local pid_file="$1"
     local script_name="$2"
     local pid=""
-    local command_line=""
     if [ -f "$pid_file" ]; then
         pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-            command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
-            if [[ "$command_line" == *"$script_name"* ]]; then
-                kill "$pid" 2>/dev/null || true
-            fi
+        if legacy_monitor_process_matches "$pid" "$script_name"; then
+            kill "$pid" 2>/dev/null || true
         fi
         rm -f "$pid_file"
     fi
+}
+
+legacy_monitor_process_matches() {
+    local pid="$1"
+    local script_name="$2"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
+
+    local expected_process=""
+    case "$script_name" in
+        *.sh) expected_process=shell ;;
+        *.mjs) expected_process=node ;;
+        *) return 1 ;;
+    esac
+
+    local process_name
+    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    process_name="${process_name##*/}"
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) ;;
+        *) return 1 ;;
+    esac
+
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "${argv_entry##*/}" = "$script_name" ] && [ "$argv_count" -eq 2 ]
+        return
+    fi
+
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    [[ "$command_line" == *"/$script_name" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#script_name}-1}"
+    local command_executable="${command_prefix%% *}"
+    command_executable="${command_executable##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 cleanup_legacy_monitor_processes() {
@@ -976,12 +1020,36 @@ process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535
 ' "$CONFIG_FILE" 2>/dev/null || echo 8765
 }
 
+dashboard_data_dir() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo "$DATA_DIR"
+        return
+    }
+    LOONGSUITE_PILOT_LAUNCHER_DATA_DIR="$DATA_DIR" "$node_bin" -e '
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const configPath = process.argv[1];
+let configured;
+try { configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir; } catch {}
+let dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || configured || process.env.LOONGSUITE_PILOT_LAUNCHER_DATA_DIR;
+if (dataDir === "~") dataDir = os.homedir();
+else if (dataDir.startsWith("~/")) dataDir = path.join(os.homedir(), dataDir.slice(2));
+process.stdout.write(dataDir);
+' "$CONFIG_FILE" 2>/dev/null || echo "$DATA_DIR"
+}
+
 dashboard_is_available() {
     local port="$1"
+    local effective_data_dir
+    effective_data_dir=$(dashboard_data_dir)
     local node_bin
     node_bin=$(resolve_node 2>/dev/null) || return 1
     "$node_bin" -e '
 const http = require("node:http");
+const crypto = require("node:crypto");
+const path = require("node:path");
 let finished = false;
 let timer;
 const finish = (code) => {
@@ -997,7 +1065,12 @@ const request = http.request({
   method: "HEAD",
 }, (response) => {
   response.resume();
-  finish(response.statusCode === 200 || response.statusCode === 503 ? 0 : 1);
+  const expectedInstance = crypto.createHash("sha256")
+    .update(path.resolve(process.argv[2]))
+    .digest("hex");
+  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
+    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
+  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
 });
 request.on("error", () => finish(1));
 request.end();
@@ -1005,7 +1078,7 @@ timer = setTimeout(() => {
   request.destroy();
   finish(1);
 }, 300);
-' "$port" >/dev/null 2>&1
+' "$port" "$effective_data_dir" >/dev/null 2>&1
 }
 
 cmd_status() {

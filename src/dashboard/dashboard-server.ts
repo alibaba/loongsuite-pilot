@@ -1,4 +1,5 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
@@ -7,6 +8,9 @@ const logger = createLogger('DashboardServer');
 
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 export const DEFAULT_DASHBOARD_PORT = 8_765;
+export const DASHBOARD_ID_HEADER = 'x-loongsuite-pilot-dashboard';
+export const DASHBOARD_ID_VALUE = 'metrics-summary-v1';
+export const DASHBOARD_INSTANCE_HEADER = 'x-loongsuite-pilot-instance';
 
 export interface DashboardServerOptions {
   dataDir: string;
@@ -27,6 +31,7 @@ export class DashboardServer {
   private readonly port: number;
   private readonly assetPath: string;
   private readonly summaryPath: string;
+  private readonly instanceId: string;
   private server: Server | null = null;
   private startPromise: Promise<void> | null = null;
 
@@ -35,6 +40,7 @@ export class DashboardServer {
     this.port = options.port ?? DEFAULT_DASHBOARD_PORT;
     this.assetPath = options.assetPath;
     this.summaryPath = path.join(options.dataDir, 'logs', 'metrics-summary.json');
+    this.instanceId = createHash('sha256').update(path.resolve(options.dataDir)).digest('hex');
   }
 
   get running(): boolean {
@@ -85,7 +91,12 @@ export class DashboardServer {
 
   private async listen(): Promise<void> {
     const server = createServer((request, response) => {
-      void this.handleRequest(request.url ?? '/', request.method ?? 'GET', response);
+      void this.handleRequest(
+        request.url ?? '/',
+        request.method ?? 'GET',
+        request.headers.host,
+        response,
+      );
     });
 
     await new Promise<void>((resolve) => {
@@ -118,9 +129,15 @@ export class DashboardServer {
   private async handleRequest(
     requestUrl: string,
     method: string,
+    hostHeader: string | undefined,
     response: ServerResponse,
   ): Promise<void> {
     try {
+      if (!this.isAllowedHost(hostHeader)) {
+        this.sendJson(response, 421, { error: 'invalid dashboard host' }, method === 'HEAD');
+        return;
+      }
+
       if (method !== 'GET' && method !== 'HEAD') {
         this.sendJson(response, 405, { error: 'method not allowed' }, method === 'HEAD');
         return;
@@ -160,6 +177,12 @@ export class DashboardServer {
     }
   }
 
+  private isAllowedHost(hostHeader: string | undefined): boolean {
+    const address = this.server?.address();
+    if (!address || typeof address === 'string' || !hostHeader) return false;
+    return isAllowedDashboardHost(hostHeader, this.host, address.port);
+  }
+
   private sendJson(
     response: ServerResponse,
     statusCode: number,
@@ -187,7 +210,24 @@ export class DashboardServer {
       'content-length': body.byteLength,
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
+      'cross-origin-resource-policy': 'same-origin',
+      [DASHBOARD_ID_HEADER]: DASHBOARD_ID_VALUE,
+      [DASHBOARD_INSTANCE_HEADER]: this.instanceId,
     });
     response.end(headOnly ? undefined : body);
   }
+}
+
+export function isAllowedDashboardHost(hostHeader: string, host: string, port: number): boolean {
+  const allowed = new Set([
+    `${host}:${port}`.toLowerCase(),
+    `${DEFAULT_DASHBOARD_HOST}:${port}`,
+    `localhost:${port}`,
+  ]);
+  if (port === 80) {
+    allowed.add(host.toLowerCase());
+    allowed.add(DEFAULT_DASHBOARD_HOST);
+    allowed.add('localhost');
+  }
+  return allowed.has(hostHeader.toLowerCase());
 }

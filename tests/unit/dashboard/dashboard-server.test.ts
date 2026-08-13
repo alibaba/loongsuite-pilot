@@ -1,11 +1,14 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DashboardServer,
+  DASHBOARD_ID_HEADER,
+  DASHBOARD_ID_VALUE,
   DEFAULT_DASHBOARD_PORT,
+  isAllowedDashboardHost,
 } from '../../../src/dashboard/dashboard-server.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -35,6 +38,13 @@ describe('DashboardServer', () => {
     expect(DEFAULT_DASHBOARD_PORT).toBe(8765);
   });
 
+  it('accepts loopback Host headers without a port only on HTTP port 80', () => {
+    expect(isAllowedDashboardHost('127.0.0.1', '127.0.0.1', 80)).toBe(true);
+    expect(isAllowedDashboardHost('localhost', '127.0.0.1', 80)).toBe(true);
+    expect(isAllowedDashboardHost('127.0.0.1', '127.0.0.1', 8765)).toBe(false);
+    expect(isAllowedDashboardHost('attacker.example', '127.0.0.1', 80)).toBe(false);
+  });
+
   it('serves only the static page and the unmodified summary file', async () => {
     const { dataDir, assetPath } = await fixture();
     const summaryPath = path.join(dataDir, 'logs', 'metrics-summary.json');
@@ -53,9 +63,38 @@ describe('DashboardServer', () => {
     const response = await fetch(`${server.address}metrics-summary.json`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(summary);
+    expect(response.headers.get(DASHBOARD_ID_HEADER)).toBe(DASHBOARD_ID_VALUE);
+    expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin');
 
     const legacy = await fetch(`${server.address}api/overview`);
     expect(legacy.status).toBe(404);
+  });
+
+  it('rejects requests whose Host header is not loopback', async () => {
+    const { dataDir, assetPath } = await fixture();
+    const server = new DashboardServer({ dataDir, assetPath, port: 0 });
+    servers.push(server);
+    await server.start();
+    const address = new URL(server.address!);
+
+    const response = await new Promise<{ statusCode?: number; body: string }>((resolve, reject) => {
+      const request = httpRequest({
+        host: address.hostname,
+        port: Number(address.port),
+        path: '/metrics-summary.json',
+        headers: { host: 'attacker.example' },
+      }, incoming => {
+        let body = '';
+        incoming.setEncoding('utf8');
+        incoming.on('data', chunk => { body += chunk; });
+        incoming.on('end', () => resolve({ statusCode: incoming.statusCode, body }));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+
+    expect(response.statusCode).toBe(421);
+    expect(JSON.parse(response.body)).toEqual({ error: 'invalid dashboard host' });
   });
 
   it('returns 503 while metrics-summary.json is not ready', async () => {

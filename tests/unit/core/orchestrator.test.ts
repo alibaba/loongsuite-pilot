@@ -14,6 +14,7 @@ const mockRuntimeWriterStart = vi.fn();
 const mockRuntimeWriterStop = vi.fn();
 const mockMetricsSummaryStart = vi.fn();
 const mockMetricsSummaryStop = vi.fn();
+const mockMetricsSummaryConstructor = vi.fn();
 const mockStatusBarSyncDesiredState = vi.fn().mockResolvedValue(undefined);
 const mockStatusBarStop = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../../src/status-bar/index.js', () => ({
@@ -21,10 +22,13 @@ vi.mock('../../../src/status-bar/index.js', () => ({
     start: mockRuntimeWriterStart,
     stop: mockRuntimeWriterStop,
   })),
-  MetricsSummaryWriter: vi.fn().mockImplementation(() => ({
-    start: mockMetricsSummaryStart,
-    stop: mockMetricsSummaryStop,
-  })),
+  MetricsSummaryWriter: vi.fn().mockImplementation((...args: unknown[]) => {
+    mockMetricsSummaryConstructor(...args);
+    return {
+      start: mockMetricsSummaryStart,
+      stop: mockMetricsSummaryStop,
+    };
+  }),
   StatusBarAppManager: vi.fn().mockImplementation(() => ({
     syncDesiredState: mockStatusBarSyncDesiredState,
     stop: mockStatusBarStop,
@@ -281,6 +285,11 @@ describe('Orchestrator', () => {
       await orch.start();
 
       expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryConstructor).toHaveBeenCalledWith(
+        '/tmp/test-data',
+        expect.objectContaining({ enabled: false }),
+        '/tmp/output',
+      );
       expect(mockDashboardStart).toHaveBeenCalledOnce();
       expect(mockDashboardConstructor).toHaveBeenCalledWith(expect.objectContaining({ port: 19_001 }));
       expect(mockStatusBarSyncDesiredState).not.toHaveBeenCalled();

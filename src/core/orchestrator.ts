@@ -317,7 +317,11 @@ export class Orchestrator extends EventEmitter {
     // MetricsSummaryWriter is a collector-owned source shared by every local
     // presentation surface. It must keep running when the optional native menu
     // bar app is disabled.
-    this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
+    this.metricsSummaryWriter = new MetricsSummaryWriter(
+      this.dataDir,
+      this.config.statusBar,
+      this.config.flushers.jsonl?.outputDir,
+    );
     this.metricsSummaryWriter.start();
 
     // The local dashboard shares the collector lifecycle and is non-fatal when
@@ -387,7 +391,7 @@ export class Orchestrator extends EventEmitter {
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
-    this.metricsSummaryWriter?.stop();
+    await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;

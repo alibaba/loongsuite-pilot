@@ -29,10 +29,39 @@ describe('dashboard service lifecycle', () => {
       runtimeSh.indexOf('cleanup_legacy_monitor_process()'),
       runtimeSh.indexOf('cleanup_legacy_monitor_processes()'),
     );
-    expect(cleanup.indexOf('ps -p "$pid" -o command=')).toBeLessThan(cleanup.indexOf('kill "$pid"'));
-    expect(cleanup).toContain('[[ "$command_line" == *"$script_name"* ]]');
+    expect(cleanup).toContain('legacy_monitor_process_matches "$pid" "$script_name"');
+    expect(cleanup).toContain('[ "${argv_entry##*/}" = "$script_name" ]');
+    expect(cleanup).toContain('[ "$argv_count" -eq 2 ]');
+    expect(cleanup).toContain('ps -p "$pid" -o uid=');
     expect(cleanup).toContain('rm -f "$pid_file"');
     expect(cleanup).not.toContain('pkill');
+  });
+
+  it('does not kill a reused legacy PID that only mentions the removed script', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'pilot-legacy-monitor-'));
+    const pidFile = resolve(root, 'legacy.pid');
+    const reused = spawn(process.execPath, [
+      '-e',
+      'setInterval(() => {}, 1000)',
+      'serve-loongsuite-pilot-monitor.mjs',
+    ], { stdio: 'ignore' });
+    const functions = runtimeSh.slice(
+      runtimeSh.indexOf('cleanup_legacy_monitor_process()'),
+      runtimeSh.indexOf('updater_process_exists()'),
+    );
+
+    try {
+      await new Promise(resolveWait => setTimeout(resolveWait, 50));
+      writeFileSync(pidFile, `${reused.pid}\n`);
+      const cleaned = spawnSync('bash', ['-c', `${functions}\ncleanup_legacy_monitor_process "$1" serve-loongsuite-pilot-monitor.mjs`, 'test', pidFile], {
+        encoding: 'utf8',
+      });
+      expect(cleaned.status).toBe(0);
+      expect(() => process.kill(reused.pid, 0)).not.toThrow();
+    } finally {
+      reused.kill('SIGTERM');
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('repairs a stale collector PID only from the exact installed bootstrap path', () => {
@@ -196,13 +225,20 @@ describe('dashboard service lifecycle', () => {
       expect(probe).toContain('require("node:http")');
       expect(probe).toContain('path: "/metrics-summary.json"');
       expect(probe).toContain('method: "HEAD"');
+      expect(probe).toContain('x-loongsuite-pilot-dashboard');
+      expect(probe).toContain('x-loongsuite-pilot-instance');
+      expect(probe).toContain('metrics-summary-v1');
       expect(probe).toContain('setTimeout');
       expect(probe).toContain('}, 300)');
     }
     expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port');
+    expect(runtimeSh).toContain('configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir');
+    expect(runtimeSh).toContain('process.env.LOONGSUITE_PILOT_DATA_DIR || configured');
+    expect(runtimeSh).toContain('effective_data_dir=$(dashboard_data_dir)');
     expect(runtimeSh).toContain('? port : 8765');
     expect(runtimeSh).toContain('http://127.0.0.1:${port}/');
     expect(runtimePs1).toContain('function Get-DashboardPort');
+    expect(runtimePs1).toContain('$numericPort -eq $integerPort');
     expect(runtimePs1).toContain('return 8765');
     expect(runtimePs1).toContain('http://127.0.0.1:$dashboardPort/');
     expect(runtimeSh).not.toContain('18765');
