@@ -255,4 +255,40 @@ describe('dashboard static page', () => {
     expect(clamp(20, 4, 100)).toBe(20);
     expect(clamp(20, 40, 10)).toBe(40);
   });
+
+  it('formats only token values compactly at explicit boundaries', () => {
+    const countMatch = dashboardHtml.match(/const count = ([^;]+);/);
+    const tokenCountMatch = dashboardHtml.match(/function tokenCount\(value\) \{([\s\S]*?)\n    \}/);
+    expect(countMatch).not.toBeNull();
+    expect(tokenCountMatch).not.toBeNull();
+    const tokenCount = Function(`
+      const count = ${countMatch[1]};
+      return function tokenCount(value) {${tokenCountMatch[1]}\n      };
+    `)();
+
+    expect(tokenCount(999_999)).toBe('999,999');
+    expect(tokenCount(1_000_000)).toBe('1M');
+    expect(tokenCount(1_500_000)).toBe('1.5M');
+    expect(tokenCount(141_688_729)).toBe('141.69M');
+    expect(tokenCount(1_000_000_000)).toBe('1B');
+    expect(tokenCount(1_250_000_000)).toBe('1.25B');
+    expect(tokenCount(1_000_000_000_000)).toBe('1000B');
+    expect(tokenCount(-141_688_729)).toBe('-141.69M');
+    expect(tokenCount(Number.NaN)).toBe('0');
+  });
+
+  it('applies compact formatting to every token semantic but not other counts', () => {
+    expect(dashboardHtml).toContain('${tokenCount(agent.tokens)}');
+    expect(dashboardHtml).toContain("$('tokens').textContent = tokenCount(today.totalTokens)");
+    expect(dashboardHtml).toContain('输入 ${tokenCount(today.inputTokens)}');
+    expect(dashboardHtml).toContain('输出 ${tokenCount(today.outputTokens)}');
+    expect(dashboardHtml).toContain('缓存读取 ${tokenCount(today.cacheReadTokens)}');
+    expect(dashboardHtml).toContain("'Token', tokenCount");
+    expect(dashboardHtml).toContain("'Session', count");
+    expect(dashboardHtml).toContain("'model', 'totalTokens', tokenCount");
+    expect(dashboardHtml).toContain("'provider', 'totalTokens', tokenCount");
+    expect(dashboardHtml).toContain("$('sessions').textContent = count(today.totalSessions)");
+    expect(dashboardHtml).toContain('${count(agent.sessions)}');
+    expect(dashboardHtml).toContain('${count(agent.events)}');
+  });
 });

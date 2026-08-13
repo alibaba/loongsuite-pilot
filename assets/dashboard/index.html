@@ -140,6 +140,17 @@
     let refreshTimer;
     const $ = (id) => document.getElementById(id);
     const count = (value) => new Intl.NumberFormat().format(Number(value) || 0);
+    function tokenCount(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return count(0);
+      const magnitude = Math.abs(numeric);
+      if (magnitude < 1_000_000) return count(numeric);
+      const useBillions = magnitude >= 1_000_000_000;
+      const divisor = useBillions ? 1_000_000_000 : 1_000_000;
+      const suffix = useBillions ? 'B' : 'M';
+      const compact = (numeric / divisor).toFixed(2).replace(/\.?0+$/, '');
+      return `${compact}${suffix}`;
+    }
     const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -164,7 +175,7 @@
         <article class="agent-card" data-agent-type="${escapeHtml(agent.agentType)}">
           <div class="agent-title">${escapeHtml(agent.agentType)}</div>
           <div class="kv">
-            <div><div class="label">Token</div><div class="value">${count(agent.tokens)}</div></div>
+            <div><div class="label">Token</div><div class="value">${tokenCount(agent.tokens)}</div></div>
             <div><div class="label">Session</div><div class="value">${count(agent.sessions)}</div></div>
             <div><div class="label">Event</div><div class="value">${count(agent.events)}</div></div>
           </div>
@@ -178,7 +189,7 @@
       const wrap = bar.closest('.trend-wrap');
       const tooltip = wrap?.querySelector('.trend-tooltip');
       if (!tooltip) return;
-      tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.day)}</span><strong>${escapeHtml(bar.dataset.label)} ${count(bar.dataset.value)}</strong>`;
+      tooltip.innerHTML = `<span>${escapeHtml(bar.dataset.day)}</span><strong>${escapeHtml(bar.dataset.label)} ${escapeHtml(bar.dataset.formattedValue)}</strong>`;
       tooltip.setAttribute('aria-hidden', 'false');
       tooltip.classList.add('show');
 
@@ -203,7 +214,7 @@
       tooltip?.classList.remove('show');
     }
 
-    function renderTrend(target, points, valueLabel) {
+    function renderTrend(target, points, valueLabel, valueFormatter) {
       const container = $(target);
       const activeElement = document.activeElement;
       const focusedDay = container.contains(activeElement) && activeElement.matches('.trend-bar')
@@ -219,8 +230,9 @@
         <div class="trend-wrap">
           <div class="trend" role="group" aria-label="最近 30 天 ${escapeHtml(valueLabel)}趋势">${shown.map((point) => {
           const height = Math.max(2, Math.round(((Number(point.value) || 0) / max) * 150));
-          const ariaLabel = `${point.day}，${valueLabel} ${count(point.value)}`;
-          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${escapeHtml(target)}-tooltip" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-value="${escapeHtml(point.value)}"><span class="trend-bar-fill" style="height:${height}px"></span></button>`;
+          const formattedValue = valueFormatter(point.value);
+          const ariaLabel = `${point.day}，${valueLabel} ${formattedValue}`;
+          return `<button type="button" class="trend-bar" tabindex="0" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${escapeHtml(target)}-tooltip" data-day="${escapeHtml(point.day)}" data-label="${escapeHtml(valueLabel)}" data-formatted-value="${escapeHtml(formattedValue)}"><span class="trend-bar-fill" style="height:${height}px"></span></button>`;
         }).join('')}</div>
           <div id="${escapeHtml(target)}-tooltip" class="trend-tooltip" role="tooltip" aria-hidden="true"></div>
         </div>
@@ -237,7 +249,7 @@
       }
     }
 
-    function renderShares(target, shares, nameKey, valueKey) {
+    function renderShares(target, shares, nameKey, valueKey, valueFormatter) {
       if (!shares.length) {
         $(target).innerHTML = '<div class="empty">暂无数据</div>';
         return;
@@ -245,7 +257,7 @@
       $(target).innerHTML = shares.map((entry) => `
         <div class="list-row">
           <div class="list-name" title="${escapeHtml(entry[nameKey])}">${escapeHtml(entry[nameKey])}<div class="bar"><span style="width:${Math.max(1, Math.min(100, Number(entry.share) * 100))}%"></span></div></div>
-          <span>${count(entry[valueKey])}</span><span>${(Number(entry.share) * 100).toFixed(1)}%</span>
+          <span>${valueFormatter(entry[valueKey])}</span><span>${(Number(entry.share) * 100).toFixed(1)}%</span>
         </div>`).join('');
     }
 
@@ -257,18 +269,18 @@
 
     function render(summary) {
       const today = summary.ranges.today;
-      $('tokens').textContent = count(today.totalTokens);
-      $('token-detail').textContent = `输入 ${count(today.inputTokens)} · 输出 ${count(today.outputTokens)} · 缓存读取 ${count(today.cacheReadTokens)}`;
+      $('tokens').textContent = tokenCount(today.totalTokens);
+      $('token-detail').textContent = `输入 ${tokenCount(today.inputTokens)} · 输出 ${tokenCount(today.outputTokens)} · 缓存读取 ${tokenCount(today.cacheReadTokens)}`;
       $('sessions').textContent = count(today.totalSessions);
       $('requests').textContent = count(today.totalRequests);
       $('tools').textContent = count(today.totalToolCalls);
       // Agent cards are intentionally derived only from agentShares. New agent
       // types therefore appear without a dashboard code change.
       renderAgents(Array.isArray(today.agentShares) ? today.agentShares : []);
-      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : [], 'Token');
-      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : [], 'Session');
-      renderShares('models', Array.isArray(today.modelShares) ? today.modelShares : [], 'model', 'totalTokens');
-      renderShares('providers', Array.isArray(today.providerShares) ? today.providerShares : [], 'provider', 'totalTokens');
+      renderTrend('token-trend', Array.isArray(summary.dailyTokens) ? summary.dailyTokens : [], 'Token', tokenCount);
+      renderTrend('session-trend', Array.isArray(summary.dailySessions) ? summary.dailySessions : [], 'Session', count);
+      renderShares('models', Array.isArray(today.modelShares) ? today.modelShares : [], 'model', 'totalTokens', tokenCount);
+      renderShares('providers', Array.isArray(today.providerShares) ? today.providerShares : [], 'provider', 'totalTokens', tokenCount);
       renderRepos(Array.isArray(today.repoShares) ? today.repoShares : []);
       setStatus(true, `数据生成于 ${new Date(summary.generatedAt).toLocaleTimeString()} · 每 ${refreshMs / 1000} 秒读取`);
       setNotice('');
