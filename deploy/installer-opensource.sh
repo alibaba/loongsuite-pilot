@@ -1983,6 +1983,7 @@ remove_hook_configs() {
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
+        "$HOME/.zcode/cli/config.json"
     )
 
     local _has_node=0

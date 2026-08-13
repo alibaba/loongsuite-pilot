@@ -1283,7 +1283,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
-        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
+        (Join-Path $env:USERPROFILE ".zcode\cli\config.json")
     )
 
     foreach ($cfg in $configs) {
