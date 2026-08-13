@@ -375,6 +375,35 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(persisted.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
   });
 
+  it('Round 18: onStart 同时设 top-level extra.inode (BaseSessionInput.processFile rotation 检测要用)', async () => {
+    // Round 18 fix (PR #233, copilot suppressed comment): the
+    // previous onStart only set `extra.minimaxCodeRollout.inode`
+    // (the rollout-specific inode used by this input's own
+    // rotation pre-pass). BaseSessionInput.processFile, however,
+    // reads the TOP-LEVEL `extra.inode` field for its own
+    // rotation detection (line 55 of base-session-input.ts).
+    // Without setting `extra.inode` here, the first collect()
+    // after onStart() sees `prevInode === undefined`, so the
+    // base class's rotation guard is bypassed. If the file
+    // rotated between onStart() and the first collect(), the
+    // base class would NOT reset offset, and would read from
+    // the old offset (potentially past the start of the new
+    // file → data loss). The fix sets both inode fields so
+    // the two rotation guards stay consistent.
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const target = path.join(TMPDIR, 'model-io-sess_inode_top.jsonl');
+    fs.writeFileSync(target, '{"line":1}\n');
+    await (input as any).onStart();
+    const stateKey = `minimax-code-rollout:${target}`;
+    const persisted = stateStore.get(stateKey);
+    // Both inode fields must be set and equal.
+    expect(persisted.extra?.inode).toBe(fs.statSync(target).ino);
+    expect(persisted.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
+    // Sanity: the two values agree (otherwise BaseSessionInput's
+    // rotation check and our input's pre-pass would disagree).
+    expect(persisted.extra?.inode).toBe(persisted.extra?.minimaxCodeRollout?.inode);
+  });
+
   it('Round 8: onStart 不重置已有 offset (Pilot 重启后从 checkpoint 恢复, 不丢 Pilot 停机期间的记录)', async () => {
     // Round 8 fix (PR #233, addressing fangxiu-wf review finding #3):
     // the previous onStart unconditionally set offset = stat.size and

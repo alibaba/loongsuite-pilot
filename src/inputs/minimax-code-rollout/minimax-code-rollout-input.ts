@@ -241,9 +241,28 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         // New file (or first sight after a state wipe): baseline to EOF
         // and init turnStepMap so the pre-pass doesn't false-trigger
         // rotation clearing on the first poll.
+        //
+        // Round 18 fix (PR #233, copilot suppressed comment): the
+        // previous implementation only set
+        // `extra.minimaxCodeRollout.inode` (the rollout-specific
+        // inode used by the input's own rotation pre-pass below).
+        // BaseSessionInput.processFile, however, reads the
+        // TOP-LEVEL `extra.inode` field for its own rotation
+        // detection (line 55 of base-session-input.ts). Without
+        // setting `extra.inode` here, the first collect() after
+        // onStart() sees `prevInode === undefined`, so the base
+        // class's `if (prevInode !== undefined && prevInode !==
+        // stat.ino)` rotation guard is bypassed. If the file
+        // rotated between onStart() and the first collect(), the
+        // base class would NOT reset offset, and would read from
+        // the old offset (potentially past the start of the new
+        // file → data loss). Setting both inode fields keeps the
+        // two rotation guards (input-level pre-pass + base-class
+        // file-level check) consistent.
         this.stateStore.setOffset(stateKey, stat.size);
         this.stateStore.update(stateKey, {
           extra: {
+            inode: (stat as any).ino,
             minimaxCodeRollout: {
               inode: (stat as any).ino,
               turnStepMap: {},

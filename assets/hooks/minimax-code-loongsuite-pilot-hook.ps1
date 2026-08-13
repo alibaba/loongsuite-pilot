@@ -30,17 +30,41 @@ function Log-Error {
         $dir = Join-Path $dataDir "logs\minimax-code\errors"
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         $file = Join-Path $dir "minimax-code-error-$day.jsonl"
-        $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-        $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
-        $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"minimax-code`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        # Round 15 fix (PR #233, after upstream rebase onto #247): Add-Content
-        # defaults to the system ANSI codepage on Windows PowerShell 5.1, which
-        # mangles non-ASCII (e.g. Chinese user names in $escapedMsg). Pin to
-        # UTF-8 + NoNewline so the JSONL file is byte-exact readable by the
-        # Node processor. Matches the claude-code wrapper's contract; the
-        # ps1-json-encoding.test.mjs (added in #247) now enforces this on
-        # every .ps1 hook asset.
-        Add-Content -Path $file -Value $line -Encoding UTF8 -NoNewline
+        # Round 18 fix (PR #233, copilot suppressed comment): the
+        # previous implementation had three bugs in the JSONL it
+        # produced:
+        #   1. `(Get-Date -Format "...Z")` uses local time but
+        #      appends a literal "Z" (UTC designator) — the
+        #      resulting timestamp is local-clock time mislabeled
+        #      as UTC. Use `.ToUniversalTime()` to actually
+        #      convert to UTC before formatting.
+        #   2. Manual `-replace` escaping only handled backslashes
+        #      and double-quotes — newlines, tabs, control chars,
+        #      and unicode characters in $Message would produce
+        #      invalid JSON. Use `ConvertTo-Json -Compress` which
+        #      handles all JSON escaping properly.
+        #   3. `-NoNewline` on Add-Content suppressed the trailing
+        #      newline that separates JSONL records. Multiple
+        #      errors would concatenate into one giant line.
+        #      Drop -NoNewline so Add-Content writes a
+        #      trailing newline (the JSONL line separator) and
+        #      the test in #247 (which only checks for
+        #      `-Encoding UTF8`) still passes.
+        $record = @{
+            time                = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            'gen_ai.agent.type' = 'minimax-code'
+            stage               = $Stage
+            'error.type'        = "ps1_$Stage"
+            'error.message'     = $Message
+        } | ConvertTo-Json -Compress
+        # Explicit -Encoding UTF8 (Round 15): Add-Content defaults
+        # to the system ANSI codepage on Windows PowerShell 5.1,
+        # which mangles non-ASCII (e.g. Chinese user names in
+        # $Message). Pinned to UTF-8 to keep the JSONL file
+        # byte-exact readable by the Node processor. The
+        # ps1-json-encoding.test.mjs (added in upstream #247)
+        # enforces this on every .ps1 hook asset.
+        Add-Content -Path $file -Value $record -Encoding UTF8
     } catch {}
 }
 
