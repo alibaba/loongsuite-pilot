@@ -1627,20 +1627,11 @@ function Remove-OpenClawPlugin {
         (Join-Path $env:USERPROFILE ".openclaw\openclaw.json"),
         (Join-Path $env:USERPROFILE ".openclaw\config.json")
     )
-    $managedPath = Join-Path $DataDir "plugins\openclaw\plugin.mjs"
-
-    foreach ($cfg in ($configs | Select-Object -Unique)) {
-        if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg.Replace($env:USERPROFILE, "~")
-        if (-not $script:NODE_BIN) {
-            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-            continue
-        }
-
-        $result = & $script:NODE_BIN -e @'
+    $managedPath = Join-Path $DataDir "plugins\openclaw"
+    $cleanupScript = @'
 const fs = require('fs');
-const f = process.argv[1];
-const managed = process.argv[2].replaceAll('\\', '/');
+const f = process.env.PILOT_OC_CONFIG;
+const managed = process.env.PILOT_OC_MANAGED.replaceAll('\\', '/');
 const entryStr = value => typeof value === 'string'
   ? value
   : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
@@ -1648,6 +1639,7 @@ const isOurs = value => {
   const normalized = entryStr(value).replaceAll('\\', '/');
   const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
   return plain === managed ||
+    plain === managed + '/plugin.mjs' ||
     normalized.includes('loongsuite-pilot-openclaw') ||
     normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
 };
@@ -1677,7 +1669,31 @@ try {
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write('cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg $managedPath 2>$null
+'@
+
+    foreach ($cfg in ($configs | Select-Object -Unique)) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $hadConfigEnv = Test-Path Env:PILOT_OC_CONFIG
+        $hadManagedEnv = Test-Path Env:PILOT_OC_MANAGED
+        $previousConfigEnv = $env:PILOT_OC_CONFIG
+        $previousManagedEnv = $env:PILOT_OC_MANAGED
+        try {
+            $env:PILOT_OC_CONFIG = $cfg
+            $env:PILOT_OC_MANAGED = $managedPath
+            $result = $cleanupScript | & $script:NODE_BIN 2>$null
+            if ($LASTEXITCODE -ne 0) { $result = "error" }
+        } finally {
+            if ($hadConfigEnv) { $env:PILOT_OC_CONFIG = $previousConfigEnv }
+            else { Remove-Item Env:PILOT_OC_CONFIG -ErrorAction SilentlyContinue }
+            if ($hadManagedEnv) { $env:PILOT_OC_MANAGED = $previousManagedEnv }
+            else { Remove-Item Env:PILOT_OC_MANAGED -ErrorAction SilentlyContinue }
+        }
 
         switch ($result) {
             "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }

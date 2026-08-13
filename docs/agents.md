@@ -44,10 +44,12 @@ best-effort wakeup and is not required for directory discovery.
 
 ## OpenClaw Compatibility And Lifecycle
 
-Pilot supports stable OpenClaw releases `>=2026.5.12`. Prerelease builds and
-older versions are rejected before Pilot changes the OpenClaw configuration.
-During deployment, Pilot adds its module path to `plugins.load.paths` and adds
-this entry to the active OpenClaw configuration:
+Pilot supports OpenClaw releases `>=2026.5.12`. The plugin package declares
+this minimum host version, and OpenClaw checks it against the running host when
+loading the plugin. Incompatible hosts skip the plugin with a diagnostic;
+Pilot never launches the OpenClaw CLI to determine its version. During
+deployment, Pilot adds its plugin package directory to `plugins.load.paths`
+and adds this entry to the active OpenClaw configuration:
 
 ```json
 {
@@ -64,9 +66,10 @@ this entry to the active OpenClaw configuration:
 
 `allowConversationAccess` is required for the native conversation lifecycle
 hooks that carry per-call messages and usage. Pilot creates a private backup
-before migrating a legacy plugin-array configuration. Upgrade and uninstall
-only replace or remove Pilot's own path and entry; unrelated plugins and their
-settings are preserved.
+before migrating a legacy plugin-array configuration. Upgrade also replaces
+the previous Pilot single-file load path with the package directory. Uninstall
+removes both forms plus Pilot's entry; unrelated plugins and their settings are
+preserved.
 
 The injected plugin writes append-only source events below
 `~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are

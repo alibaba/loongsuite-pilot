@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { runInNewContext } from 'node:vm';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
@@ -86,6 +87,17 @@ function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function extractOpenClawCleanupScripts() {
+  const shMarker = "<<'NODE'\n";
+  const shStart = sh.indexOf(shMarker, sh.indexOf('remove_openclaw_plugin()'));
+  const psMarker = "$cleanupScript = @'\n";
+  const psStart = ps1.indexOf(psMarker, ps1.indexOf('function Remove-OpenClawPlugin'));
+  return [
+    ['sh', sh.slice(shStart + shMarker.length, sh.indexOf('\nNODE', shStart))],
+    ['ps1', ps1.slice(psStart + psMarker.length, ps1.indexOf("\n'@", psStart))],
+  ];
 }
 
 // Derive lifecycle coverage from the deployment manifests. New hook agents
@@ -377,9 +389,82 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
       expect(installer).toContain("delete plugins.entries['loongsuite-pilot-openclaw']");
       expect(installer).toContain("plugins.load.paths.filter(value => !isOurs(value))");
       expect(installer).toContain("['plugin', 'plugins']");
+      expect(installer).toContain("plain === managed + '/plugin.mjs'");
       expect(installer).toContain('plugins/openclaw/plugin.mjs');
     }
   });
+
+  it('streams cleanup code and paths without putting openclaw in Node argv', () => {
+    const shCleanup = sh.slice(
+      sh.indexOf('remove_openclaw_plugin()'),
+      sh.indexOf('# CMD: uninstall', sh.indexOf('remove_openclaw_plugin()')),
+    );
+    const psCleanup = ps1.slice(
+      ps1.indexOf('function Remove-OpenClawPlugin'),
+      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+    );
+
+    expect(shCleanup).not.toMatch(/node\s+-e/);
+    expect(shCleanup).toContain('PILOT_OC_CONFIG="$cfg" PILOT_OC_MANAGED="$managed_path" node');
+    expect(psCleanup).not.toContain('& $script:NODE_BIN -e');
+    expect(psCleanup).toContain('$cleanupScript | & $script:NODE_BIN');
+  });
+
+  it.each(extractOpenClawCleanupScripts())(
+    '%s streamed cleanup removes both current and legacy managed paths',
+    (_platform, cleanupScript) => {
+      const configPath = '/tmp/pilot-openclaw-config.json';
+      const managedPath = '/tmp/.loongsuite-pilot/plugins/openclaw';
+      let writtenConfig;
+      let stdout = '';
+      let stderr = '';
+      const fs = {
+        readFileSync(path, encoding) {
+          expect(path).toBe(configPath);
+          expect(['utf8', 'utf-8']).toContain(encoding);
+          return JSON.stringify({
+            plugin: [`file://${managedPath}/plugin.mjs`, '/unrelated/legacy.mjs'],
+            plugins: {
+              load: { paths: [managedPath, `${managedPath}/plugin.mjs`, '/unrelated/plugin'] },
+              entries: {
+                'loongsuite-pilot-openclaw': { enabled: true },
+                unrelated: { enabled: true },
+              },
+            },
+          });
+        },
+        writeFileSync(path, value, encoding) {
+          expect(path).toBe(configPath);
+          expect(['utf8', 'utf-8']).toContain(encoding);
+          writtenConfig = value;
+        },
+      };
+      const sandboxProcess = {
+        env: {
+          PILOT_OC_CONFIG: configPath,
+          PILOT_OC_MANAGED: managedPath,
+        },
+        stdout: { write: value => { stdout += value; } },
+        stderr: { write: value => { stderr += value; } },
+        exit: code => { throw new Error(`cleanup unexpectedly exited with ${code}: ${stderr}`); },
+      };
+
+      runInNewContext(cleanupScript, {
+        process: sandboxProcess,
+        require(id) {
+          expect(id).toBe('fs');
+          return fs;
+        },
+      });
+
+      expect(stdout).toBe('cleaned');
+      expect(stderr).toBe('');
+      const cleaned = JSON.parse(writtenConfig);
+      expect(cleaned.plugin).toEqual(['/unrelated/legacy.mjs']);
+      expect(cleaned.plugins.load.paths).toEqual(['/unrelated/plugin']);
+      expect(cleaned.plugins.entries).toEqual({ unrelated: { enabled: true } });
+    },
+  );
 
   it('runs cleanup before installation files are removed', () => {
     const shUninstall = sh.slice(sh.indexOf('cmd_uninstall()'));

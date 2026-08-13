@@ -586,7 +586,13 @@ function handleMessagePartUpdated(props, userId) {
         session.systemPrompt,
         turn.userPromptText
       );
-      if (inputMsgs) record["gen_ai.input.messages"] = inputMsgs;
+      if (inputMsgs) {
+        record["gen_ai.input.messages"] = inputMsgs;
+        record["gen_ai.input.messages_delta"] = inputMsgs.map((message) => ({
+          ...message,
+          parts: message.parts.map((part) => ({ ...part })),
+        }));
+      }
       if (session.systemInstructionsParts && session.systemInstructionsParts.length > 0) {
         record["gen_ai.system_instructions"] = session.systemInstructionsParts;
       } else if (session.systemPrompt) {

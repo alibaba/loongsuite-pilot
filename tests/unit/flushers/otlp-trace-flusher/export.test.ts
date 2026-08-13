@@ -263,10 +263,25 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     });
     const flusher = new OtlpTraceFlusher(cfg) as any;
     // default group uses cfg.serviceName; inner group uses its override
-    const userRes = flusher.buildResource('claude-code', 'test-pilot');
-    const innerRes = flusher.buildResource('claude-code', 'managed-svc');
+    const userRes = flusher.buildResource('claude-code', 'test-pilot-claude-code');
+    const innerRes = flusher.buildResource('claude-code', 'managed-svc-claude-code');
     expect(userRes.attributes['service.name']).toBe('test-pilot-claude-code');
     expect(innerRes.attributes['service.name']).toBe('managed-svc-claude-code');
+  });
+
+  it('uses one exact service.name for different agent types when suffixing is disabled', () => {
+    const flusher = new OtlpTraceFlusher(makeConfig({
+      serviceName: 'shared-service',
+      appendAgentTypeToServiceName: false,
+    })) as any;
+    const endpoint = flusher.endpoints[0];
+
+    for (const agentType of ['opencode', 'codex']) {
+      const serviceName = flusher.resolveEndpointServiceName(endpoint, agentType);
+      const resource = flusher.buildResource(agentType, serviceName);
+      expect(resource.attributes['service.name']).toBe('shared-service');
+      expect(resource.attributes['gen_ai.agent.type']).toBe(agentType);
+    }
   });
 
   it('isolates a failing backend and still exports to the healthy one', async () => {

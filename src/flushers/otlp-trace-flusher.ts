@@ -92,6 +92,7 @@ interface ResolvedOtlpEndpoint {
   headers: Record<string, string>;
   compression: CompressionAlgorithm;
   serviceName: string;
+  appendAgentTypeToServiceName: boolean;
 }
 
 interface AgentExportState {
@@ -204,6 +205,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       headers: ep.headers ?? {},
       compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
       serviceName: ep.serviceName || cfg.serviceName,
+      appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
     }));
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
@@ -380,7 +382,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // Fan out to every backend; each endpoint belongs to exactly one serviceName
     // group, so the spans reach each backend once.
-    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    const serviceNames = [...new Set(
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+    )];
     await Promise.all(
       serviceNames.map((serviceName) =>
         this.exportInBatches(this.getOrCreateExportState(agentType, serviceName), agentType, spans),
@@ -485,7 +489,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Convert once per distinct service.name (backends may split into user/inner
     // service names). Each service name owns an independent convert state, so the
     // common single-name case still converts exactly once.
-    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    const serviceNames = [...new Set(
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+    )];
     await Promise.all(
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
@@ -972,7 +978,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (state) return state;
 
     const exporters = this.endpoints
-      .filter((ep) => ep.serviceName === serviceName)
+      .filter((endpoint) => this.resolveEndpointServiceName(endpoint, agentType) === serviceName)
       .map((ep) => ({
         name: ep.name,
         exporter: this.exporterFactory({
@@ -986,6 +992,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     state = { exporters };
     this.agentExportStates.set(key, state);
     return state;
+  }
+
+  private resolveEndpointServiceName(endpoint: ResolvedOtlpEndpoint, agentType: string): string {
+    return endpoint.appendAgentTypeToServiceName
+      ? `${endpoint.serviceName}-${agentType}`
+      : endpoint.serviceName;
   }
 
   private buildResource(
@@ -1025,7 +1037,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     return new Resource({
-      'service.name': `${serviceName}-${agentType}`,
+      'service.name': serviceName,
       'service.version': this.pilotVersion,
       'service.instance.id': this.instanceId,
       'service.namespace': 'loongsuite-pilot',

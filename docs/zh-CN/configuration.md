@@ -23,7 +23,7 @@ Pilot 按以下顺序解析配置：
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
-  "serviceNamePrefix": "loongsuite-pilot"
+  "serviceName": "my-agent-service"
 }
 ```
 
@@ -34,7 +34,8 @@ Pilot 按以下顺序解析配置：
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
-| `serviceNamePrefix` | 上报后端使用的服务名前缀。 |
+| `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
+| `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
 
 对应环境变量：
 
@@ -46,6 +47,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
+| `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
 
