@@ -215,7 +215,7 @@ describe('resolveHome env-var expansion', () => {
     expect(resolveHome('~/.minimax-code')).toBe(path.join(home, '.minimax-code'));
   });
 
-  it('Round 9: afterEach restores the pre-test env-var value (not unconditional delete)', () => {
+  it('Round 9: snapshot mechanism captures pre-test env-var state (per-test, per-var)', () => {
     // Round 9 fix (PR #233, copilot suppressed comment): the previous
     // afterEach unconditionally deleted APPDATA / HOME / NOT_SET_VAR
     // whenever they were defined, which clobbered any value another
@@ -223,26 +223,32 @@ describe('resolveHome env-var expansion', () => {
     // suite order-dependent on any other test that touched these vars.
     // The new afterEach snapshots each tracked var in beforeEach and
     // restores the exact pre-test value (delete if originally
-    // undefined, restore the original string otherwise). The post-
-    // afterEach state is observed by the NEXT test's beforeEach (which
-    // re-snapshots), so the cleanest assertion is to set APPDATA to a
-    // marker, leave the test, and verify the marker has been cleared
-    // by the time the afterEach (run between tests) has fired.
+    // undefined, restore the original string otherwise).
     //
-    // We use a unique marker that won't collide with other env-var
-    // test bodies, then read process.env from inside the test body —
-    // the afterEach hasn't run yet, so the marker must still be
-    // present. The afterEach behavior is verified transitively by the
-    // fact that subsequent tests in the same describe block see
-    // process.env.APPDATA in its pre-suite state.
+    // Round 20 fix (PR #233, copilot suppressed comment): the
+    // previous test name claimed "afterEach restores ..." but the
+    // assertion actually ran INSIDE the test body, before
+    // afterEach. This test only verifies the snapshot mechanism
+    // (per-var, per-test scope) and the resolveHome env-var
+    // expansion. The actual post-afterEach restoration is
+    // verified transitively: every OTHER test in this describe
+    // block sets its own env vars and reads them back without
+    // seeing this test's mutations, which is only possible if
+    // afterEach restores between tests.
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
     process.env.APPDATA = 'C:\\round9-marker';
     expect(resolveHome('%APPDATA%\\foo')).toBe('C:\\round9-marker\\foo');
-    // The afterEach fires AFTER this test body returns. To verify it
-    // actually restores, we set up a beforeAll-level baseline and
-    // re-check at the next test's beforeEach. The simplest way: assert
-    // that a DIFFERENT tracked var (HOME) is unaffected by the test
-    // body's mutation of APPDATA — i.e. the afterEach scope is per-var.
+    // The snapshot is taken in beforeEach. The test body's mutation
+    // of APPDATA does not affect the snapshot, so the afterEach
+    // (which runs after this body returns) will restore APPDATA to
+    // the snapshot value. This assertion verifies the snapshot
+    // captured the pre-test HOME value (set by the parent process
+    // or a prior test's afterEach).
     expect(process.env.HOME).toBe(snapshot['HOME']);
+    // The test body's mutation of APPDATA must NOT bleed into the
+    // snapshot. snapshot['APPDATA'] is whatever the parent
+    // process had set (or undefined). The afterEach will use
+    // snapshot['APPDATA'] to restore, not process.env.APPDATA.
+    expect(snapshot['APPDATA']).not.toBe('C:\\round9-marker');
   });
 });

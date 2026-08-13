@@ -321,7 +321,17 @@ function cmdStop() {
   // interrupted 优先于 cancelled (如果同时给两个,按 interrupted 处理)。
   // 字段命名兼容 camelCase + snake_case 两种形态, MiniMax Code SDK
   // 最终字段名待官方确认。
-  const toolCallCount = typeof event.toolCallCount === 'number' ? event.toolCallCount : 0;
+  //
+  // Round 20 fix (PR #233, copilot suppressed comment): the
+  // previous implementation only read `event.toolCallCount`
+  // (camelCase). If the host sends `tool_call_count`
+  // (snake_case — the documented format per the comment
+  // above), the count would silently default to 0 and
+  // misrepresent the turn metadata. Match the dual-case
+  // pattern used for `interrupted` / `cancelled` below.
+  const toolCallCount = (typeof event.toolCallCount === 'number' ? event.toolCallCount
+    : typeof event.tool_call_count === 'number' ? event.tool_call_count
+    : 0);
   const interruptedSignal = event.interrupted
     ?? event.isInterrupted
     ?? event.is_interrupted;

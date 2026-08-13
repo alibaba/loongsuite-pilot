@@ -155,6 +155,28 @@ describe('minimax-code-hook-processor: cmdStop interrupted-signal resolution', (
     expect(stop['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
     expect(stop['gen_ai.tool.call.count']).toBe(5);
   });
+
+  test('Round 20: tool_call_count (snake_case) 兼容 → 正确读到 count 不是默认 0', () => {
+    // Round 20 fix (PR #233, copilot suppressed comment): the
+    // previous cmdStop only read `event.toolCallCount`
+    // (camelCase). If the host sends `tool_call_count`
+    // (snake_case — the documented format per the cmdStop
+    // header comment), the count would silently default to 0
+    // and misrepresent the turn metadata. Now matches the
+    // dual-case pattern used for `interrupted` / `cancelled`.
+    const sid = 'sess-tool-snake';
+    const result = runHook('stop', {
+      session_id: sid,
+      sessionId: sid,
+      timestamp: '2026-08-10T12:00:00.000Z',
+      tool_call_count: 7,  // snake_case instead of toolCallCount
+    });
+    expect(result.status).toBe(0);
+
+    const records = readEmittedRecords();
+    const stop = records.find((r) => r['gen_ai.agent.event.name'] === 'stop');
+    expect(stop['gen_ai.tool.call.count']).toBe(7);
+  });
 });
 
 // ─── cmdPostToolUse tool-result status classification (Round 8) ───
