@@ -24,6 +24,69 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Actionability classes for a final send failure. Drives alarm level and
+ * whether the failure is terminal (needs human config change) vs self-healing.
+ */
+export type FailureClass = 'transient' | 'quota' | 'config' | 'payload';
+
+/** alarm_level per failure class: terminal/payload are most actionable. */
+export const FAILURE_CLASS_ALARM_LEVEL: Record<FailureClass, '1' | '2' | '3'> = {
+  transient: '3',
+  quota: '2',
+  config: '1',
+  payload: '1',
+};
+
+// Terminal SLS API error codes: the target project/logstore is gone, forbidden,
+// or recycled — retrying never succeeds until an operator fixes configuration.
+const CONFIG_ERROR_CODES = [
+  'ProjectNotExist',
+  'ProjectForbidden',
+  'ProjectInRecycleBin',
+  'LogStoreNotExist',
+];
+
+function extractStatus(err: unknown): number | undefined {
+  if (err instanceof HttpError) return err.status;
+  if (err && typeof err === 'object' && 'status' in err) {
+    const s = (err as { status: unknown }).status;
+    if (typeof s === 'number') return s;
+  }
+  return undefined;
+}
+
+/**
+ * Classify a final send failure by actionability. Works across all send modes:
+ * webtracking throws HttpError (has .status), while the @alicloud/log SDK (ak
+ * mode) throws objects whose code lives in `.code`/`.errorCode` or the message
+ * string — so we inspect both, unlike the historical `instanceof HttpError`
+ * check that silently never matched on the ak path.
+ */
+export function classifyFailure(err: unknown): FailureClass {
+  const status = extractStatus(err);
+  const codeField =
+    err && typeof err === 'object'
+      ? String(
+          (err as { code?: unknown }).code ??
+            (err as { errorCode?: unknown }).errorCode ??
+            '',
+        )
+      : '';
+  const msg = `${codeField} ${String(err)}`;
+
+  if (status === 413 || /PostBodyTooLarge|Request Entity Too Large|body size/i.test(msg)) {
+    return 'payload';
+  }
+  if (status === 429 || /\bServerBusy\b|Throttl/i.test(msg)) {
+    return 'quota';
+  }
+  if (status === 404 || status === 403 || CONFIG_ERROR_CODES.some(c => msg.includes(c))) {
+    return 'config';
+  }
+  return 'transient';
+}
+
 export interface SlsTransportConfig {
   endpoint: string;
   project: string;

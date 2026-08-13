@@ -19,6 +19,9 @@ import {
   postWebtracking,
   postApiKeyLogStoreLogs,
   isRetryable,
+  classifyFailure,
+  FAILURE_CLASS_ALARM_LEVEL,
+  type FailureClass,
   RETRY_MAX_ATTEMPTS,
   RETRY_BASE_DELAY_MS,
   WEBTRACKING_TIMEOUT_MS,
@@ -37,11 +40,52 @@ const DEFAULT_HEADERS_TIMEOUT_MS = 30_000;
 const DEFAULT_BODY_TIMEOUT_MS = 15_000;
 const DEFAULT_OVERALL_TIMEOUT_MS = 30_000;
 
+// transient (network) failures don't alarm per-occurrence — the out_failed metric
+// already carries the volume. Only a sustained outage (this many consecutive
+// all-batch-failed flush cycles on one endpoint) escalates to a single alarm.
+const TRANSIENT_ESCALATE_THRESHOLD = 3;
+
+// A terminal (config) failure trips the breaker after this many consecutive
+// occurrences, then backs off exponentially to stop pointless retries.
+const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CIRCUIT_BASE_BACKOFF_MS = 2_000;
+const CIRCUIT_MAX_BACKOFF_MS = 600_000; // 10 min upper bound
+
+// config + escalated-transient alarms are cooldown-gated so a persistent fault
+// reports once per window instead of every cycle. Re-arms after the window (not a once-guard).
+const FLUSH_ALARM_COOLDOWN_MS = 3_600_000;
+
+// Marker appended to a field truncated to fit the single-request body cap.
+const TRUNCATION_MARKER = '...[TRUNCATED]';
+
 interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
   agentType?: string;
   byteSize: number;
+}
+
+interface CircuitState {
+  configFails: number;
+  openUntil: number;
+  backoffMs: number;
+}
+
+/**
+ * Raised by a send path when a batch (or part of it) finally fails. Carries the
+ * split so flush() can credit succeeded entries and debit failed ones accurately,
+ * instead of charging the whole batch to one side.
+ */
+export class FlushFailure extends Error {
+  constructor(
+    readonly succeededEntries: number,
+    readonly failedEntries: number,
+    readonly failureClass: FailureClass,
+    readonly cause?: unknown,
+  ) {
+    super(`flush failed: ${failedEntries} entries (${failureClass})`);
+    this.name = 'FlushFailure';
+  }
 }
 
 const logger = createLogger('SlsFlusher');
@@ -78,6 +122,12 @@ export class SlsFlusher extends BaseFlusher {
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
   private alarmManager: AlarmManager | null = null;
+
+  // Per-endpoint failure state (keyed by endpoint.name).
+  private readonly transientFailStreak: Map<string, number> = new Map();
+  private readonly circuits: Map<string, CircuitState> = new Map();
+  // Cooldown gate for config + escalated-transient alarms, keyed `${endpoint}_${class}`.
+  private readonly lastAlarmAt: Map<string, number> = new Map();
 
   private readonly serviceName: string;
   private readonly serviceNamePrefix: string;
@@ -194,6 +244,15 @@ export class SlsFlusher extends BaseFlusher {
         .map(([, logs]) => () => {
           const endpoint = logs[0].endpoint;
           const counter = this.endpointCounters.get(endpoint.name);
+
+          // Circuit open (terminal endpoint, still within backoff): skip the send
+          // entirely. Count the drop but do NOT re-send, re-persist, or re-alarm —
+          // that is exactly the pointless-request/write loop we are stopping.
+          if (this.isCircuitOpen(endpoint.name, Date.now())) {
+            if (counter) counter.outFailed += logs.length;
+            return Promise.resolve();
+          }
+
           const startMs = Date.now();
           const send = this.flushEndpoint(endpoint, logs);
           return send.then(() => {
@@ -202,15 +261,24 @@ export class SlsFlusher extends BaseFlusher {
               counter.totalDelayMs += Date.now() - startMs;
               counter.lastFlushTime = formatTime(new Date());
             }
+            this.onEndpointSuccess(endpoint.name);
           }).catch(err => {
+            const succeeded = err instanceof FlushFailure ? err.succeededEntries : 0;
+            const failed = err instanceof FlushFailure ? err.failedEntries : logs.length;
+            const failureClass: FailureClass =
+              err instanceof FlushFailure ? err.failureClass : classifyFailure(err);
             if (counter) {
-              counter.outFailed += logs.length;
+              counter.outEntries += succeeded;
+              counter.outFailed += failed;
               counter.totalDelayMs += Date.now() - startMs;
             }
             logger.error('SLS endpoint flush failed', {
               endpoint: endpoint.name,
-              error: String(err),
+              failureClass,
+              failed,
+              succeeded,
             });
+            this.onEndpointFailure(endpoint, succeeded, failureClass, err instanceof FlushFailure ? err.cause : err);
           });
         });
 
@@ -236,6 +304,91 @@ export class SlsFlusher extends BaseFlusher {
       () => execute(),
     );
     await Promise.all(workers);
+  }
+
+  // --- per-endpoint failure handling -------------------------------------
+
+  private isCircuitOpen(name: string, now: number): boolean {
+    const c = this.circuits.get(name);
+    return !!c && now < c.openUntil;
+  }
+
+  private onEndpointSuccess(name: string): void {
+    // Any success (including a half-open probe) clears streak + breaker.
+    this.transientFailStreak.delete(name);
+    this.circuits.delete(name);
+  }
+
+  private onEndpointFailure(
+    endpoint: SlsEndpoint,
+    succeeded: number,
+    failureClass: FailureClass,
+    cause: unknown,
+  ): void {
+    if (failureClass === 'transient') {
+      // Only a whole-batch failure counts toward "sustained outage". Any partial
+      // success means the endpoint is reachable → reset and stay silent.
+      if (succeeded > 0) {
+        this.transientFailStreak.delete(endpoint.name);
+        return;
+      }
+      const streak = (this.transientFailStreak.get(endpoint.name) ?? 0) + 1;
+      this.transientFailStreak.set(endpoint.name, streak);
+      if (streak >= TRANSIENT_ESCALATE_THRESHOLD) {
+        this.recordFailureAlarm(
+          endpoint, 'transient',
+          `SLS send failing continuously (${streak} cycles): ${String(cause)}`,
+          true,
+        );
+      }
+      return;
+    }
+
+    // Non-transient failure this cycle: not a clean transient outage → reset streak.
+    this.transientFailStreak.delete(endpoint.name);
+
+    if (failureClass === 'config') {
+      this.recordFailureAlarm(endpoint, 'config', `SLS terminal config error: ${String(cause)}`, true);
+      this.tripCircuit(endpoint.name);
+      return;
+    }
+    // quota / payload: report per-occurrence (aggregated by AlarmManager, no cooldown).
+    this.recordFailureAlarm(endpoint, failureClass, `SLS ${failureClass} failure: ${String(cause)}`, false);
+  }
+
+  private recordFailureAlarm(
+    endpoint: SlsEndpoint,
+    failureClass: FailureClass,
+    message: string,
+    cooldown: boolean,
+  ): void {
+    if (!this.alarmManager) return;
+    if (cooldown) {
+      const key = `${endpoint.name}_${failureClass}`;
+      const now = Date.now();
+      const last = this.lastAlarmAt.get(key) ?? 0;
+      if (now - last < FLUSH_ALARM_COOLDOWN_MS) return;
+      this.lastAlarmAt.set(key, now);
+    }
+    this.alarmManager.record(
+      'FLUSH_SEND_ALARM',
+      FAILURE_CLASS_ALARM_LEVEL[failureClass],
+      message,
+      { endpoint_name: endpoint.name, failure_class: failureClass },
+    );
+  }
+
+  private tripCircuit(name: string): void {
+    const c = this.circuits.get(name) ?? { configFails: 0, openUntil: 0, backoffMs: CIRCUIT_BASE_BACKOFF_MS };
+    c.configFails++;
+    if (c.configFails >= CIRCUIT_FAILURE_THRESHOLD) {
+      // First trip uses base backoff; each subsequent probe failure doubles it (capped).
+      c.backoffMs = c.openUntil === 0
+        ? CIRCUIT_BASE_BACKOFF_MS
+        : Math.min(c.backoffMs * 2, CIRCUIT_MAX_BACKOFF_MS);
+      c.openUntil = Date.now() + c.backoffMs;
+    }
+    this.circuits.set(name, c);
   }
 
   /** Exact global name wins; otherwise managed endpoints may override the shared prefix. */
@@ -325,30 +478,44 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
-    this.alarmManager?.record(
-      'FLUSH_SEND_ALARM', '2',
-      `SLS ak send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
-    );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
-      this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2',
-        `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
-      );
-    }
     await this.persistFailedLogs(
       endpoint,
       logs.length,
       logs.reduce((sum, log) => sum + log.byteSize, 0),
       lastErr,
     );
+    throw lastErr;
   }
 
   private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
-    const chunks = this.splitForWebtracking(logs);
+    const { chunks, dropped } = this.splitForWebtracking(logs);
+    let succeeded = 0;
+    let failed = 0;
+    let sendErr: unknown;
+
+    // Oversize entries the splitter could not fit even after truncation: count as
+    // failed and persist a payload record. They never reach the wire.
+    if (dropped > 0) {
+      failed += dropped;
+      await this.persistFailedLogs(
+        endpoint, dropped, 0,
+        new Error(`payload dropped: ${dropped} entr${dropped === 1 ? 'y' : 'ies'} exceed WEBTRACKING_MAX_BODY_BYTES`),
+      );
+    }
+
     for (const chunk of chunks) {
-      await this.postWebtracking(endpoint, chunk);
+      try {
+        await this.postWebtracking(endpoint, chunk);
+        succeeded += chunk.length;
+      } catch (err) {
+        failed += chunk.length;
+        sendErr = err;
+      }
+    }
+
+    if (failed > 0) {
+      const failureClass: FailureClass = sendErr ? classifyFailure(sendErr) : 'payload';
+      throw new FlushFailure(succeeded, failed, failureClass, sendErr ?? new Error('payload oversize'));
     }
   }
 
@@ -406,37 +573,46 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
-    this.alarmManager?.record(
-      'FLUSH_SEND_ALARM', '2',
-      `SLS apiKey send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
-    );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
-      this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2',
-        `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
-      );
-    }
     await this.persistFailedLogs(
       endpoint,
       logs.length,
       logs.reduce((sum, log) => sum + log.byteSize, 0),
       lastErr,
     );
+    throw lastErr;
   }
 
-  private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
+  private splitForWebtracking(logs: QueuedLog[]): { chunks: QueuedLog[][]; dropped: number } {
+    const maxBytes = WEBTRACKING_MAX_BODY_BYTES;
     const chunks: QueuedLog[][] = [];
     let current: QueuedLog[] = [];
     let currentSize = 0;
+    let dropped = 0;
 
-    for (const log of logs) {
-      const logSize = Buffer.byteLength(JSON.stringify(log.content));
+    for (const raw of logs) {
+      let log = raw;
+      let logSize = Buffer.byteLength(JSON.stringify(log.content));
+
+      // A single entry over the cap can never fit any chunk. Try trimming its
+      // largest field; if it still won't fit, drop it rather than emit a request
+      // that is guaranteed to be rejected.
+      if (logSize > maxBytes) {
+        const trimmed = this.truncateOversizeEntry(log, maxBytes);
+        if (!trimmed) {
+          dropped++;
+          continue;
+        }
+        log = trimmed;
+        logSize = Buffer.byteLength(JSON.stringify(log.content));
+        if (logSize > maxBytes) {
+          dropped++;
+          continue;
+        }
+      }
 
       if (current.length > 0 &&
           (current.length >= WEBTRACKING_MAX_LOGS ||
-           currentSize + logSize > WEBTRACKING_MAX_BODY_BYTES)) {
+           currentSize + logSize > maxBytes)) {
         chunks.push(current);
         current = [];
         currentSize = 0;
@@ -449,7 +625,39 @@ export class SlsFlusher extends BaseFlusher {
     if (current.length > 0) {
       chunks.push(current);
     }
-    return chunks;
+    return { chunks, dropped };
+  }
+
+  /**
+   * Shrink an oversize entry by truncating its largest string field so the whole
+   * content serializes under maxBytes, preserving JSON validity, UTF-8 boundaries,
+   * and leaving a marker. Returns null when trimming that one field can't get it
+   * under the cap (caller then drops the entry).
+   */
+  private truncateOversizeEntry(log: QueuedLog, maxBytes: number): QueuedLog | null {
+    const content: Record<string, string> = { ...log.content };
+    let largestKey = '';
+    let largestBytes = 0;
+    for (const [k, v] of Object.entries(content)) {
+      const len = Buffer.byteLength(v);
+      if (len > largestBytes) {
+        largestBytes = len;
+        largestKey = k;
+      }
+    }
+    if (!largestKey) return null;
+
+    const overshoot = Buffer.byteLength(JSON.stringify(content)) - maxBytes;
+    if (overshoot <= 0) return log;
+
+    const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+    // Headroom absorbs JSON escaping of the retained slice.
+    const targetBytes = largestBytes - overshoot - markerBytes - 256;
+    if (targetBytes <= 0) return null;
+
+    content[largestKey] = truncateUtf8Bytes(content[largestKey], targetBytes) + TRUNCATION_MARKER;
+    const byteSize = Buffer.byteLength(JSON.stringify(content));
+    return { ...log, content, byteSize };
   }
 
   private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
@@ -522,19 +730,8 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
-    this.alarmManager?.record(
-      'FLUSH_SEND_ALARM', '2',
-      `SLS webtracking send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
-    );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
-      this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2',
-        `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
-      );
-    }
     await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
+    throw lastErr;
   }
 
   private async persistFailedLogs(
@@ -655,4 +852,11 @@ export class SlsFlusher extends BaseFlusher {
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+}
+
+/** UTF-8-safe truncation to at most maxBytes, without splitting a multibyte char. */
+function truncateUtf8Bytes(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  return bytes.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/u, '');
 }
