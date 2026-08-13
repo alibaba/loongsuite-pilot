@@ -608,7 +608,7 @@ probe_agents() {
         return 0
     }
     local count
-    count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
     msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     echo ""
 }
@@ -624,18 +624,18 @@ select_agents() {
     fi
 
     local agent_count
-    agent_count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    agent_count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
     if [ "$agent_count" = "0" ]; then
         return 0
     fi
 
     # Non-interactive: auto-select all detected agents
     if [ ! -t 0 ]; then
-        SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
+        SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
-" "$PROBE_RESULT" 2>/dev/null || true)
+" 2>/dev/null || true)
         msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
             "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
         echo ""
@@ -643,9 +643,9 @@ process.stdout.write(detected.join(','));
     fi
 
     # Interactive menu
-    "$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const lang = process.argv[2];
+    printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const lang = process.argv[1];
 const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
@@ -663,7 +663,7 @@ if (lang === 'zh') {
   console.log('    Default selection (detected): ' + defaults.join(','));
   console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
 }
-" "$PROBE_RESULT" "$LANG_MODE"
+" "$LANG_MODE"
 
     # Read user input (Node readline handles UTF-8 editing; normalize Chinese punctuation).
     # Prompt must go to stderr so it is visible and not captured by $().
@@ -683,9 +683,9 @@ rl.question('    > ', (answer) => {
     }
 
     # Compute final selection: empty input = detected agents, otherwise use exact input
-    SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const input = (process.argv[2] || '').replace(/[，、；]/g, ',');
+    SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
+const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -694,7 +694,7 @@ if (!input.trim()) {
 }
 const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
 process.stdout.write(ids.join(','));
-" "$PROBE_RESULT" "$select_input" 2>/dev/null || true)
+" "$select_input" 2>/dev/null || true)
 
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
@@ -955,7 +955,10 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
+    printf '%s' "$PROBE_RESULT" | \
+        LP_SLS_API_KEY="$SLS_API_KEY" \
+        LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
+        "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -1026,7 +1029,7 @@ const cmsLicenseKey = '${CMS_LICENSE_KEY}';
 const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
-const selectedAgents = '${SELECTED_AGENTS}';
+const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 
@@ -1058,7 +1061,7 @@ if (maskMode) {
 if (selectedAgents) {
   config.agents = config.agents || {};
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(process.argv[1] || '[]');
+  const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     config.agents[agent.id].enabled = selected.includes(agent.id);
@@ -1066,7 +1069,7 @@ if (selectedAgents) {
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-" -- "$PROBE_RESULT"
+"
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -2375,7 +2378,7 @@ try {
 # their configuration remain semantically unchanged.
 remove_openclaw_plugin() {
     local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
-    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local managed_path="$DATA_DIR/plugins/openclaw"
     local configs=()
     [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
     configs+=(
@@ -2398,17 +2401,18 @@ remove_openclaw_plugin() {
         fi
 
         local result
-        result=$(node -e "
+        result=$(PILOT_OC_CONFIG="$cfg" PILOT_OC_MANAGED="$managed_path" node 2>/dev/null <<'NODE'
 const fs = require('fs');
-const f = process.argv[1];
-const managed = process.argv[2].replaceAll('\\\\', '/');
+const f = process.env.PILOT_OC_CONFIG;
+const managed = process.env.PILOT_OC_MANAGED.replaceAll('\\', '/');
 const entryStr = value => typeof value === 'string'
   ? value
   : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
 const isOurs = value => {
-  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const normalized = entryStr(value).replaceAll('\\', '/');
   const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
   return plain === managed ||
+    plain === managed + '/plugin.mjs' ||
     normalized.includes('loongsuite-pilot-openclaw') ||
     normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
 };
@@ -2435,10 +2439,11 @@ try {
     }
   }
   if (!changed) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write('cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+NODE
+) || result="error"
 
         case "$result" in
             cleaned)

@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PACKAGE_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/package.json');
+const OPENCLAW_AGENT_DEF_PATH = path.resolve(__dirname, '../../../../agents.d/openclaw.json');
 const FIXTURES = path.join(__dirname, 'fixtures');
 
 function readJsonl(name) {
@@ -62,6 +64,8 @@ function registerPlugin(plugin, pluginConfig = {}) {
   const handlers = {};
   const api = {
     pluginConfig,
+    registrationMode: 'full',
+    runtime: { version: '2026.6.10' },
     on: (name, handler) => { handlers[name] = handler; },
   };
   plugin.register(api);
@@ -110,10 +114,31 @@ function todayStamp() {
 }
 
 describe('OpenClaw plugin stateful pipeline', () => {
+  it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
+    const packageJson = JSON.parse(fs.readFileSync(PLUGIN_PACKAGE_PATH, 'utf-8'));
+    const agentDefinition = JSON.parse(fs.readFileSync(OPENCLAW_AGENT_DEF_PATH, 'utf-8'));
+
+    expect(packageJson.openclaw.install.minHostVersion).toBe('>=2026.5.12');
+    expect(agentDefinition.pluginInject).not.toHaveProperty('versionCheck');
+    expect(agentDefinition.pluginInject.pluginSpec).toBe(
+      'file://$PILOT_DATA/plugins/openclaw',
+    );
+    expect(agentDefinition.pluginInject.replaceSpecs).toContain(
+      '$PILOT_DATA/plugins/openclaw/plugin.mjs',
+    );
+    expect(agentDefinition.pluginInject.replaceSpecs).not.toContain(
+      'plugins/openclaw/plugin.mjs',
+    );
+  });
+
   it('registers 16 hooks via api.on', async () => {
     const plugin = await loadPlugin();
     const registered = new Set();
-    const api = { on: (name) => registered.add(name) };
+    const api = {
+      registrationMode: 'full',
+      runtime: { version: '2026.5.12' },
+      on: (name) => registered.add(name),
+    };
     plugin.register(api);
     expect(registered.size).toBe(16);
     expect(registered.has('session_start')).toBe(true);
@@ -132,6 +157,84 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(registered.has('before_agent_reply')).toBe(true);
     expect(registered.has('before_model_resolve')).toBe(true);
     expect(registered.has('before_prompt_build')).toBe(true);
+  });
+
+  it('skips host validation during CLI metadata discovery', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    expect(() => plugin.register({
+      registrationMode: 'cli-metadata',
+      runtime: {},
+      logger,
+      on,
+    })).not.toThrow();
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('retains the version guard for legacy APIs without a registration mode', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    plugin.register({
+      runtime: { version: '2026.3.2' },
+      logger,
+      on,
+    });
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['unparseable', 'not-a-version'],
+    ['too old', '2026.3.2'],
+    ['prerelease below the stable floor', '2026.5.12-beta.1'],
+  ])('does not register hooks when the host version is %s', async (_label, version) => {
+    const plugin = await loadPlugin();
+    const registered = new Set();
+    const logger = { error: vi.fn() };
+    const api = {
+      logger,
+      registrationMode: 'full',
+      runtime: version === undefined ? {} : { version },
+      on: (name) => registered.add(name),
+    };
+
+    expect(() => plugin.register(api)).not.toThrow();
+    expect(registered.size).toBe(0);
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+  });
+
+  it.each(['2026.5.12', '2026.5.12-1', 'v2026.6.10'])(
+    'registers hooks on supported host version %s',
+    async (version) => {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+
+      plugin.register({
+        runtime: { version },
+        on: (name) => registered.add(name),
+      });
+
+      expect(registered.size).toBe(16);
+    },
+  );
+
+  it('fails open with a clear diagnostic when the host plugin API is unsupported', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+
+    expect(() => plugin.register({ logger })).not.toThrow();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
   });
 
   it('reports an unwritable plugin log directory once when scoped debug is enabled', async () => {
@@ -199,8 +302,8 @@ describe('OpenClaw plugin stateful pipeline', () => {
       r['gen_ai.usage.reasoning_tokens'],
       r['gen_ai.usage.total_tokens'],
     ])).toEqual([
-      [906, 129, 12672, 59, 1035],
-      [1202, 197, 12672, 22, 1399],
+      [13578, 129, 12672, 59, 13707],
+      [13874, 197, 12672, 22, 14071],
     ]);
     expect(responses.map((r) => r['gen_ai.response.finish_reasons'])).toEqual([
       ['tool_calls'],
@@ -215,8 +318,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(terminal['gen_ai.output.messages']).toBeUndefined();
     expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
-    expect(terminal['agent.openclaw.aggregate_usage.input_tokens']).toBe(2108);
+    expect(terminal['agent.openclaw.aggregate_usage.input_tokens']).toBe(27452);
     expect(terminal['agent.openclaw.aggregate_usage.output_tokens']).toBe(326);
+    expect(terminal['agent.openclaw.aggregate_usage.total_tokens']).toBe(27778);
     expect(terminal['agent.openclaw.aggregate_usage.reasoning_tokens']).toBe(81);
     expect(terminal['agent.openclaw.per_call_usage.count']).toBe(2);
     expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
@@ -241,6 +345,49 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.total_tokens']).toBeUndefined();
+  });
+
+  it('includes cache read and creation in input and total without double-counting reasoning', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'cache-usage-run';
+    const sessionId = 'cache-usage-session';
+    const sessionKey = 'agent:main:cache-usage';
+    const callId = `${runId}:model:1`;
+    const usage = {
+      input: 11,
+      output: 7,
+      cacheRead: 3,
+      cacheWrite: 5,
+      reasoningTokens: 2,
+    };
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'test-model', prompt: 'use cache' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, outcome: 'completed', durationMs: 4 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], provider: 'test', model: 'test-model', usage, stopReason: 'stop' } } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', usage } },
+    ]);
+
+    const response = records.find((record) => record['event.name'] === 'llm.response');
+    expect(response).toMatchObject({
+      'gen_ai.usage.input_tokens': 19,
+      'gen_ai.usage.output_tokens': 7,
+      'gen_ai.usage.cache_read.input_tokens': 3,
+      'gen_ai.usage.cache_creation.input_tokens': 5,
+      'gen_ai.usage.reasoning_tokens': 2,
+      'gen_ai.usage.total_tokens': 26,
+    });
+
+    const terminal = records.find((record) => record['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal).toMatchObject({
+      'agent.openclaw.aggregate_usage.input_tokens': 19,
+      'agent.openclaw.aggregate_usage.output_tokens': 7,
+      'agent.openclaw.aggregate_usage.cache_read_input_tokens': 3,
+      'agent.openclaw.aggregate_usage.cache_creation_input_tokens': 5,
+      'agent.openclaw.aggregate_usage.reasoning_tokens': 2,
+      'agent.openclaw.aggregate_usage.total_tokens': 26,
+    });
+    expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
   });
 
   it('keeps trace_id and gen_ai.turn.id stable across all events in the run', async () => {
@@ -777,9 +924,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(responses[0]['gen_ai.response.id']).toBe('provider-empty-error');
     expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
     expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
-    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(11);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(14);
     expect(responses[0]['gen_ai.usage.output_tokens']).toBe(0);
-    expect(responses[0]['gen_ai.usage.total_tokens']).toBe(11);
+    expect(responses[0]['gen_ai.usage.total_tokens']).toBe(14);
     expect(responses[0]['agent.openclaw.duration_ms']).toBe(17);
     expect(responses[0]['agent.openclaw.error_category']).toBe('authentication');
     expect(responses[0]['error.type']).toBe('model_call_error');
