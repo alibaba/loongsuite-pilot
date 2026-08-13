@@ -277,6 +277,31 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(plugins.entries['loongsuite-pilot-openclaw']).toBeUndefined();
   });
 
+  it('undeploy removes legacy managed paths but preserves an unrelated matching suffix', async () => {
+    const managedOldPath = `${dataDir}/plugins/openclaw/plugin.mjs`;
+    const unrelatedPath = '/opt/vendor/plugins/openclaw/plugin.mjs';
+    await fs.writeFile(configPath, JSON.stringify({
+      plugins: {
+        load: { paths: [managedOldPath, `file://${managedOldPath}`, unrelatedPath] },
+        entries: {
+          'loongsuite-pilot-openclaw': {
+            enabled: true,
+            hooks: { allowConversationAccess: true },
+          },
+        },
+      },
+    }));
+
+    expect(await strategy.undeploy(openclawDef())).toBe(true);
+
+    const cfg = await readConfig();
+    const plugins = cfg.plugins as { load: { paths: string[] }; entries: Record<string, unknown> };
+    expect(plugins.load.paths).not.toContain(managedOldPath);
+    expect(plugins.load.paths).not.toContain(`file://${managedOldPath}`);
+    expect(plugins.load.paths).toContain(unrelatedPath);
+    expect(plugins.entries['loongsuite-pilot-openclaw']).toBeUndefined();
+  });
+
   it('replaceSpecs removes legacy paths but preserves unrelated entries', async () => {
     await fs.writeFile(configPath, JSON.stringify({
       plugins: {

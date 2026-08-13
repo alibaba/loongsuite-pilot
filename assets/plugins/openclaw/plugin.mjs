@@ -1273,6 +1273,13 @@ export default {
     "ARMS GenAI event_t producer: captures 16 OpenClaw plugin hooks and writes JSONL for loongsuite-pilot BaseHookInput.",
 
   register(api) {
+    // OpenClaw's CLI metadata discovery provides a stub runtime and noop hook
+    // registrar. This plugin has no CLI commands, so there is nothing to do
+    // until the host performs a full registration.
+    if (api?.registrationMode === "cli-metadata") {
+      return;
+    }
+
     if (typeof api?.on !== "function") {
       reportUnsupportedHost(api, "api.on is unavailable");
       return;

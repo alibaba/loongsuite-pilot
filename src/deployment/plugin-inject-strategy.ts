@@ -348,6 +348,19 @@ export class PluginInjectStrategy implements DeployStrategy {
       === path.normalize(this.toOpenclawPath(resolvedReplacement));
   }
 
+  private openclawRemovalMatches(
+    entry: unknown,
+    resolvedSpec: string,
+    config: PluginInjectConfig,
+  ): boolean {
+    if (this.pathMatches(entry, resolvedSpec, config.pluginId)) return true;
+    if (typeof entry !== 'string') return false;
+
+    return config.replaceSpecs?.some(
+      (old) => this.openclawReplacementMatches(entry, old),
+    ) ?? false;
+  }
+
   private openclawHasPlugin(
     json: Record<string, unknown>,
     resolvedSpec: string,
@@ -477,7 +490,7 @@ export class PluginInjectStrategy implements DeployStrategy {
     if (load && Array.isArray(load.paths)) {
       const before = (load.paths as unknown[]).length;
       const filtered = (load.paths as unknown[]).filter(
-        (entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId),
+        (entry) => !this.openclawRemovalMatches(entry, resolvedSpec, config),
       );
       if (filtered.length !== before) {
         load.paths = filtered;

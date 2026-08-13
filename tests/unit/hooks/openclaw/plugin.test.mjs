@@ -64,6 +64,7 @@ function registerPlugin(plugin, pluginConfig = {}) {
   const handlers = {};
   const api = {
     pluginConfig,
+    registrationMode: 'full',
     runtime: { version: '2026.6.10' },
     on: (name, handler) => { handlers[name] = handler; },
   };
@@ -134,6 +135,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     const plugin = await loadPlugin();
     const registered = new Set();
     const api = {
+      registrationMode: 'full',
       runtime: { version: '2026.5.12' },
       on: (name) => registered.add(name),
     };
@@ -157,6 +159,38 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(registered.has('before_prompt_build')).toBe(true);
   });
 
+  it('skips host validation during CLI metadata discovery', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    expect(() => plugin.register({
+      registrationMode: 'cli-metadata',
+      runtime: {},
+      logger,
+      on,
+    })).not.toThrow();
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('retains the version guard for legacy APIs without a registration mode', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    plugin.register({
+      runtime: { version: '2026.3.2' },
+      logger,
+      on,
+    });
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+  });
+
   it.each([
     ['missing', undefined],
     ['unparseable', 'not-a-version'],
@@ -168,6 +202,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     const logger = { error: vi.fn() };
     const api = {
       logger,
+      registrationMode: 'full',
       runtime: version === undefined ? {} : { version },
       on: (name) => registered.add(name),
     };
