@@ -111,16 +111,71 @@ sync_installed_scripts_from_version() {
     mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
 }
 
+find_current_user_processes_by_exact_suffix() {
+    local expected_suffix="$1"
+    local expected_process="$2"
+    local pid=""
+    local process_name=""
+    local command_line=""
+    while read -r pid process_name command_line; do
+        [ -n "$pid" ] || continue
+        process_name="${process_name##*/}"
+        case "$expected_process:$process_name" in
+            node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+            *) continue ;;
+        esac
+        if [ "$command_line" = "$expected_suffix" ] || [[ "$command_line" == *" $expected_suffix" ]]; then
+            echo "$pid"
+        fi
+    done < <(ps -U "$(id -u)" -o pid= -o ucomm= -o command= 2>/dev/null || true)
+}
+
+find_installed_collector_pid() {
+    find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node | head -n 1
+}
+
 is_running() {
+    local pid=""
     if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
             return 0
         fi
         rm -f "$PID_FILE"
     fi
+
+    # launchd may briefly start a duplicate wrapper which overwrites the PID
+    # file before the collector's single-instance lock makes it exit. Recover
+    # only the current user's process whose final argument is this install's
+    # exact bootstrap path; another checkout or a shell inspecting the path
+    # cannot match this suffix.
+    pid=$(find_installed_collector_pid)
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        local pid_tmp="$PID_FILE.tmp.$$"
+        printf '%s\n' "$pid" > "$pid_tmp"
+        mv -f "$pid_tmp" "$PID_FILE"
+        return 0
+    fi
     return 1
+}
+
+stop_installed_collector_processes() {
+    local attempt
+    local pid
+    local matched
+    for attempt in 1 2 3 4 5; do
+        matched=false
+        while read -r pid; do
+            [ -n "$pid" ] || continue
+            matched=true
+            kill "$pid" 2>/dev/null || true
+        done < <({
+            find_current_user_processes_by_exact_suffix "$LOONGSUITE_PILOT_BIN run" shell
+            find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node
+        } | sort -u)
+        [ "$matched" = true ] || return 0
+        sleep 0.2
+    done
 }
 
 is_pid_file_running() {
@@ -540,8 +595,9 @@ cmd_stop() {
     # Stop updater PID-file tracked process
     stop_pid_file "$UPDATER_PID_FILE"
 
-    # Kill any remaining orphan processes
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
+    # A launchd wrapper may still be between startup and exec after unload.
+    # Retry exact installed paths so it cannot later become an orphan collector.
+    stop_installed_collector_processes
     pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
 
     rm -f "$PID_FILE"
@@ -579,7 +635,7 @@ cmd_restart_collector() {
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
+    stop_installed_collector_processes
 
     if is_running; then
         local pid

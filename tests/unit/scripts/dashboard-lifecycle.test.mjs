@@ -31,6 +31,38 @@ describe('dashboard service lifecycle', () => {
     expect(cleanup).not.toContain('pkill');
   });
 
+  it('repairs a stale collector PID only from the exact installed bootstrap path', () => {
+    const processLookup = runtimeSh.slice(
+      runtimeSh.indexOf('find_current_user_processes_by_exact_suffix()'),
+      runtimeSh.indexOf('is_pid_file_running()'),
+    );
+
+    expect(processLookup).toContain('ps -U "$(id -u)" -o pid= -o ucomm= -o command=');
+    expect(processLookup).toContain('find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node');
+    expect(processLookup).toContain('node:node|node:nodejs');
+    expect(processLookup).toContain('[[ "$command_line" == *" $expected_suffix" ]]');
+    expect(processLookup).toContain('mv -f "$pid_tmp" "$PID_FILE"');
+    expect(processLookup).not.toContain('pgrep');
+    expect(processLookup).not.toContain('pkill');
+  });
+
+  it('stops exact installed collector wrappers with a short retry', () => {
+    const stopHelper = runtimeSh.slice(
+      runtimeSh.indexOf('stop_installed_collector_processes()'),
+      runtimeSh.indexOf('is_pid_file_running()'),
+    );
+    const stopCommand = runtimeSh.slice(
+      runtimeSh.indexOf('cmd_stop()'),
+      runtimeSh.indexOf('cmd_restart_collector()'),
+    );
+
+    expect(stopHelper).toContain('find_current_user_processes_by_exact_suffix "$LOONGSUITE_PILOT_BIN run" shell');
+    expect(stopHelper).toContain('find_current_user_processes_by_exact_suffix "$BOOTSTRAP_DIR/collector-daemon.js" node');
+    expect(stopHelper).toContain('for attempt in 1 2 3 4 5');
+    expect(stopCommand).toContain('stop_installed_collector_processes');
+    expect(runtimeSh).not.toContain('pkill -f "loongsuite-pilot/bin/collector-daemon"');
+  });
+
   it('probes the dashboard before printing its URL on Unix and Windows', () => {
     const unixProbe = runtimeSh.slice(
       runtimeSh.indexOf('dashboard_is_available()'),
