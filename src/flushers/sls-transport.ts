@@ -81,7 +81,13 @@ export function classifyFailure(err: unknown): FailureClass {
   if (status === 429 || /\bServerBusy\b|Throttl/i.test(msg)) {
     return 'quota';
   }
-  if (status === 404 || status === 403 || CONFIG_ERROR_CODES.some(c => msg.includes(c))) {
+  // A known SLS error code is terminal regardless of status. A bare 404/403
+  // only counts as config when the body looks like a structured SLS error —
+  // otherwise a proxy/CDN/WAF 404 would falsely trip the circuit breaker.
+  if (CONFIG_ERROR_CODES.some(c => msg.includes(c))) {
+    return 'config';
+  }
+  if ((status === 404 || status === 403) && /errorCode/i.test(msg)) {
     return 'config';
   }
   return 'transient';

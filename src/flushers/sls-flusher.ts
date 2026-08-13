@@ -250,6 +250,10 @@ export class SlsFlusher extends BaseFlusher {
           // that is exactly the pointless-request/write loop we are stopping.
           if (this.isCircuitOpen(endpoint.name, Date.now())) {
             if (counter) counter.outFailed += logs.length;
+            logger.debug('SLS circuit open, skipping send', {
+              endpoint: endpoint.name,
+              dropped: logs.length,
+            });
             return Promise.resolve();
           }
 
@@ -316,7 +320,9 @@ export class SlsFlusher extends BaseFlusher {
   private onEndpointSuccess(name: string): void {
     // Any success (including a half-open probe) clears streak + breaker.
     this.transientFailStreak.delete(name);
-    this.circuits.delete(name);
+    if (this.circuits.delete(name)) {
+      logger.info('SLS circuit breaker recovered', { endpoint: name });
+    }
   }
 
   private onEndpointFailure(
@@ -387,6 +393,11 @@ export class SlsFlusher extends BaseFlusher {
         ? CIRCUIT_BASE_BACKOFF_MS
         : Math.min(c.backoffMs * 2, CIRCUIT_MAX_BACKOFF_MS);
       c.openUntil = Date.now() + c.backoffMs;
+      logger.warn('SLS circuit breaker tripped', {
+        endpoint: name,
+        configFails: c.configFails,
+        backoffMs: c.backoffMs,
+      });
     }
     this.circuits.set(name, c);
   }
@@ -591,7 +602,9 @@ export class SlsFlusher extends BaseFlusher {
 
     for (const raw of logs) {
       let log = raw;
-      let logSize = Buffer.byteLength(JSON.stringify(log.content));
+      // byteSize was already computed in enqueue() from the same JSON.stringify —
+      // reuse it here and only re-serialize after a truncation mutates content.
+      let logSize = raw.byteSize;
 
       // A single entry over the cap can never fit any chunk. Try trimming its
       // largest field; if it still won't fit, drop it rather than emit a request
@@ -603,7 +616,7 @@ export class SlsFlusher extends BaseFlusher {
           continue;
         }
         log = trimmed;
-        logSize = Buffer.byteLength(JSON.stringify(log.content));
+        logSize = trimmed.byteSize;
         if (logSize > maxBytes) {
           dropped++;
           continue;

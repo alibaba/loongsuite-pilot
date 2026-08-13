@@ -84,10 +84,16 @@ describe('classifyFailure', () => {
 
   it('classifies terminal config errors as config', () => {
     expect(classifyFailure(new HttpError(404, '{"errorCode":"ProjectNotExist"}'))).toBe('config');
-    expect(classifyFailure(new HttpError(403, 'forbidden'))).toBe('config');
+    expect(classifyFailure(new HttpError(403, '{"errorCode":"ProjectForbidden"}'))).toBe('config');
     // ak SDK style: errorCode field, no HTTP status
     expect(classifyFailure({ errorCode: 'ProjectForbidden', message: 'forbidden' })).toBe('config');
     expect(classifyFailure({ code: 'ProjectInRecycleBin' })).toBe('config');
+  });
+
+  it('does not classify a bare (proxy) 404/403 as config', () => {
+    // No SLS errorCode in the body → likely a proxy/CDN/WAF, not a terminal SLS error.
+    expect(classifyFailure(new HttpError(404, 'nginx not found'))).toBe('transient');
+    expect(classifyFailure(new HttpError(403, 'Forbidden'))).toBe('transient');
   });
 
   it('classifies timeouts / network / unknown as transient', () => {
