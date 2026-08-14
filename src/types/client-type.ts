@@ -45,6 +45,7 @@ export enum ClientType {
   MimoCode = 'mimo-code',
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
+  Dsh = 'dsh',
 
 }
 

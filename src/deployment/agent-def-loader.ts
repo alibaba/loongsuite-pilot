@@ -98,9 +98,28 @@ export class AgentDefLoader {
       && mode !== 'plugin-inject'
       && mode !== 'directory-plugin'
       && mode !== 'detection-only'
+      && mode !== 'dsh-yaml-patch'
     ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
+    }
+    if (mode === 'dsh-yaml-patch') {
+      const cfg = obj.dshYamlPatch as Record<string, unknown> | null;
+      if (!cfg || typeof cfg !== 'object') {
+        logger.warn('invalid dsh-yaml-patch definition: missing dshYamlPatch', { file: filePath });
+        return false;
+      }
+      for (const field of ['pluginSource', 'entryId', 'marker'] as const) {
+        const v = cfg[field];
+        if (typeof v !== 'string' || v.length === 0) {
+          logger.warn('invalid dsh-yaml-patch definition: field must be non-empty string', { file: filePath, field });
+          return false;
+        }
+      }
+      if (cfg.patchPath !== undefined && (typeof cfg.patchPath !== 'string' || cfg.patchPath.length === 0)) {
+        logger.warn('invalid dsh-yaml-patch definition: patchPath must be non-empty string', { file: filePath });
+        return false;
+      }
     }
     if (obj.piSdk !== undefined) {
       const piSdk = obj.piSdk as Record<string, unknown> | null;
