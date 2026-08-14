@@ -649,9 +649,9 @@ function transcriptInputMessage(
   blobToUri?: BlobToUriFn,
   timestampMs = 0,
   recordOffset?: number,
-): { role: string; parts: TranscriptMessagePart[] } | null {
+): JsonValue | null {
   const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
-  return parts.length > 0 ? { role, parts } : null;
+  return parts.length > 0 ? { role, parts } as unknown as JsonValue : null;
 }
 
 function extractMessageParts(
