@@ -34,10 +34,7 @@ export function attachMultimodalMetadata(
   entry[MULTIMODAL_METADATA_FIELD] = items as unknown as JsonValue;
 }
 
-/**
- * Attach multimodal_metadata from uri parts already on the entry.
- * Dedupes by uri (first wins). No side cache — mime/modality live on the part.
- */
+/** Collect uri parts on entry into multimodal_metadata (dedupe by uri). */
 export function attachMultimodalMetadataForEntry(entry: AgentActivityEntry): void {
   const items: MultimodalMetadataItem[] = [];
   const seen = new Set<string>();

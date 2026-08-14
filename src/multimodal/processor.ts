@@ -19,6 +19,7 @@ import type {
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
+  MAX_MULTIMODAL_PATH_INFLIGHT,
   MAX_MULTIMODAL_PENDING_BYTES,
   MAX_MULTIMODAL_PENDING_UPLOADS,
   MULTIMODAL_SHUTDOWN_TIMEOUT_MS,
@@ -27,23 +28,27 @@ import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
 
-/**
- * Multimodal conversion service shared across agents.
- *
- * Two public entry points :
- * - `blobToUri`: raw base64 blob → decode → bytes → uri + upload
- * - `pathToUri`: local image path → read bytes → uri + upload
- */
+interface PathUriCacheEntry {
+  mtimeMs: number;
+  size: number;
+  result: UriResult | null;
+}
+
+function pathInflightKey(absPath: string, mtimeMs: number, size: number): string {
+  return `${absPath}\0${mtimeMs}\0${size}`;
+}
+
+/** Convert blob/path to storage uri and enqueue async upload. */
 export class MultimodalProcessor {
   private readonly pending = new Set<Promise<void>>();
-  /** In-flight object relative paths (`day/sha.ext`); not the same as Uploader success LRU. */
+  /** In-flight upload keys. */
   private readonly pendingKeys = new Set<string>();
   private pendingBytes = 0;
   private shuttingDown = false;
   private readonly storageBasePath: string;
-  /** Absolute local path → uri result (incl. null misses); shared across collect cycles. */
-  private readonly pathUriCache = new LruMap<UriResult | null>(MULTIMODAL_LRU_LIMIT);
-  /** In-flight path reads so concurrent pathToUri for the same path share one IO. */
+  /** path→uri cache keyed by mtime+size. */
+  private readonly pathUriCache = new LruMap<PathUriCacheEntry>(MULTIMODAL_LRU_LIMIT);
+  /** In-flight path reads. */
   private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
 
   constructor(
@@ -57,10 +62,7 @@ export class MultimodalProcessor {
     this.storageBasePath = base;
   }
 
-  /**
-   * Local image path → storage uri. Path-level LRU + in-flight dedupe.
-   * Reads file bytes directly (no base64 encode/decode).
-   */
+  /** Local image path → uri. */
   async pathToUri(filePath: string, timeUnixMs?: number): Promise<UriResult | null> {
     if (this.shuttingDown) {
       logger.warn('multimodal pathToUri rejected', { reason: 'shutting_down' });
@@ -71,34 +73,66 @@ export class MultimodalProcessor {
     if (!trimmed || !isImageFilePath(trimmed)) return null;
     const key = path.resolve(trimmed);
 
-    if (this.pathUriCache.has(key)) {
-      return this.pathUriCache.get(key) ?? null;
+    const stated = await statImagePath(key);
+    if (!stated) return null;
+
+    const cached = this.pathUriCache.get(key);
+    if (
+      cached
+      && cached.mtimeMs === stated.mtimeMs
+      && cached.size === stated.size
+    ) {
+      return cached.result;
     }
 
-    const inflight = this.pathUriInflight.get(key);
+    const slotKey = pathInflightKey(key, stated.mtimeMs, stated.size);
+    const inflight = this.pathUriInflight.get(slotKey);
     if (inflight) return inflight;
+
+    if (this.pathUriInflight.size >= MAX_MULTIMODAL_PATH_INFLIGHT) {
+      logger.warn('multimodal pathToUri rejected', {
+        reason: 'path_inflight_full',
+        pending: this.pathUriInflight.size,
+        limit: MAX_MULTIMODAL_PATH_INFLIGHT,
+      });
+      return null;
+    }
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const stated = await statImagePath(key);
-        if (!stated) {
-          this.pathUriCache.set(key, null);
-          return null;
+        const fresh = await statImagePath(key);
+        if (!fresh) return null;
+
+        if (fresh.mtimeMs !== stated.mtimeMs || fresh.size !== stated.size) {
+          this.pathUriInflight.delete(slotKey);
+          return this.pathToUri(filePath, timeUnixMs);
         }
-        if (stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) {
+
+        const cachedFresh = this.pathUriCache.get(key);
+        if (
+          cachedFresh
+          && cachedFresh.mtimeMs === fresh.mtimeMs
+          && cachedFresh.size === fresh.size
+        ) {
+          return cachedFresh.result;
+        }
+
+        if (fresh.size <= 0 || fresh.size > MAX_MULTIMODAL_DATA_SIZE) {
           logger.warn('multimodal path rejected', {
             reason: 'size_limit',
-            size: stated.size,
+            size: fresh.size,
           });
-          this.pathUriCache.set(key, null);
+          this.pathUriCache.set(key, {
+            mtimeMs: fresh.mtimeMs,
+            size: fresh.size,
+            result: null,
+          });
           return null;
         }
 
-        const loaded = await readImagePathBytes(stated);
-        if (!loaded) {
-          this.pathUriCache.set(key, null);
-          return null;
-        }
+        const loaded = await readImagePathBytes(fresh);
+        if (!loaded) return null;
+
         const result = this.bytesToUri(loaded.bytes, {
           mime_type: loaded.mime_type,
           modality: 'image',
@@ -106,27 +140,27 @@ export class MultimodalProcessor {
             ? { time_unix_ms: timeUnixMs }
             : {}),
         });
-        this.pathUriCache.set(key, result);
+        this.pathUriCache.set(key, {
+          mtimeMs: fresh.mtimeMs,
+          size: fresh.size,
+          result,
+        });
         return result;
       } catch (err) {
         logger.warn('multimodal pathToUri failed', { error: String(err) });
-        this.pathUriCache.set(key, null);
         return null;
       }
     })();
 
-    this.pathUriInflight.set(key, pending);
+    this.pathUriInflight.set(slotKey, pending);
     try {
       return await pending;
     } finally {
-      this.pathUriInflight.delete(key);
+      this.pathUriInflight.delete(slotKey);
     }
   }
 
-  /**
-   * Raw base64 blob → storage uri. Upload runs in the background; failure /
-   * queue-full only logs a warning (uri may dangle).
-   */
+  /** Raw base64 → uri (upload async). */
   blobToUri(params: BlobToUriParams): UriResult | null {
     try {
       if (this.shuttingDown) {
@@ -161,10 +195,7 @@ export class MultimodalProcessor {
     }
   }
 
-  /**
-   * Shared path after bytes are available: hash → optimistic uri → enqueue upload.
-   * `bytes` is the payload; meta reuses UriConvertMeta .
-   */
+  /** Hash bytes → uri and enqueue upload. */
   private bytesToUri(bytes: Buffer, meta: UriConvertMeta = {}): UriResult | null {
     if (this.shuttingDown) {
       logger.warn('multimodal blob rejected', { reason: 'shutting_down' });
@@ -194,13 +225,11 @@ export class MultimodalProcessor {
       sha256,
     };
 
-    // Same key already uploading — return optimistic uri, do not double-enqueue.
     if (this.pendingKeys.has(targetPath)) {
       logger.debug('multimodal upload skipped (in-flight)', { uri });
       return result;
     }
 
-    // Optimistic uri even when the upload queue is full (may dangle).
     if (this.pending.size >= MAX_MULTIMODAL_PENDING_UPLOADS) {
       logger.warn('multimodal upload queue full, skipping enqueue', {
         reason: 'queue_full',

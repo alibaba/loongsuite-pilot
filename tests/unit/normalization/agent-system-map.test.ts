@@ -27,6 +27,7 @@ describe('resolveAgentSystem', () => {
 
   it('maps qwen-code-cli to qwen-code', () => {
     expect(resolveAgentSystem('qwen-code-cli')).toBe('qwen-code');
+    expect(resolveAgentSystem('qwen-work-cn')).toBe('qwen');
   });
 
   it('maps mimo-code to mimo-code', () => {
@@ -55,7 +56,7 @@ describe('resolveAgentSystem', () => {
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
       'cursor', 'cursor-hook',
-      'qwen-code-cli', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes',
+      'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes',
     ];
     for (const key of expectedKeys) {
       expect(AGENT_SYSTEM_MAP[key]).toBeDefined();

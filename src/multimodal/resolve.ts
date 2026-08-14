@@ -17,7 +17,7 @@ const IMAGE_EXT_TO_MIME: Record<string, string> = {
 
 export type { PathBytes, PathStat };
 
-/** Decode blob `content` as raw base64. */
+/** Decode raw base64 blob content. */
 export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   const base64 = typeof part.content === 'string' ? part.content.trim() : '';
   if (!base64) return null;
@@ -31,12 +31,12 @@ export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   }
 }
 
-/** True when the path has a known image file extension. */
+/** Whether path looks like an image by extension. */
 export function isImageFilePath(filePath: string): boolean {
   return mimeFromImagePath(filePath) !== null;
 }
 
-/** MIME type from image extension. */
+/** MIME from image file extension. */
 export function mimeFromImagePath(filePath: string): string | null {
   const trimmed = filePath.trim();
   if (!trimmed) return null;
@@ -45,7 +45,7 @@ export function mimeFromImagePath(filePath: string): string | null {
   return IMAGE_EXT_TO_MIME[ext] ?? null;
 }
 
-/** Stat a local image path. */
+/** Stat local image path. */
 export async function statImagePath(filePath: string): Promise<PathStat | null> {
   const mime = mimeFromImagePath(filePath);
   if (!mime) return null;
@@ -58,10 +58,15 @@ export async function statImagePath(filePath: string): Promise<PathStat | null> 
     return null;
   }
   if (!stat.isFile()) return null;
-  return { resolvedPath, mime_type: mime, size: stat.size };
+  return {
+    resolvedPath,
+    mime_type: mime,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
 }
 
-/** Read bytes for a stated local image path. */
+/** Read bytes for a stated image path. */
 export async function readImagePathBytes(stated: PathStat): Promise<PathBytes | null> {
   try {
     const bytes = await fs.readFile(stated.resolvedPath);
@@ -98,7 +103,7 @@ export function extFromMime(mime: string): string {
   }
 }
 
-/** Infer modality from MIME type prefix; undefined when unknown. */
+/** Modality from MIME prefix. */
 export function modalityFromMime(mime: string): 'image' | 'audio' | 'video' | undefined {
   const normalized = mime.toLowerCase().split(';')[0]?.trim() ?? '';
   if (normalized.startsWith('image/')) return 'image';
@@ -107,28 +112,25 @@ export function modalityFromMime(mime: string): 'image' | 'audio' | 'video' | un
   return undefined;
 }
 
-export function yyyymmddUTC(date = new Date()): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
+export function yyyymmddLocal(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
   return `${y}${m}${d}`;
 }
 
-/**
- * UTC YYYYMMDD from unix epoch milliseconds.
- * Falls back to current UTC day when missing/invalid.
- */
+/** YYYYMMDD (local) from event time; else `fallback`/now. */
 export function yyyymmddFromUnixMs(
   timeUnixMs: number | undefined,
   fallback = new Date(),
 ): string {
   if (typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0) {
-    return yyyymmddUTC(new Date(timeUnixMs));
+    return yyyymmddLocal(new Date(timeUnixMs));
   }
-  return yyyymmddUTC(fallback);
+  return yyyymmddLocal(fallback);
 }
 
-/** Join storageBasePath (oss://bucket/prefix) with relative targetPath. */
+/** Join storage base URI with relative object key. */
 export function joinStorageUri(storageBasePath: string, targetPath: string): string {
   const base = storageBasePath.replace(/\/+$/, '');
   const rel = targetPath.replace(/^\/+/, '');

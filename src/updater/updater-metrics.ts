@@ -28,7 +28,8 @@ export type UpdaterEventType =
   | 'deployed'
   | 'collector_restarted'
   | 'update_failure'
-  | 'updater_stopped_max_failures';
+  | 'updater_stopped_max_failures'
+  | 'managed_node_pin_failed';
 
 export interface UpdaterEvent {
   event_type: UpdaterEventType;
@@ -37,6 +38,8 @@ export interface UpdaterEvent {
   latest_version?: string;
   error?: string;
   consecutive_failures?: number;
+  node_bin?: string;
+  pin?: string;
   user_id: string;
   ip: string;
   __time__: number;

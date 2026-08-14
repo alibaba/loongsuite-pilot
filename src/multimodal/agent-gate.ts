@@ -3,10 +3,7 @@ import { isMultimodalSupportedAgent } from '../normalization/agent-config.js';
 
 export { isMultimodalSupportedAgent } from '../normalization/agent-config.js';
 
-/**
- * True when this agent id is supported and configured for multimodal uri conversion.
- * Requires captureMessageContent and uploadMode !== none.
- */
+/** Whether agent is multimodal-capable and uploadMode !== none. */
 export function isAgentMultimodalEnabled(
   agentId: string | undefined,
   agent: AgentConfig,

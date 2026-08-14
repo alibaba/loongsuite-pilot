@@ -94,7 +94,7 @@ describe('SlsUploader', () => {
     expect(put).toHaveBeenCalledTimes(1);
   });
 
-  it('does not record successKeys when closed during in-flight put', async () => {
+  it('returns success but skips successKeys when closed during in-flight put', async () => {
     let resolvePut!: (value: { ok: true; statusCode: number; requestId: string }) => void;
     const putGate = new Promise<{ ok: true; statusCode: number; requestId: string }>(resolve => {
       resolvePut = resolve;
@@ -112,7 +112,8 @@ describe('SlsUploader', () => {
     const uploading = uploader.upload(item);
     await uploader.shutdown();
     resolvePut({ ok: true, statusCode: 200, requestId: 'late' });
-    expect(await uploading).toBe(false);
+
+    expect(await uploading).toBe(true);
     expect(put).toHaveBeenCalledTimes(1);
     expect(await uploader.upload(item)).toBe(false);
     expect(put).toHaveBeenCalledTimes(1);

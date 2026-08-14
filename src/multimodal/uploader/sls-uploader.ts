@@ -10,10 +10,7 @@ import { slsPutObject, tryParseSlsStorageBasePath } from './sls-client.js';
 
 const logger = createLogger('SlsUploader');
 
-/**
- * SLS PutObject uploader for multimodal binaries.
- * Separate from SlsFlusher (PutLogs). Fail-open: upload() never throws.
- */
+/** SLS PutObject uploader (fail-open). */
 export class SlsUploader implements Uploader {
   private readonly project: string;
   private readonly logstore: string;
@@ -24,7 +21,6 @@ export class SlsUploader implements Uploader {
     private readonly sls: MultimodalSlsConfig,
     storageBasePath: string,
   ) {
-    // Prefer explicit sls.project/logstore; storageBasePath is sls://project/logstore.
     const parsed = tryParseSlsStorageBasePath(storageBasePath);
     this.project = sls.project || parsed?.project || '';
     this.logstore = sls.logstore || parsed?.logstore || '';
@@ -91,7 +87,14 @@ export class SlsUploader implements Uploader {
         return false;
       }
 
-      if (this.closed) return false;
+      if (this.closed) {
+        logger.debug('sls upload completed after close', {
+          targetPath: item.targetPath,
+          size: item.expectedSize,
+          requestId: result.value,
+        });
+        return true;
+      }
       this.successKeys.set(objectKey, true);
       logger.debug('sls upload ok', {
         targetPath: item.targetPath,

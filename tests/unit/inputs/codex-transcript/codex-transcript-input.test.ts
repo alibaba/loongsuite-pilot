@@ -5,14 +5,23 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
-import { extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn, BlobToUriParams } from '../../../../src/multimodal/types.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
+const SUBAGENT_FIXTURE_DIR = path.resolve(process.cwd(), 'tests/fixtures/codex-subagent');
+const PARENT_FIXTURE_NAME = 'rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl';
+const CHILD_FIXTURE_NAME = 'rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl';
+const CHILD_FIXTURES = [
+  { name: CHILD_FIXTURE_NAME, threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', turnId: 'child-turn-1' },
+  { name: 'rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl', threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', turnId: 'child-turn-2' },
+  { name: 'rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl', threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', turnId: 'child-turn-3' },
+  { name: 'rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl', threadId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', turnId: 'child-turn-4' },
+] as const;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
@@ -229,7 +238,10 @@ function controlOnlyAbortedTurn(sessionId: string, turnId: string, start: string
   ];
 }
 
-async function createInput(root: string, pollIntervalMs = 10): Promise<{
+async function createInput(
+  root: string,
+  pollIntervalMs = 10,
+): Promise<{
   input: CodexTranscriptInput;
   entries: AgentActivityEntry[];
   batches: AgentActivityEntry[][];
@@ -332,6 +344,11 @@ async function processTranscriptOnce(input: CodexTranscriptInput, transcript: st
   return (input as unknown as { processFile(filePath: string): Promise<number> }).processFile(transcript);
 }
 
+async function finalizeSubagentFusions(input: CodexTranscriptInput): Promise<number> {
+  return (input as unknown as { finalizeReadySubagentFusions(): Promise<number> })
+    .finalizeReadySubagentFusions();
+}
+
 function transcriptCheckpoint(
   stateStore: StateStore,
   transcript: string,
@@ -347,6 +364,792 @@ function globalProcessedTurnIds(stateStore: StateStore): string[] {
 }
 
 describe('CodexTranscriptInput', () => {
+  it('extracts the single-level subagent relationship from owning session metadata', async () => {
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const firstRecord = JSON.parse(fixture.split('\n')[0]) as Record<string, unknown>;
+
+    expect(extractCodexTranscriptMeta(firstRecord)).toEqual(expect.objectContaining({
+      threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      rootSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      threadSource: 'subagent',
+      parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      depth: 1,
+      createdAtMs: Date.parse('2026-08-07T02:00:04.100Z'),
+      agentPath: '/root/fixture_child',
+      agentNickname: 'FixtureChild',
+      provider: 'openai',
+    }));
+  });
+
+  it('bounds reported subagent link fingerprints by evicting the oldest child', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-link-cap-'));
+    tempDirs.push(root);
+    const { input } = await createDormantInput(root);
+    const internals = input as unknown as {
+      reportedSubagentLinks: Map<string, string>;
+      subagentLinker: { registerChild(meta: ReturnType<typeof extractCodexTranscriptMeta>): void };
+      reportSubagentLinks(): void;
+    };
+    for (let index = 0; index < 10_000; index++) {
+      internals.reportedSubagentLinks.set(`old-child-${index}`, 'orphan::parent_not_found');
+    }
+    internals.subagentLinker.registerChild({
+      threadId: 'new-child',
+      rootSessionId: 'parent-thread',
+      threadSource: 'subagent',
+      parentThreadId: 'parent-thread',
+      depth: 1,
+      provider: 'openai',
+    });
+
+    internals.reportSubagentLinks();
+    await input.stop();
+
+    expect(internals.reportedSubagentLinks).toHaveLength(10_000);
+    expect(internals.reportedSubagentLinks.has('old-child-0')).toBe(false);
+    expect(internals.reportedSubagentLinks.has('new-child')).toBe(true);
+  });
+
+  it('holds the parent terminal and fuses completed child rollouts into the parent turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-owner-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+
+    const parentLines = parentFixture.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await waitFor(() => input.getSubagentLinkSnapshot().detectedSpawns === 4);
+    const childTranscripts = new Map<string, string>();
+    for (const fixture of CHILD_FIXTURES) {
+      const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      childTranscripts.set(fixture.threadId, await writeTranscriptNamed(sessionDir, fixture.name, text));
+    }
+    await waitFor(() => [...childTranscripts.values()].every(transcript =>
+      Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent)));
+    expect(globalProcessedTurnIds(stateStore)).not.toContain('parent-turn-1');
+    expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 0)).toBe(true);
+
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await waitFor(() => CHILD_FIXTURES.every(fixture =>
+      responsesForTurn(entries, fixture.turnId).length === 1));
+    await input.stop();
+
+    expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(2);
+    for (const fixture of CHILD_FIXTURES) {
+      const childEntries = entries.filter(entry =>
+        entry['agent.codex.transcript_turn_id'] === fixture.turnId);
+      expect(childEntries.length).toBeGreaterThan(0);
+      expect(new Set(childEntries.map(entry => entry['gen_ai.session.id']))).toEqual(
+        new Set(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']),
+      );
+      expect(new Set(childEntries.map(entry => entry['gen_ai.agent.id']))).toEqual(
+        new Set([fixture.threadId]),
+      );
+      expect(new Set(childEntries.map(entry => entry['gen_ai.turn.id']))).toEqual(
+        new Set(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:parent-turn-1']),
+      );
+      expect(transcriptCheckpoint(stateStore, childTranscripts.get(fixture.threadId)!)).toMatchObject({
+        ownerSessionMetaOffset: 0,
+      });
+      expect(childEntries.every(entry => entry['gen_ai.agent.scope'] === 'subagent')).toBe(true);
+      expect(childEntries.every(entry => entry['gen_ai.agent.depth'] === 1)).toBe(true);
+      expect(new Set(childEntries.map(entry => entry['gen_ai.subagent.parent_tool_call.id']))).toEqual(
+        new Set([`call-subagent-${CHILD_FIXTURES.indexOf(fixture) + 1}`]),
+      );
+      expect(childEntries.some(entry => entry['event.name'] === 'other')).toBe(false);
+      expect(childEntries.find(entry => entry['event.name'] === 'llm.request')).toEqual(
+        expect.objectContaining({
+          'gen_ai.input.messages': expect.any(Array),
+        }),
+      );
+    }
+    expect(globalProcessedTurnIds(stateStore)).toEqual(expect.arrayContaining([
+      'parent-turn-1',
+      ...CHILD_FIXTURES.map(fixture => fixture.turnId),
+    ]));
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
+      pendingFusion: null,
+      activeTurn: null,
+    });
+    expect(input.getSubagentLinkSnapshot()).toMatchObject({
+      detectedChildren: 4,
+      detectedSpawns: 4,
+      linkedChildren: 4,
+      orphanChildren: 0,
+      links: CHILD_FIXTURES.map((fixture, index) => expect.objectContaining({
+        childThreadId: fixture.threadId,
+        parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        parentTurnId: 'parent-turn-1',
+        parentToolCallId: `call-subagent-${index + 1}`,
+        confidence: 'agent_path',
+      })),
+    });
+  });
+
+  it('does not attach new children to a historical spawn in a long parent rollout', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-history-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const [sessionMeta, ...currentTurn] = parentFixture.trimEnd().split('\n');
+    const historicalTurn = [
+      record('2026-08-07T01:00:00.000Z', 'turn_context', {
+        turn_id: 'historical-parent-turn', model: 'gpt-test', cwd: '/tmp/codex-subagent-fixture',
+      }),
+      record('2026-08-07T01:00:01.000Z', 'event_msg', {
+        type: 'task_started', turn_id: 'historical-parent-turn',
+      }),
+      record('2026-08-07T01:00:02.000Z', 'response_item', {
+        type: 'function_call',
+        call_id: 'call-historical-subagent',
+        name: 'spawn_agent',
+        arguments: JSON.stringify({ task_name: 'stale_child', message: 'redacted' }),
+      }),
+      record('2026-08-07T01:00:03.000Z', 'response_item', {
+        type: 'function_call_output',
+        call_id: 'call-historical-subagent',
+        output: JSON.stringify({ task_name: '/root/stale_child' }),
+      }),
+      record('2026-08-07T01:00:04.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'historical-parent-turn', last_agent_message: 'delegated',
+      }),
+    ];
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      [sessionMeta, ...historicalTurn, ...currentTurn].join('\n') + '\n',
+    );
+
+    for (const fixture of CHILD_FIXTURES) {
+      const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      const childTranscript = await writeTranscriptNamed(sessionDir, fixture.name, text);
+      await processTranscriptOnce(input, childTranscript);
+    }
+    await processTranscriptOnce(input, parentTranscript);
+
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
+      pendingFusion: null,
+      activeTurn: null,
+    });
+    expect(input.getSubagentLinkSnapshot().links).toEqual(expect.arrayContaining(
+      CHILD_FIXTURES.map((fixture, index) => expect.objectContaining({
+        childThreadId: fixture.threadId,
+        parentTurnId: 'parent-turn-1',
+        parentToolCallId: `call-subagent-${index + 1}`,
+      })),
+    ));
+  });
+
+  it('captures child terminals before the parent terminal and keeps scanning later child turns', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-child-first-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await waitFor(() => input.getSubagentLinkSnapshot().detectedSpawns === 4);
+
+    const childTranscripts: string[] = [];
+    for (const [index, fixture] of CHILD_FIXTURES.entries()) {
+      let text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      if (index === 0) {
+        const lines = text.trimEnd().split('\n');
+        const terminal = JSON.parse(lines.at(-1)!) as { payload: Record<string, unknown> };
+        terminal.payload.type = 'turn_aborted';
+        delete terminal.payload.last_agent_message;
+        terminal.payload.reason = 'interrupted';
+        lines[lines.length - 1] = JSON.stringify(terminal);
+        text = lines.join('\n') + '\n';
+      }
+      childTranscripts.push(await writeTranscriptNamed(sessionDir, fixture.name, text));
+    }
+    await waitFor(() => childTranscripts.every(transcript =>
+      Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent)));
+    for (const [index, transcript] of childTranscripts.entries()) {
+      const childStat = await fs.stat(transcript);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: childStat.size,
+        pendingSubagent: {
+          parentTurnId: 'parent-turn-1',
+          parentToolCallId: `call-subagent-${index + 1}`,
+          confidence: 'agent_path',
+          activeTurn: { turnId: CHILD_FIXTURES[index]!.turnId },
+        },
+        activeTurn: null,
+      });
+    }
+    expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 0)).toBe(true);
+
+    const followupLines = simpleCompletedTurn(
+      CHILD_FIXTURES[0].threadId,
+      'child-followup-turn',
+      'follow up after the captured child terminal',
+      'followup complete',
+      10,
+      2,
+      '2026-08-07T02:02:00.000Z',
+    ).slice(1);
+    await fs.appendFile(childTranscripts[0]!, followupLines.join('\n') + '\n', 'utf8');
+    await waitFor(() => responsesForTurn(entries, 'child-followup-turn').length === 1);
+    expect(transcriptCheckpoint(stateStore, childTranscripts[0]!).pendingSubagent).not.toBeNull();
+
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await waitFor(() => CHILD_FIXTURES.every(fixture =>
+      responsesForTurn(entries, fixture.turnId).length === 1));
+    await input.stop();
+
+    const abortedEntries = entries.filter(entry =>
+      entry['agent.codex.transcript_turn_id'] === 'child-turn-1');
+    expect(abortedEntries.some(entry => entry['agent.codex.turn_status'] === 'interrupted')).toBe(true);
+    expect(abortedEntries.every(entry => entry['gen_ai.agent.scope'] === 'subagent')).toBe(true);
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({ pendingFusion: null });
+  });
+
+  it('forces a reliably linked active child to finalize when the parent reaches task_complete', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-parent-barrier-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, parentTranscript);
+
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    childLines.pop();
+    const childTranscript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      childLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, childTranscript);
+
+    const childStat = await fs.stat(childTranscript);
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(0);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      scanOffset: childStat.size,
+      pendingSubagent: null,
+      activeTurn: {
+        turnId: 'child-turn-1',
+        emittedStepCount: 0,
+      },
+    });
+
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).not.toBeNull();
+
+    await finalizeSubagentFusions(input);
+
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.subagent.parent_tool_call.id': 'call-subagent-1',
+      'agent.codex.turn_status': 'interrupted',
+    });
+    expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(2);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      activeTurn: null,
+      pendingSubagent: null,
+      emittedTerminalTurnIds: ['child-turn-1'],
+    });
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
+      activeTurn: null,
+      pendingFusion: null,
+    });
+  });
+
+  it('releases the parent when a reliable child cannot be rebuilt and emits that child independently later', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-missing-child-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, parentTranscript);
+
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    const childTranscript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      childLines[0]! + '\n',
+    );
+    await processTranscriptOnce(input, childTranscript);
+
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).not.toBeNull();
+
+    await finalizeSubagentFusions(input);
+
+    expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(2);
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
+      activeTurn: null,
+      pendingFusion: null,
+    });
+
+    await fs.appendFile(childTranscript, childLines.slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'child-turn-1')[0]).not.toHaveProperty('gen_ai.agent.scope', 'subagent');
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      activeTurn: null,
+      pendingSubagent: null,
+    });
+  });
+
+  it('emits an orphan child as an independent trace instead of holding its rollout', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-orphan-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.session.id': CHILD_FIXTURES[0].threadId,
+    });
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      pendingSubagent: null,
+      activeTurn: null,
+    });
+  });
+
+  it('does not treat followup_task as a new child lifecycle that requires fusion', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-followup-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = (await fs.readFile(
+      path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME),
+      'utf8',
+    )).replaceAll('"name":"spawn_agent"', '"name":"followup_task"');
+    const parentTranscript = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentFixture);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+
+    await processTranscriptOnce(input, parentTranscript);
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({ pendingFusion: null });
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
+  });
+
+  it('degrades an ambiguous repeated agent path to an independent child trace', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-ambiguous-path-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = (await fs.readFile(
+      path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME),
+      'utf8',
+    )).trimEnd().split('\n')
+      .filter(line => !line.includes('call-subagent-3') && !line.includes('call-subagent-4'))
+      .map(line => line.replaceAll('fixture_child_2', 'fixture_child'))
+      .join('\n') + '\n';
+    const parentTranscript = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentFixture);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+
+    await processTranscriptOnce(input, parentTranscript);
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      pendingSubagent: null,
+      activeTurn: null,
+    });
+    expect(input.getSubagentLinkSnapshot().links).toContainEqual(expect.objectContaining({
+      childThreadId: CHILD_FIXTURES[0].threadId,
+      confidence: 'orphan',
+      orphanReason: 'ambiguous_agent_path',
+    }));
+  });
+
+  it('releases a captured agent_path candidate if a later spawn makes the path ambiguous', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-late-ambiguity-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n')
+      .filter(line => (
+        !line.includes('call-subagent-2')
+        && !line.includes('call-subagent-3')
+        && !line.includes('call-subagent-4')
+        && !line.includes('"type":"task_complete"')
+      ));
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, parentTranscript);
+
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+    await processTranscriptOnce(input, childTranscript);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      pendingSubagent: {
+        parentToolCallId: 'call-subagent-1',
+        confidence: 'agent_path',
+      },
+    });
+
+    await fs.appendFile(parentTranscript, [
+      record('2026-08-07T02:00:07.000Z', 'response_item', {
+        type: 'function_call',
+        call_id: 'call-subagent-late',
+        name: 'spawn_agent',
+        arguments: JSON.stringify({ task_name: 'fixture_child', message: 'redacted' }),
+      }),
+      record('2026-08-07T02:00:08.000Z', 'response_item', {
+        type: 'function_call_output',
+        call_id: 'call-subagent-late',
+        output: JSON.stringify({ task_name: '/root/fixture_child' }),
+      }),
+      record('2026-08-07T02:00:09.000Z', 'event_msg', tokenUsage(120, 12)),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(input.getSubagentLinkSnapshot().links).toContainEqual(expect.objectContaining({
+      childThreadId: CHILD_FIXTURES[0].threadId,
+      confidence: 'orphan',
+      orphanReason: 'ambiguous_agent_path',
+    }));
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
+  });
+
+  it('uses explicit child ids and parentToolCallId to keep repeated paths as distinct candidates', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-explicit-identity-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const originalParent = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = originalParent.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const reducedParent = parentLines
+      .filter(line => !line.includes('call-subagent-3') && !line.includes('call-subagent-4'))
+      .map(line => line.replaceAll('fixture_child_2', 'fixture_child'));
+    reducedParent.splice(reducedParent.length - 1, 0,
+      record('2026-08-07T02:00:04.400Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        event_id: 'call-subagent-1',
+        agent_thread_id: CHILD_FIXTURES[0].threadId,
+        agent_path: '/root/fixture_child',
+        occurred_at_ms: Date.parse('2026-08-07T02:00:04.400Z'),
+      }),
+      record('2026-08-07T02:00:04.450Z', 'event_msg', {
+        type: 'sub_agent_activity',
+        kind: 'started',
+        event_id: 'call-subagent-2',
+        agent_thread_id: CHILD_FIXTURES[1].threadId,
+        agent_path: '/root/fixture_child',
+        occurred_at_ms: Date.parse('2026-08-07T02:00:04.450Z'),
+      }),
+    );
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      reducedParent.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, parentTranscript);
+
+    const childTranscripts: string[] = [];
+    for (const [index, fixture] of CHILD_FIXTURES.slice(0, 2).entries()) {
+      let childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      if (index === 1) childText = childText.replaceAll('/root/fixture_child_2', '/root/fixture_child');
+      const transcript = await writeTranscriptNamed(sessionDir, fixture.name, childText);
+      childTranscripts.push(transcript);
+      await processTranscriptOnce(input, transcript);
+    }
+
+    expect(transcriptCheckpoint(stateStore, childTranscripts[0]!)).toMatchObject({
+      pendingSubagent: {
+        parentToolCallId: 'call-subagent-1',
+        confidence: 'explicit_id',
+      },
+    });
+    expect(transcriptCheckpoint(stateStore, childTranscripts[1]!)).toMatchObject({
+      pendingSubagent: {
+        parentToolCallId: 'call-subagent-2',
+        confidence: 'explicit_id',
+      },
+    });
+
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    expect((transcriptCheckpoint(stateStore, parentTranscript).pendingFusion as { children: unknown[] }).children)
+      .toHaveLength(2);
+    await finalizeSubagentFusions(input);
+
+    expect(responsesForTurn(entries, CHILD_FIXTURES[0].turnId)).toHaveLength(1);
+    expect(responsesForTurn(entries, CHILD_FIXTURES[1].turnId)).toHaveLength(1);
+    expect(new Set(entries
+      .filter(entry => entry['gen_ai.agent.scope'] === 'subagent')
+      .map(entry => entry['gen_ai.subagent.parent_tool_call.id'])))
+      .toEqual(new Set(['call-subagent-1', 'call-subagent-2']));
+  });
+
+  it('keeps time_order links diagnostic-only and emits the child independently', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-time-order-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n');
+    parentLines.pop();
+    const parentTranscript = await writeTranscriptNamed(
+      sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, parentTranscript);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n').map((line, index) => {
+      if (index !== 0) return line;
+      const meta = JSON.parse(line) as { payload: Record<string, unknown> };
+      const source = meta.payload.source as { subagent: { thread_spawn: Record<string, unknown> } };
+      delete source.subagent.thread_spawn.agent_path;
+      return JSON.stringify(meta);
+    });
+    const childTranscript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      childLines.join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, childTranscript);
+
+    expect(input.getSubagentLinkSnapshot().links).toContainEqual(expect.objectContaining({
+      childThreadId: CHILD_FIXTURES[0].threadId,
+      confidence: 'time_order',
+    }));
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
+  });
+
+  it('recovers a persisted parent fusion when child rollouts appear before restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-restart-'));
+    tempDirs.push(root);
+    const first = await createInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentLines = parentFixture.trimEnd().split('\n');
+    const parentTerminal = parentLines.pop()!;
+    const parentTranscript = await writeTranscriptNamed(
+      first.sessionDir,
+      PARENT_FIXTURE_NAME,
+      parentLines.join('\n') + '\n',
+    );
+    await waitFor(() => first.input.getSubagentLinkSnapshot().detectedSpawns === 4);
+    for (const fixture of CHILD_FIXTURES) {
+      const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      await writeTranscriptNamed(first.sessionDir, fixture.name, text);
+    }
+    await waitFor(() => CHILD_FIXTURES.every(fixture => {
+      const transcript = path.join(first.sessionDir, '2026', '06', '24', fixture.name);
+      return Boolean(transcriptCheckpoint(first.stateStore, transcript)?.pendingSubagent);
+    }));
+    await first.input.stop();
+    await first.stateStore.save();
+    await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+
+    const restarted = await createInput(root);
+    await waitFor(() => CHILD_FIXTURES.every(fixture =>
+      responsesForTurn(restarted.entries, fixture.turnId).length === 1));
+    await restarted.input.stop();
+
+    expect(transcriptCheckpoint(restarted.stateStore, parentTranscript)).toMatchObject({
+      pendingFusion: null,
+      activeTurn: null,
+    });
+    expect(restarted.entries.filter(entry => entry['gen_ai.agent.scope'] === 'subagent').length)
+      .toBeGreaterThan(0);
+    expect(restarted.entries.every(entry => entry['gen_ai.session.id'] === 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))
+      .toBe(true);
+  });
+
+  it('rebuilds owning metadata instead of trusting a legacy latest-meta checkpoint', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-migration-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+    const stat = await fs.stat(childTranscript);
+    const copiedParentEndOffset = Buffer.byteLength(childLines.slice(0, 9).join('\n') + '\n');
+    const copiedParentMetaOffset = Buffer.byteLength(childLines[0] + '\n');
+    const persistedState = new StateStore(path.join(root, 'input-state.json'));
+    await persistedState.load();
+    persistedState.update(`codex-transcript:${childTranscript}`, {
+      lastOffset: copiedParentEndOffset,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: copiedParentEndOffset,
+          activeTurn: null,
+          pendingTerminal: null,
+          // This is the pre-fix shape and deliberately points at parent meta.
+          latestSessionMetaOffset: copiedParentMetaOffset,
+          emittedTerminalTurnIds: ['parent-turn-1'],
+        },
+      },
+    });
+    await persistedState.save();
+
+    const recovered = await createInput(root);
+    await waitFor(() => responsesForTurn(recovered.entries, 'child-turn-1').length === 1);
+    await recovered.input.stop();
+
+    expect(responsesForTurn(recovered.entries, 'child-turn-1')).toHaveLength(1);
+    expect(transcriptCheckpoint(recovered.stateStore, childTranscript)).toMatchObject({
+      ownerSessionMetaOffset: 0,
+      pendingSubagent: null,
+      activeTurn: null,
+    });
+  });
+
+  it('skips copied parent terminals whose line timestamps were rewritten at fork time', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-rewritten-time-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const parentTurnId = '019fdb63-2fc6-7491-9895-8c8f86a8bcab';
+    const childTurnId = '019fdb63-714b-7c72-9c8c-c2e40d9c9111';
+    const lines = fixture.trimEnd().split('\n').map((line, index) => {
+      const parsed = JSON.parse(line) as { timestamp: string; payload: Record<string, unknown> };
+      if (index === 0) {
+        parsed.timestamp = '2026-08-07T08:42:35.146Z';
+        parsed.payload.timestamp = parsed.timestamp;
+        parsed.payload.id = '019fdb63-710a-7131-978c-6a6ee744fff9';
+      }
+      if (index >= 1 && index <= 8) parsed.timestamp = '2026-08-07T08:42:35.204Z';
+      return JSON.stringify(parsed)
+        .replaceAll('parent-turn-1', parentTurnId)
+        .replaceAll('child-turn-1', childTurnId);
+    });
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      lines.join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(entries, childTurnId).length === 1);
+    await input.stop();
+
+    expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+      pendingSubagent: null,
+      activeTurn: null,
+    });
+  });
+
+  it('uses exact parent turn ownership when child metadata has no creation timestamp', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-turn-owner-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const parentThreadId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const childThreadId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const parentTurnId = 'copied-parent-turn';
+    const childTurnId = 'owned-child-turn';
+    const parentMeta = record('2026-08-07T02:00:00.000Z', 'session_meta', {
+      id: parentThreadId,
+      session_id: parentThreadId,
+      source: 'vscode',
+      thread_source: 'user',
+      model_provider: 'openai',
+    });
+    await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, [
+      parentMeta,
+      record('2026-08-07T02:00:01.000Z', 'turn_context', {
+        turn_id: parentTurnId, model: 'gpt-test',
+      }),
+      record('2026-08-07T02:00:02.000Z', 'event_msg', {
+        type: 'task_started', turn_id: parentTurnId,
+      }),
+    ].join('\n') + '\n');
+
+    const childMeta = JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: childThreadId,
+        session_id: parentThreadId,
+        source: {
+          subagent: {
+            thread_spawn: {
+              parent_thread_id: parentThreadId,
+              depth: 1,
+              agent_path: '/root/fixture_child',
+            },
+          },
+        },
+        thread_source: 'subagent',
+        model_provider: 'openai',
+        multi_agent_version: 'v2',
+      },
+    });
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, [
+      childMeta,
+      parentMeta,
+      record('2026-08-07T02:00:03.000Z', 'turn_context', {
+        turn_id: parentTurnId, model: 'gpt-test',
+      }),
+      record('2026-08-07T02:00:04.000Z', 'event_msg', {
+        type: 'task_started', turn_id: parentTurnId,
+      }),
+      record('2026-08-07T02:00:05.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: parentTurnId,
+      }),
+      record('2026-08-07T02:00:06.000Z', 'turn_context', {
+        turn_id: childTurnId, model: 'gpt-test',
+      }),
+      record('2026-08-07T02:00:07.000Z', 'event_msg', {
+        type: 'task_started', turn_id: childTurnId,
+      }),
+      record('2026-08-07T02:00:08.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'child task' }],
+      }),
+      record('2026-08-07T02:00:09.000Z', 'event_msg', {
+        type: 'agent_message', message: 'child done', phase: 'final',
+      }),
+      record('2026-08-07T02:00:10.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: childTurnId,
+      }),
+    ].join('\n') + '\n');
+
+    await waitFor(() => responsesForTurn(entries, childTurnId).length === 1);
+    await input.stop();
+
+    expect(responsesForTurn(entries, parentTurnId)).toHaveLength(0);
+    expect(responsesForTurn(entries, childTurnId)).toHaveLength(1);
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      activeTurn: null,
+      pendingTerminal: null,
+    });
+  });
+
   it('emits a terminal LLM pair with zero usage for a completed turn without output', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-empty-completed-'));
     tempDirs.push(root);
@@ -1634,6 +2437,12 @@ describe('CodexTranscriptInput', () => {
         finish_reason: 'stop',
       }],
     });
+    expect(responses[0]?.['agent.codex.turn_status']).toBeUndefined();
+    expect(entries).toContainEqual(expect.objectContaining({
+      'event.name': 'other',
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
+    }));
     const finalRequest = entries.find(entry => (
       entry['event.name'] === 'llm.request'
       && entry['gen_ai.step.id'] === 'session-1:turn-1:s3'
@@ -2276,6 +3085,38 @@ describe('Codex transcript multimodal extraction', () => {
     const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
     expect(userParts(turn!)).toEqual([{ type: 'text', content: 'look' }]);
     expect(JSON.stringify(turn!.inputMessages)).not.toContain(imagePath);
+  });
+
+  it('passes stable reuseKey so callers can skip re-decode on partial replay', () => {
+    const png = Buffer.from('fake-png-reuse').toString('base64');
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+      ]),
+      userMessageItem('look'),
+    ]);
+
+    const cache = new Map<string, ReturnType<BlobToUriFn>>();
+    let decodeCount = 0;
+    const cachingBlobToUri: BlobToUriFn = (params) => {
+      if (params.reuseKey && cache.has(params.reuseKey)) {
+        return cache.get(params.reuseKey) ?? null;
+      }
+      decodeCount += 1;
+      const result = fakeBlobToUri(params);
+      if (result && params.reuseKey) cache.set(params.reuseKey, result);
+      return result;
+    };
+
+    const first = extractTurn(fixture, { blobToUri: cachingBlobToUri });
+    const second = extractTurn(fixture, { blobToUri: cachingBlobToUri });
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(userParts(first!)[1]).toMatchObject({ type: 'uri' });
+    expect(userParts(second!)[1]).toEqual(userParts(first!)[1]);
+    expect(decodeCount).toBe(1);
+    expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
   });
 });
 

@@ -12,7 +12,7 @@ import {
   readImagePathBytes,
   statImagePath,
   yyyymmddFromUnixMs,
-  yyyymmddUTC,
+  yyyymmddLocal,
 } from '../../../src/multimodal/resolve.js';
 
 const tmpDirs: string[] = [];
@@ -75,15 +75,26 @@ describe('multimodal resolve helpers', () => {
     );
   });
 
-  it('formats UTC yyyymmdd', () => {
-    expect(yyyymmddUTC(new Date('2026-08-04T03:50:18.354Z'))).toBe('20260804');
+  it('formats local yyyymmdd', () => {
+    // Local-calendar constructors stay stable across CI timezones.
+    expect(yyyymmddLocal(new Date(2026, 7, 4, 3, 50, 18))).toBe('20260804');
   });
 
-  it('formats UTC yyyymmdd from time_unix_ms', () => {
-    // 2026-08-04T03:50:18.354Z
-    expect(yyyymmddFromUnixMs(1_785_815_418_354)).toBe('20260804');
-    expect(yyyymmddFromUnixMs(undefined, new Date('2026-08-04T03:50:18.354Z'))).toBe('20260804');
-    expect(yyyymmddFromUnixMs(Number.NaN, new Date('2026-08-04T03:50:18.354Z'))).toBe('20260804');
+  it('formats local yyyymmdd from time_unix_ms', () => {
+    const local = new Date(2026, 7, 4, 15, 30, 0);
+    expect(yyyymmddFromUnixMs(local.getTime())).toBe('20260804');
+    expect(yyyymmddFromUnixMs(undefined, local)).toBe('20260804');
+    expect(yyyymmddFromUnixMs(Number.NaN, local)).toBe('20260804');
+  });
+
+  it('uses local calendar day rather than UTC near midnight', () => {
+    // 00:30 local on Jan 2 — east-of-UTC zones still have UTC on Jan 1.
+    const localMorning = new Date(2026, 0, 2, 0, 30, 0);
+    expect(yyyymmddLocal(localMorning)).toBe('20260102');
+    if (localMorning.getTimezoneOffset() < 0) {
+      const utc = `${localMorning.getUTCFullYear()}${String(localMorning.getUTCMonth() + 1).padStart(2, '0')}${String(localMorning.getUTCDate()).padStart(2, '0')}`;
+      expect(utc).toBe('20260101');
+    }
   });
 
   it('detects image extensions and mime types from path', () => {
@@ -106,6 +117,7 @@ describe('multimodal resolve helpers', () => {
       mime_type: 'image/png',
       size: bytes.length,
     });
+    expect(stated?.mtimeMs).toEqual(expect.any(Number));
     expect(stated?.resolvedPath).toBe(path.resolve(file));
 
     const loaded = await readImagePathBytes(stated!);

@@ -86,7 +86,7 @@ The table below describes what multimodal collection actually captures per agent
 
 ### Codex
 
-Codex converts matching `input_image` data-URLs to `uri` parts at write time; base64 is not written into JSONL. Upload is asynchronous; when the queue is full or upload fails, Pilot may still emit an optimistic `uri` (dangling) and log a warning.
+Codex converts matching `input_image` data-URLs to `uri` parts at write time; base64 is not written into JSONL. Upload is asynchronous and may produce optimistic `uri`s (see [Dangling URIs](#dangling-uris-and-consumer-contract) below).
 
 | `uploadMode` | Codex surface | Typical user action |
 |--------------|---------------|---------------------|
@@ -98,7 +98,7 @@ Codex converts matching `input_image` data-URLs to `uri` parts at write time; ba
 
 Notes:
 
-- An image path in the prompt or reply does not by itself yield multimodal media; Codex detection is driven by base64 `input_image` in the transcript.
+- An image path in the prompt or reply does not by itself yield multimodal media; Codex detection is driven by base64 `input_image` in the transcript. Local paths often remain in companion `input_text` (`Files mentioned` / `<image path="...">`); Pilot uploads from the companion data-URL only and does not re-read the file from disk.
 - With `captureMessageContent: false`, multimodal summary fields are stripped with other message content.
 
 ### Qoder IDE
@@ -141,6 +141,20 @@ Notes:
 - Optional `gen_ai.input.multimodal_metadata`: a summary list of `uri` media on that event.
 
 Full field docs: [Output Event Schema](output-event-schema.md#multimodal-message-parts).
+
+## Dangling URIs And Consumer Contract
+
+Pilot emits optimistic storage `uri`s at write time; upload continues asynchronously. In the cases below the object may never land in storage (dangling), and Pilot logs a warning:
+
+| Case | Behavior |
+|------|----------|
+| Upload queue full | Still returns a `uri`, but skips enqueue. |
+| Upload failed | PUT / retries fail; no further retry of that blob. |
+| Shutdown timeout | `MultimodalProcessor.shutdown()` waits at most about **1.5s** for in-flight uploads (`MULTIMODAL_SHUTDOWN_TIMEOUT_MS`). |
+
+The shutdown timeout does **not** mark those uploads as failed: they remain unsettled Promises and the PUT may still be in flight. After the wait, shutdown stops waiting, the uploader is marked `closed` (so a late completion will not write the in-process `successKeys` cache), and the process typically `exit`s soon after—which may interrupt unfinished requests. Whether the object eventually lands is **best-effort**: it may succeed or be permanently missing. Event fields alone cannot distinguish those outcomes; operators can tell from logs.
+
+This is an intentional trade-off: images are supplementary to the text pipeline and must not block process exit. Blobs live only in memory—there is no “persist remaining and retry next start” spill like some SLS senders. On stop, events that already carry a `uri` are usually flushed first, then checkpoints / transcript offsets advance, so unfinished uploads in that window are **not replayed** on restart.
 
 ## Related Docs
 

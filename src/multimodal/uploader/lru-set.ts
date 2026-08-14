@@ -1,10 +1,7 @@
-/** Default capacity for multimodal LRU caches (e.g. upload success keys). */
+/** Default LRU capacity for multimodal caches. */
 export const MULTIMODAL_LRU_LIMIT = 2048;
 
-/**
- * String-key LRU map. get()/has()/set() refresh recency; overflow drops the oldest entry.
- * Use as a set with value `true` when only membership is needed.
- */
+/** String-key LRU map (get/set refresh recency). */
 export class LruMap<V> {
   private readonly map = new Map<string, V>();
 

@@ -1,0 +1,21 @@
+{
+  "id": "qwen-work-cn",
+  "displayName": "QwenWorkCN",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qwenworkcn"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.qwenworkcn/settings.json",
+    "events": ["Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "winShell": "powershell"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qwen-work-cn/history"
+  }
+}

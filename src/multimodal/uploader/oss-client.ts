@@ -36,10 +36,7 @@ interface OssEndpoint {
   region: string;
 }
 
-/**
- * Minimal OSS PutObject client (Signature Version 4 / OSS4-HMAC-SHA256).
- * Independent from SlsFlusher / @alicloud/log.
- */
+/** OSS PutObject (V4). */
 export async function ossPutObject(params: OssPutObjectParams): Promise<OssPutObjectResult> {
   try {
     const endpoint = normalizeOssEndpoint(params.endpoint);
@@ -105,7 +102,7 @@ export function parseOssStorageBasePath(storageBasePath: string): { bucket: stri
   };
 }
 
-/** Exported for unit tests (deterministic signing). */
+/** For tests (deterministic signing). */
 export function buildV4PutRequest(args: {
   endpoint: OssEndpoint;
   bucket: string;
@@ -125,7 +122,7 @@ export function buildV4PutRequest(args: {
   const dateTime = toOssDateTime(now);
   const date = dateTime.slice(0, 8);
 
-  // Do not include Content-MD5 / Content-Length in the signed header set.
+  // Omit Content-MD5 / Content-Length from signed headers.
   const headers: Record<string, string> = {
     'Content-Type': args.contentType,
     'User-Agent': 'loongsuite-pilot-multimodal-oss/1.0',
@@ -213,7 +210,6 @@ function normalizeObjectKey(objectKey: string): string {
 }
 
 function v4UriEncode(value: string, keepSlashes: boolean): string {
-  // Keep -_.~ unencoded (OSS V4 URI encoding).
   let encoded = encodeURIComponent(value)
     .replace(/[!'()*]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
     .replace(/%7E/gi, '~');

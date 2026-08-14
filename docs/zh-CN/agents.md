@@ -6,14 +6,18 @@
 
 ## 支持的 Agent ID
 
-这些 ID 可用于安装参数、`agent-control.json` 和 `config.json`。
+这些 ID 用于标识受支持的集成。大多数 ID 可直接用于安装参数、
+`agent-control.json` 和 `config.json`；复用采集链路或输出类型不同的情况会在说明中标出。
 
 | Agent | ID | 说明 |
 |-------|----|------|
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
+| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
+| Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
+| MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.5.12 及以上稳定版本；采集原生 LLM、ReAct、工具、Token、错误和取消事件。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
@@ -24,7 +28,7 @@
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
-| Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
+| Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的

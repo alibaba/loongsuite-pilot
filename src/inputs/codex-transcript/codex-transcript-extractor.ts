@@ -24,12 +24,39 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const payload = asRecord(record.payload);
   if (!payload) return null;
 
+  const threadId = stringValue(payload.id) ?? '';
+  const source = asRecord(payload.source);
+  const subagent = asRecord(source?.subagent);
+  const threadSpawn = asRecord(subagent?.thread_spawn);
+  const parentThreadId = stringValue(threadSpawn?.parent_thread_id);
+  const agentPath = stringValue(threadSpawn?.agent_path);
+  const agentNickname = stringValue(threadSpawn?.agent_nickname);
+  const agentRole = stringValue(threadSpawn?.agent_role);
+  const rawThreadSource = stringValue(payload.thread_source);
+  const threadSource: CodexTranscriptMeta['threadSource'] = rawThreadSource === 'subagent' || parentThreadId
+    ? 'subagent'
+    : rawThreadSource === 'user'
+      ? 'user'
+      : 'unknown';
+  const rawDepth = numberValue(threadSpawn?.depth);
+  const depth = rawDepth !== undefined && rawDepth >= 0
+    ? Math.trunc(rawDepth)
+    : threadSource === 'subagent' ? 1 : 0;
+  const createdAtMs = timestampMs(payload, timestampMs(record, Number.NaN));
   const baseInstructions = readInstructionText(payload.base_instructions);
   const toolDefinitions = Array.isArray(payload.dynamic_tools)
     ? toJsonValue(payload.dynamic_tools)
     : undefined;
   return {
-    sessionId: stringValue(payload.id) ?? '',
+    threadId,
+    rootSessionId: stringValue(payload.session_id) ?? threadId,
+    threadSource,
+    ...(parentThreadId ? { parentThreadId } : {}),
+    depth,
+    ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
+    ...(agentPath ? { agentPath } : {}),
+    ...(agentNickname ? { agentNickname } : {}),
+    ...(agentRole ? { agentRole } : {}),
     provider: stringValue(payload.model_provider) ?? 'openai',
     ...(baseInstructions ? { baseInstructions } : {}),
     ...(toolDefinitions !== undefined ? { toolDefinitions } : {}),
@@ -136,7 +163,7 @@ function extractCodexTurn(
   let cwd = opts.cwd;
   let developerInstructions = opts.developerInstructions;
   const blobToUri = opts.blobToUri;
-  // Default both when blobToUri is provided without mode (unit tests / callers).
+  // Default both when blobToUri is set without mode.
   const uploadMode = opts.uploadMode ?? (blobToUri ? 'both' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
@@ -322,6 +349,28 @@ function extractCodexTurn(
 
     if (record.type !== 'response_item') continue;
     const itemType = stringValue(payload.type);
+    if (itemType === 'agent_message' && meta?.threadSource === 'subagent') {
+      const recipient = stringValue(payload.recipient);
+      const communicationMeta = asRecord(payload.internal_chat_message_metadata_passthrough);
+      const messageTurnId = stringValue(communicationMeta?.turn_id);
+      // Codex represents the initial parent → child delegation as an internal
+      // agent_message rather than a user_message. Treat it as the child turn's
+      // input only when it targets this child and belongs to this turn; child →
+      // parent completion messages in root rollouts must not become prompts.
+      if (
+        (!meta.agentPath || !recipient || recipient === meta.agentPath)
+        && (!messageTurnId || messageTurnId === expectedTurnId)
+      ) {
+        const message = transcriptInputMessage('user', payload.content);
+        if (message) {
+          inputMessages.push(message);
+          appendPrompt(extractMessageText(payload.content));
+          sawSubmittedUserMessage = true;
+          markActivity(timestamp);
+        }
+      }
+      continue;
+    }
     if (itemType === 'message') {
       const role = stringValue(payload.role);
       if (role === 'assistant') {
@@ -344,6 +393,7 @@ function extractCodexTurn(
           payload.content,
           multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
           timestamp,
+          source.startOffset,
         );
         if (message) {
           inputMessages.push(message);
@@ -404,6 +454,7 @@ function extractCodexTurn(
       payload,
       multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
       timestamp,
+      source.startOffset,
     );
     if (!toolOutput) continue;
     const envelope = toolSteps.get(toolOutput.callId);
@@ -458,7 +509,7 @@ function extractCodexTurn(
     && (sawSubmittedUserMessage || steps.length > 0 || sawTerminal),
   );
   const turn: CodexExtractedTranscriptTurn = {
-    sessionId: meta?.sessionId || fallbackSessionId,
+    sessionId: meta?.threadId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
     provider: meta?.provider ?? 'openai',
     model,
@@ -549,6 +600,7 @@ function transcriptToolOutput(
   payload: Record<string, unknown>,
   blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
+  recordOffset?: number,
 ): { callId: string; output?: JsonValue } | null {
   if (itemType !== 'function_call_output' && itemType !== 'custom_tool_call_output' && itemType !== 'tool_search_output') return null;
   const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
@@ -563,9 +615,9 @@ function transcriptToolOutput(
       }),
     };
   }
-  // Codex may return read-image tool results as content-part arrays with input_image.
+  // Tool results may include input_image parts.
   if (Array.isArray(payload.output)) {
-    const parts = extractMessageParts(payload.output, blobToUri, timestampMs);
+    const parts = extractMessageParts(payload.output, blobToUri, timestampMs, recordOffset);
     return { callId, output: parts as unknown as JsonValue };
   }
   return { callId, output: toJsonValue(parseMaybeJson(payload.output)) };
@@ -590,19 +642,15 @@ type TranscriptMessagePart =
   | { type: 'text'; content: string }
   | UriPart;
 
-/**
- * Build GenAI message parts from Codex transcript content blocks.
- * Preserves order: input_text → text, input_image data-URL → uri (write-time blobToUri).
- * Then collapses Codex `<image…>` / `</image>` wrapper texts around uri parts.
- * Prompt summaries still use extractMessageText only.
- */
+/** Codex content blocks → GenAI parts (text + uri). */
 function transcriptInputMessage(
   role: string,
   content: unknown,
-  blobToUri: BlobToUriFn | undefined,
-  timestampMs: number,
+  blobToUri?: BlobToUriFn,
+  timestampMs = 0,
+  recordOffset?: number,
 ): { role: string; parts: TranscriptMessagePart[] } | null {
-  const parts = extractMessageParts(content, blobToUri, timestampMs);
+  const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
   return parts.length > 0 ? { role, parts } : null;
 }
 
@@ -610,6 +658,7 @@ function extractMessageParts(
   content: unknown,
   blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
+  recordOffset?: number,
 ): TranscriptMessagePart[] {
   if (typeof content === 'string' && content) {
     return [{ type: 'text', content }];
@@ -619,7 +668,8 @@ function extractMessageParts(
   const parts: TranscriptMessagePart[] = [];
   let multimodalCount = 0;
   let hasUriPart = false;
-  for (const item of content) {
+  for (let partIndex = 0; partIndex < content.length; partIndex++) {
+    const item = content[partIndex];
     if (typeof item === 'string' && item) {
       parts.push({ type: 'text', content: item });
       continue;
@@ -647,6 +697,7 @@ function extractMessageParts(
         mime_type: dataMatch[1] || 'image/unknown',
         modality: 'image',
         time_unix_ms: Math.max(0, timestampMs),
+        ...(typeof recordOffset === 'number' ? { reuseKey: `${recordOffset}:${partIndex}` } : {}),
       });
       if (!result) continue;
       multimodalCount++;

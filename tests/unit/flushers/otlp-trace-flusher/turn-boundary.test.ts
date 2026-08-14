@@ -75,6 +75,47 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
+  it('does not close a Codex turn on intermediate root or subagent stops', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+    const turnId = 'parent:turn-1';
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'event.name': 'llm.request',
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'event.name': 'other',
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
+    }));
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
+  });
+
   it('Signal A: finish_reason=error triggers immediate flush', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
@@ -244,10 +285,16 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
           'gen_ai.step.id': `${turnId}:s2`,
           'gen_ai.response.finish_reasons': ['stop'],
         }),
+        makeEntry({
+          ...base,
+          'event.name': 'other',
+          'agent.codex.turn_status': 'completed',
+          'gen_ai.turn.end': true,
+        }),
       ]);
 
       expect(mockConvert).toHaveBeenCalledTimes(1);
-      expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(6);
     });
 
     it('Hermes retry batch: error response does not drop the successful retry', async () => {

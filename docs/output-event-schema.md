@@ -107,7 +107,7 @@ When global multimodal infrastructure and the agent `uploadMode` are enabled (se
 | `text` | Text content. |
 | `uri` | Uploaded or optimistic media reference; includes `uri`, `mime_type`, and optional `modality` (for example `image`). |
 
-`uri` values look like `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` or `sls://project/logstore/YYYYMMDD/<sha256>.ext`. The content hash is encoded in the object path. A uri may dangle if upload fails; Pilot fails open and continues text collection.
+`uri` values look like `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` or `sls://project/logstore/YYYYMMDD/<sha256>.ext`. The content hash is encoded in the object path. `YYYYMMDD` is the event's **local** calendar day (from `time_unix_ms` when present), not UTC—the same convention as the Python probe, so date-prefix queries align across implementations near midnight. A uri may dangle if upload fails; Pilot fails open and continues text collection.
 
 ## Custom Agent Identity
 
