@@ -244,8 +244,9 @@ function enrichTurn(turn, mainSessionId) {
       };
       llmCalls.push(llmCall);
 
-      // Reset delta buffer; next step's delta starts accumulating from here.
-      inputDeltaBuffer = [];
+      // The next request includes this assistant message before any tool
+      // results produced from its function calls.
+      inputDeltaBuffer = [r];
       prevStepEndTimestamp = r.timestamp;
     }
     // skip other system subtypes (slash_command, notification, etc.) in v1

@@ -195,7 +195,20 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
         if (!match) return [];
         return [{ type: 'tool_call_response', id: call.id, response: resultValue(match) }];
       });
-      if (parts.length > 0) inputDelta = [{ role: 'tool', parts }];
+      if (parts.length > 0) {
+        inputDelta = [
+          {
+            role: 'assistant',
+            parts: previousToolCalls.map(call => ({
+              type: 'tool_call',
+              id: call.id,
+              name: call.name,
+              arguments: toJsonValue(call.input),
+            })),
+          },
+          { role: 'tool', parts },
+        ];
+      }
     }
 
     const result = buildStepEvents({

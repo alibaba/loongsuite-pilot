@@ -669,22 +669,34 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       const stepFields = { ...baseFields, 'gen_ai.step.id': stepId, 'gen_ai.request.model': turnModel };
       const stepEntries: AgentActivityEntry[] = [];
 
-      // Build input.messages_delta (step1=user prompt, stepN=prev tool results)
+      // Build input.messages_delta (step1=user prompt, stepN=prev assistant tool calls + results)
       let inputDelta: JsonValue | undefined;
       if (round === 0 && matchedPrompt?.text) {
         inputDelta = [{ role: 'user', parts: [{ type: 'text', content: matchedPrompt.text }] }];
       } else if (round > 0) {
         const prevTurn = session.turns[round - 1];
         if (prevTurn && prevTurn.toolCalls.length > 0) {
+          const assistantParts: JsonValue[] = [];
           const toolParts: JsonValue[] = [];
           for (const tc of prevTurn.toolCalls) {
+            const toolCallPart: Record<string, JsonValue> = {
+              type: 'tool_call',
+              id: tc.id,
+              name: tc.name,
+            };
+            const args = safeParseJson(tc.argumentsJson);
+            if (args !== undefined) toolCallPart.arguments = args;
+            assistantParts.push(toolCallPart);
             const result = toolResultMap.get(tc.id);
             if (result) {
               toolParts.push({ type: 'tool_call_response', id: tc.id, response: result });
             }
           }
           if (toolParts.length > 0) {
-            inputDelta = [{ role: 'tool', parts: toolParts }];
+            inputDelta = [
+              { role: 'assistant', parts: assistantParts },
+              { role: 'tool', parts: toolParts },
+            ];
           }
         }
       }
