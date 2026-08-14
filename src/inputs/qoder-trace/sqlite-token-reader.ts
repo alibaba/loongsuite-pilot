@@ -171,28 +171,29 @@ export function isIdeaDbPath(dbPath: string | null): boolean {
   return normalized.includes('.qoder/shared_client');
 }
 
-function resolveAllQoderDbPaths(): string[] {
-  // Qoder Desktop (Electron app) keeps SQLite under platform app-support.
-  // Qoder for JetBrains shares state through ~/.qoder/shared_client/.
-  // Both may coexist on the same machine with different sessions, so we return ALL accessible paths.
+/** Relative path from a Qoder profile root to local.db. */
+const QODER_DB_TAIL = path.join('SharedClientCache', 'cache', 'db', 'local.db');
+
+/** Desktop app-support DB, hashed-profile DBs, and JetBrains ~/.qoder/shared_client. */
+export function resolveAllQoderDbPaths(): string[] {
   const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-  const candidates = process.platform === 'darwin'
-    ? [
-        resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db'),
-        resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-      ]
+  const qoderRoot = process.platform === 'darwin'
+    ? resolveHome('~/Library/Application Support/Qoder')
     : process.platform === 'win32'
-      ? [
-          path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db'),
-          path.join(os.homedir(), '.qoder', 'shared_client', 'cache', 'db', 'local.db'),
-        ]
-      : [
-          resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db'),
-          resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-        ];
+      ? path.join(appdata, 'Qoder')
+      : resolveHome('~/.config/Qoder');
+
+  const candidates = [
+    path.join(qoderRoot, QODER_DB_TAIL),
+    ...listHashedProfileDbPaths(qoderRoot),
+    resolveHome('~/.qoder/shared_client/cache/db/local.db'),
+  ];
 
   const available: string[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     try {
       fs.accessSync(candidate);
       available.push(candidate);
@@ -201,6 +202,22 @@ function resolveAllQoderDbPaths(): string[] {
     }
   }
   return available;
+}
+
+/** Linux remote / multi-profile Qoder nests local.db under <qoderRoot>/<hash>/. */
+function listHashedProfileDbPaths(qoderRoot: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(qoderRoot);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    found.push(path.join(qoderRoot, name, QODER_DB_TAIL));
+  }
+  return found;
 }
 
 function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
