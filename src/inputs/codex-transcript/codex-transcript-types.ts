@@ -111,7 +111,7 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Present until the first owned turn is located from Hook or UUIDv7 evidence. */
+  /** Present until the first owned range is located and actually consumed. */
   forkBootstrap?: CodexForkBootstrap;
   /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];

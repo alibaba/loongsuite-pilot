@@ -302,16 +302,41 @@ export class CodexTranscriptInput extends BaseInput {
       };
       checkpointChanged = true;
     } else if (checkpoint.inode !== stat.ino) {
-      this.logger.warn('Codex transcript inode changed; applying no-replay baseline', {
-        transcriptPath: filePath,
-        previousInode: checkpoint.inode,
-        currentInode: stat.ino,
-        previousScanOffset: checkpoint.scanOffset,
-        hadForkBootstrap: checkpoint.forkBootstrap !== undefined,
-      });
-      await this.baselineFile(filePath, key);
-      this.saveGlobalProcessedTerminalTurnIds();
-      return 0;
+      if (checkpoint.forkBootstrap) {
+        this.logger.warn('Codex fork transcript inode changed before owned history was consumed; restarting bootstrap', {
+          transcriptPath: filePath,
+          previousInode: checkpoint.inode,
+          currentInode: stat.ino,
+          previousScanOffset: checkpoint.scanOffset,
+          previousSearchOffset: checkpoint.forkBootstrap.searchOffset,
+        });
+        checkpoint = {
+          inode: stat.ino,
+          scanOffset: 0,
+          activeTurn: null,
+          pendingTerminal: null,
+          pendingFusion: null,
+          pendingSubagent: null,
+          ownerSessionMetaOffset: null,
+          emittedTerminalTurnIds: checkpoint.emittedTerminalTurnIds,
+          forkBootstrap: {
+            ...checkpoint.forkBootstrap,
+            searchOffset: 0,
+          },
+        };
+        checkpointChanged = true;
+      } else {
+        this.logger.warn('Codex transcript inode changed; applying no-replay baseline', {
+          transcriptPath: filePath,
+          previousInode: checkpoint.inode,
+          currentInode: stat.ino,
+          previousScanOffset: checkpoint.scanOffset,
+          hadForkBootstrap: false,
+        });
+        await this.baselineFile(filePath, key);
+        this.saveGlobalProcessedTerminalTurnIds();
+        return 0;
+      }
     }
 
     if (checkpoint.ownerSessionMetaOffset === null) {
@@ -412,7 +437,14 @@ export class CodexTranscriptInput extends BaseInput {
       }
 
       checkpoint.scanOffset = located.startOffset;
-      checkpoint.forkBootstrap = undefined;
+      // Retain the recovery evidence until the owned range actually advances.
+      // A Start Hook intentionally returns after anchoring, so clearing this
+      // state here would make an intervening inode replacement baseline the
+      // copied prefix and permanently lose the already-written child turn.
+      checkpoint.forkBootstrap = {
+        ...bootstrap,
+        searchOffset: located.startOffset,
+      };
       this.logger.info('anchored fork/subagent rollout at its first owned turn', {
         transcriptPath: filePath,
         turnId: located.turnId,
@@ -431,6 +463,8 @@ export class CodexTranscriptInput extends BaseInput {
       }
     }
 
+    const forkBootstrapAtOwnedScanStart = checkpoint.forkBootstrap;
+    const ownedScanStartOffset = checkpoint.scanOffset;
     let emittedCount = 0;
     let processedTerminalCount = 0;
     if (
@@ -703,6 +737,13 @@ export class CodexTranscriptInput extends BaseInput {
       if (blocked || terminalTurnId === null) break;
     }
 
+    if (
+      forkBootstrapAtOwnedScanStart
+      && checkpoint.scanOffset > ownedScanStartOffset
+    ) {
+      checkpoint.forkBootstrap = undefined;
+      checkpointChanged = true;
+    }
     if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
     this.saveGlobalProcessedTerminalTurnIds();
     return emittedCount;
@@ -975,8 +1016,9 @@ export class CodexTranscriptInput extends BaseInput {
         continue;
       }
       const checkpoint = this.readCheckpoint(this.stateKey(filePath));
-      const ownerOffset = checkpoint?.ownerSessionMetaOffset
-        ?? await findOwnerSessionMetaOffset(filePath, stat.size);
+      const ownerOffset = checkpoint?.inode === stat.ino
+        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(filePath, stat.size)
+        : await findOwnerSessionMetaOffset(filePath, stat.size);
       if (ownerOffset === null) continue;
       const record = await readJsonLineAt(filePath, ownerOffset);
       const meta = record ? extractCodexTranscriptMeta(record) : null;
