@@ -210,6 +210,49 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(r!['event.name']).toBe('llm.request');
     expect(r!['gen_ai.input.messages']).toBeUndefined();
   });
+
+  it('emits gen_ai.system_instructions and gen_ai.tool.definitions on llm.request from real request/header', async () => {
+    // Bug #2: real dsh request/header carries header.system (system prompt)
+    // and header.tools (tool definitions). Both MUST be surfaced onto each
+    // llm.request so the OTLP trace's LLM span exposes the agent's
+    // instructions and tool surface to ARMS — no fabrication when absent.
+    const { entries } = await loadAll();
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(requests.length).toBe(3);
+    for (const r of requests) {
+      // header.system is a non-empty string in the fixture
+      expect(r['gen_ai.system_instructions']).toBeDefined();
+      const sys = r['gen_ai.system_instructions'];
+      expect(typeof sys === 'string' || typeof sys === 'object').toBe(true);
+      // header.tools has 25 entries in the fixture
+      expect(r['gen_ai.tool.definitions']).toBeDefined();
+      const tools = r['gen_ai.tool.definitions'] as unknown;
+      expect(tools).toBeInstanceOf(Array);
+      expect((tools as unknown[]).length).toBe(25);
+      // Each tool exposes { name, description, parameters }
+      const first = (tools as unknown[])[0] as { name?: string; description?: string; parameters?: unknown };
+      expect(typeof first.name).toBe('string');
+      expect(first.name!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('omits gen_ai.tool.definitions when request/header has no tools (no fabrication)', () => {
+    // 缺失则缺: when request/header carries no `tools` field, the
+    // transform must NOT fabricate an empty array or default value.
+    const state = newState();
+    state.cachedHeader = { model: 'm', provider: 'p', system: 's' }; // no tools
+    state.currentTurn = 1;
+    state.currentStep = 1;
+    const r = transformDshRecord({
+      type: 'assistant/chunk',
+      sid: 's',
+      time: 1000,
+      data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+    expect(r).toBeDefined();
+    expect(r!['gen_ai.system_instructions']).toBe('s');
+    expect(r!['gen_ai.tool.definitions']).toBeUndefined();
+  });
 });
 
 describe('dsh-event-transform (privacy)', () => {
