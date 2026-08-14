@@ -34,12 +34,12 @@ function Log-Error {
         # previous implementation had three bugs in the JSONL it
         # produced:
         #   1. `(Get-Date -Format "...Z")` uses local time but
-        #      appends a literal "Z" (UTC designator) — the
+        #      appends a literal "Z" (UTC designator) -- the
         #      resulting timestamp is local-clock time mislabeled
         #      as UTC. Use `.ToUniversalTime()` to actually
         #      convert to UTC before formatting.
         #   2. Manual `-replace` escaping only handled backslashes
-        #      and double-quotes — newlines, tabs, control chars,
+        #      and double-quotes -- newlines, tabs, control chars,
         #      and unicode characters in $Message would produce
         #      invalid JSON. Use `ConvertTo-Json -Compress` which
         #      handles all JSON escaping properly.
@@ -96,7 +96,7 @@ function Resolve-NodeBin {
     # with a non-default data dir, the hook would fail to find
     # the pinned Node binary even though one exists under the
     # configured data dir (and every other part of the script
-    # already honors LOONGSUITE_PILOT_DATA_DIR — the dataDir
+    # already honors LOONGSUITE_PILOT_DATA_DIR -- the dataDir
     # resolution at line 27 uses it). Fall back to the default
     # only when $env:LOONGSUITE_PILOT_DATA_DIR is unset,
     # matching the dataDir resolution pattern.
