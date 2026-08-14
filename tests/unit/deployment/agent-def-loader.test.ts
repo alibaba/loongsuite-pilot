@@ -337,4 +337,75 @@ describe('AgentDefLoader', () => {
     expect(defs).toHaveLength(0);
   });
 
+  describe('dsh-yaml-patch validation', () => {
+    const validDsh = {
+      id: 'dsh',
+      displayName: 'DeepSeek Harness',
+      deployMode: 'dsh-yaml-patch',
+      detection: { paths: ['~/.dsh'], commands: ['dsh'] },
+      dshYamlPatch: {
+        pluginSource: '$PILOT_DATA/plugins/dsh/plugin.mjs',
+        entryId: 'loongsuite-pilot-observability',
+        marker: 'PILOT-OBSERVABILITY-MANAGED',
+      },
+    };
+
+    it('loads a valid dsh-yaml-patch definition', async () => {
+      await fs.writeFile(path.join(builtinDir, 'dsh.json'), JSON.stringify(validDsh));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(1);
+      expect(defs[0].dshYamlPatch?.entryId).toBe('loongsuite-pilot-observability');
+    });
+
+    it('rejects an unknown deployMode', async () => {
+      await fs.writeFile(path.join(builtinDir, 'unknown.json'), JSON.stringify({
+        ...validDsh,
+        id: 'unknown-mode',
+        deployMode: 'made-up-mode',
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when dshYamlPatch is missing', async () => {
+      await fs.writeFile(path.join(builtinDir, 'missing-cfg.json'), JSON.stringify({
+        ...validDsh,
+        id: 'missing-cfg',
+        dshYamlPatch: undefined,
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when required field is empty', async () => {
+      await fs.writeFile(path.join(builtinDir, 'empty-entry.json'), JSON.stringify({
+        ...validDsh,
+        id: 'empty-entry',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, entryId: '' },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when field has wrong type', async () => {
+      await fs.writeFile(path.join(builtinDir, 'wrong-type.json'), JSON.stringify({
+        ...validDsh,
+        id: 'wrong-type',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, marker: 123 },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when patchPath is non-empty but wrong type', async () => {
+      await fs.writeFile(path.join(builtinDir, 'bad-path.json'), JSON.stringify({
+        ...validDsh,
+        id: 'bad-path',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, patchPath: 42 },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+  });
+
 });
