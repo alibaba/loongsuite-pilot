@@ -30,7 +30,12 @@ export interface DshEventAggregatorState {
   currentStep: number | undefined;
   /** Cached `request/header` config — dsh emits this once per turn,
    * not once per step. Each step's llm.request reuses it. */
-  cachedHeader: { model?: string; provider?: string; system?: string } | undefined;
+  cachedHeader: {
+    model?: string;
+    provider?: string;
+    system?: string;
+    tools?: unknown[];
+  } | undefined;
   /** stepKey set for which an llm.request has already been emitted,
    * so request/header arrival + step/start arrival don't double-emit. */
   emittedRequest: Set<string>;
@@ -201,7 +206,8 @@ export function transformDshRecord(
       const model = asString(config.model);
       const provider = asString(config.provider);
       const system = asString(header.system);
-      state.cachedHeader = { model, provider, system };
+      const tools = asArray(header.tools);
+      state.cachedHeader = { model, provider, system, tools };
       return null;
     }
 
@@ -217,12 +223,16 @@ export function transformDshRecord(
         if (!state.emittedRequest.has(key)) {
           state.emittedRequest.add(key);
           const inputSnapshot = state.inputMessages.slice();
+          const tools = state.cachedHeader.tools;
           return buildAgentActivityEntry({
             ...common,
             'event.name': 'llm.request',
             'gen_ai.provider.name': state.cachedHeader.provider,
             'gen_ai.request.model': state.cachedHeader.model,
             'gen_ai.system_instructions': state.cachedHeader.system,
+            'gen_ai.tool.definitions': tools && tools.length > 0
+              ? toJsonValue(tools)
+              : undefined,
             'gen_ai.input.messages': inputSnapshot.length > 0
               ? toJsonValue(inputSnapshot)
               : undefined,
