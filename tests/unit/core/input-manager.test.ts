@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -240,6 +241,70 @@ describe('InputManager', () => {
         expect(child.batchCalls[0][0]).not.toHaveProperty('output.messages');
         expect(child.batchCalls[0][0]['gen_ai.agent.type']).toBe(ClientType.Cursor);
       }
+    });
+  });
+
+  describe('turn boundary enrichment', () => {
+    it('fills boundaries once before dispatching the same records to every flusher', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      manager.setFlusher(new MultiFlusher([jsonl, sls, http]));
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const entries = [
+        buildTestEntry({
+          'event.id': 'request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-1',
+        }),
+        buildTestEntry({
+          'event.id': 'response',
+          'event.name': 'llm.response',
+          'gen_ai.turn.id': 'turn-1',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ];
+
+      input.emit('entries', entries);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0]).toHaveLength(2);
+        expect(child.batchCalls[0][0]).toMatchObject({
+          'event.id': 'request',
+          'gen_ai.turn.start': true,
+        });
+        expect(child.batchCalls[0][1]).toMatchObject({
+          'event.id': 'response',
+          'gen_ai.turn.end': true,
+        });
+      }
+    });
+
+    it('fails open and dispatches original entries when enrichment throws', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const enrich = vi.spyOn(TurnBoundaryProcessor.prototype, 'enrich')
+        .mockImplementationOnce(() => {
+          throw new Error('synthetic enrichment failure');
+        });
+      const original = buildTestEntry({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+
+      input.emit('entries', [original]);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]).toMatchObject({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+      expect(flusher.batchCalls[0][0]['gen_ai.turn.start']).toBeUndefined();
+      enrich.mockRestore();
     });
   });
 

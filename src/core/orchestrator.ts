@@ -197,7 +197,7 @@ export class Orchestrator extends EventEmitter {
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
-    this.inputManager = new InputManager();
+    this.inputManager = new InputManager(this.stateStore);
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
