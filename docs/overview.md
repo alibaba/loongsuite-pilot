@@ -16,7 +16,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Token usage | Capture input, output, cache read, and cache creation tokens when the source agent exposes them. |
 | Tool activity | Capture tool call names, arguments, results, durations, and errors when available. |
 | Privacy controls | Disable message content capture per agent and mask secrets before output. |
-| Runtime operations | Manage the background service, inspect status, run an optional dashboard, and rollback versions. |
+| Runtime operations | Manage the background service, inspect status, use the built-in local dashboard, and rollback versions. |
 
 ## Supported Agents
 

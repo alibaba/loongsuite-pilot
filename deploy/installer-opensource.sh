@@ -970,6 +970,10 @@ const config = {
   enabled: true,
   dataDir: '$DATA_DIR',
 };
+if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
+  config.dashboard = {};
+}
+if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
   config.userId = config['user.id'];

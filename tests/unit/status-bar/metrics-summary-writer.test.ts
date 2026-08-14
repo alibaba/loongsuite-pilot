@@ -127,6 +127,41 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalSessions).toBe(1);
   });
 
+  it('reads events from the configured JSONL output directory', async () => {
+    const outputDir = path.join(tmpDir, 'custom-jsonl-output');
+    await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [makeLlmResponse()]);
+
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig(), outputDir);
+    await writer.refresh();
+
+    const summaryPath = path.join(tmpDir, 'logs', 'metrics-summary.json');
+    const summary = JSON.parse(await fs.readFile(summaryPath, 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1200);
+    expect(summary.ranges.today.agentShares).toEqual([
+      expect.objectContaining({ agentType: 'claude-code', tokens: 1200 }),
+    ]);
+  });
+
+  it('waits for an in-flight refresh before stopping', async () => {
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    let finishAggregate!: () => void;
+    const aggregate = new Promise<void>(resolve => { finishAggregate = resolve; });
+    vi.spyOn(writer as unknown as { aggregate: () => Promise<void> }, 'aggregate')
+      .mockReturnValue(aggregate);
+
+    const refresh = writer.refresh();
+    let stopped = false;
+    const stop = writer.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    finishAggregate();
+    await expect(refresh).resolves.toBeUndefined();
+    await expect(stop).resolves.toBeUndefined();
+    expect(stopped).toBe(true);
+    await expect(writer.refresh()).resolves.toBeUndefined();
+  });
+
   it('deduplicates sessions correctly', async () => {
     const outputDir = path.join(tmpDir, 'logs', 'output');
     await writeJsonlFile(outputDir, `claude-code-${today()}.jsonl`, [

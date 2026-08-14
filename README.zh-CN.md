@@ -9,7 +9,7 @@ LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采�
 <p align="center">
   <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot 本地 Dashboard" width="880">
   <br>
-  <em>本地 Dashboard —— 一眼掌握多 Agent 采集状态、Token 用量与上报健康度。</em>
+  <em>内置本地 Dashboard —— 一眼查看多 Agent Token、会话、请求、工具调用、模型、服务商和仓库活动。</em>
 </p>
 
 ## 为什么需要 LoongSuite Pilot？
@@ -33,7 +33,7 @@ Pilot 主要帮助回答这些问题：
 | 统一事件 Schema | 将 Agent 原生事件归一化为统一的 GenAI 事件字段。 |
 | 多目标输出 | 支持 JSONL、阿里云 SLS、HTTP 和 OTLP Trace。 |
 | 隐私控制 | 支持按 Agent 控制内容采集，并在输出前进行密钥脱敏。 |
-| 本地运维 | 提供状态查看、重启、回滚和可选本地 Dashboard。 |
+| 本地运维 | 提供状态查看、重启、回滚和内置本地 Dashboard。 |
 
 ## 支持的 Agent
 
@@ -164,13 +164,9 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-可选本地 Dashboard：
-
-```bash
-loongsuite-pilot monitor start
-```
-
-然后打开 `http://127.0.0.1:8765/`。
+本地 Dashboard 会随采集服务一起启动和停止，直接打开
+`http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
+`logs/metrics-summary.json`。
 
 macOS 菜单栏 App：
 

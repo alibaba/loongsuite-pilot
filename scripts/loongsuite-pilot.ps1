@@ -943,6 +943,71 @@ function Cmd-RestartUpdater {
 # ============================================================
 # CMD: status
 # ============================================================
+function Get-DashboardPort {
+    try {
+        if (Test-Path $CONFIG_FILE) {
+            $config = Get-Content -LiteralPath $CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+            $port = $config.dashboard.port
+            if ($null -ne $port -and $port -isnot [string] -and $port -isnot [bool]) {
+                $numericPort = [double]$port
+                $integerPort = [long]$numericPort
+                if ($numericPort -eq $integerPort -and
+                    $integerPort -ge 1 -and $integerPort -le 65535) {
+                    return [int]$integerPort
+                }
+            }
+        }
+    } catch {}
+    return 8765
+}
+
+function Test-DashboardAvailable {
+    param([int]$Port)
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { return $false }
+
+    $probe = @'
+const http = require("node:http");
+const crypto = require("node:crypto");
+const path = require("node:path");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: Number(process.argv[1]),
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  const expectedInstance = crypto.createHash("sha256")
+    .update(path.resolve(process.argv[2]))
+    .digest("hex");
+  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
+    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
+  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+'@
+
+    try {
+        & $nodeBin -e $probe $Port $DATA_DIR *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
 function Cmd-Status {
     $verInfo = ""
     $versionDir = Resolve-CurrentVersion
@@ -968,6 +1033,14 @@ function Cmd-Status {
         Write-Host "loongsuite-pilot${verInfo} is not running"
         if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
             Write-Host "   collector task: running without a runtime heartbeat" -ForegroundColor Yellow
+        }
+    }
+    if ($collectorRunning) {
+        $dashboardPort = Get-DashboardPort
+        if (Test-DashboardAvailable -Port $dashboardPort) {
+            Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+        } else {
+            Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
         }
     }
 
