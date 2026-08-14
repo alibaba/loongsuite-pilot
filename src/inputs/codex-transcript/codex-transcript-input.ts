@@ -131,6 +131,7 @@ interface DynamicDirectoryWalkBudget {
 
 interface CodexWakeupMarker {
   initialTurnId?: string;
+  recoveryTurnId?: string;
   hookEvent?: string;
 }
 
@@ -301,6 +302,13 @@ export class CodexTranscriptInput extends BaseInput {
       };
       checkpointChanged = true;
     } else if (checkpoint.inode !== stat.ino) {
+      this.logger.warn('Codex transcript inode changed; applying no-replay baseline', {
+        transcriptPath: filePath,
+        previousInode: checkpoint.inode,
+        currentInode: stat.ino,
+        previousScanOffset: checkpoint.scanOffset,
+        hadForkBootstrap: checkpoint.forkBootstrap !== undefined,
+      });
       await this.baselineFile(filePath, key);
       this.saveGlobalProcessedTerminalTurnIds();
       return 0;
@@ -321,11 +329,12 @@ export class CodexTranscriptInput extends BaseInput {
       : undefined;
     if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
 
-    // A fork/subagent rollout starts with copied ancestor history. Its lifecycle
-    // Hook supplies the exact first turn owned by this rollout, so keep normal
-    // collection parked at offset zero until that task_started record appears.
-    // The independent search offset makes this safe when the Hook fires before
-    // Codex finishes appending the copied prefix or the new turn.
+    // A fork/subagent rollout starts with copied ancestor history. Prefer the
+    // lifecycle Hook's exact initial turn; when that Hook is unavailable, UUIDv7
+    // causality identifies the earliest turn created after the rollout owner.
+    // A terminal Hook supplies recovery evidence but is not assumed to be the
+    // first turn. Keep normal collection parked at zero until one of these
+    // positive ownership signals is found.
     const hasCopiedPrefix = ownerMeta != null && (
       ownerMeta.forkedFromId != null
       || ownerMeta.parentThreadId != null
@@ -338,29 +347,66 @@ export class CodexTranscriptInput extends BaseInput {
       && checkpoint.pendingTerminal === null
     ) {
       const marker = await this.readWakeupMarker(ownerMeta!.threadId, filePath);
-      const markerTurnId = marker?.initialTurnId;
       let bootstrap: CodexForkBootstrap = checkpoint.forkBootstrap ?? { searchOffset: 0 };
-      if (markerTurnId && bootstrap.turnId !== markerTurnId) {
-        bootstrap = { turnId: markerTurnId, searchOffset: 0 };
+      if (marker?.initialTurnId && bootstrap.initialTurnId !== marker.initialTurnId) {
+        bootstrap = {
+          initialTurnId: marker.initialTurnId,
+          ...(marker.recoveryTurnId ? { recoveryTurnId: marker.recoveryTurnId } : {}),
+          searchOffset: 0,
+        };
+      } else if (
+        marker?.recoveryTurnId
+        && bootstrap.recoveryTurnId !== marker.recoveryTurnId
+      ) {
+        bootstrap = {
+          ...bootstrap,
+          recoveryTurnId: marker.recoveryTurnId,
+          // The newly arrived terminal evidence may already lie before an EOF
+          // reached by an evidence-free UUID probe. Re-scan from the start.
+          searchOffset: bootstrap.initialTurnId ? bootstrap.searchOffset : 0,
+        };
+      }
+      const safeSearchOffset = boundedSearchOffset(bootstrap.searchOffset, stat.size);
+      if (safeSearchOffset !== bootstrap.searchOffset) {
+        this.logger.warn('repaired invalid Codex fork bootstrap search offset', {
+          transcriptPath: filePath,
+          searchOffset: bootstrap.searchOffset,
+          repairedSearchOffset: safeSearchOffset,
+          fileSize: stat.size,
+        });
+        bootstrap = { ...bootstrap, searchOffset: safeSearchOffset };
       }
       checkpoint.forkBootstrap = bootstrap;
       checkpointChanged = true;
-      if (!bootstrap.turnId) {
-        this.saveCheckpoint(key, checkpoint);
-        return 0;
-      }
+      const searchedNewBytes = bootstrap.searchOffset < stat.size;
 
       const located = await findTurnStartOffset(
         filePath,
-        bootstrap.turnId,
+        ownerMeta!.threadId,
+        bootstrap.initialTurnId,
+        bootstrap.recoveryTurnId,
         bootstrap.searchOffset,
         stat.size,
       );
       if (located.startOffset === null) {
         checkpoint.forkBootstrap = {
-          turnId: bootstrap.turnId,
+          ...(bootstrap.initialTurnId ? { initialTurnId: bootstrap.initialTurnId } : {}),
+          ...(bootstrap.recoveryTurnId ? { recoveryTurnId: bootstrap.recoveryTurnId } : {}),
           searchOffset: located.nextOffset,
         };
+        if (
+          located.nextOffset >= stat.size
+          && searchedNewBytes
+          && !bootstrap.initialTurnId
+          && uuidV7TimestampMs(ownerMeta!.threadId) === undefined
+          && !bootstrap.recoveryTurnId
+        ) {
+          this.logger.warn('Codex fork bootstrap has no usable Hook or UUIDv7 ownership evidence', {
+            transcriptPath: filePath,
+            threadId: ownerMeta!.threadId,
+            searchedBytes: located.nextOffset,
+          });
+        }
         this.saveCheckpoint(key, checkpoint);
         return 0;
       }
@@ -369,7 +415,8 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.forkBootstrap = undefined;
       this.logger.info('anchored fork/subagent rollout at its first owned turn', {
         transcriptPath: filePath,
-        turnId: bootstrap.turnId,
+        turnId: located.turnId,
+        anchorKind: located.anchorKind,
         skippedBytes: located.startOffset,
         hookEvent: marker?.hookEvent,
         threadSource: ownerMeta!.threadSource,
@@ -1475,15 +1522,29 @@ export class CodexTranscriptInput extends BaseInput {
           fs.realpath(recordedTranscriptPath),
           fs.realpath(transcriptPath),
         ]);
-        if (recordedRealPath !== transcriptRealPath) return undefined;
+        if (recordedRealPath !== transcriptRealPath) {
+          this.logger.warn('Codex wakeup transcript path differs from discovered session file; accepting session anchor', {
+            sessionId,
+            recordedTranscriptPath,
+            transcriptPath,
+          });
+        }
       } catch {
-        if (path.resolve(recordedTranscriptPath) !== path.resolve(transcriptPath)) return undefined;
+        if (path.resolve(recordedTranscriptPath) !== path.resolve(transcriptPath)) {
+          this.logger.warn('Codex wakeup transcript path could not be canonicalized; accepting session anchor', {
+            sessionId,
+            recordedTranscriptPath,
+            transcriptPath,
+          });
+        }
       }
     }
     const initialTurnId = stringValue(record.initial_turn_id);
+    const recoveryTurnId = stringValue(record.recovery_turn_id);
     const hookEvent = stringValue(record.hook_event);
     return {
       ...(initialTurnId ? { initialTurnId } : {}),
+      ...(recoveryTurnId ? { recoveryTurnId } : {}),
       ...(hookEvent ? { hookEvent } : {}),
     };
   }
@@ -1858,10 +1919,18 @@ export class CodexTranscriptInput extends BaseInput {
     const bootstrapRecord = asRecord(value.forkBootstrap);
     const forkBootstrap: CodexForkBootstrap | null = bootstrapRecord
       && typeof bootstrapRecord.searchOffset === 'number'
+      && Number.isFinite(bootstrapRecord.searchOffset)
+      && bootstrapRecord.searchOffset >= 0
       ? {
           searchOffset: bootstrapRecord.searchOffset,
-          ...(typeof bootstrapRecord.turnId === 'string'
-            ? { turnId: bootstrapRecord.turnId }
+          ...(typeof bootstrapRecord.initialTurnId === 'string'
+            ? { initialTurnId: bootstrapRecord.initialTurnId }
+            : typeof bootstrapRecord.turnId === 'string'
+              // Migrate checkpoints written by the first Hook-anchor version.
+              ? { initialTurnId: bootstrapRecord.turnId }
+              : {}),
+          ...(typeof bootstrapRecord.recoveryTurnId === 'string'
+            ? { recoveryTurnId: bootstrapRecord.recoveryTurnId }
             : {}),
         }
       : null;
@@ -2141,27 +2210,72 @@ async function findOwnerSessionMetaOffset(
   return ownerOffset;
 }
 
-/** Locate the Hook-provided first task owned by a forked rollout. */
+type ForkAnchorKind = 'initial-hook' | 'uuidv7' | 'terminal-recovery';
+
+/** Locate the first positively-owned turn of a forked rollout in one bounded window. */
 async function findTurnStartOffset(
   filePath: string,
-  turnId: string,
+  ownerThreadId: string,
+  initialTurnId: string | undefined,
+  recoveryTurnId: string | undefined,
   startOffset: number,
   fileSize: number,
-): Promise<{ startOffset: number | null; nextOffset: number }> {
+): Promise<{
+  startOffset: number | null;
+  nextOffset: number;
+  turnId?: string;
+  anchorKind?: ForkAnchorKind;
+}> {
   let turnStartOffset: number | null = null;
-  const { nextOffset } = await scanJsonLines(filePath, startOffset, fileSize, line => {
+  let matchedTurnId: string | undefined;
+  let anchorKind: ForkAnchorKind | undefined;
+  const safeStart = boundedSearchOffset(startOffset, fileSize);
+  const scanEnd = Math.min(fileSize, safeStart + MAX_SCAN_BYTES_PER_FILE_CYCLE);
+  const ownerTimestamp = uuidV7TimestampMs(ownerThreadId);
+  const { nextOffset } = await scanJsonLines(filePath, safeStart, scanEnd, line => {
     const payload = asRecord(line.record.payload);
+    if (!payload) return undefined;
+    const candidateTurnId = turnIdForStart(line.record, payload);
+    if (!candidateTurnId) return undefined;
+
+    if (initialTurnId && candidateTurnId === initialTurnId) {
+      turnStartOffset = line.startOffset;
+      matchedTurnId = candidateTurnId;
+      anchorKind = 'initial-hook';
+      return false;
+    }
+    if (initialTurnId) return undefined;
+
+    const candidateTimestamp = uuidV7TimestampMs(candidateTurnId);
     if (
-      line.record.type === 'event_msg'
-      && payload?.type === 'task_started'
-      && stringValue(payload.turn_id) === turnId
+      ownerTimestamp !== undefined
+      && candidateTimestamp !== undefined
+      && candidateTimestamp >= ownerTimestamp
     ) {
       turnStartOffset = line.startOffset;
+      matchedTurnId = candidateTurnId;
+      anchorKind = 'uuidv7';
+      return false;
+    }
+    if (recoveryTurnId && candidateTurnId === recoveryTurnId) {
+      turnStartOffset = line.startOffset;
+      matchedTurnId = candidateTurnId;
+      anchorKind = 'terminal-recovery';
       return false;
     }
     return undefined;
   });
-  return { startOffset: turnStartOffset, nextOffset };
+  return {
+    startOffset: turnStartOffset,
+    nextOffset,
+    ...(matchedTurnId ? { turnId: matchedTurnId } : {}),
+    ...(anchorKind ? { anchorKind } : {}),
+  };
+}
+
+function boundedSearchOffset(value: number, fileSize: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > fileSize) return 0;
+  return Math.trunc(value);
 }
 
 function selectOwnerSessionMetaOffset(

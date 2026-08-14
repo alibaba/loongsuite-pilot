@@ -86,11 +86,13 @@ export interface CodexPendingTerminalTurn {
   sourceRecordCount?: number;
 }
 
-/** Exact first-turn bootstrap for a fork/subagent rollout. */
+/** First-owned-turn bootstrap for a fork/subagent rollout. */
 export interface CodexForkBootstrap {
   /** Hook-provided first turn owned by this rollout. */
-  turnId?: string;
-  /** How far the append-only rollout has been searched for that turn. */
+  initialTurnId?: string;
+  /** Terminal Hook evidence for an owned turn; it may not be the first one. */
+  recoveryTurnId?: string;
+  /** How far the append-only rollout has been searched for an owned turn. */
   searchOffset: number;
 }
 
@@ -109,7 +111,7 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Present until a lifecycle Hook identifies this rollout's first owned turn. */
+  /** Present until the first owned turn is located from Hook or UUIDv7 evidence. */
   forkBootstrap?: CodexForkBootstrap;
   /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];

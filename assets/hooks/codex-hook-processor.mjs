@@ -130,25 +130,41 @@ function writeWakeupMarker(input, hookEvent) {
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
   const marker = path.join(directory, `${safePathPart(sessionId)}.json`);
   let initialTurnId = '';
+  let recoveryTurnId = '';
   try {
     const existing = JSON.parse(fs.readFileSync(marker, 'utf8'));
     if (existing && typeof existing.initial_turn_id === 'string') {
       initialTurnId = existing.initial_turn_id;
+    }
+    if (existing && typeof existing.recovery_turn_id === 'string') {
+      recoveryTurnId = existing.recovery_turn_id;
     }
   } catch {
     // The first Hook for a session has no existing marker.
   }
   if (
     !initialTurnId
+    && !recoveryTurnId
     && (hookEvent === 'user-prompt-submit' || hookEvent === 'subagent-start')
     && typeof input.turn_id === 'string'
   ) {
     initialTurnId = input.turn_id;
   }
+  if (
+    (hookEvent === 'stop' || hookEvent === 'subagent-stop')
+    && typeof input.turn_id === 'string'
+    && input.turn_id
+  ) {
+    // A terminal Hook proves this turn belongs to the rollout, but it may be a
+    // later turn when the corresponding Start Hook was missed. Keep it as
+    // recovery evidence rather than overwriting the exact initial anchor.
+    recoveryTurnId = input.turn_id;
+  }
   const payload = {
     session_id: sessionId,
     ...(typeof input.turn_id === 'string' && input.turn_id ? { turn_id: input.turn_id } : {}),
     ...(initialTurnId ? { initial_turn_id: initialTurnId } : {}),
+    ...(recoveryTurnId ? { recovery_turn_id: recoveryTurnId } : {}),
     ...(typeof input.transcript_path === 'string' && input.transcript_path
       ? { transcript_path: input.transcript_path }
       : {}),

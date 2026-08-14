@@ -149,9 +149,46 @@ describe('codex transcript discovery hook', () => {
       session_id: 'child-session',
       turn_id: 'child-turn',
       initial_turn_id: 'child-turn',
+      recovery_turn_id: 'child-turn',
       transcript_path: childTranscript,
       hook_event: 'subagent-stop',
     });
+  });
+
+  test('records Stop as recovery evidence without claiming it is the initial turn', () => {
+    const result = runHook('stop', {
+      session_id: 'fork-session',
+      turn_id: 'latest-terminal-turn',
+      transcript_path: '/tmp/rollout-fork.jsonl',
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(fs.readFileSync(markerPath('fork-session'), 'utf8'))).toMatchObject({
+      session_id: 'fork-session',
+      turn_id: 'latest-terminal-turn',
+      recovery_turn_id: 'latest-terminal-turn',
+      hook_event: 'stop',
+    });
+    expect(JSON.parse(fs.readFileSync(markerPath('fork-session'), 'utf8')))
+      .not.toHaveProperty('initial_turn_id');
+  });
+
+  test('does not promote a later UserPromptSubmit after terminal recovery evidence', () => {
+    runHook('stop', {
+      session_id: 'multi-turn-fork',
+      turn_id: 'first-terminal-turn',
+      transcript_path: '/tmp/rollout-multi-turn.jsonl',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'multi-turn-fork',
+      turn_id: 'later-prompt-turn',
+      transcript_path: '/tmp/rollout-multi-turn.jsonl',
+    });
+
+    const marker = JSON.parse(fs.readFileSync(markerPath('multi-turn-fork'), 'utf8'));
+    expect(marker).not.toHaveProperty('initial_turn_id');
+    expect(marker.recovery_turn_id).toBe('first-terminal-turn');
+    expect(marker.turn_id).toBe('later-prompt-turn');
   });
 
   test('writes AgentTeams resource attributes into the wakeup marker', () => {
