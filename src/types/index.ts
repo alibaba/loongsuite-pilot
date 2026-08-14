@@ -124,6 +124,8 @@ export interface AnalyticsConfig {
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  /** Global multimodal storage. */
+  multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
 }
@@ -141,9 +143,69 @@ export interface UpstreamLinkConfig {
   ttlMs: number;
 }
 
+export const MULTIMODAL_UPLOAD_MODES = [
+  'none',
+  'input',
+  'output',
+  'tool',
+  'both',
+] as const;
+export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
+
+/** uploadMode covers user input. */
+export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
+  return mode === 'input' || mode === 'both';
+}
+
+/** uploadMode covers model output. */
+export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
+  return mode === 'output' || mode === 'both';
+}
+
+/** uploadMode covers tool results. */
+export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
+  return mode === 'tool' || mode === 'both';
+}
+
+export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
+export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+
+export interface MultimodalOssConfig {
+  endpoint: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+export interface MultimodalSlsConfig {
+  endpoint: string;
+  project: string;
+  logstore: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
+export interface MultimodalRuntimeConfig {
+  uploader: MultimodalUploaderKind;
+  storageBasePath: string;
+  oss?: MultimodalOssConfig;
+  sls?: MultimodalSlsConfig;
+}
+
+/** Agent ids with multimodal extraction implemented. */
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+
+/** Per-agent multimodal policy (`uploadMode: none` disables). */
+export interface AgentMultimodalConfig {
+  uploadMode: MultimodalUploadMode;
+}
+
 export interface AgentConfig {
   enabled?: boolean;
   captureMessageContent: boolean;
+  multimodal?: AgentMultimodalConfig;
 }
 
 export type AgentsConfig = Record<string, AgentConfig>;

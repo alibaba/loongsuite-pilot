@@ -509,6 +509,244 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents).toEqual({});
     });
+
+    it('parses per-agent multimodal nested config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+          cursor: { captureMessageContent: true },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex).toEqual({
+        captureMessageContent: true,
+        multimodal: { uploadMode: 'both' },
+      });
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+    });
+
+    it('defaults agent multimodal uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: {},
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'none',
+      });
+    });
+
+    it('keeps multimodal config for any agent id (runtime capability gate applies later)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.cursor.multimodal).toEqual({
+        uploadMode: 'both',
+      });
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'both',
+      });
+    });
+  });
+
+  describe('multimodal infra config', () => {
+    it('is undefined when multimodal block is absent', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({});
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('loads oss infra without uploadMode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 'oss://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        uploader: 'oss',
+        storageBasePath: 'oss://bucket/mm',
+        oss: {
+          endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      });
+    });
+
+    it('derives sls storageBasePath from project/logstore', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        uploader: 'sls',
+        storageBasePath: 'sls://my-project/logstore-multimodal',
+        sls: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'my-project',
+          logstore: 'logstore-multimodal',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      });
+    });
+
+    it('disables multimodal when uploader is invalid', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: { uploader: 's3' },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is not oss://', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 's3://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 'oss://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            accessKeyId: 'ak',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls project is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('falls back unknown agent uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'unknown' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
+    });
+
+    it('accepts input, output, and tool uploadMode values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'input' },
+          },
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'tool' },
+          },
+          'claude-code': {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'output' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'tool' });
+      expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
+    });
   });
 
   describe('mask config', () => {

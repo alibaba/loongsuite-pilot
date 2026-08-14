@@ -11,6 +11,12 @@ import type {
   LogRetentionConfig,
   MaskConfig,
   MaskType,
+  AgentMultimodalConfig,
+  MultimodalOssConfig,
+  MultimodalRuntimeConfig,
+  MultimodalSlsConfig,
+  MultimodalUploadMode,
+  MultimodalUploaderKind,
   OtlpEndpoint,
   OtlpEndpointEntry,
   CmsEndpointEntry,
@@ -21,7 +27,11 @@ import type {
   StatusBarConfig,
   UpstreamLinkConfig,
 } from '../types/index.js';
-import { SUPPORTED_MASK_TYPES } from '../types/index.js';
+import {
+  MULTIMODAL_UPLOAD_MODES,
+  MULTIMODAL_UPLOADER_KINDS,
+  SUPPORTED_MASK_TYPES,
+} from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
@@ -126,6 +136,25 @@ export interface ConfigFile {
     ttlMs?: number;
   };
 
+  multimodal?: {
+    uploader?: string;
+    storageBasePath?: string;
+    oss?: {
+      endpoint?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+      securityToken?: string;
+    };
+    sls?: {
+      endpoint?: string;
+      project?: string;
+      logstore?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+      securityToken?: string;
+    };
+  };
+
   mask?: {
     mode?: string;
     types?: string[];
@@ -153,6 +182,9 @@ export interface ConfigFile {
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
+    multimodal?: {
+      uploadMode?: string;
+    };
   }>;
 
   autoUpdate?: {
@@ -265,6 +297,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
+    multimodal: buildMultimodalConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
 }
@@ -280,6 +313,92 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
     // deleting all freshly-written correlation files and silently breaking linking.
     ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
+  };
+}
+
+const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
+const MULTIMODAL_UPLOADER_KIND_SET = new Set<string>(MULTIMODAL_UPLOADER_KINDS);
+
+/** Parse global multimodal storage config; invalid → undefined. */
+function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
+  const block = file?.multimodal;
+  if (!block || typeof block !== 'object') return undefined;
+
+  try {
+    const uploaderRaw = block.uploader ?? 'oss';
+    if (!MULTIMODAL_UPLOADER_KIND_SET.has(uploaderRaw)) {
+      throw new Error(`invalid multimodal.uploader: ${uploaderRaw}`);
+    }
+    const uploader = uploaderRaw as MultimodalUploaderKind;
+
+    if (uploader === 'oss') {
+      const storageBasePathRaw = (block.storageBasePath ?? '').trim();
+      if (!storageBasePathRaw) {
+        throw new Error('multimodal.storageBasePath is required when uploader=oss');
+      }
+      if (!storageBasePathRaw.startsWith('oss://')) {
+        throw new Error('multimodal.storageBasePath must start with oss:// when uploader=oss');
+      }
+      return {
+        uploader,
+        storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
+        oss: buildMultimodalOssConfig(block),
+      };
+    }
+
+    if (uploader === 'sls') {
+      const sls = buildMultimodalSlsConfig(block);
+      return {
+        uploader,
+        storageBasePath: `sls://${sls.project}/${sls.logstore}`,
+        sls,
+      };
+    }
+
+    throw new Error(`unsupported multimodal.uploader: ${uploaderRaw}`);
+  } catch (err) {
+    logger.error('multimodal config invalid; disabled for process', { error: String(err) });
+    return undefined;
+  }
+}
+
+function buildMultimodalOssConfig(
+  block: ConfigFile['multimodal'] | undefined,
+): MultimodalOssConfig {
+  const endpoint = block?.oss?.endpoint ?? '';
+  const accessKeyId = block?.oss?.accessKeyId ?? '';
+  const accessKeySecret = block?.oss?.accessKeySecret ?? '';
+  const securityToken = block?.oss?.securityToken ?? '';
+  if (!endpoint || !accessKeyId || !accessKeySecret) {
+    throw new Error('multimodal.oss requires endpoint, accessKeyId, accessKeySecret');
+  }
+  return {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
+  };
+}
+
+function buildMultimodalSlsConfig(
+  block: ConfigFile['multimodal'] | undefined,
+): MultimodalSlsConfig {
+  const endpoint = block?.sls?.endpoint ?? '';
+  const project = block?.sls?.project ?? '';
+  const logstore = block?.sls?.logstore ?? 'logstore-multimodal';
+  const accessKeyId = block?.sls?.accessKeyId ?? '';
+  const accessKeySecret = block?.sls?.accessKeySecret ?? '';
+  const securityToken = block?.sls?.securityToken ?? '';
+  if (!endpoint || !project || !accessKeyId || !accessKeySecret) {
+    throw new Error('multimodal.sls requires endpoint, project, accessKeyId, accessKeySecret');
+  }
+  return {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    project,
+    logstore,
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
   };
 }
 
@@ -329,13 +448,29 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 
   for (const [agentType, policy] of Object.entries(file.agents)) {
     if (!agentType || !policy || typeof policy !== 'object') continue;
+    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
+    const multimodal = buildAgentMultimodalConfig(policy.multimodal);
     result[agentType] = {
       enabled: policy.enabled,
-      captureMessageContent: parseOptionalBool(policy.captureMessageContent) ?? true,
+      captureMessageContent,
+      ...(multimodal ? { multimodal } : {}),
     };
   }
 
   return result;
+}
+
+function buildAgentMultimodalConfig(
+  block: { uploadMode?: string } | undefined,
+): AgentMultimodalConfig | undefined {
+  if (!block || typeof block !== 'object') return undefined;
+
+  const uploadModeRaw = block.uploadMode ?? 'none';
+  const uploadMode = MULTIMODAL_UPLOAD_MODE_SET.has(uploadModeRaw)
+    ? (uploadModeRaw as MultimodalUploadMode)
+    : 'none';
+
+  return { uploadMode };
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);

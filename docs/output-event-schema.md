@@ -73,9 +73,10 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | Cache-read token cost in USD. |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | Cache-creation token cost in USD. |
 | `gen_ai.usage.total_cost` | double | Recommended | Total event cost in USD. |
-| `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. |
+| `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on this entry; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the message contains media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
@@ -96,6 +97,17 @@ Required levels follow OpenTelemetry wording:
 | `workspace.current_root` | string | Recommended | Git top-level directory, inferred when the working directory is a git repository. |
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
+
+## Multimodal Message Parts
+
+When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Multimodal Collection](multimodal.md)), media in message `parts` uses object-storage references instead of inline base64:
+
+| `parts[].type` | Description |
+|----------------|-------------|
+| `text` | Text content. |
+| `uri` | Uploaded or optimistic media reference; includes `uri`, `mime_type`, and optional `modality` (for example `image`). |
+
+`uri` values look like `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` or `sls://project/logstore/YYYYMMDD/<sha256>.ext`. The content hash is encoded in the object path. `YYYYMMDD` is the event's **local** calendar day (from `time_unix_ms` when present), not UTC—the same convention as the Python probe, so date-prefix queries align across implementations near midnight. A uri may dangle if upload fails; Pilot fails open and continues text collection.
 
 ## Custom Agent Identity
 

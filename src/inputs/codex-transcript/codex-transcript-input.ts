@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
+import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
@@ -25,6 +25,10 @@ import {
   extractCodexTranscriptMeta,
   sessionIdFromTranscriptPath,
 } from './codex-transcript-extractor.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
+import type { BlobToUriFn, UriResult } from '../../multimodal/types.js';
+import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
+import { attachMultimodalMetadataForEntry } from '../../multimodal/rewrite.js';
 import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
@@ -140,6 +144,12 @@ export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
   spanContextDir?: string;
+  /** Multimodal options (enabled + processor). */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+  };
 }
 
 export class CodexTranscriptInput extends BaseInput {
@@ -150,6 +160,11 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
   private readonly spanContextDir: string;
+  private readonly includeMultimodal: boolean;
+  private readonly multimodalUploadMode: MultimodalUploadMode;
+  private readonly multimodalProcessor: MultimodalProcessor | null;
+  /** Partial-replay uri cache. */
+  private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private wakeupWatcher: FSWatcher | null = null;
   private processedTerminalTurnIdsLoaded = false;
   private processedTerminalTurnIdsDirty = false;
@@ -165,10 +180,18 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly transcriptPathByThreadId = new Map<string, string>();
 
   constructor(opts: CodexTranscriptInputOptions) {
-    super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    const processor = opts.multimodal?.processor ?? null;
+    const includeMultimodal = opts.multimodal?.enabled === true && !!processor;
+    super({
+      stateStore: opts.stateStore,
+      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+    });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();
     this.spanContextDir = opts.spanContextDir ?? defaultSpanContextDir();
+    this.includeMultimodal = includeMultimodal;
+    this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
+    this.multimodalProcessor = includeMultimodal ? processor : null;
   }
 
   static getWatchPaths(): string[] {
@@ -216,6 +239,7 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async onStop(): Promise<void> {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
+    this.multimodalUriCache.clear();
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
@@ -251,6 +275,9 @@ export class CodexTranscriptInput extends BaseInput {
 
     const flush = (): void => {
       if (batch.length === 0) return;
+      for (const entry of batch) {
+        attachMultimodalMetadataForEntry(entry);
+      }
       this.emit('entries', batch);
       emittedCount += batch.length;
       batch = [];
@@ -667,7 +694,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      partialTurnOptions(activeTurn),
+      this.partialTurnOptions(activeTurn, filePath),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
@@ -818,7 +845,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      partialTurnOptions(activeTurn),
+      this.partialTurnOptions(activeTurn, filePath),
     );
     const lastStep = previous?.steps.at(-1);
     if (!lastStep) {
@@ -1857,6 +1884,42 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (markDirty) this.processedTerminalTurnIdsDirty = true;
   }
+
+  private partialTurnOptions(activeTurn: CodexActiveTranscriptTurn, filePath: string): {
+    startedAtMs?: number;
+    model?: string;
+    cwd?: string;
+    developerInstructions?: string;
+    blobToUri?: BlobToUriFn;
+    uploadMode?: MultimodalUploadMode;
+  } {
+    return {
+      startedAtMs: activeTurn.startedAtMs,
+      ...(this.includeMultimodal && this.multimodalProcessor
+        ? { blobToUri: this.blobToUri(filePath), uploadMode: this.multimodalUploadMode }
+        : {}),
+      ...(activeTurn.model ? { model: activeTurn.model } : {}),
+      ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
+      ...(activeTurn.developerInstructions
+        ? { developerInstructions: activeTurn.developerInstructions }
+        : {}),
+    };
+  }
+
+  /** blob→uri with per-transcript replay cache. */
+  private blobToUri(transcriptPath: string): BlobToUriFn {
+    return (params) => {
+      if (!this.multimodalProcessor) return null;
+      const cacheKey = params.reuseKey ? `${transcriptPath}\0${params.reuseKey}` : undefined;
+      if (cacheKey) {
+        const hit = this.multimodalUriCache.get(cacheKey);
+        if (hit) return hit;
+      }
+      const result = this.multimodalProcessor.blobToUri(params);
+      if (result && cacheKey) this.multimodalUriCache.set(cacheKey, result);
+      return result;
+    };
+  }
 }
 
 async function collectRolloutFiles(dir: string, files: string[]): Promise<void> {
@@ -2105,19 +2168,6 @@ function updateActiveTurnMetadata(
   if (developerInstructions) activeTurn.developerInstructions = developerInstructions;
 }
 
-function partialTurnOptions(activeTurn: CodexActiveTranscriptTurn): {
-  startedAtMs: number;
-  model?: string;
-  cwd?: string;
-  developerInstructions?: string;
-} {
-  return {
-    startedAtMs: activeTurn.startedAtMs,
-    ...(activeTurn.model ? { model: activeTurn.model } : {}),
-    ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
-    ...(activeTurn.developerInstructions ? { developerInstructions: activeTurn.developerInstructions } : {}),
-  };
-}
 
 function updateActiveTurnFromExtractedTurn(
   activeTurn: CodexActiveTranscriptTurn,

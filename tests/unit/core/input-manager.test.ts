@@ -402,7 +402,45 @@ describe('InputManager', () => {
       expect(stopped).toBe(true);
       expect(flusher.sendBatch).toHaveBeenCalledTimes(1);
     });
+
+    it('shuts down multimodal processor after draining queues', async () => {
+      const shutdown = vi.fn(async () => undefined);
+      manager.setMultimodalProcessor({ shutdown } as any);
+      await manager.stopAll();
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues stopAll when multimodal processor shutdown fails', async () => {
+      const shutdown = vi.fn(async () => {
+        throw new Error('shutdown boom');
+      });
+      manager.setMultimodalProcessor({ shutdown } as any);
+      await expect(manager.stopAll()).resolves.toBeUndefined();
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects replacing an active multimodal processor with a different instance', async () => {
+      const first = { shutdown: vi.fn(async () => undefined) };
+      const second = { shutdown: vi.fn(async () => undefined) };
+      manager.setMultimodalProcessor(first as any);
+      manager.setMultimodalProcessor(second as any);
+      await manager.stopAll();
+      expect(first.shutdown).toHaveBeenCalledTimes(1);
+      expect(second.shutdown).not.toHaveBeenCalled();
+    });
+
+    it('allows reinstalling multimodal processor after stopAll clears it', async () => {
+      const first = { shutdown: vi.fn(async () => undefined) };
+      const second = { shutdown: vi.fn(async () => undefined) };
+      manager.setMultimodalProcessor(first as any);
+      await manager.stopAll();
+      manager.setMultimodalProcessor(second as any);
+      await manager.stopAll();
+      expect(first.shutdown).toHaveBeenCalledTimes(1);
+      expect(second.shutdown).toHaveBeenCalledTimes(1);
+    });
   });
+
 
   describe('no flusher warning', () => {
     it('drops entries when no flusher is set', async () => {

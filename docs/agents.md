@@ -133,8 +133,9 @@ Use `config.json` when you need to control message content capture:
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
 | `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
+| `multimodal.uploadMode` | Multimodal upload policy. `none` (default) disables; `input` / `tool` / `output` / `both` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 
-For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md).
+For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` only today).
 
 ## Verify Agent Collection
 
