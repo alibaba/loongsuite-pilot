@@ -13,6 +13,7 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 // attachment 019ffc45). 155 records, 18 distinct event types. Do NOT
 // synthesize or alter — every assertion below ties to a real line.
 const FIXTURE = path.join(__dirname, '..', '..', '..', 'fixtures', 'dsh', 'dsh-probe-events-real.jsonl');
+const FIXTURE_SID = 'session-d79193cc-deea-4e24-bc36-52dabbf8530f';
 
 interface LoadedRecords {
   records: Record<string, unknown>[];
@@ -43,7 +44,11 @@ describe('dsh-event-transform (real fixture)', () => {
     const responses = entries.filter(e => e['event.name'] === 'llm.response');
     expect(responses.length).toBe(3);
     const stepIds = responses.map(e => e['gen_ai.step.id']).sort();
-    expect(stepIds).toEqual(['1.1', '1.2', '1.3']);
+    expect(stepIds).toEqual([
+      `${FIXTURE_SID}:1:1`,
+      `${FIXTURE_SID}:1:2`,
+      `${FIXTURE_SID}:1:3`,
+    ]);
   });
 
   it('emits exactly one llm.request per LLM call', async () => {
@@ -120,6 +125,7 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(resultIds.sort()).toEqual(callIds.sort());
     expect(calls[0]['gen_ai.tool.name']).toBe('write');
     expect(calls[1]['gen_ai.tool.name']).toBe('read');
+    expect(results.map(r => r['gen_ai.tool.name'])).toEqual(['write', 'read']);
   });
 
   it('all events share a per-turn stable trace_id', async () => {
@@ -148,6 +154,16 @@ describe('dsh-event-transform (real fixture)', () => {
       const respTs = BigInt(responses[i].time_unix_nano as string);
       expect(respTs).toBeGreaterThan(reqTs);
     }
+  });
+
+  it('uses native request/context or step/start boundaries instead of first chunks', async () => {
+    const { entries } = await loadAll();
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(requests.map(e => e.time_unix_nano)).toEqual([
+      '1786643725829000000',
+      '1786643727189000000',
+      '1786643727920000000',
+    ]);
   });
 
   it('finish_reasons are populated from the streamed finish chunk', async () => {
@@ -252,6 +268,85 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(r).toBeDefined();
     expect(r!['gen_ai.system_instructions']).toBe('s');
     expect(r!['gen_ai.tool.definitions']).toBeUndefined();
+  });
+});
+
+describe('dsh-event-transform (correlation isolation)', () => {
+  it('scopes native turn and step numbers by session id', () => {
+    const run = (sid: string) => {
+      const state = newState();
+      transformDshRecord({ type: 'turn/start', sid, time: 1, data: { turn: 1 } }, ClientType.Dsh, state);
+      transformDshRecord({ type: 'step/start', sid, time: 2, data: { turn: 1, step: 1 } }, ClientType.Dsh, state);
+      transformDshRecord({
+        type: 'request/header', sid, time: 3,
+        data: { header: { config: { provider: 'p', model: 'm' } } },
+      }, ClientType.Dsh, state);
+      return transformDshRecord({
+        type: 'assistant/chunk', sid, time: 4,
+        data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+      }, ClientType.Dsh, state)!;
+    };
+
+    const a = run('session-a');
+    const b = run('session-b');
+    expect(a['gen_ai.turn.id']).toBe('session-a:1');
+    expect(b['gen_ai.turn.id']).toBe('session-b:1');
+    expect(a['gen_ai.step.id']).toBe('session-a:1:1');
+    expect(b['gen_ai.step.id']).toBe('session-b:1:1');
+    expect(a['gen_ai.turn.id']).not.toBe(b['gen_ai.turn.id']);
+    expect(a.trace_id).not.toBe(b.trace_id);
+  });
+
+  it('matches parallel tool results by call id and drops an orphan result', () => {
+    const state = newState();
+    const base = { sid: 'session-a', time: 10, data: { turn: 1, step: 1 } };
+    transformDshRecord({
+      ...base,
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { content: [
+          { type: 'tool-call', id: 'call-a', name: 'read', arguments: '{}' },
+          { type: 'tool-call', id: 'call-b', name: 'write', arguments: '{}' },
+        ] },
+      },
+    }, ClientType.Dsh, state);
+
+    const result = (callId: string) => transformDshRecord({
+      ...base,
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { source: { callId }, content: [{ type: 'text', text: 'ok' }] },
+      },
+    }, ClientType.Dsh, state);
+
+    expect(result('call-b')?.['gen_ai.tool.name']).toBe('write');
+    expect(result('call-a')?.['gen_ai.tool.name']).toBe('read');
+    expect(result('orphan')).toBeNull();
+  });
+
+  it('clears unfinished turn state at turn/end', () => {
+    const state = newState();
+    state.currentTurn = 1;
+    state.currentStep = 1;
+    state.cachedHeader = { model: 'old-model', provider: 'old-provider' };
+    state.inputMessages.push({ role: 'user', parts: [] });
+    state.toolNames.set('call', 'read');
+    state.requestStartTimes.set('session-a:1:1', 1);
+
+    transformDshRecord({
+      type: 'turn/end', sid: 'session-a', time: 2, data: { turn: 1 },
+    }, ClientType.Dsh, state);
+
+    expect(state.currentTurn).toBeUndefined();
+    expect(state.currentStep).toBeUndefined();
+    expect(state.cachedHeader).toBeUndefined();
+    expect(state.inputMessages).toEqual([]);
+    expect(state.toolNames.size).toBe(0);
+    expect(state.requestStartTimes.size).toBe(0);
   });
 });
 
