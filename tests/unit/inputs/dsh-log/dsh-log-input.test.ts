@@ -41,6 +41,10 @@ async function appendRecords(filePath: string, records: Record<string, unknown>[
   await fs.appendFile(filePath, records.map(record => JSON.stringify(record)).join('\n') + '\n');
 }
 
+function serializeRecords(records: Record<string, unknown>[]): string {
+  return records.map(record => JSON.stringify(record)).join('\n') + '\n';
+}
+
 describe('DshLogInput state isolation and restart recovery', () => {
   let tmpDir: string;
   let statePath: string;
@@ -63,6 +67,23 @@ describe('DshLogInput state isolation and restart recovery', () => {
       store,
       input: new TestDshLogInput({ stateStore: store, sessionDir: tmpDir }),
     };
+  }
+
+  type PersistedState = Record<string, {
+    lastOffset?: number;
+    extra?: Record<string, unknown>;
+  }>;
+
+  async function readPersistedState(): Promise<PersistedState> {
+    return JSON.parse(await fs.readFile(statePath, 'utf-8')) as PersistedState;
+  }
+
+  async function writePersistedState(state: PersistedState): Promise<void> {
+    await fs.writeFile(statePath, JSON.stringify(state));
+  }
+
+  function stateKey(filePath: string): string {
+    return `dsh-log:${filePath}`;
   }
 
   it('keeps aggregators isolated when two session files advance across poll cycles', async () => {
@@ -206,6 +227,125 @@ describe('DshLogInput state isolation and restart recovery', () => {
     await second.store.save();
     expect(await fs.readFile(statePath, 'utf-8')).toContain('dshLastHeaderOffset');
   });
+
+  it('persists a null header offset after a legacy scan finds no header', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      { type: 'turn/start', sid: 'session-a', time: 1, data: { turn: 1 } },
+      { type: 'step/start', sid: 'session-a', time: 2, data: { turn: 1, step: 1 } },
+      chunk('session-a', 3),
+      { type: 'turn/end', sid: 'session-a', time: 4, data: { turn: 1 } },
+    ]);
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+
+    const legacyState = await readPersistedState();
+    delete legacyState[stateKey(file)].extra?.dshLastHeaderOffset;
+    await writePersistedState(legacyState);
+
+    const second = await makeInput();
+    expect(await second.input.runCollect()).toEqual([]);
+    await second.store.save();
+    const migrated = await readPersistedState();
+    expect(migrated[stateKey(file)].extra?.dshLastHeaderOffset).toBeNull();
+  });
+
+  it.each(['out-of-range', 'wrong-record-type', 'session-mismatch'] as const)(
+    'drops an invalid last-header checkpoint (%s)',
+    async (variant) => {
+      const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+      const completedTurn = [
+        ...prefix('session-a', 'provider-a', 'first-prompt'),
+        chunk('session-a'),
+        { type: 'turn/end', sid: 'session-a', time: 12, data: { turn: 1 } },
+      ];
+      let mismatchedHeaderOffset: number | undefined;
+      if (variant === 'session-mismatch') {
+        mismatchedHeaderOffset = Buffer.byteLength(serializeRecords(completedTurn));
+        completedTurn.push({
+          type: 'request/header', sid: 'session-b', time: 13,
+          data: {
+            header: {
+              config: { provider: 'provider-b', model: 'provider-b-model' },
+              system: 'provider-b-system',
+            },
+          },
+        });
+      }
+      await appendRecords(file, completedTurn);
+
+      const first = await makeInput();
+      await first.input.runCollect();
+      await first.store.save();
+      const persisted = await readPersistedState();
+      const checkpoint = persisted[stateKey(file)];
+      const invalidOffset = variant === 'out-of-range'
+        ? (checkpoint.lastOffset ?? 0) + 1
+        : variant === 'wrong-record-type'
+          ? 0
+          : mismatchedHeaderOffset!;
+      checkpoint.extra!.dshLastHeaderOffset = invalidOffset;
+      await writePersistedState(persisted);
+
+      await appendRecords(file, [
+        { type: 'turn/start', sid: 'session-a', time: 20, data: { turn: 2 } },
+        { type: 'step/start', sid: 'session-a', time: 21, data: { turn: 2, step: 1 } },
+        chunk('session-a', 22, 2),
+        { type: 'turn/end', sid: 'session-a', time: 23, data: { turn: 2 } },
+      ]);
+
+      const second = await makeInput();
+      const entries = await second.input.runCollect();
+      const request = entries.find(entry => entry['event.name'] === 'llm.request');
+      expect(request).toBeDefined();
+      expect(request?.['gen_ai.request.model']).toBeUndefined();
+      expect(request?.['gen_ai.system_instructions']).toBeUndefined();
+      await second.store.save();
+      const recovered = await readPersistedState();
+      expect(recovered[stateKey(file)].extra?.dshLastHeaderOffset).toBeNull();
+    },
+  );
+
+  it.each(['truncated', 'replaced'] as const)(
+    'does not reuse a stale header after the session file is %s',
+    async (variant) => {
+      const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+      await appendRecords(file, [
+        ...prefix('session-old', 'old-provider', 'x'.repeat(10_000)),
+        chunk('session-old'),
+        { type: 'turn/end', sid: 'session-old', time: 12, data: { turn: 1 } },
+      ]);
+      const first = await makeInput();
+      await first.input.runCollect();
+      await first.store.save();
+
+      const replacement = serializeRecords([
+        { type: 'turn/start', sid: 'session-new', time: 20, data: { turn: 1 } },
+        { type: 'step/start', sid: 'session-new', time: 21, data: { turn: 1, step: 1 } },
+        chunk('session-new', 22),
+        { type: 'turn/end', sid: 'session-new', time: 23, data: { turn: 1 } },
+      ]);
+      if (variant === 'truncated') {
+        await fs.writeFile(file, replacement);
+      } else {
+        const replacementPath = path.join(tmpDir, 'replacement.jsonl');
+        await fs.writeFile(replacementPath, replacement);
+        await fs.rename(replacementPath, file);
+      }
+
+      const second = await makeInput();
+      const entries = await second.input.runCollect();
+      const request = entries.find(entry => entry['event.name'] === 'llm.request');
+      expect(request?.['gen_ai.session.id']).toBe('session-new');
+      expect(request?.['gen_ai.request.model']).toBeUndefined();
+      expect(request?.['gen_ai.system_instructions']).toBeUndefined();
+      await second.store.save();
+      const recovered = await readPersistedState();
+      expect(recovered[stateKey(file)].extra?.dshBoundSessionId).toBe('session-new');
+      expect(recovered[stateKey(file)].extra?.dshLastHeaderOffset).toBeNull();
+    },
+  );
 
   it('does not duplicate an already emitted request after restart replay', async () => {
     const file = path.join(tmpDir, 'dsh-session-a.jsonl');

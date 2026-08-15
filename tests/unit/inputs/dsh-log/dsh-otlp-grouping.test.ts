@@ -94,5 +94,9 @@ describe('DSH session-scoped turn ids in OTLP buffering', () => {
     expect(llmSpans).toHaveLength(2);
     expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
       .toEqual([1_000_000, 1_000_000]);
+    for (const span of captured) {
+      expect(span.resource.attributes['gen_ai.agent.type']).toBe('dsh');
+      expect(span.resource.attributes['gen_ai.agent.system']).toBe('dsh');
+    }
   });
 });

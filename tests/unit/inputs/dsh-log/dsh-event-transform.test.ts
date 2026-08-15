@@ -379,6 +379,46 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('continue');
   });
 
+  it('prefers a new turn header over the last session header', () => {
+    const state = newState();
+    state.lastKnownHeader = {
+      provider: 'old-provider',
+      model: 'old-model',
+      system: 'old-system',
+    };
+    transformDshRecord({
+      type: 'turn/start', sid: 'session-a', time: 1, data: { turn: 2 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 'session-a', time: 2, data: { turn: 2, step: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'request/header', sid: 'session-a', time: 3,
+      data: {
+        header: {
+          config: { provider: 'new-provider', model: 'new-model' },
+          system: 'new-system',
+        },
+      },
+    }, ClientType.Dsh, state);
+    const request = transformDshRecord({
+      type: 'assistant/chunk', sid: 'session-a', time: 4,
+      data: { turn: 2, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+
+    expect(request?.['gen_ai.provider.name']).toBe('new-provider');
+    expect(request?.['gen_ai.request.model']).toBe('new-model');
+    expect(request?.['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: 'new-system' },
+    ]);
+    expect(state.lastKnownHeader).toEqual({
+      provider: 'new-provider',
+      model: 'new-model',
+      system: 'new-system',
+      tools: undefined,
+    });
+  });
+
   it('still emits llm.request when no header has ever been observed', () => {
     const state = newState();
     transformDshRecord({
