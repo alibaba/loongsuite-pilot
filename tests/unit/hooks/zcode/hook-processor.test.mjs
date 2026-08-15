@@ -119,6 +119,63 @@ describe('buildEnvelopeRecords', () => {
     const agentRecord = records.find((r) => r['gen_ai.span.kind'] === 'agent');
     expect(agentRecord.span_id).toBe(expectedAgentSpanId);
   });
+
+  test('envelopes carry NO terminal finish_reasons — rollout is the authoritative terminal source', () => {
+    const records = buildEnvelopeRecords({
+      sessionId: stdinPayload.session_id,
+      turnId: stdinPayload.turnId,
+      traceId: toW3CTraceId(stdinPayload.traceId),
+      timestamp: stdinPayload.timestamp,
+      userId: 'test-user',
+      cwd: stdinPayload.cwd,
+    });
+    for (const r of records) {
+      expect(r['gen_ai.response.finish_reasons']).toBeUndefined();
+    }
+  });
+});
+
+// ─── native-ID resolution from the rollout transcript (review fix #1) ───
+
+describe('readLastRolloutRecord + resolveNativeIds via rollout transcript', () => {
+  test('readLastRolloutRecord returns the last complete model_io line', async () => {
+    const { readLastRolloutRecord } = await import('../../../../assets/hooks/zcode-hook-processor.mjs');
+    // The synthetic paired fixture's session has no live rollout file on this
+    // machine — the helper must fail open (null) rather than throw.
+    expect(readLastRolloutRecord('sess_definitely-not-on-this-machine')).toBeNull();
+  });
+
+  test('readLastRolloutRecord reads the last complete line from ~/.zcode/cli/rollout', async () => {
+    const os = await import('node:os');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { readLastRolloutRecord } = await import('../../../../assets/hooks/zcode-hook-processor.mjs');
+
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zcode-rollout-home-'));
+    const rolloutDir = path.join(tmpHome, '.zcode', 'cli', 'rollout');
+    fs.mkdirSync(rolloutDir, { recursive: true });
+    const sessionId = `sess_${path.basename(tmpHome)}`;
+    const lastRecord = {
+      type: 'model_io', sessionId,
+      turnId: 'turn_from_rollout', traceId: '11111111-2222-3333-4444-555555555555',
+      completedAt: '2026-07-13T02:39:27.000Z',
+    };
+    const olderRecord = { ...lastRecord, turnId: 'turn_older', requestId: 'r0' };
+    fs.writeFileSync(
+      path.join(rolloutDir, `model-io-sess_${sessionId}.jsonl`),
+      `${JSON.stringify(olderRecord)}\n${JSON.stringify({ ...lastRecord, requestId: 'r1' })}\n`,
+    );
+
+    try {
+      const rec = readLastRolloutRecord(sessionId, tmpHome);
+      expect(rec).toBeTruthy();
+      expect(rec.type).toBe('model_io');
+      expect(rec.turnId).toBe('turn_from_rollout');
+      expect(rec.traceId).toBe('11111111-2222-3333-4444-555555555555');
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── rollout writer timing vs hook fire (spec §1.5 #7) ───

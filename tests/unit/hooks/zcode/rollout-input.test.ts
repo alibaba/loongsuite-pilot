@@ -951,3 +951,132 @@ describe('ZCodeRolloutInput: iter6 state-loss regression', () => {
     expect(toolCallParts.length).toBe(0);
   });
 });
+
+// ─── scenario #14: no-next-record drain (review fix #2) ───
+// A last-in-batch model_io with toolCalls is buffered as pending. When the
+// NEXT batch starts a different turn, the old turn's buffered tool calls are
+// drained: tool.call records are emitted truthfully, and NO fabricated
+// tool.result is invented (the source never observed a result). Also covers
+// the canonical status enums on real results (success/failure) and the
+// canonical finish_reason normalization (tool-calls → tool_call).
+
+describe('ZCodeRolloutInput: no-next-record drain (review fix #2)', () => {
+  test('next batch on a different turn drains pending tool.calls WITHOUT fabricating tool.results', async () => {
+    const sid = 'sess_drain_001';
+    const turnA = 'turn_drain_a';
+    const turnB = 'turn_drain_b';
+    const traceId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    const lineA: Record<string, unknown> = {
+      type: 'model_io', sessionId: sid, turnId: turnA, traceId, requestId: 'req-a',
+      startedAt: '2026-07-13T08:00:00.000Z', completedAt: '2026-07-13T08:00:05.000Z',
+      model: { modelId: 'synthetic-model', providerId: 'synthetic-provider' },
+      request: { messages: [{ role: 'user', content: 'synthetic drain prompt' }], toolNames: ['Bash'] },
+      response: {
+        finishReason: 'tool-calls', modelId: 'synthetic-model', responseId: 'resp-a',
+        text: 'synthetic drain text',
+        toolCalls: [{ id: 'call_drain_1', name: 'Bash', input: { description: 'drain' } }],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      },
+    };
+    const lineB: Record<string, unknown> = {
+      type: 'model_io', sessionId: sid, turnId: turnB, traceId, requestId: 'req-b',
+      startedAt: '2026-07-13T08:01:00.000Z', completedAt: '2026-07-13T08:01:04.000Z',
+      model: { modelId: 'synthetic-model', providerId: 'synthetic-provider' },
+      request: { messages: [{ role: 'user', content: 'synthetic next turn' }], toolNames: [] },
+      response: {
+        finishReason: 'stop', modelId: 'synthetic-model', responseId: 'resp-b',
+        text: 'synthetic next turn answer', toolCalls: [],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      },
+    };
+
+    const statePath = path.join(tmpRoot, 'drain-state.json');
+    const all: any[] = [];
+    for (const line of [lineA, lineB]) {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      all.push(...buildable.buildEntriesFromRolloutLines([line]));
+      await ss.save();
+    }
+
+    // turnA's buffered tool.call IS emitted by the drain...
+    const drainedCall = all.find(
+      (r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_drain_1',
+    );
+    expect(drainedCall).toBeDefined();
+    expect(drainedCall['gen_ai.turn.id']).toBe(turnA);
+    expect(drainedCall['agent.source']).toBe('zcode-rollout');
+
+    // ...but NO tool.result is fabricated for it (result was never observed).
+    const fabricatedResult = all.find(
+      (r) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_drain_1',
+    );
+    expect(fabricatedResult).toBeUndefined();
+  });
+
+  test('paired real results use canonical success/failure statuses and normalized finish reasons', () => {
+    const sid = 'sess_enum_001';
+    const turnId = 'turn_enum_001';
+    const traceId = '01234567-89ab-cdef-0123-456789abcdef';
+    const line0: Record<string, unknown> = {
+      type: 'model_io', sessionId: sid, turnId, traceId, requestId: 'req-e0',
+      startedAt: '2026-07-13T09:00:00.000Z', completedAt: '2026-07-13T09:00:05.000Z',
+      model: { modelId: 'synthetic-model', providerId: 'synthetic-provider' },
+      request: { messages: [{ role: 'user', content: 'synthetic enum prompt' }], toolNames: ['Bash'] },
+      response: {
+        finishReason: 'tool-calls', modelId: 'synthetic-model', responseId: 'resp-e0',
+        text: 'synthetic enum text',
+        toolCalls: [
+          { id: 'call_ok_1', name: 'Bash', input: {} },
+          { id: 'call_err_1', name: 'Bash', input: {} },
+        ],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      },
+    };
+    const line1: Record<string, unknown> = {
+      type: 'model_io', sessionId: sid, turnId, traceId, requestId: 'req-e1',
+      startedAt: '2026-07-13T09:00:08.000Z', completedAt: '2026-07-13T09:00:12.000Z',
+      model: { modelId: 'synthetic-model', providerId: 'synthetic-provider' },
+      request: {
+        messages: [
+          { role: 'user', content: 'synthetic enum prompt' },
+          { role: 'tool', toolCallId: 'call_ok_1', content: 'fine' },
+          { role: 'tool', toolCallId: 'call_err_1', content: 'boom', isError: true },
+        ],
+        toolNames: [],
+      },
+      response: {
+        finishReason: 'stop', modelId: 'synthetic-model', responseId: 'resp-e1',
+        text: 'done', toolCalls: [],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      },
+    };
+
+    const input = new ZCodeRolloutInput({ stateStore, rolloutDir });
+    const buildable = input as unknown as {
+      buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+    };
+    const records = buildable.buildEntriesFromRolloutLines([line0, line1]);
+
+    const okResult = records.find(
+      (r) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_ok_1',
+    );
+    const errResult = records.find(
+      (r) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_err_1',
+    );
+    // Canonical enums per normalizeToolResultStatus — NOT ok/error/interrupted.
+    expect(okResult['tool.result.status']).toBe('success');
+    expect(errResult['tool.result.status']).toBe('failure');
+
+    // Raw 'tool-calls' finish reason normalized to canonical 'tool_call'.
+    const step0Resp = records.find(
+      (r) => r['event.name'] === 'llm.response' && r['gen_ai.step.id'].endsWith(':req-e0'),
+    );
+    expect(step0Resp['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+  });
+});

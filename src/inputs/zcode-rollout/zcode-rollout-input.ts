@@ -226,6 +226,12 @@ export class ZCodeRolloutInput extends BaseInput {
       if (fsid && ftid && first.type === 'model_io') {
         allEntries.push(...this.flushPendingToolCalls(fsid, ftid, first));
       }
+      // Drain turns that will never be paired: a new batch starting on a
+      // different turn means the old turn ended without consuming its last
+      // tool results in a follow-up model_io. Emit the buffered tool.call
+      // records WITHOUT fabricating results (review: "result not observed"
+      // must stay truthful; orphan tool.call synthesis lives in the flusher).
+      allEntries.push(...this.drainStalePendingTurns(fsid ? `${fsid}+${ftid ?? ''}` : ''));
     }
 
     for (let i = 0; i < lines.length; i++) {
@@ -239,7 +245,7 @@ export class ZCodeRolloutInput extends BaseInput {
       if (isLastInBatch && this.lineHasToolCalls(record)) {
         // Last line of batch with toolCalls: emit STEP+LLM but buffer the
         // toolCalls to state — they'll be paired with the next batch's first
-        // line (or emitted as placeholders if no next batch arrives).
+        // line (or drained without results if the turn ends here).
         allEntries.push(...this.buildEntriesFromRolloutLine(record, undefined, { skipToolCalls: true }));
         // Guard: only buffer when sid+tid are valid. Malformed/partial records
         // with empty sid/tid would otherwise share a single `:+` state key,
@@ -252,6 +258,72 @@ export class ZCodeRolloutInput extends BaseInput {
       }
     }
     return allEntries;
+  }
+
+  /**
+   * Registry of turns holding buffered (un-resulted) tool calls, persisted
+   * under one state key. Bounded to the most recent MAX_PENDING_TURNS entries
+   * so state cannot grow without limit across a long-lived daemon.
+   */
+  private getPendingTurnRegistry(): string[] {
+    const key = 'zcode-rollout:pending-turn-registry';
+    return (this.stateStore.get(key).extra?.turns as string[] | undefined) ?? [];
+  }
+
+  private setPendingTurnRegistry(turns: string[]): void {
+    const key = 'zcode-rollout:pending-turn-registry';
+    this.stateStore.update(key, { extra: { turns } });
+  }
+
+  /**
+   * Drain buffered tool calls for every pending turn EXCEPT the one currently
+   * active (currentTurnKey = `<sid>+<tid>`). Emits only the tool.call records
+   * — no fabricated tool.result (the source never observed a result). Clears
+   * the drained state keys and drops them from the registry.
+   */
+  private drainStalePendingTurns(currentTurnKey: string): AgentActivityEntry[] {
+    const registry = this.getPendingTurnRegistry();
+    if (registry.length === 0) return [];
+
+    const out: AgentActivityEntry[] = [];
+    const remaining: string[] = [];
+    for (const turnKey of registry) {
+      if (turnKey === currentTurnKey) {
+        remaining.push(turnKey);
+        continue;
+      }
+      const pending = this.stateStore.get(`zcode-rollout:pending-tool-calls:${turnKey}`)
+        .extra?.pending as PendingToolCall[] | undefined;
+      if (pending && pending.length > 0) {
+        for (const p of pending) {
+          out.push(buildAgentActivityEntry({
+            time_unix_nano: p.completedAtNs,
+            'event.id': crypto.randomUUID(),
+            'event.name': 'tool.call',
+            'gen_ai.session.id': p.sid,
+            'gen_ai.turn.id': p.tid,
+            'gen_ai.step.id': p.stepId,
+            'gen_ai.agent.type': ClientType.ZCode,
+            'gen_ai.agent.id': p.sid,
+            'gen_ai.agent.name': 'ZCode',
+            'agent.source': 'zcode-rollout',
+            'gen_ai.provider.name': p.providerId,
+            'gen_ai.tool.name': p.toolName,
+            'gen_ai.tool.call.id': p.callId,
+            'gen_ai.tool.call.exec.id': p.callId,
+            ...(p.args !== undefined && p.args !== null
+              ? { 'gen_ai.tool.call.arguments': p.args as JsonValue }
+              : {}),
+            trace_id: p.traceId,
+            span_id: deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId),
+            parent_span_id: p.stepSpanId,
+          }));
+        }
+      }
+      this.stateStore.update(`zcode-rollout:pending-tool-calls:${turnKey}`, { extra: { pending: [] } });
+    }
+    this.setPendingTurnRegistry(remaining);
+    return out;
   }
 
   private lineHasToolCalls(record: Record<string, unknown>): boolean {
@@ -302,6 +374,22 @@ export class ZCodeRolloutInput extends BaseInput {
       });
     }
     this.stateStore.update(key, { extra: { pending } });
+
+    // Register the turn so drainStalePendingTurns can close it out when a
+    // later batch moves on to another turn. Bounded: keep the most recent
+    // MAX_PENDING_TURNS; evicted turns are drained immediately without
+    // fabricated results.
+    const MAX_PENDING_TURNS = 32;
+    const turnKey = `${sid}+${tid}`;
+    const registry = this.getPendingTurnRegistry().filter((t) => t !== turnKey);
+    registry.push(turnKey);
+    if (registry.length > MAX_PENDING_TURNS) {
+      const evicted = registry.splice(0, registry.length - MAX_PENDING_TURNS);
+      for (const t of evicted) {
+        this.stateStore.update(`zcode-rollout:pending-tool-calls:${t}`, { extra: { pending: [] } });
+      }
+    }
+    this.setPendingTurnRegistry(registry);
   }
 
   /**
@@ -368,6 +456,11 @@ export class ZCodeRolloutInput extends BaseInput {
       }));
 
       if (result) {
+        // Real observed result only. Canonical statuses per the shared
+        // normalizer (entry-builder normalizeToolResultStatus):
+        // success | failure | cancelled | unknown. Never fabricate a result
+        // for the unmatched case (review fix) — the flusher's orphan-tool
+        // synthesis owns tool.call records whose result never arrived.
         const isError = result.isError === true;
         out.push(buildAgentActivityEntry({
           time_unix_nano: resultTimeNs,
@@ -387,7 +480,7 @@ export class ZCodeRolloutInput extends BaseInput {
           ...(result.content !== undefined
             ? { 'gen_ai.tool.call.result': result.content as JsonValue }
             : {}),
-          'tool.result.status': isError ? 'error' : 'ok',
+          'tool.result.status': isError ? 'failure' : 'success',
           ...(isError && result.content
             ? { 'error.type': 'ToolError', 'error.message': String(result.content).slice(0, 500) }
             : {}),
@@ -395,37 +488,16 @@ export class ZCodeRolloutInput extends BaseInput {
           span_id: toolSpanId,
           parent_span_id: p.stepSpanId,
         }));
-      } else {
-        // Placeholder tool.result (1ms duration) — paired result never arrived
-        // (e.g. LLM aborted before consuming tool output, or session was
-        // interrupted). Use 'interrupted' status to indicate this is NOT a
-        // real successful completion; the previous 'ok' was incorrectly
-        // normalized to 'unknown' and produced false audit semantics.
-        out.push(buildAgentActivityEntry({
-          time_unix_nano: resultTimeNs,
-          'event.id': crypto.randomUUID(),
-          'event.name': 'tool.result',
-          'gen_ai.session.id': p.sid,
-          'gen_ai.turn.id': p.tid,
-          'gen_ai.step.id': p.stepId,
-          'gen_ai.agent.type': ClientType.ZCode,
-          'gen_ai.agent.id': p.sid,
-          'gen_ai.agent.name': 'ZCode',
-          'agent.source': 'zcode-rollout',
-          'gen_ai.provider.name': p.providerId,
-          'gen_ai.tool.name': p.toolName,
-          'gen_ai.tool.call.id': p.callId,
-          'gen_ai.tool.call.exec.id': p.callId,
-          'tool.result.status': 'interrupted',
-          trace_id: p.traceId,
-          span_id: toolSpanId,
-          parent_span_id: p.stepSpanId,
-        }));
       }
+      // No else branch: an unobserved result is NOT emitted. Fabricated
+      // 1ms placeholder results (previous 'ok'/'interrupted' variants)
+      // invented audit data the source never recorded.
     }
 
-    // Clear pending — they've all been emitted (paired or placeholder).
+    // Clear pending and drop the turn from the registry.
     this.stateStore.update(key, { extra: { pending: [] } });
+    const drained = this.getPendingTurnRegistry().filter((t) => t !== `${sid}+${tid}`);
+    this.setPendingTurnRegistry(drained);
 
     // Sort flushed tool records by time so the flusher sees them in order.
     out.sort((a, b) => {
@@ -526,10 +598,13 @@ export class ZCodeRolloutInput extends BaseInput {
     // the flusher to treat this as a terminal signal, dropping late hook entries.
     // When completedAt exists but finishReason is missing → 'interrupted'.
     // When both are missing → 'end_turn' as safe neutral (not a terminal signal).
+    // Raw values are normalized to the canonical validator set via
+    // normalizeFinishReason() (e.g. tool_use/tool-calls → tool_call).
     const rawFinishReason = str(response.finishReason) ?? str(response.finish_reason);
     const hasCompletedAt = !!(str(record.completedAt) ?? str(record.completed_at));
-    const finishReason = rawFinishReason
-      ?? (hasCompletedAt ? 'interrupted' : 'end_turn');
+    const finishReason = normalizeFinishReason(
+      rawFinishReason ?? (hasCompletedAt ? 'interrupted' : 'end_turn'),
+    );
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
@@ -764,6 +839,7 @@ export class ZCodeRolloutInput extends BaseInput {
 
       const result = toolResultsByCallId.get(tc.id);
       if (result) {
+        // Real observed result only, canonical statuses (success | failure).
         const isError = result.isError === true;
         entries.push(buildAgentActivityEntry({
           time_unix_nano: toolResultTimeNs,
@@ -783,7 +859,7 @@ export class ZCodeRolloutInput extends BaseInput {
           ...(result.content !== undefined
             ? { 'gen_ai.tool.call.result': result.content as JsonValue }
             : {}),
-          'tool.result.status': isError ? 'error' : 'ok',
+          'tool.result.status': isError ? 'failure' : 'success',
           ...(isError && result.content
             ? { 'error.type': 'ToolError', 'error.message': String(result.content).slice(0, 500) }
             : {}),
@@ -791,31 +867,11 @@ export class ZCodeRolloutInput extends BaseInput {
           span_id: toolSpanId,
           parent_span_id: stepSpanId,
         }));
-      } else {
-        // Placeholder tool.result (1ms duration) — paired result not found in
-        // nextRecord (nextRecord absent or no matching tool msg). Use
-        // 'interrupted' status to indicate this is NOT a real completion.
-        entries.push(buildAgentActivityEntry({
-          time_unix_nano: toolResultTimeNs,
-          'event.id': crypto.randomUUID(),
-          'event.name': 'tool.result',
-          'gen_ai.session.id': sessionId,
-          'gen_ai.turn.id': turnId,
-          'gen_ai.step.id': stepId,
-          'gen_ai.agent.type': ClientType.ZCode,
-          'gen_ai.agent.id': sessionId,
-          'gen_ai.agent.name': 'ZCode',
-          'agent.source': 'zcode-rollout',
-          'gen_ai.provider.name': providerId,
-          'gen_ai.tool.name': tc.name,
-          'gen_ai.tool.call.id': tc.id,
-          'gen_ai.tool.call.exec.id': tc.id,
-          'tool.result.status': 'interrupted',
-          trace_id: traceId,
-          span_id: toolSpanId,
-          parent_span_id: stepSpanId,
-        }));
       }
+      // No else branch: unobserved results are NOT fabricated here. When the
+      // line is last-in-batch the caller buffers the toolCalls for cross-batch
+      // pairing; otherwise the flusher's orphan-tool synthesis covers the
+      // unpaired tool.call truthfully.
     }
 
     return this.sortEntries(entries);
@@ -941,4 +997,41 @@ function str(v: unknown): string | undefined {
 
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Canonical finish reasons accepted by scripts/validate-trace.mjs
+ * (VALID_FINISH_REASONS). Producers must emit exactly these values.
+ */
+const CANONICAL_FINISH_REASONS = new Set([
+  'stop', 'length', 'content_filter', 'tool_call', 'tool_calls',
+  'error', 'end_turn', 'max_tokens', 'interrupted', 'cancelled',
+]);
+
+/**
+ * Normalize a raw ZCode finish reason to the canonical validator set.
+ * Raw rollout values seen in the wild: 'tool_use', 'tool-calls',
+ * 'tool_calls', 'function_call' (all → 'tool_call'); 'aborted'/'cancelled'
+ * (→ 'interrupted'); 'max_output_tokens' (→ 'max_tokens'). Values already
+ * canonical pass through; unknown values fall back to 'stop'.
+ */
+function normalizeFinishReason(raw: string): string {
+  const v = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  switch (v) {
+    case 'tool_use':
+    case 'tool_calls':
+    case 'tool_call':
+    case 'function_call':
+    case 'function_calls':
+      return 'tool_call';
+    case 'aborted':
+    case 'cancelled':
+    case 'canceled':
+    case 'interrupted':
+      return 'interrupted';
+    case 'max_output_tokens':
+      return 'max_tokens';
+    default:
+      return CANONICAL_FINISH_REASONS.has(v) ? v : 'stop';
+  }
 }

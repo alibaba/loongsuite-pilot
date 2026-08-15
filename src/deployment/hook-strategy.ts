@@ -368,15 +368,27 @@ export class HookStrategy implements DeployStrategy {
       }
     }
 
-    // Disable ZCode hooks on undeploy so the agent stops firing hooks.
+    // Disable ZCode hooks on undeploy — but ONLY when no user-managed hook
+    // entries remain. Unconditionally writing enabled=false would also turn
+    // off third-party hooks that survive in the same config (review fix).
     if (def.id === 'zcode' && def.hook?.settingsPath) {
       try {
         const resolvedPath = resolveHome(def.hook.settingsPath);
         const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
-        if (existing?.hooks && typeof existing.hooks === 'object') {
-          (existing.hooks as Record<string, unknown>).enabled = false;
-          await writeJsonFile(resolvedPath, existing);
-          logger.info('zcode hooks.enabled set to false on undeploy', { settingsPath: resolvedPath });
+        const hooks = existing?.hooks;
+        if (hooks && typeof hooks === 'object' && !Array.isArray(hooks)) {
+          const hooksObj = hooks as Record<string, unknown>;
+          const hasRemainingHookEntries = Object.entries(hooksObj)
+            .filter(([k]) => k !== 'enabled')
+            .some(([, v]) =>
+              (Array.isArray(v) && v.length > 0) ||
+              (v && typeof v === 'object' && Object.values(v as Record<string, unknown>)
+                .some((vv) => Array.isArray(vv) && vv.length > 0)));
+          if (!hasRemainingHookEntries && hooksObj.enabled === true) {
+            hooksObj.enabled = false;
+            await writeJsonFile(resolvedPath, existing!);
+            logger.info('zcode hooks.enabled set to false on undeploy (no user hooks remain)', { settingsPath: resolvedPath });
+          }
         }
       } catch (err) {
         logger.warn('zcode hooks.enabled cleanup failed (non-blocking)', { error: String(err) });

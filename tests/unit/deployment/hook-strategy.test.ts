@@ -841,4 +841,99 @@ describe('HookStrategy', () => {
       expect(cliCall).toBeUndefined();
     });
   });
+
+  // ─── ZCode lifecycle: hooks.enabled management (review fix #3) ───
+
+  describe('zcode hooks.enabled lifecycle', () => {
+    const zcodeDef = (): AgentDefinition => makeDef({
+      id: 'zcode',
+      hook: {
+        settingsPath: '/home/.zcode/cli/config.json',
+        events: ['Stop'],
+        hookCommand: '/opt/pilot/hooks/zcode-loongsuite-pilot-hook.sh',
+        format: 'nested',
+        eventsRoot: 'events',
+        eventSubcommand: 'kebab-case',
+      },
+    });
+
+    it('deploy writes hooks.enabled=true on a fresh config, preserving other user keys', async () => {
+      const userConfig = { theme: 'dark', editor: { fontSize: 14 } };
+      vi.mocked(readJsonFile).mockResolvedValue({ ...userConfig } as any);
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(zcodeDef());
+
+      const writeCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('.zcode/cli/config.json'));
+      expect(writeCall).toBeTruthy();
+      const written = writeCall![1] as any;
+      expect(written.hooks.enabled).toBe(true);
+      // Preserves existing user config — only the flag is added.
+      expect(written.theme).toBe('dark');
+      expect(written.editor.fontSize).toBe(14);
+    });
+
+    it('deploy re-enables hooks when the user previously set enabled=false', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: { enabled: false } } as any);
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(zcodeDef());
+
+      const writeCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('.zcode/cli/config.json'));
+      expect(writeCall).toBeTruthy();
+      expect((writeCall![1] as any).hooks.enabled).toBe(true);
+    });
+
+    it('deploy skips the write when hooks.enabled is already true', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: { enabled: true } } as any);
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(zcodeDef());
+
+      const writeCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('.zcode/cli/config.json'));
+      expect(writeCall).toBeUndefined();
+    });
+
+    it('undeploy does NOT disable hooks when user-managed entries remain', async () => {
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      // After Pilot's Stop hook is removed, a third-party hook survives.
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          enabled: true,
+          events: {
+            PreToolUse: [{ command: '/usr/local/bin/user-own-hook.sh' }],
+          },
+        },
+      } as any);
+
+      const ok = await strategy.undeploy(zcodeDef());
+      expect(ok).toBe(true);
+
+      const writeCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('.zcode/cli/config.json'));
+      expect(writeCall).toBeUndefined();
+    });
+
+    it('undeploy disables hooks only when no user-managed entries remain', async () => {
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      // Pilot's Stop was the last hook — after removal, hooks.events is empty.
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: { enabled: true, events: {} },
+      } as any);
+
+      const ok = await strategy.undeploy(zcodeDef());
+      expect(ok).toBe(true);
+
+      const writeCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('.zcode/cli/config.json'));
+      expect(writeCall).toBeTruthy();
+      expect((writeCall![1] as any).hooks.enabled).toBe(false);
+    });
+  });
 });

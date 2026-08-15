@@ -2074,18 +2074,33 @@ try {
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
-  for (const [event, entries] of Object.entries(hooks)) {
-    if (!Array.isArray(entries)) continue;
-    const filtered = entries.filter(e => {
-      const cmd = e.command || '';
-      const nested = Array.isArray(e.hooks) ? e.hooks : [];
-      const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
-      if (hasMarker) changed = true;
-      return !hasMarker;
-    });
-    if (filtered.length === 0) { delete hooks[event]; changed = true; }
-    else hooks[event] = filtered;
+  // Clean one container of event arrays. Returns true when the container
+  // holds no entries afterwards (so the caller can delete it).
+  const cleanContainer = (container) => {
+    let emptied = true;
+    for (const [event, entries] of Object.entries(container)) {
+      if (!Array.isArray(entries)) { emptied = false; continue; }
+      const filtered = entries.filter(e => {
+        const cmd = e.command || '';
+        const nested = Array.isArray(e.hooks) ? e.hooks : [];
+        const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
+        if (hasMarker) changed = true;
+        return !hasMarker;
+      });
+      if (filtered.length === 0) { delete container[event]; changed = true; }
+      else { container[event] = filtered; emptied = false; }
+    }
+    return emptied;
+  };
+  // Nested layout (zcode): hooks.events.<Event> holds the arrays, so
+  // recurse into object children one level below hooks.
+  for (const [key, value] of Object.entries(hooks)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      if (cleanContainer(value)) { delete hooks[key]; }
+    }
   }
+  // Flat layout: hooks.<Event> arrays directly under hooks.
+  cleanContainer(hooks);
   if (changed) {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
     process.stdout.write('cleaned');
