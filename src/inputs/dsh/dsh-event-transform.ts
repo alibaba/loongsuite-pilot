@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 import { ClientType } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
 
 /**
@@ -20,6 +20,13 @@ const NS_PER_MS = 1_000_000n;
 const MAX_TURN_CORRELATIONS = 1_024;
 const MAX_INPUT_MESSAGES = 2_048;
 
+export interface DshRequestHeader {
+  model?: string;
+  provider?: string;
+  system?: string;
+  tools?: unknown[];
+}
+
 export interface DshEventAggregatorState {
   /** stepKey → finish reason.kind from `assistant/chunk type=finish`. */
   pendingFinish: Map<string, string>;
@@ -30,14 +37,11 @@ export interface DshEventAggregatorState {
    * llm.request when the dsh stream only emits `request/header`
    * once per turn). */
   currentStep: number | undefined;
-  /** Cached `request/header` config — dsh emits this once per turn,
-   * not once per step. Each step's llm.request reuses it. */
-  cachedHeader: {
-    model?: string;
-    provider?: string;
-    system?: string;
-    tools?: unknown[];
-  } | undefined;
+  /** Header seen in the current turn. */
+  currentTurnHeader: DshRequestHeader | undefined;
+  /** Most recent header in this session file. DSH may omit request/header
+   * when a later turn reuses an existing model client. */
+  lastKnownHeader: DshRequestHeader | undefined;
   /** stepKey set for which an llm.request has already been emitted,
    * so request/header arrival + step/start arrival don't double-emit. */
   emittedRequest: Set<string>;
@@ -63,7 +67,8 @@ export function newState(): DshEventAggregatorState {
     pendingFinish: new Map(),
     currentTurn: undefined,
     currentStep: undefined,
-    cachedHeader: undefined,
+    currentTurnHeader: undefined,
+    lastKnownHeader: undefined,
     emittedRequest: new Set(),
     requestStartTimes: new Map(),
     firstOutputTimes: new Map(),
@@ -77,7 +82,7 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.pendingFinish.clear();
   state.currentTurn = undefined;
   state.currentStep = undefined;
-  state.cachedHeader = undefined;
+  state.currentTurnHeader = undefined;
   state.emittedRequest.clear();
   state.requestStartTimes.clear();
   state.firstOutputTimes.clear();
@@ -143,6 +148,25 @@ function asObject(v: unknown): Record<string, unknown> | undefined {
 
 function asArray(v: unknown): unknown[] | undefined {
   return Array.isArray(v) ? v : undefined;
+}
+
+export function parseDshRequestHeader(
+  record: Record<string, unknown>,
+): DshRequestHeader | undefined {
+  if (record.type !== 'request/header') return undefined;
+  const data = asObject(record.data) ?? {};
+  const header = asObject(data.header) ?? {};
+  const config = asObject(header.config) ?? {};
+  return {
+    model: asString(config.model),
+    provider: asString(config.provider),
+    system: asString(header.system),
+    tools: asArray(header.tools),
+  };
+}
+
+function normalizeSystemInstructions(system: string | undefined): JsonValue | undefined {
+  return system === undefined ? undefined : [{ type: 'text', content: system }];
 }
 
 /** Map dsh content part array → GenAI parts (nested parts schema). */
@@ -266,13 +290,9 @@ export function transformDshRecord(
       return null;
 
     case 'request/header': {
-      const header = asObject(data.header) ?? {};
-      const config = asObject(header.config) ?? {};
-      const model = asString(config.model);
-      const provider = asString(config.provider);
-      const system = asString(header.system);
-      const tools = asArray(header.tools);
-      state.cachedHeader = { model, provider, system, tools };
+      const header = parseDshRequestHeader(record) ?? {};
+      state.currentTurnHeader = header;
+      state.lastKnownHeader = header;
       if (sid && turn !== undefined && step !== undefined) {
         setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
       }
@@ -315,20 +335,21 @@ export function transformDshRecord(
       // this point all input for the step has landed (user/message for
       // step 1, prior step's assistant/message + tool/result for steps
       // 2+). The accumulator snapshot is the LLM's input context.
-      if (key && state.cachedHeader) {
+      if (key) {
         if (!state.emittedRequest.has(key)) {
           if (state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
           state.emittedRequest.add(key);
           const inputSnapshot = state.inputMessages.slice();
-          const tools = state.cachedHeader.tools;
+          const header = state.currentTurnHeader ?? state.lastKnownHeader;
+          const tools = header?.tools;
           const requestTime = state.requestStartTimes.get(key) ?? time;
           return buildAgentActivityEntry({
             ...common,
             'time_unix_nano': msToNano(requestTime),
             'event.name': 'llm.request',
-            'gen_ai.provider.name': state.cachedHeader.provider,
-            'gen_ai.request.model': state.cachedHeader.model,
-            'gen_ai.system_instructions': state.cachedHeader.system,
+            'gen_ai.provider.name': header?.provider,
+            'gen_ai.request.model': header?.model,
+            'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
             'gen_ai.tool.definitions': tools && tools.length > 0
               ? toJsonValue(tools)
               : undefined,

@@ -223,7 +223,7 @@ describe('dsh-event-transform (real fixture)', () => {
     // transform must NOT fabricate a placeholder input.messages; the
     // field is omitted entirely (硬门禁 #3: 缺失则缺).
     const state = newState();
-    state.cachedHeader = { model: 'm', provider: 'p', system: 's' };
+    state.currentTurnHeader = { model: 'm', provider: 'p', system: 's' };
     state.currentTurn = 1;
     state.currentStep = 1;
     const r = transformDshRecord({
@@ -274,7 +274,7 @@ describe('dsh-event-transform (real fixture)', () => {
     const state = newState();
     state.currentTurn = 1;
     state.currentStep = 1;
-    state.cachedHeader = { model: 'm', provider: 'p' };
+    state.currentTurnHeader = { model: 'm', provider: 'p' };
     transformDshRecord({
       type: 'assistant/chunk', sid: 's', time: 1000,
       data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
@@ -301,8 +301,9 @@ describe('dsh-event-transform (real fixture)', () => {
     for (const r of requests) {
       // header.system is a non-empty string in the fixture
       expect(r['gen_ai.system_instructions']).toBeDefined();
-      const sys = r['gen_ai.system_instructions'];
-      expect(typeof sys === 'string' || typeof sys === 'object').toBe(true);
+      expect(r['gen_ai.system_instructions']).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'text' }),
+      ]));
       // header.tools has 25 entries in the fixture
       expect(r['gen_ai.tool.definitions']).toBeDefined();
       const tools = r['gen_ai.tool.definitions'] as unknown;
@@ -319,7 +320,7 @@ describe('dsh-event-transform (real fixture)', () => {
     // 缺失则缺: when request/header carries no `tools` field, the
     // transform must NOT fabricate an empty array or default value.
     const state = newState();
-    state.cachedHeader = { model: 'm', provider: 'p', system: 's' }; // no tools
+    state.currentTurnHeader = { model: 'm', provider: 'p', system: 's' }; // no tools
     state.currentTurn = 1;
     state.currentStep = 1;
     const r = transformDshRecord({
@@ -329,8 +330,71 @@ describe('dsh-event-transform (real fixture)', () => {
       data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
     }, ClientType.Dsh, state);
     expect(r).toBeDefined();
-    expect(r!['gen_ai.system_instructions']).toBe('s');
+    expect(r!['gen_ai.system_instructions']).toEqual([{ type: 'text', content: 's' }]);
     expect(r!['gen_ai.tool.definitions']).toBeUndefined();
+  });
+
+  it('reuses the last session header when a later turn omits request/header', () => {
+    const state = newState();
+    transformDshRecord({
+      type: 'turn/start', sid: 'session-a', time: 1, data: { turn: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 'session-a', time: 2, data: { turn: 1, step: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'request/header', sid: 'session-a', time: 3,
+      data: {
+        header: {
+          config: { provider: 'deepseek-official', model: 'deepseek-model' },
+          system: 'follow the session instructions',
+        },
+      },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'turn/end', sid: 'session-a', time: 4, data: { turn: 1 },
+    }, ClientType.Dsh, state);
+
+    transformDshRecord({
+      type: 'turn/start', sid: 'session-a', time: 5, data: { turn: 2 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 'session-a', time: 6, data: { turn: 2, step: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'user/message', sid: 'session-a', time: 7,
+      data: { turn: 2, content: [{ type: 'text', text: 'continue' }] },
+    }, ClientType.Dsh, state);
+    const request = transformDshRecord({
+      type: 'assistant/chunk', sid: 'session-a', time: 8,
+      data: { turn: 2, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+
+    expect(request?.['event.name']).toBe('llm.request');
+    expect(request?.['gen_ai.provider.name']).toBe('deepseek-official');
+    expect(request?.['gen_ai.request.model']).toBe('deepseek-model');
+    expect(request?.['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: 'follow the session instructions' },
+    ]);
+    expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('continue');
+  });
+
+  it('still emits llm.request when no header has ever been observed', () => {
+    const state = newState();
+    transformDshRecord({
+      type: 'turn/start', sid: 'session-a', time: 1, data: { turn: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 'session-a', time: 2, data: { turn: 1, step: 1 },
+    }, ClientType.Dsh, state);
+    const request = transformDshRecord({
+      type: 'assistant/chunk', sid: 'session-a', time: 3,
+      data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+
+    expect(request?.['event.name']).toBe('llm.request');
+    expect(request?.['gen_ai.request.model']).toBeUndefined();
+    expect(request?.['gen_ai.system_instructions']).toBeUndefined();
   });
 });
 
@@ -395,7 +459,8 @@ describe('dsh-event-transform (correlation isolation)', () => {
     const state = newState();
     state.currentTurn = 1;
     state.currentStep = 1;
-    state.cachedHeader = { model: 'old-model', provider: 'old-provider' };
+    state.currentTurnHeader = { model: 'old-model', provider: 'old-provider' };
+    state.lastKnownHeader = state.currentTurnHeader;
     state.inputMessages.push({ role: 'user', parts: [] });
     state.toolNames.set('call', 'read');
     state.requestStartTimes.set('session-a:1:1', 1);
@@ -407,7 +472,8 @@ describe('dsh-event-transform (correlation isolation)', () => {
 
     expect(state.currentTurn).toBeUndefined();
     expect(state.currentStep).toBeUndefined();
-    expect(state.cachedHeader).toBeUndefined();
+    expect(state.currentTurnHeader).toBeUndefined();
+    expect(state.lastKnownHeader).toEqual({ model: 'old-model', provider: 'old-provider' });
     expect(state.inputMessages).toEqual([]);
     expect(state.toolNames.size).toBe(0);
     expect(state.requestStartTimes.size).toBe(0);

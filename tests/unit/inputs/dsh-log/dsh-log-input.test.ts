@@ -12,23 +12,28 @@ class TestDshLogInput extends DshLogInput {
   }
 }
 
-function prefix(sid: string, provider: string, prompt: string): Record<string, unknown>[] {
+function prefix(
+  sid: string,
+  provider: string,
+  prompt: string,
+  system = `${provider}-system`,
+): Record<string, unknown>[] {
   return [
     { type: 'turn/start', sid, time: 1, data: { turn: 1 } },
     { type: 'step/start', sid, time: 2, data: { turn: 1, step: 1 } },
     { type: 'user/message', sid, time: 3, data: { content: [{ type: 'text', text: prompt }] } },
     {
       type: 'request/header', sid, time: 4,
-      data: { header: { config: { provider, model: `${provider}-model` } } },
+      data: { header: { config: { provider, model: `${provider}-model` }, system } },
     },
     { type: 'request/context', sid, time: 5, data: { provider, model: `${provider}-model` } },
   ];
 }
 
-function chunk(sid: string, time = 10): Record<string, unknown> {
+function chunk(sid: string, time = 10, turn = 1, step = 1): Record<string, unknown> {
   return {
     type: 'assistant/chunk', sid, time,
-    data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+    data: { turn, step, chunk: { type: 'block-start' } },
   };
 }
 
@@ -100,6 +105,106 @@ describe('DshLogInput state isolation and restart recovery', () => {
 
     expect(request?.['gen_ai.provider.name']).toBe('provider-a');
     expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
+  });
+
+  it('restores the last header after a completed turn and pairs a headerless next turn', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'first-prompt', 'private-system'),
+      chunk('session-a'),
+      {
+        type: 'assistant/message', sid: 'session-a', time: 11,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            id: 'response-1',
+            content: [{ type: 'text', text: 'first answer' }],
+            source: { provider: 'provider-a', model: 'provider-a-model' },
+          },
+        },
+      },
+      { type: 'turn/end', sid: 'session-a', time: 12, data: { turn: 1 } },
+    ]);
+
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+    const persisted = await fs.readFile(statePath, 'utf-8');
+    expect(persisted).toContain('dshLastHeaderOffset');
+    expect(persisted).not.toContain('private-system');
+    expect(persisted).not.toContain('first-prompt');
+
+    await appendRecords(file, [
+      { type: 'turn/start', sid: 'session-a', time: 20, data: { turn: 2 } },
+      { type: 'step/start', sid: 'session-a', time: 21, data: { turn: 2, step: 1 } },
+      {
+        type: 'user/message', sid: 'session-a', time: 22,
+        data: { turn: 2, content: [{ type: 'text', text: 'continue-session' }] },
+      },
+      { type: 'request/context', sid: 'session-a', time: 23, data: { turn: 2, step: 1 } },
+      chunk('session-a', 24, 2),
+      {
+        type: 'assistant/message', sid: 'session-a', time: 25,
+        data: {
+          turn: 2,
+          step: 1,
+          message: {
+            id: 'response-2',
+            content: [{ type: 'text', text: 'second answer' }],
+            source: { provider: 'provider-a', model: 'provider-a-model' },
+          },
+        },
+      },
+      { type: 'turn/end', sid: 'session-a', time: 26, data: { turn: 2 } },
+    ]);
+
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    expect(entries.map(entry => entry['event.name'])).toEqual([
+      'other',
+      'llm.request',
+      'llm.response',
+    ]);
+    const request = entries[1];
+    expect(request['gen_ai.provider.name']).toBe('provider-a');
+    expect(request['gen_ai.request.model']).toBe('provider-a-model');
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: 'private-system' },
+    ]);
+    expect(JSON.stringify(request['gen_ai.input.messages'])).toContain('continue-session');
+  });
+
+  it('migrates a legacy checkpoint by locating the last header once', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'first-prompt'),
+      chunk('session-a'),
+      { type: 'turn/end', sid: 'session-a', time: 12, data: { turn: 1 } },
+    ]);
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+
+    const rawState = JSON.parse(await fs.readFile(statePath, 'utf-8')) as Record<
+      string,
+      { extra?: Record<string, unknown> }
+    >;
+    const stateKey = Object.keys(rawState)[0];
+    delete rawState[stateKey].extra?.dshLastHeaderOffset;
+    await fs.writeFile(statePath, JSON.stringify(rawState));
+    await appendRecords(file, [
+      { type: 'turn/start', sid: 'session-a', time: 20, data: { turn: 2 } },
+      { type: 'step/start', sid: 'session-a', time: 21, data: { turn: 2, step: 1 } },
+      chunk('session-a', 22, 2),
+    ]);
+
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    expect(entries.find(entry => entry['event.name'] === 'llm.request')?.['gen_ai.request.model'])
+      .toBe('provider-a-model');
+    await second.store.save();
+    expect(await fs.readFile(statePath, 'utf-8')).toContain('dshLastHeaderOffset');
   });
 
   it('does not duplicate an already emitted request after restart replay', async () => {

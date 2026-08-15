@@ -12,6 +12,7 @@ import {
 import {
   transformDshRecord,
   newState,
+  parseDshRequestHeader,
   type DshEventAggregatorState,
 } from '../dsh/dsh-event-transform.js';
 
@@ -28,6 +29,7 @@ interface DshFileRuntimeState {
   inode: number;
   boundSessionId?: string;
   activeTurnStartOffset?: number;
+  lastHeaderOffset?: number;
 }
 
 export interface DshLogInputOptions
@@ -61,9 +63,9 @@ export class DshLogInput extends BaseSessionInput {
   }
 
   /**
-   * DSH keeps cross-line request/tool state, so its checkpoint must restore the
-   * active turn after a Pilot restart. This DSH-local loop records byte-accurate
-   * turn boundaries without changing BaseSessionInput for other agents.
+   * DSH keeps cross-line request/tool state and may reuse one request header
+   * across completed turns. This DSH-local loop records byte-accurate recovery
+   * offsets without changing BaseSessionInput for other agents.
    */
   protected async collect(): Promise<AgentActivityEntry[]> {
     const files = await this.discoverSessionFiles();
@@ -198,6 +200,29 @@ export class DshLogInput extends BaseSessionInput {
         : undefined,
     };
 
+    const hasHeaderOffset = Object.prototype.hasOwnProperty.call(extra, 'dshLastHeaderOffset');
+    if (typeof extra.dshLastHeaderOffset === 'number') {
+      const headerOffset = extra.dshLastHeaderOffset;
+      const headerRecord = Number.isInteger(headerOffset) && headerOffset >= 0 && headerOffset < offset
+        ? await this.readRecordAtOffset(filePath, headerOffset, offset)
+        : undefined;
+      if (!headerRecord || !this.restoreHeader(headerRecord, headerOffset, runtime)) {
+        logger.warn('invalid dsh last-header checkpoint; dropping cached header', {
+          file: filePath,
+          headerOffset,
+        });
+      }
+    } else if (!hasHeaderOffset && offset > 0) {
+      const legacyHeader = await this.findLegacyLastHeader(
+        filePath,
+        offset,
+        runtime.boundSessionId,
+      );
+      if (legacyHeader) {
+        this.restoreHeader(legacyHeader.record, legacyHeader.offset, runtime);
+      }
+    }
+
     let replayStart: number | undefined;
     if (
       extra.dshStateVersion === DSH_STATE_VERSION
@@ -250,6 +275,9 @@ export class DshLogInput extends BaseSessionInput {
     if (record.type === 'turn/start' && sid) {
       runtime.activeTurnStartOffset = lineOffset;
     }
+    if (sid && parseDshRequestHeader(record)) {
+      runtime.lastHeaderOffset = lineOffset;
+    }
     const entry = transformDshRecord(record, ClientType.Dsh, runtime.aggregator);
     if (record.type === 'turn/end') {
       runtime.activeTurnStartOffset = undefined;
@@ -267,9 +295,102 @@ export class DshLogInput extends BaseSessionInput {
         inode,
         dshStateVersion: DSH_STATE_VERSION,
         dshActiveTurnStartOffset: runtime?.activeTurnStartOffset ?? null,
+        dshLastHeaderOffset: runtime?.lastHeaderOffset ?? null,
         dshBoundSessionId: runtime?.boundSessionId ?? null,
       },
     });
+  }
+
+  private restoreHeader(
+    record: Record<string, unknown>,
+    lineOffset: number,
+    runtime: DshFileRuntimeState,
+  ): boolean {
+    const sid = typeof record.sid === 'string' && record.sid.length > 0
+      ? record.sid
+      : undefined;
+    const header = parseDshRequestHeader(record);
+    if (!sid || !header || (runtime.boundSessionId && runtime.boundSessionId !== sid)) {
+      return false;
+    }
+    runtime.boundSessionId ??= sid;
+    runtime.lastHeaderOffset = lineOffset;
+    runtime.aggregator.lastKnownHeader = header;
+    return true;
+  }
+
+  private async readRecordAtOffset(
+    filePath: string,
+    lineOffset: number,
+    committedOffset: number,
+  ): Promise<Record<string, unknown> | undefined> {
+    const length = Math.min(LEGACY_SCAN_BYTES, committedOffset - lineOffset);
+    if (length <= 0) return undefined;
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const bytes = Buffer.alloc(length);
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const result = await handle.read(
+          bytes,
+          bytesRead,
+          length - bytesRead,
+          lineOffset + bytesRead,
+        );
+        if (result.bytesRead <= 0) break;
+        bytesRead += result.bytesRead;
+      }
+      const newline = bytes.subarray(0, bytesRead).indexOf(0x0a);
+      if (newline < 0) return undefined;
+      return JSON.parse(bytes.subarray(0, newline).toString('utf-8')) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async findLegacyLastHeader(
+    filePath: string,
+    offset: number,
+    boundSessionId?: string,
+  ): Promise<{ offset: number; record: Record<string, unknown> } | undefined> {
+    const start = Math.max(0, offset - LEGACY_SCAN_BYTES);
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const bytes = Buffer.alloc(offset - start);
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+      const data = bytes.subarray(0, bytesRead);
+      let cursor = 0;
+      if (start > 0) {
+        const newline = data.indexOf(0x0a);
+        if (newline < 0) return undefined;
+        cursor = newline + 1;
+      }
+      let lastHeader: { offset: number; record: Record<string, unknown> } | undefined;
+      while (cursor < data.length) {
+        const newline = data.indexOf(0x0a, cursor);
+        if (newline < 0) break;
+        const lineOffset = start + cursor;
+        try {
+          const record = JSON.parse(data.subarray(cursor, newline).toString('utf-8')) as Record<string, unknown>;
+          const sid = typeof record.sid === 'string' && record.sid.length > 0
+            ? record.sid
+            : undefined;
+          if (
+            parseDshRequestHeader(record)
+            && sid
+            && (!boundSessionId || boundSessionId === sid)
+          ) {
+            lastHeader = { offset: lineOffset, record };
+          }
+        } catch { /* Ignore malformed historical lines during bounded migration. */ }
+        cursor = newline + 1;
+      }
+      return lastHeader;
+    } finally {
+      await handle.close();
+    }
   }
 
   private async findLegacyActiveTurnStart(filePath: string, offset: number): Promise<number | undefined> {
@@ -279,8 +400,12 @@ export class DshLogInput extends BaseSessionInput {
       const bytes = Buffer.alloc(offset - start);
       const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
       const data = bytes.subarray(0, bytesRead);
-      let cursor = start === 0 ? 0 : data.indexOf(0x0a) + 1;
-      if (cursor <= 0) return undefined;
+      let cursor = 0;
+      if (start > 0) {
+        const newline = data.indexOf(0x0a);
+        if (newline < 0) return undefined;
+        cursor = newline + 1;
+      }
       let lastBoundary: { type: string; offset: number } | undefined;
       while (cursor < data.length) {
         const newline = data.indexOf(0x0a, cursor);
