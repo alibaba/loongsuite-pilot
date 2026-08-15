@@ -62,6 +62,8 @@ export interface AgentActivityEntry {
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
   'gen_ai.response.finish_reasons'?: string[];
+  /** Request-to-first-native-output latency in nanoseconds. */
+  'gen_ai.response.time_to_first_token'?: number;
   'gen_ai.usage.input_tokens'?: number;
   'gen_ai.usage.output_tokens'?: number;
   'gen_ai.usage.cache_read.input_tokens'?: number;

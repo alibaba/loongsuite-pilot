@@ -131,12 +131,13 @@ Important fields:
 |-------|---------|
 | `id` | Stable agent ID used in config, output, and admission control. |
 | `displayName` | Human-readable agent name. |
-| `deployMode` | `hook`, `plugin-inject`, `directory-plugin`, or `plugin-probe`. |
+| `deployMode` | `hook`, `plugin-inject`, `directory-plugin`, `plugin-probe`, or the built-in DSH-specific `dsh-yaml-patch`. |
 | `detection.paths` | Local paths that indicate the agent is installed. |
 | `detection.commands` | Commands that indicate the agent is installed. |
 | `hook` | Hook settings path, events, command, and format. Required for hook mode. |
 | `pluginInject` | Config paths and plugin spec. Required for plugin injection mode. |
 | `directoryPlugin` | Managed source and target directories. Required for native directory plugin mode. |
+| `dshYamlPatch` | DSH plugin source, entry ID, and ownership marker. Required only for the built-in `dsh-yaml-patch` mode. |
 | `input` | Source type and source location for the collector input. |
 
 `pluginInject.configKey` can target an array field other than the default

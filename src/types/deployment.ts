@@ -284,6 +284,8 @@ export interface DeployedAgentRecord {
   lastRemoteCheckedAt?: string;
   /** Resolved external target for managed directory plugins. */
   targetDir?: string;
+  /** Resolved cordis.patch.yml path used by the DSH integration lifecycle. */
+  dshPatchPath?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

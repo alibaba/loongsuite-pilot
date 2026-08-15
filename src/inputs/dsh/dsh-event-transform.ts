@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 import { ClientType } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
 
 /**
@@ -17,6 +17,15 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
  */
 
 const NS_PER_MS = 1_000_000n;
+const MAX_TURN_CORRELATIONS = 1_024;
+const MAX_INPUT_MESSAGES = 2_048;
+
+export interface DshRequestHeader {
+  model?: string;
+  provider?: string;
+  system?: string;
+  tools?: unknown[];
+}
 
 export interface DshEventAggregatorState {
   /** stepKey → finish reason.kind from `assistant/chunk type=finish`. */
@@ -28,17 +37,20 @@ export interface DshEventAggregatorState {
    * llm.request when the dsh stream only emits `request/header`
    * once per turn). */
   currentStep: number | undefined;
-  /** Cached `request/header` config — dsh emits this once per turn,
-   * not once per step. Each step's llm.request reuses it. */
-  cachedHeader: {
-    model?: string;
-    provider?: string;
-    system?: string;
-    tools?: unknown[];
-  } | undefined;
+  /** Header seen in the current turn. */
+  currentTurnHeader: DshRequestHeader | undefined;
+  /** Most recent header in this session file. DSH may omit request/header
+   * when a later turn reuses an existing model client. */
+  lastKnownHeader: DshRequestHeader | undefined;
   /** stepKey set for which an llm.request has already been emitted,
    * so request/header arrival + step/start arrival don't double-emit. */
   emittedRequest: Set<string>;
+  /** stepKey → selected model request boundary in milliseconds. */
+  requestStartTimes: Map<string, number>;
+  /** stepKey → first native streamed output delta timestamp in milliseconds. */
+  firstOutputTimes: Map<string, number>;
+  /** Native tool call id → tool name, used to complete tool.result events. */
+  toolNames: Map<string, string>;
   /** Accumulated conversation messages for the next llm.request's
    * `gen_ai.input.messages`. Reset on `turn/start`. Pushed by
    * `user/message`, `assistant/message` (post-emit), and `tool/result`
@@ -46,6 +58,8 @@ export interface DshEventAggregatorState {
    * of a step arrives — at that point all input for the step has
    * landed (user prompt + any prior step's assistant msg + tool result). */
   inputMessages: unknown[];
+  /** Once true, omit input.messages instead of presenting a truncated history. */
+  inputMessagesOverflowed: boolean;
 }
 
 export function newState(): DshEventAggregatorState {
@@ -53,10 +67,59 @@ export function newState(): DshEventAggregatorState {
     pendingFinish: new Map(),
     currentTurn: undefined,
     currentStep: undefined,
-    cachedHeader: undefined,
+    currentTurnHeader: undefined,
+    lastKnownHeader: undefined,
     emittedRequest: new Set(),
+    requestStartTimes: new Map(),
+    firstOutputTimes: new Map(),
+    toolNames: new Map(),
     inputMessages: [],
+    inputMessagesOverflowed: false,
   };
+}
+
+function resetTurnState(state: DshEventAggregatorState): void {
+  state.pendingFinish.clear();
+  state.currentTurn = undefined;
+  state.currentStep = undefined;
+  state.currentTurnHeader = undefined;
+  state.emittedRequest.clear();
+  state.requestStartTimes.clear();
+  state.firstOutputTimes.clear();
+  state.toolNames.clear();
+  state.inputMessages = [];
+  state.inputMessagesOverflowed = false;
+}
+
+function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
+  if (!map.has(key) && map.size >= MAX_TURN_CORRELATIONS) return;
+  map.set(key, value);
+}
+
+function addInputMessage(state: DshEventAggregatorState, message: unknown): void {
+  if (state.inputMessagesOverflowed) return;
+  if (state.inputMessages.length >= MAX_INPUT_MESSAGES) {
+    state.inputMessages = [];
+    state.inputMessagesOverflowed = true;
+    return;
+  }
+  state.inputMessages.push(message);
+}
+
+function rememberToolNames(content: unknown, state: DshEventAggregatorState): void {
+  for (const part of asArray(content) ?? []) {
+    const value = asObject(part);
+    if (!value || asString(value.type) !== 'tool-call') continue;
+    const callId = asString(value.id);
+    const name = asString(value.name);
+    if (callId && name) setBounded(state.toolNames, callId, name);
+  }
+}
+
+function isStreamedOutputDelta(chunkType: string | undefined): boolean {
+  return chunkType === 'reasoning-delta'
+    || chunkType === 'text-delta'
+    || chunkType === 'tool-call-delta';
 }
 
 function stepKey(sid: string, turn: number, step: number): string {
@@ -85,6 +148,33 @@ function asObject(v: unknown): Record<string, unknown> | undefined {
 
 function asArray(v: unknown): unknown[] | undefined {
   return Array.isArray(v) ? v : undefined;
+}
+
+export function parseDshRequestHeader(
+  record: Record<string, unknown>,
+): DshRequestHeader | undefined {
+  if (record.type !== 'request/header') return undefined;
+  const data = asObject(record.data);
+  if (!data) return undefined;
+  const header = asObject(data.header);
+  if (!header) return undefined;
+  const config = asObject(header.config);
+  const parsed: DshRequestHeader = {
+    model: asString(config?.model),
+    provider: asString(config?.provider),
+    system: asString(header.system),
+    tools: asArray(header.tools),
+  };
+  return parsed.model !== undefined
+    || parsed.provider !== undefined
+    || parsed.system !== undefined
+    || parsed.tools !== undefined
+    ? parsed
+    : undefined;
+}
+
+function normalizeSystemInstructions(system: string | undefined): JsonValue | undefined {
+  return system === undefined ? undefined : [{ type: 'text', content: system }];
 }
 
 /** Map dsh content part array → GenAI parts (nested parts schema). */
@@ -164,8 +254,10 @@ export function transformDshRecord(
   if (turn === undefined) turn = state.currentTurn;
   let step = asNumber(data.step);
   if (step === undefined) step = state.currentStep;
-  const turnId = turn !== undefined ? String(turn) : undefined;
-  const stepId = turn !== undefined && step !== undefined ? `${turn}.${step}` : undefined;
+  // Native DSH turn numbers restart in every session. Include sid locally so
+  // the common OTLP flusher never merges `turn:1` from unrelated sessions.
+  const turnId = sid && turn !== undefined ? `${sid}:${turn}` : undefined;
+  const stepId = turnId && step !== undefined ? `${turnId}:${step}` : undefined;
   const traceId = sid && turn !== undefined ? traceIdFor(sid, turn) : undefined;
 
   const common = {
@@ -186,63 +278,95 @@ export function transformDshRecord(
     case 'agent/inbox/spliced':
     case 'session/title':
     case 'session/title-llm-request':
-    case 'request/context':
-    case 'turn/end':
     case 'step/end':
       return null;
 
     case 'turn/start':
+      resetTurnState(state);
       state.currentTurn = turn;
-      state.inputMessages = [];
+      return null;
+
+    case 'turn/end':
+      resetTurnState(state);
       return null;
 
     case 'step/start':
       state.currentStep = step;
+      if (sid && turn !== undefined && step !== undefined) {
+        setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
+      }
       return null;
 
     case 'request/header': {
-      const header = asObject(data.header) ?? {};
-      const config = asObject(header.config) ?? {};
-      const model = asString(config.model);
-      const provider = asString(config.provider);
-      const system = asString(header.system);
-      const tools = asArray(header.tools);
-      state.cachedHeader = { model, provider, system, tools };
+      const header = parseDshRequestHeader(record);
+      if (!header) return null;
+      state.currentTurnHeader = header;
+      state.lastKnownHeader = header;
+      if (sid && turn !== undefined && step !== undefined) {
+        setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
+      }
+      return null;
+    }
+
+    case 'request/context': {
+      if (sid && turn !== undefined && step !== undefined) {
+        // request/context is the closest native signal to provider dispatch and
+        // intentionally overrides the earlier header / step-start fallback.
+        setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
+      }
       return null;
     }
 
     case 'assistant/chunk': {
       const chunk = asObject(data.chunk) ?? {};
       const chunkType = asString(chunk.type);
+      const key = sid && turn !== undefined && step !== undefined
+        ? stepKey(sid, turn, step)
+        : undefined;
+
+      // DSH exposes native stream deltas for reasoning, text, and tool calls.
+      // Keep the first such source timestamp so the eventual llm.response can
+      // report TTFT relative to request/context (or the step/start fallback).
+      // block-start is intentionally excluded because it is stream metadata,
+      // not a generated token. Record this before returning llm.request so a
+      // stream whose first record is already a delta does not lose its TTFT.
+      if (key && isStreamedOutputDelta(chunkType) && !state.firstOutputTimes.has(key)) {
+        setBounded(state.firstOutputTimes, key, time);
+      }
+
+      if (chunkType === 'finish' && key) {
+        const reason = asObject(chunk.reason) ?? {};
+        const kind = asString(reason.kind);
+        if (kind) setBounded(state.pendingFinish, key, kind);
+      }
+
       // Emit llm.request on the first chunk of a step (any subtype) — at
       // this point all input for the step has landed (user/message for
       // step 1, prior step's assistant/message + tool/result for steps
       // 2+). The accumulator snapshot is the LLM's input context.
-      if (sid && turn !== undefined && step !== undefined && state.cachedHeader) {
-        const key = stepKey(sid, turn, step);
+      if (key) {
         if (!state.emittedRequest.has(key)) {
+          if (state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
           state.emittedRequest.add(key);
           const inputSnapshot = state.inputMessages.slice();
-          const tools = state.cachedHeader.tools;
+          const header = state.currentTurnHeader ?? state.lastKnownHeader;
+          const tools = header?.tools;
+          const requestTime = state.requestStartTimes.get(key) ?? time;
           return buildAgentActivityEntry({
             ...common,
+            'time_unix_nano': msToNano(requestTime),
             'event.name': 'llm.request',
-            'gen_ai.provider.name': state.cachedHeader.provider,
-            'gen_ai.request.model': state.cachedHeader.model,
-            'gen_ai.system_instructions': state.cachedHeader.system,
+            'gen_ai.provider.name': header?.provider,
+            'gen_ai.request.model': header?.model,
+            'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
             'gen_ai.tool.definitions': tools && tools.length > 0
               ? toJsonValue(tools)
               : undefined,
-            'gen_ai.input.messages': inputSnapshot.length > 0
+            'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
               ? toJsonValue(inputSnapshot)
               : undefined,
           });
         }
-      }
-      if (chunkType === 'finish' && sid && turn !== undefined && step !== undefined) {
-        const reason = asObject(chunk.reason) ?? {};
-        const kind = asString(reason.kind);
-        if (kind) state.pendingFinish.set(stepKey(sid, turn, step), kind);
       }
       return null;
     }
@@ -251,7 +375,7 @@ export function transformDshRecord(
       const content = data.content;
       const msgId = asString((asObject(data) ?? {}).id);
       const userParts = normalizeUserParts(content);
-      state.inputMessages.push({ role: 'user', parts: userParts });
+      addInputMessage(state, { role: 'user', parts: userParts });
       return buildAgentActivityEntry({
         ...common,
         'event.name': 'other',
@@ -277,11 +401,21 @@ export function transformDshRecord(
       const reasoningTokens = asNumber(usage.reasoningTokens);
 
       let finishReasons: string[] | undefined;
+      let timeToFirstToken: number | undefined;
       if (sid && turn !== undefined && step !== undefined) {
-        const kind = state.pendingFinish.get(stepKey(sid, turn, step));
-        state.pendingFinish.delete(stepKey(sid, turn, step));
+        const key = stepKey(sid, turn, step);
+        const kind = state.pendingFinish.get(key);
+        state.pendingFinish.delete(key);
         if (kind && FINISH_REASON_MAP[kind]) {
           finishReasons = [FINISH_REASON_MAP[kind]];
+        }
+
+        const requestStart = state.requestStartTimes.get(key);
+        const firstOutput = state.firstOutputTimes.get(key);
+        state.requestStartTimes.delete(key);
+        state.firstOutputTimes.delete(key);
+        if (requestStart !== undefined && firstOutput !== undefined && firstOutput >= requestStart) {
+          timeToFirstToken = Math.round((firstOutput - requestStart) * 1_000_000);
         }
       }
 
@@ -290,10 +424,11 @@ export function transformDshRecord(
         : outputTokens;
 
       const assistantParts = normalizeAssistantParts(content);
+      rememberToolNames(content, state);
 
       // Push the assistant message to the input accumulator so the next
       // step's llm.request sees it as part of the input context.
-      state.inputMessages.push({ role: 'assistant', parts: assistantParts });
+      addInputMessage(state, { role: 'assistant', parts: assistantParts });
 
       return buildAgentActivityEntry({
         ...common,
@@ -303,6 +438,7 @@ export function transformDshRecord(
         'gen_ai.response.id': responseId,
         'gen_ai.response.model': model,
         'gen_ai.response.finish_reasons': finishReasons,
+        'gen_ai.response.time_to_first_token': timeToFirstToken,
         'gen_ai.usage.input_tokens': inputTokens,
         'gen_ai.usage.output_tokens': outputTokensTotal,
         'gen_ai.usage.cache_read.input_tokens': cacheRead,
@@ -317,6 +453,7 @@ export function transformDshRecord(
       const callId = asString(data.callId);
       const name = asString(data.name);
       if (!callId || !name) return null;
+      setBounded(state.toolNames, callId, name);
       let args: unknown = data.arguments;
       if (typeof args === 'string') {
         try { args = JSON.parse(args); } catch { /* keep raw string */ }
@@ -335,14 +472,20 @@ export function transformDshRecord(
       const source = asObject(message.source) ?? {};
       const callId = asString(source.callId);
       if (!callId) return null;
+      const name = state.toolNames.get(callId);
+      state.toolNames.delete(callId);
       const content = message.content;
       const toolParts = normalizeToolResultParts(content);
       // Push the tool result as a `tool` role message so the next step's
       // llm.request input.messages includes the tool_call_response.
-      state.inputMessages.push({ role: 'tool', parts: toolParts });
+      addInputMessage(state, { role: 'tool', parts: toolParts });
+      // A nameless tool.result violates the public schema. Preserve the real
+      // result in the next LLM input context, but do not emit a false name.
+      if (!name) return null;
       return buildAgentActivityEntry({
         ...common,
         'event.name': 'tool.result',
+        'gen_ai.tool.name': name,
         'gen_ai.tool.call.id': callId,
         'gen_ai.tool.call.result': toJsonValue([{
           role: 'tool',

@@ -15,9 +15,11 @@
 import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
+const ENABLED_MARKER = path.join(path.dirname(fileURLToPath(import.meta.url)), '.collection-enabled');
 
 function dataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR
@@ -25,6 +27,7 @@ function dataDir() {
     || path.join(os.homedir(), '.loongsuite-pilot');
 }
 function logDir() { return path.join(dataDir(), 'logs', 'dsh'); }
+function collectionEnabled() { return existsSync(ENABLED_MARKER); }
 function ensureDir(d) {
   mkdirSync(d, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') chmodSync(d, 0o700);
@@ -50,6 +53,10 @@ function appendLine(file, obj) {
 }
 
 export default function apply(ctx) {
+  if (!collectionEnabled()) {
+    ctx.logger(AGENT).info('loongsuite-pilot-observability collection is disabled');
+    return;
+  }
   ensureDir(logDir());
   appendLine(path.join(logDir(), `dsh-${process.pid}.jsonl`), {
     type: `${AGENT}/loaded`,
@@ -57,11 +64,13 @@ export default function apply(ctx) {
     time: Date.now(),
   });
   ctx.on('session/created', (s) => {
+    if (!collectionEnabled()) return;
     appendLine(sessionFile(s.id), {
       type: 'session/created', sid: String(s.id), time: Date.now(),
     });
   });
   ctx.on('session/event', (s, e) => {
+    if (!collectionEnabled()) return;
     appendLine(sessionFile(s.id), {
       sid: String(s.id),
       seq: e.seq,

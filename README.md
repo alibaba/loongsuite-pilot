@@ -46,6 +46,7 @@ Pilot is designed to answer practical questions:
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
+| DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
@@ -63,6 +64,11 @@ Pilot is designed to answer practical questions:
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 
 OpenClaw integration requires OpenClaw 2026.5.12 or later.
+
+DeepSeek Harness (`dsh`) loads Pilot's observability plugin from its user-level
+`cordis.patch.yml`. The integration captures native LLM, reasoning, tool, token,
+and time-to-first-token events. See [Agent Configuration](docs/agents.md#deepseek-harness-collection-and-lifecycle)
+for activation, source-log, disable, and uninstall behavior.
 
 ### Documented Windows Agent Support
 

@@ -2116,6 +2116,64 @@ try {
 }
 
 # ============================================================
+# Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
+# The same helper is invoked by the PowerShell installer.
+# ============================================================
+remove_dsh_yaml_patch() {
+    local plugin_dir="$DATA_DIR/plugins/dsh"
+    local cleanup_script="$plugin_dir/cleanup.mjs"
+    local node_bin=""
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        msg "    ❌ 无可用 Node.js，无法安全清理 DSH YAML patch" \
+            "    ❌ No usable Node.js; cannot safely remove the DSH YAML patch"
+        return 1
+    fi
+
+    # DSH_HOME may differ between install and uninstall. Prefer the exact path
+    # recorded when Pilot deployed the block, then fall back for legacy state.
+    local dsh_home="${DSH_HOME:-$HOME/.dsh}"
+    local patch_path="$dsh_home/cordis.patch.yml"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if [ -f "$state_file" ]; then
+        local persisted_patch
+        persisted_patch=$("$node_bin" -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.dsh?.dshPatchPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted_patch" ]; then patch_path="$persisted_patch"; fi
+    fi
+
+    if [ ! -f "$cleanup_script" ]; then
+        if [ -f "$patch_path" ] && grep -Fq '# BEGIN PILOT-OBSERVABILITY-MANAGED' "$patch_path"; then
+            msg "    ❌ DSH 清理脚本缺失，拒绝删除仍被 YAML 引用的插件资产" \
+                "    ❌ DSH cleanup helper is missing; refusing to remove plugin assets still referenced by YAML"
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! "$node_bin" "$cleanup_script" --patch "$patch_path" --plugin-dir "$plugin_dir"; then
+        msg "    ❌ DSH YAML patch 清理失败；卸载已停止，Pilot 资产保持不变" \
+            "    ❌ DSH YAML patch cleanup failed; uninstall stopped and Pilot assets were preserved"
+        return 1
+    fi
+    msg "    ✅ 已清理 DSH YAML patch" "    ✅ Cleaned DSH YAML patch"
+}
+
+# ============================================================
 # Remove plugin-inject specs (OpenCode)
 # ============================================================
 # OpenCode uses deployMode "plugin-inject": a spec is written into its own
@@ -2616,6 +2674,12 @@ cmd_uninstall() {
         esac
     fi
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
+    echo ""
+
+    msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
+    if ! remove_dsh_yaml_patch; then
+        return 1
+    fi
     echo ""
 
     # Read the persisted target before the data/install directory is removed.
