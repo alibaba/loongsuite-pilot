@@ -22,6 +22,7 @@ export const DSH_ENABLED_MARKER = '.collection-enabled';
 const BEGIN_PREFIX = '# BEGIN ';
 const END_PREFIX = '# END ';
 const LOCK_SUFFIX = '.loongsuite-pilot.lock';
+const LOCK_GATE_SUFFIX = '.reclaim';
 const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_RETRY_MS = 25;
 const STALE_LOCK_MS = 30_000;
@@ -58,7 +59,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     return detectAgent(def.detection);
   }
 
-  async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
+  async needsDeploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<boolean> {
     const cfg = def.dshYamlPatch;
     if (!cfg) return false;
     const pluginPath = this.resolvePluginPath(cfg);
@@ -66,16 +67,17 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     if (!pluginHash) return true;
     if (!(await fileExists(this.resolveEnabledMarkerPath(cfg)))) return true;
     const pluginUrl = pathToFileURL(pluginPath).href;
-    const fileBytes = await this.readBytes(this.resolvePatchPath(cfg));
-    const block = this.findPilotBlock(fileBytes, cfg.marker);
-    if (!block) return true;
-    if (!block.includes(`entryId=${cfg.entryId}\n`)) return true;
-    if (!block.includes(`pluginSource=${pluginUrl}\n`)) return true;
-    if (!block.includes(`pluginHash=${pluginHash}\n`)) return true;
+    const fileBytes = await this.readBytes(this.resolvePatchPath(cfg, record?.dshPatchPath));
+    const parsed = this.splitOnPilotBlock(fileBytes, cfg.marker);
+    const block = parsed.existingBlock;
+    if (parsed.conflictBlock || !block) return true;
+    if (!this.hasMetadataLine(block, `# entryId=${cfg.entryId}`)) return true;
+    if (!this.hasMetadataLine(block, `# pluginSource=${pluginUrl}`)) return true;
+    if (!this.hasMetadataLine(block, `# pluginHash=${pluginHash}`)) return true;
     return false;
   }
 
-  async deploy(def: AgentDefinition): Promise<DeployResult> {
+  async deploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<DeployResult> {
     const cfg = def.dshYamlPatch;
     if (!cfg) {
       return { success: false, agentId: def.id, deployMode: 'dsh-yaml-patch', error: 'missing dshYamlPatch config' };
@@ -91,7 +93,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       };
     }
 
-    const patchPath = this.resolvePatchPath(cfg);
+    const patchPath = this.resolvePatchPath(cfg, record?.dshPatchPath);
     const lockToken = await this.acquirePatchLock(patchPath);
     if (!lockToken) {
       return {
@@ -112,7 +114,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
         if (
           parsed.conflictBlock
-          || (parsed.existingBlock && !parsed.existingBlock.includes(`# entryId=${cfg.entryId}\n`))
+          || (parsed.existingBlock && !this.hasMetadataLine(parsed.existingBlock, `# entryId=${cfg.entryId}`))
         ) {
           return {
             success: false,
@@ -171,7 +173,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     }
   }
 
-  async undeploy(def: AgentDefinition): Promise<boolean> {
+  async undeploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<boolean> {
     const cfg = def.dshYamlPatch;
     if (!cfg) return false;
     try {
@@ -180,7 +182,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       logger.warn('failed to disable DSH collection marker', { error: String(err) });
       return false;
     }
-    const patchPath = this.resolvePatchPath(cfg);
+    const patchPath = this.resolvePatchPath(cfg, record?.dshPatchPath);
     const lockToken = await this.acquirePatchLock(patchPath);
     if (!lockToken) return false;
 
@@ -195,7 +197,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
         if (
           parsed.conflictBlock
-          || (parsed.existingBlock && !parsed.existingBlock.includes(`# entryId=${cfg.entryId}\n`))
+          || (parsed.existingBlock && !this.hasMetadataLine(parsed.existingBlock, `# entryId=${cfg.entryId}`))
         ) {
           logger.warn('undeploy refused: existing block marker mismatch', { path: patchPath });
           return false;
@@ -242,42 +244,82 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     ].join('\n');
   }
 
-  private findPilotBlock(bytes: Buffer, marker: string): string | null {
-    const text = bytes.toString('utf-8');
-    const beginIdx = text.indexOf(`${BEGIN_PREFIX}${marker}`);
-    if (beginIdx < 0) return null;
-    const endIdx = text.indexOf(`${END_PREFIX}${marker}`, beginIdx);
-    if (endIdx < 0) return null;
-    return text.slice(beginIdx, endIdx + `${END_PREFIX}${marker}`.length);
-  }
-
   private splitOnPilotBlock(
     bytes: Buffer,
     marker: string,
   ): { before: Buffer; existingBlock: string | null; after: Buffer; conflictBlock: boolean } {
-    const text = bytes.toString('utf-8');
     const beginMarker = `${BEGIN_PREFIX}${marker}`;
     const endMarker = `${END_PREFIX}${marker}`;
-    const beginIdx = text.indexOf(beginMarker);
-    if (beginIdx < 0) {
+    const beginOffsets = this.findLineMarkerOffsets(bytes, beginMarker);
+    const endOffsets = this.findLineMarkerOffsets(bytes, endMarker);
+    if (beginOffsets.length === 0 && endOffsets.length === 0) {
       return { before: bytes, existingBlock: null, after: Buffer.alloc(0), conflictBlock: false };
     }
-    const endIdx = text.indexOf(endMarker, beginIdx);
-    if (endIdx < 0) {
-      return { before: bytes, existingBlock: null, after: Buffer.alloc(0), conflictBlock: false };
+    if (beginOffsets.length !== 1 || endOffsets.length !== 1) {
+      return { before: bytes, existingBlock: null, after: Buffer.alloc(0), conflictBlock: true };
     }
-    let blockEnd = endIdx + endMarker.length;
-    if (text[blockEnd] === '\n') blockEnd += 1;
-    const block = text.slice(beginIdx, blockEnd);
-    const conflict = !block.includes(`# entryId=`) || !block.includes(`# pluginSource=`) || !block.includes(`# pluginHash=`);
-    const before = text.slice(0, beginIdx);
-    const after = text.slice(blockEnd);
+
+    const beginIdx = beginOffsets[0];
+    const endIdx = endOffsets[0];
+    if (endIdx <= beginIdx) {
+      return { before: bytes, existingBlock: null, after: Buffer.alloc(0), conflictBlock: true };
+    }
+
+    const beginLineEnd = this.lineEndOffset(bytes, beginIdx);
+    const endLineEnd = this.lineEndOffset(bytes, endIdx);
+    const beginLine = bytes.subarray(beginIdx, beginLineEnd).toString('utf-8').replace(/\r$/, '');
+    const endLine = bytes.subarray(endIdx, endLineEnd).toString('utf-8').replace(/\r$/, '');
+    const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const validBegin = new RegExp(`^${BEGIN_PREFIX}${escapedMarker}(?: \\(created-file: (?:true|false)\\))?$`)
+      .test(beginLine);
+    const validEnd = endLine === endMarker;
+    let blockEnd = endLineEnd;
+    if (bytes[blockEnd] === 0x0a) blockEnd += 1;
+    const block = bytes.subarray(beginIdx, blockEnd).toString('utf-8');
+    const conflict = !validBegin
+      || !validEnd
+      || !this.hasMetadataPrefix(block, '# entryId=')
+      || !this.hasMetadataPrefix(block, '# pluginSource=')
+      || !this.hasMetadataPrefix(block, '# pluginHash=');
     return {
-      before: Buffer.from(before, 'utf-8'),
+      before: bytes.subarray(0, beginIdx),
       existingBlock: block,
-      after: Buffer.from(after, 'utf-8'),
+      after: bytes.subarray(blockEnd),
       conflictBlock: conflict,
     };
+  }
+
+  private findLineMarkerOffsets(bytes: Buffer, marker: string): number[] {
+    const needle = Buffer.from(marker, 'utf-8');
+    const offsets: number[] = [];
+    let from = 0;
+    while (from < bytes.length) {
+      const index = bytes.indexOf(needle, from);
+      if (index < 0) break;
+      const atLineStart = index === 0 || bytes[index - 1] === 0x0a;
+      const next = index + needle.length;
+      const boundary = next === bytes.length
+        || bytes[next] === 0x20
+        || bytes[next] === 0x09
+        || bytes[next] === 0x0d
+        || bytes[next] === 0x0a;
+      if (atLineStart && boundary) offsets.push(index);
+      from = index + needle.length;
+    }
+    return offsets;
+  }
+
+  private lineEndOffset(bytes: Buffer, lineStart: number): number {
+    const newline = bytes.indexOf(0x0a, lineStart);
+    return newline < 0 ? bytes.length : newline;
+  }
+
+  private hasMetadataPrefix(block: string, prefix: string): boolean {
+    return block.split(/\r?\n/).some(line => line.startsWith(prefix) && line.length > prefix.length);
+  }
+
+  private hasMetadataLine(block: string, expected: string): boolean {
+    return block.split(/\r?\n/).includes(expected);
   }
 
   private extractCreatedFlag(block: string): 'true' | 'false' | null {
@@ -291,10 +333,17 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     return resolveHome(cfg.pluginSource);
   }
 
-  private resolvePatchPath(cfg: DshYamlPatchConfig): string {
+  resolvePatchPathForRecord(def: AgentDefinition, record?: DeployedAgentRecord): string | undefined {
+    return def.dshYamlPatch
+      ? this.resolvePatchPath(def.dshYamlPatch, record?.dshPatchPath)
+      : undefined;
+  }
+
+  private resolvePatchPath(cfg: DshYamlPatchConfig, persistedPath?: string): string {
+    if (persistedPath && path.isAbsolute(persistedPath)) return persistedPath;
     const fromEnv = process.env.DSH_HOME;
-    if (cfg.patchPath) return resolveHome(cfg.patchPath);
-    if (fromEnv) return path.join(fromEnv, 'cordis.patch.yml');
+    if (cfg.patchPath) return path.resolve(resolveHome(cfg.patchPath));
+    if (fromEnv) return path.resolve(fromEnv, 'cordis.patch.yml');
     return DEFAULT_PATCH_PATH;
   }
 
@@ -418,12 +467,52 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
   private async acquirePatchLock(target: string): Promise<string | null> {
     const lockPath = `${target}${LOCK_SUFFIX}`;
+    const gatePath = `${lockPath}${LOCK_GATE_SUFFIX}`;
     await fs.mkdir(path.dirname(lockPath), { recursive: true });
     const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (Date.now() <= deadline) {
+      const gateToken = await this.acquireOwnerFile(gatePath, deadline);
+      if (!gateToken) return null;
+      let acquired = false;
       try {
-        const handle = await fs.open(lockPath, 'wx', 0o600);
+        try {
+          const handle = await fs.open(lockPath, 'wx', 0o600);
+          try {
+            await handle.write(token);
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          acquired = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          try {
+            const stat = await fs.stat(lockPath);
+            if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+              // Every cooperating creator, releaser, and stale reclaimer holds
+              // gatePath while mutating lockPath. A prior stat can therefore
+              // never authorize deletion of a newly-created owner's lock.
+              await fs.unlink(lockPath);
+            }
+          } catch (statErr) {
+            if ((statErr as NodeJS.ErrnoException).code !== 'ENOENT') throw statErr;
+          }
+        }
+      } finally {
+        await this.releaseOwnerFile(gatePath, gateToken);
+      }
+      if (acquired) return token;
+      await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
+    }
+    return null;
+  }
+
+  private async acquireOwnerFile(filePath: string, deadline: number): Promise<string | null> {
+    const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
+    while (Date.now() <= deadline) {
+      try {
+        const handle = await fs.open(filePath, 'wx', 0o600);
         try {
           await handle.write(token);
           await handle.sync();
@@ -433,15 +522,6 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         return token;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-        try {
-          const stat = await fs.stat(lockPath);
-          if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
-            await fs.unlink(lockPath);
-            continue;
-          }
-        } catch (statErr) {
-          if ((statErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        }
         await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
       }
     }
@@ -450,12 +530,31 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
   private async releasePatchLock(target: string, token: string): Promise<void> {
     const lockPath = `${target}${LOCK_SUFFIX}`;
+    const gatePath = `${lockPath}${LOCK_GATE_SUFFIX}`;
+    const gateToken = await this.acquireOwnerFile(gatePath, Date.now() + LOCK_TIMEOUT_MS);
+    if (!gateToken) {
+      logger.warn('failed to acquire DSH lock release gate', { path: gatePath });
+      return;
+    }
     try {
       const owner = await fs.readFile(lockPath, 'utf-8');
       if (owner === token) await fs.unlink(lockPath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         logger.warn('failed to release DSH patch lock', { path: lockPath, error: String(err) });
+      }
+    } finally {
+      await this.releaseOwnerFile(gatePath, gateToken);
+    }
+  }
+
+  private async releaseOwnerFile(filePath: string, token: string): Promise<void> {
+    try {
+      const owner = await fs.readFile(filePath, 'utf-8');
+      if (owner === token) await fs.unlink(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('failed to release DSH owner file', { path: filePath, error: String(err) });
       }
     }
   }

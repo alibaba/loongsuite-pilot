@@ -2291,6 +2291,21 @@ function Remove-DshYamlPatch {
     $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
     $patchPath = Join-Path $dshHome "cordis.patch.yml"
 
+    # DSH_HOME may differ between install and uninstall. Prefer the exact path
+    # persisted by DeploymentManager, with the current environment as a legacy fallback.
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if (Test-Path -LiteralPath $stateFile) {
+        try {
+            $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+            $persistedPatch = $state.dsh.dshPatchPath
+            if ($persistedPatch -and ([string]$persistedPatch -match '^(?:[A-Za-z]:[\\/]|\\\\)')) {
+                $patchPath = [string]$persistedPatch
+            }
+        } catch {
+            # Preserve compatibility with missing or legacy state and use the fallback above.
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $cleanupScript)) {
         if ((Test-Path -LiteralPath $patchPath) -and
             (Select-String -LiteralPath $patchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)) {

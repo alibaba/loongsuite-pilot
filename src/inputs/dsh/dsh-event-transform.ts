@@ -154,15 +154,23 @@ export function parseDshRequestHeader(
   record: Record<string, unknown>,
 ): DshRequestHeader | undefined {
   if (record.type !== 'request/header') return undefined;
-  const data = asObject(record.data) ?? {};
-  const header = asObject(data.header) ?? {};
-  const config = asObject(header.config) ?? {};
-  return {
-    model: asString(config.model),
-    provider: asString(config.provider),
+  const data = asObject(record.data);
+  if (!data) return undefined;
+  const header = asObject(data.header);
+  if (!header) return undefined;
+  const config = asObject(header.config);
+  const parsed: DshRequestHeader = {
+    model: asString(config?.model),
+    provider: asString(config?.provider),
     system: asString(header.system),
     tools: asArray(header.tools),
   };
+  return parsed.model !== undefined
+    || parsed.provider !== undefined
+    || parsed.system !== undefined
+    || parsed.tools !== undefined
+    ? parsed
+    : undefined;
 }
 
 function normalizeSystemInstructions(system: string | undefined): JsonValue | undefined {
@@ -290,7 +298,8 @@ export function transformDshRecord(
       return null;
 
     case 'request/header': {
-      const header = parseDshRequestHeader(record) ?? {};
+      const header = parseDshRequestHeader(record);
+      if (!header) return null;
       state.currentTurnHeader = header;
       state.lastKnownHeader = header;
       if (sid && turn !== undefined && step !== undefined) {

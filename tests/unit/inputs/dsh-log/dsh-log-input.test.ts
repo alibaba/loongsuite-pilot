@@ -196,6 +196,35 @@ describe('DshLogInput state isolation and restart recovery', () => {
     expect(JSON.stringify(request['gen_ai.input.messages'])).toContain('continue-session');
   });
 
+  it('does not checkpoint a malformed header over the last valid header', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'first-prompt', 'valid-system'),
+      { type: 'request/header', sid: 'session-a', time: 6, data: { header: null } },
+      chunk('session-a', 7),
+      { type: 'turn/end', sid: 'session-a', time: 8, data: { turn: 1 } },
+    ]);
+
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+    await appendRecords(file, [
+      { type: 'turn/start', sid: 'session-a', time: 20, data: { turn: 2 } },
+      { type: 'step/start', sid: 'session-a', time: 21, data: { turn: 2, step: 1 } },
+      { type: 'user/message', sid: 'session-a', time: 22, data: { turn: 2, content: [{ type: 'text', text: 'continue' }] } },
+      chunk('session-a', 23, 2),
+    ]);
+
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    expect(request?.['gen_ai.provider.name']).toBe('provider-a');
+    expect(request?.['gen_ai.request.model']).toBe('provider-a-model');
+    expect(request?.['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: 'valid-system' },
+    ]);
+  });
+
   it('migrates a legacy checkpoint by locating the last header once', async () => {
     const file = path.join(tmpDir, 'dsh-session-a.jsonl');
     await appendRecords(file, [

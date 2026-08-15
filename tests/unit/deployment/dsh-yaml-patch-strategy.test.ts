@@ -166,6 +166,50 @@ describe('DshYamlPatchStrategy', () => {
     expect(content).toBe(hostile);
   });
 
+  it.each([
+    ['unmatched BEGIN', `user-before\n# BEGIN ${MARKER}\nuser-after\n`],
+    ['unmatched END', `user-before\n# END ${MARKER}\nuser-after\n`],
+    [
+      'nested BEGIN',
+      [
+        'user-before',
+        `# BEGIN ${MARKER}`,
+        `# BEGIN ${MARKER}`,
+        '# entryId=loongsuite-pilot-observability',
+        '# pluginSource=file:///pilot/plugin.mjs',
+        '# pluginHash=abc',
+        `# END ${MARKER}`,
+        'user-after',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'duplicate blocks',
+      [
+        `# BEGIN ${MARKER}`,
+        '# entryId=loongsuite-pilot-observability',
+        '# pluginSource=file:///pilot/a.mjs',
+        '# pluginHash=abc',
+        `# END ${MARKER}`,
+        `# BEGIN ${MARKER}`,
+        '# entryId=loongsuite-pilot-observability',
+        '# pluginSource=file:///pilot/b.mjs',
+        '# pluginHash=def',
+        `# END ${MARKER}`,
+        '',
+      ].join('\n'),
+    ],
+  ])('fails closed without changing bytes for malformed marker shape: %s', async (_label, malformed) => {
+    await fs.writeFile(patchPath, malformed);
+    const result = await strategy.deploy(makeDef());
+    expect(result.success).toBe(false);
+    expect(await fs.readFile(patchPath, 'utf-8')).toBe(malformed);
+
+    const removed = await strategy.undeploy(makeDef());
+    expect(removed).toBe(false);
+    expect(await fs.readFile(patchPath, 'utf-8')).toBe(malformed);
+  });
+
   it('does not touch third-party rows on deploy or undeploy', async () => {
     const thirdParty = [
       '- id: third-party-a',
@@ -248,6 +292,25 @@ describe('DshYamlPatchStrategy', () => {
     await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('serializes concurrent stale-lock reclaimers without deleting a new owner lock', async () => {
+    const lockPath = `${patchPath}.loongsuite-pilot.lock`;
+    const gatePath = `${lockPath}.reclaim`;
+    await fs.writeFile(lockPath, 'abandoned');
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockPath, old, old);
+
+    const otherStrategy = new DshYamlPatchStrategy(tmpDir);
+    const [a, b] = await Promise.all([
+      strategy.deploy(makeDef()),
+      otherStrategy.deploy(makeDef()),
+    ]);
+    expect(a.success).toBe(true);
+    expect(b.success).toBe(true);
+    expect((await readPatch()).match(new RegExp(`# BEGIN ${MARKER}`, 'g'))).toHaveLength(1);
+    await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(gatePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('detects concurrent modification by same-size/mtime but different bytes', async () => {
     const def = makeDef();
     await strategy.deploy(def);
@@ -299,6 +362,34 @@ describe('DshYamlPatchStrategy', () => {
       expect(content).toContain(`# BEGIN ${MARKER}`);
     } finally {
       delete process.env.DSH_HOME;
+    }
+  });
+
+  it('uses the persisted patch path after DSH_HOME changes', async () => {
+    const originalDshHome = process.env.DSH_HOME;
+    const homeA = path.join(tmpDir, 'home-a');
+    const homeB = path.join(tmpDir, 'home-b');
+    const pathA = path.join(homeA, 'cordis.patch.yml');
+    const pathB = path.join(homeB, 'cordis.patch.yml');
+    const def = makeDef();
+    delete (def.dshYamlPatch as { patchPath?: string }).patchPath;
+    try {
+      process.env.DSH_HOME = homeA;
+      expect((await strategy.deploy(def)).success).toBe(true);
+      const record = {
+        deployMode: 'dsh-yaml-patch' as const,
+        deployedAt: new Date().toISOString(),
+        dshPatchPath: pathA,
+      };
+
+      process.env.DSH_HOME = homeB;
+      expect(await strategy.needsDeploy(def, record)).toBe(false);
+      expect(await strategy.undeploy(def, record)).toBe(true);
+      await expect(fs.stat(pathA)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(pathB)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (originalDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = originalDshHome;
     }
   });
 

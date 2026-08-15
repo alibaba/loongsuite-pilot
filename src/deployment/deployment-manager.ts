@@ -149,7 +149,7 @@ export class DeploymentManager {
     try {
       ok = def.deployMode === 'hook'
         ? await this.hookStrategy.undeploy(def)
-        : await this.dshYamlPatchStrategy.undeploy(def);
+        : await this.dshYamlPatchStrategy.undeploy(def, this.state[def.id]);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
@@ -185,7 +185,9 @@ export class DeploymentManager {
     if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
       return false;
     }
-    const ok = await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
+    const ok = def.deployMode === 'dsh-yaml-patch'
+      ? await this.dshYamlPatchStrategy.undeploy(def, this.state[def.id])
+      : await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
     if (ok && this.state[def.id]) {
       delete this.state[def.id];
       await this.saveState();
@@ -240,12 +242,17 @@ export class DeploymentManager {
       if (isRemote && record && this.pluginProbeStrategy.isRemoteCheckDue(record)) {
         record.lastRemoteCheckedAt = new Date().toISOString();
       }
+      if (def.deployMode === 'dsh-yaml-patch' && record && !record.dshPatchPath) {
+        record.dshPatchPath = this.dshYamlPatchStrategy.resolvePatchPathForRecord(def, record);
+      }
       logger.debug('agent already deployed, skipping', { agentId: def.id });
       return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
     }
 
     logger.info('deploying agent', { agentId: def.id, deployMode: def.deployMode });
-    const result = await strategy.deploy(def);
+    const result = def.deployMode === 'dsh-yaml-patch'
+      ? await this.dshYamlPatchStrategy.deploy(def, record)
+      : await strategy.deploy(def);
 
     if (result.success) {
       const newRecord: DeployedAgentRecord = {
@@ -266,6 +273,10 @@ export class DeploymentManager {
 
       if (def.deployMode === 'directory-plugin' && def.directoryPlugin) {
         newRecord.targetDir = path.resolve(def.directoryPlugin.targetDir);
+      }
+
+      if (def.deployMode === 'dsh-yaml-patch') {
+        newRecord.dshPatchPath = this.dshYamlPatchStrategy.resolvePatchPathForRecord(def, record);
       }
 
       this.state[def.id] = newRecord;

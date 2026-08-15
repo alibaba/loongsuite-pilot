@@ -65,6 +65,37 @@ describe('DSH uninstall cleanup helper', () => {
     expect(await fs.readFile(patchPath, 'utf-8')).toBe(invalid);
   });
 
+  it.each([
+    ['unmatched END', `user-before\n# END ${MARKER}\nuser-after\n`],
+    ['nested BEGIN', `# BEGIN ${MARKER}\n# BEGIN ${MARKER}\n${block(false)}`],
+    ['duplicate blocks', `${block(false)}${block(false)}`],
+  ])('fails closed and preserves malformed marker bytes: %s', async (_label, invalid) => {
+    await fs.writeFile(patchPath, invalid);
+    const result = await cleanupDshIntegration({ patchPath, pluginDir, marker: MARKER });
+    expect(result.success).toBe(false);
+    expect(await fs.readFile(patchPath, 'utf-8')).toBe(invalid);
+  });
+
+  it('serializes concurrent stale-lock cleanup without corrupting user bytes', async () => {
+    const before = '# user-before\n';
+    const after = '# user-after\n';
+    await fs.writeFile(patchPath, before + block(false) + after);
+    const lockPath = `${patchPath}.loongsuite-pilot.lock`;
+    await fs.writeFile(lockPath, 'abandoned');
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockPath, old, old);
+
+    const [a, b] = await Promise.all([
+      cleanupDshIntegration({ patchPath, pluginDir, marker: MARKER }),
+      cleanupDshIntegration({ patchPath, pluginDir, marker: MARKER }),
+    ]);
+    expect(a.success).toBe(true);
+    expect(b.success).toBe(true);
+    expect(await fs.readFile(patchPath, 'utf-8')).toBe(before + after);
+    await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(`${lockPath}.reclaim`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('wires cleanup before installation asset removal on Unix and Windows', async () => {
     const unix = await fs.readFile(path.resolve('deploy/installer-opensource.sh'), 'utf-8');
     const unixUninstall = unix.slice(unix.indexOf('cmd_uninstall()'));
@@ -75,5 +106,7 @@ describe('DSH uninstall cleanup helper', () => {
     const windowsUninstall = windows.slice(windows.indexOf('function Cmd-Uninstall'));
     expect(windowsUninstall.indexOf('Remove-DshYamlPatch'))
       .toBeLessThan(windowsUninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(unix).toContain('dshPatchPath');
+    expect(windows).toContain('dshPatchPath');
   });
 });

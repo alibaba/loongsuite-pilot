@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_MARKER = 'PILOT-OBSERVABILITY-MANAGED';
 const ENABLED_MARKER = '.collection-enabled';
 const LOCK_SUFFIX = '.loongsuite-pilot.lock';
+const LOCK_GATE_SUFFIX = '.reclaim';
 const BEGIN_PREFIX = '# BEGIN ';
 const END_PREFIX = '# END ';
 const LOCK_TIMEOUT_MS = 2_000;
+const LOCK_RETRY_MS = 25;
 const STALE_LOCK_MS = 30_000;
 
 function sha256(bytes) {
@@ -34,26 +36,71 @@ async function exists(filePath) {
 }
 
 function splitPilotBlock(bytes, marker) {
-  const text = bytes.toString('utf-8');
   const begin = `${BEGIN_PREFIX}${marker}`;
   const end = `${END_PREFIX}${marker}`;
-  const beginIndex = text.indexOf(begin);
-  if (beginIndex < 0) return { before: bytes, block: null, after: Buffer.alloc(0), conflict: false };
-  const endIndex = text.indexOf(end, beginIndex);
-  if (endIndex < 0) return { before: bytes, block: null, after: Buffer.alloc(0), conflict: true };
-  let blockEnd = endIndex + end.length;
-  if (text[blockEnd] === '\n') blockEnd++;
-  const block = text.slice(beginIndex, blockEnd);
-  const conflict = !block.includes('# entryId=')
-    || !block.includes('# pluginSource=')
-    || !block.includes('# pluginHash=')
-    || !block.includes('# entryId=loongsuite-pilot-observability\n');
+  const beginOffsets = findLineMarkerOffsets(bytes, begin);
+  const endOffsets = findLineMarkerOffsets(bytes, end);
+  if (beginOffsets.length === 0 && endOffsets.length === 0) {
+    return { before: bytes, block: null, after: Buffer.alloc(0), conflict: false };
+  }
+  if (beginOffsets.length !== 1 || endOffsets.length !== 1) {
+    return { before: bytes, block: null, after: Buffer.alloc(0), conflict: true };
+  }
+
+  const beginIndex = beginOffsets[0];
+  const endIndex = endOffsets[0];
+  if (endIndex <= beginIndex) {
+    return { before: bytes, block: null, after: Buffer.alloc(0), conflict: true };
+  }
+
+  const beginLineEnd = lineEndOffset(bytes, beginIndex);
+  const endLineEnd = lineEndOffset(bytes, endIndex);
+  const beginLine = bytes.subarray(beginIndex, beginLineEnd).toString('utf-8').replace(/\r$/, '');
+  const endLine = bytes.subarray(endIndex, endLineEnd).toString('utf-8').replace(/\r$/, '');
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const validBegin = new RegExp(`^${BEGIN_PREFIX}${escapedMarker}(?: \\(created-file: (?:true|false)\\))?$`)
+    .test(beginLine);
+  const validEnd = endLine === end;
+  let blockEnd = endLineEnd;
+  if (bytes[blockEnd] === 0x0a) blockEnd++;
+  const block = bytes.subarray(beginIndex, blockEnd).toString('utf-8');
+  const lines = block.split(/\r?\n/);
+  const conflict = !validBegin
+    || !validEnd
+    || !lines.includes('# entryId=loongsuite-pilot-observability')
+    || !lines.some(line => line.startsWith('# pluginSource=') && line.length > '# pluginSource='.length)
+    || !lines.some(line => line.startsWith('# pluginHash=') && line.length > '# pluginHash='.length);
   return {
-    before: Buffer.from(text.slice(0, beginIndex), 'utf-8'),
+    before: bytes.subarray(0, beginIndex),
     block,
-    after: Buffer.from(text.slice(blockEnd), 'utf-8'),
+    after: bytes.subarray(blockEnd),
     conflict,
   };
+}
+
+function findLineMarkerOffsets(bytes, marker) {
+  const needle = Buffer.from(marker, 'utf-8');
+  const offsets = [];
+  let from = 0;
+  while (from < bytes.length) {
+    const index = bytes.indexOf(needle, from);
+    if (index < 0) break;
+    const atLineStart = index === 0 || bytes[index - 1] === 0x0a;
+    const next = index + needle.length;
+    const boundary = next === bytes.length
+      || bytes[next] === 0x20
+      || bytes[next] === 0x09
+      || bytes[next] === 0x0d
+      || bytes[next] === 0x0a;
+    if (atLineStart && boundary) offsets.push(index);
+    from = next;
+  }
+  return offsets;
+}
+
+function lineEndOffset(bytes, lineStart) {
+  const newline = bytes.indexOf(0x0a, lineStart);
+  return newline < 0 ? bytes.length : newline;
 }
 
 async function syncDirectory(dir) {
@@ -65,37 +112,73 @@ async function syncDirectory(dir) {
 
 async function acquireLock(target) {
   const lockPath = `${target}${LOCK_SUFFIX}`;
+  const gatePath = `${lockPath}${LOCK_GATE_SUFFIX}`;
   await fs.mkdir(path.dirname(lockPath), { recursive: true });
   const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (Date.now() <= deadline) {
+    const gateToken = await acquireOwnerFile(gatePath, deadline);
+    if (!gateToken) return null;
+    let acquired = false;
     try {
-      const handle = await fs.open(lockPath, 'wx', 0o600);
+      try {
+        const handle = await fs.open(lockPath, 'wx', 0o600);
+        try { await handle.write(token); await handle.sync(); } finally { await handle.close(); }
+        acquired = true;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        try {
+          const stat = await fs.stat(lockPath);
+          if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) await fs.unlink(lockPath);
+        } catch (statError) {
+          if (statError?.code !== 'ENOENT') throw statError;
+        }
+      }
+    } finally {
+      await releaseOwnerFile(gatePath, gateToken);
+    }
+    if (acquired) return token;
+    await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
+  }
+  return null;
+}
+
+async function acquireOwnerFile(filePath, deadline) {
+  const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
+  while (Date.now() <= deadline) {
+    try {
+      const handle = await fs.open(filePath, 'wx', 0o600);
       try { await handle.write(token); await handle.sync(); } finally { await handle.close(); }
       return token;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
-      try {
-        const stat = await fs.stat(lockPath);
-        if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
-          await fs.unlink(lockPath);
-          continue;
-        }
-      } catch (statError) {
-        if (statError?.code === 'ENOENT') continue;
-      }
-      await new Promise(resolve => setTimeout(resolve, 25));
+      await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
     }
   }
   return null;
 }
 
-async function releaseLock(target, token) {
-  const lockPath = `${target}${LOCK_SUFFIX}`;
+async function releaseOwnerFile(filePath, token) {
   try {
-    if (await fs.readFile(lockPath, 'utf-8') === token) await fs.unlink(lockPath);
+    if (await fs.readFile(filePath, 'utf-8') === token) await fs.unlink(filePath);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function releaseLock(target, token) {
+  const lockPath = `${target}${LOCK_SUFFIX}`;
+  const gatePath = `${lockPath}${LOCK_GATE_SUFFIX}`;
+  const gateToken = await acquireOwnerFile(gatePath, Date.now() + LOCK_TIMEOUT_MS);
+  if (!gateToken) return;
+  try {
+    try {
+      if (await fs.readFile(lockPath, 'utf-8') === token) await fs.unlink(lockPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  } finally {
+    await releaseOwnerFile(gatePath, gateToken);
   }
 }
 

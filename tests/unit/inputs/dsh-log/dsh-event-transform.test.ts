@@ -419,6 +419,36 @@ describe('dsh-event-transform (real fixture)', () => {
     });
   });
 
+  it('ignores a malformed header instead of replacing the last valid header', () => {
+    const state = newState();
+    state.lastKnownHeader = {
+      provider: 'valid-provider',
+      model: 'valid-model',
+      system: 'valid-system',
+    };
+    transformDshRecord({
+      type: 'turn/start', sid: 'session-a', time: 1, data: { turn: 2 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 'session-a', time: 2, data: { turn: 2, step: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'request/header', sid: 'session-a', time: 3, data: { header: 'malformed' },
+    }, ClientType.Dsh, state);
+    const request = transformDshRecord({
+      type: 'assistant/chunk', sid: 'session-a', time: 4,
+      data: { turn: 2, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+
+    expect(state.lastKnownHeader).toEqual({
+      provider: 'valid-provider',
+      model: 'valid-model',
+      system: 'valid-system',
+    });
+    expect(request?.['gen_ai.provider.name']).toBe('valid-provider');
+    expect(request?.['gen_ai.request.model']).toBe('valid-model');
+  });
+
   it('still emits llm.request when no header has ever been observed', () => {
     const state = newState();
     transformDshRecord({
