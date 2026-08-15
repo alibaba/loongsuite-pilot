@@ -1,4 +1,5 @@
 import * as os from 'node:os';
+import * as fs from 'node:fs';
 import type {
   AgentsConfig,
   AnalyticsConfig,
@@ -245,6 +246,87 @@ function envInt(key: string, fallback: number): number {
 }
 
 /**
+ * Single source of truth for userId precedence:
+ *   env LOONGSUITE_PILOT_USER_ID > config.userId > config['user.id'] > hostname.
+ * Shared by loadConfig() (startup) and createUserIdProvider() (runtime refresh)
+ * so the two never diverge. Empty/whitespace-only values are treated as unset
+ * (fall through to hostname), consistent with the hooks' `||` resolution — this
+ * prevents self-monitoring status from reporting an empty user_id while the
+ * collected logs fall back to hostname.
+ */
+function resolveUserId(file: Pick<ConfigFile, 'userId' | 'user.id'> | null | undefined): string {
+  const candidates = [env('LOONGSUITE_PILOT_USER_ID'), file?.userId, file?.['user.id']];
+  for (const c of candidates) {
+    const trimmed = c?.trim();
+    if (trimmed) return trimmed;
+  }
+  return os.hostname();
+}
+
+/**
+ * How often createUserIdProvider() re-resolves userId from config.json. userId is
+ * otherwise a process-startup snapshot; refreshing lets an operator correct a
+ * wrong/missing userId (so self-monitoring status matches the collected logs)
+ * without a service restart. 24h keeps filesystem reads negligible while bounding staleness.
+ */
+export const USER_ID_REFRESH_INTERVAL_MS = 86_400_000; // 24h
+
+export interface UserIdProviderOptions {
+  /** Value resolved at startup; used until the first refresh and as fallback on read errors. */
+  initialUserId: string;
+  /** Config file path (defaults to AGENT_DATA_COLLECTION_CONFIG or ~/.loongsuite-pilot/config.json). */
+  configPath?: string;
+  /** Refresh interval in ms (default 24h). */
+  refreshIntervalMs?: number;
+  /** Injectable clock for tests. */
+  now?: () => number;
+  /** Injectable file reader for tests. */
+  readFile?: (filePath: string) => string;
+}
+
+/**
+ * Returns a getter that re-resolves userId at most once per refresh interval
+ * (default 24h), mirroring loadConfig()'s precedence. Only the config file can
+ * change during a process lifetime, so a periodic re-read is enough.
+ */
+export function createUserIdProvider(opts: UserIdProviderOptions): () => string {
+  const configPath = resolveHome(opts.configPath ?? env('AGENT_DATA_COLLECTION_CONFIG') ?? DEFAULT_CONFIG_PATH);
+  const refreshIntervalMs = opts.refreshIntervalMs ?? USER_ID_REFRESH_INTERVAL_MS;
+  const now = opts.now ?? Date.now;
+  const readFile = opts.readFile ?? ((p: string) => fs.readFileSync(p, 'utf-8'));
+
+  let cached = opts.initialUserId;
+  let hasRefreshed = false;
+  let lastRefreshAt = 0;
+
+  function resolve(): string {
+    let file: ConfigFile;
+    try {
+      file = JSON.parse(readFile(configPath)) as ConfigFile;
+    } catch {
+      // Missing or corrupt config: keep the last known good value rather than
+      // regressing to hostname on a transient read error.
+      return cached;
+    }
+    return resolveUserId(file);
+  }
+
+  return (): string => {
+    const t = now();
+    if (!hasRefreshed || t - lastRefreshAt >= refreshIntervalMs) {
+      const next = resolve();
+      if (next !== cached) {
+        logger.info('userId refreshed from config', { previous: cached, current: next });
+      }
+      cached = next;
+      hasRefreshed = true;
+      lastRefreshAt = t;
+    }
+    return cached;
+  };
+}
+
+/**
  * Load configuration with three priority layers:
  *   1. Environment variables (highest)
  *   2. Config file (~/.loongsuite-pilot/config.json or AGENT_DATA_COLLECTION_CONFIG)
@@ -267,7 +349,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
-  const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const userId = resolveUserId(file);
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';

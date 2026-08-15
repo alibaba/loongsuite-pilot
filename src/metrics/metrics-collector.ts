@@ -151,7 +151,7 @@ export interface InfraHealthSnapshot {
 
 export class MetricsCollector {
   private readonly version: string;
-  private readonly userId: string;
+  private readonly userIdProvider: () => string;
   private readonly dataDir: string;
   private readonly canaryPolicy: string;
   private readonly agentsConfig: AgentsConfig;
@@ -175,9 +175,11 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId?: string; userIdProvider?: () => string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
-    this.userId = opts.userId;
+    // Read userId lazily each cycle so an operator can correct a wrong/missing
+    // userId without restarting; a static userId remains supported for callers/tests.
+    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId ?? '');
     this.dataDir = opts.dataDir;
     this.canaryPolicy = opts.canaryPolicy ?? '';
     this.agentsConfig = opts.agentsConfig ?? {};
@@ -188,12 +190,14 @@ export class MetricsCollector {
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
-    this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
+    // instance_id is a stable per-process identifier; seed it from the startup
+    // userId snapshot even though the reported user_id field refreshes at runtime.
+    this.instanceId = `${this.userIdProvider()}_${this.localIp}_${this.startTimestamp}`;
     this.initType = readInitType(opts.dataDir);
   }
 
   getUserId(): string {
-    return this.userId;
+    return this.userIdProvider();
   }
 
   collectL1(snapshot: DataflowSnapshot): L1Metrics {
@@ -228,7 +232,7 @@ export class MetricsCollector {
       hostname: os.hostname(),
       ip: this.localIp,
       instance_id: this.instanceId,
-      user_id: this.userId,
+      user_id: this.userIdProvider(),
       pid: process.pid,
       cpu: String(cpuPercent),
       mem: String(Math.round(mem.rss / 1024 / 1024)),
@@ -275,7 +279,7 @@ export class MetricsCollector {
           input_name: name,
           input_type: stats.type,
         },
-        user_id: this.userId,
+        user_id: this.userIdProvider(),
         in_events_total: String(stats.inEvents),
         in_size_bytes: String(stats.inBytes),
         out_events_total: String(stats.outEvents),
@@ -302,7 +306,7 @@ export class MetricsCollector {
           logstore: stats.logstore,
           mode: stats.mode,
         },
-        user_id: this.userId,
+        user_id: this.userIdProvider(),
         in_entries_total: String(stats.inEntries),
         in_size_bytes: String(stats.inBytes),
         out_entries_total: String(stats.outEntries),
@@ -330,7 +334,7 @@ export class MetricsCollector {
         input_name: name,
         instance_id: this.instanceId,
         source_ip: this.localIp,
-        user_id: this.userId,
+        user_id: this.userIdProvider(),
         succeed_events: String(stats.outEvents),
         failed_events: String(stats.outFailed),
         input_idle_minutes: String(idleMinutes),

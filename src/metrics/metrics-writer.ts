@@ -34,6 +34,8 @@ export interface MetricsWriterOptions {
   dataDir: string;
   version: string;
   userId: string;
+  /** Optional refreshable userId source; when set, overrides the static userId each cycle. */
+  userIdProvider?: () => string;
   canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
@@ -65,6 +67,7 @@ export class MetricsWriter {
     this.collector = new MetricsCollector({
       version: opts.version,
       userId: opts.userId,
+      userIdProvider: opts.userIdProvider,
       dataDir: opts.dataDir,
       agentsConfig: opts.agentsConfig,
       canaryPolicy: opts.canaryPolicy,

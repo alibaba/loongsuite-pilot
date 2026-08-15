@@ -52,12 +52,14 @@ export class AlarmManager {
   private readonly alarms: Map<string, AlarmItem> = new Map();
   private readonly ip: string;
   private readonly version: string;
-  private readonly userId: string;
+  private readonly userIdProvider: () => string;
 
-  constructor(opts: { ip: string; version: string; userId: string }) {
+  constructor(opts: { ip: string; version: string; userId?: string; userIdProvider?: () => string }) {
     this.ip = opts.ip;
     this.version = opts.version;
-    this.userId = opts.userId;
+    // Read userId lazily so a runtime correction propagates to alarms too;
+    // a static userId remains supported for callers/tests.
+    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId ?? '');
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext): void {
@@ -84,7 +86,7 @@ export class AlarmManager {
         alarm_level: item.level,
         alarm_message: item.message,
         alarm_count: String(item.count),
-        user_id: this.userId,
+        user_id: this.userIdProvider(),
         ip: this.ip,
         ver: this.version,
         __time__: now,
