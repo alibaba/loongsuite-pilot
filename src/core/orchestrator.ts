@@ -53,6 +53,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -129,6 +130,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'dsh-log': 'dsh',
   };
 
   private readonly config: AnalyticsConfig;
@@ -1414,6 +1416,28 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['hermes-agent-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
+    const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
+    await ensureDshLogDir(dshLogDir);
+    const dshLogInput = new DshLogInput({
+      stateStore: this.stateStore,
+      sessionDir: dshLogDir,
+      pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(dshLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(dshLogInput, {
+        watchPaths: [dshLogDir],
+        isAvailable: async () => directoryExists(dshLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['dsh-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'dsh-log',
+            listenerCfg['dsh-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
       }),
     );
 
