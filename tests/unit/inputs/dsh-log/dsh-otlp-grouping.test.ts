@@ -24,7 +24,7 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
     { type: 'request/context', sid, time: baseTime + 4, data: {} },
     {
       type: 'assistant/chunk', sid, time: baseTime + 5,
-      data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'done' } },
     },
     {
       type: 'assistant/chunk', sid, time: baseTime + 6,
@@ -90,5 +90,9 @@ describe('DSH session-scoped turn ids in OTLP buffering', () => {
     expect(entrySpans).toHaveLength(2);
     expect(agentSpans).toHaveLength(2);
     expect(new Set(entrySpans.map(span => span.spanContext().traceId)).size).toBe(2);
+    const llmSpans = captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(2);
+    expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
+      .toEqual([1_000_000, 1_000_000]);
   });
 });

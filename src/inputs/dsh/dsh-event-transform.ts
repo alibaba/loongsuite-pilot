@@ -41,8 +41,10 @@ export interface DshEventAggregatorState {
   /** stepKey set for which an llm.request has already been emitted,
    * so request/header arrival + step/start arrival don't double-emit. */
   emittedRequest: Set<string>;
-  /** stepKey → the earliest known model request boundary in milliseconds. */
+  /** stepKey → selected model request boundary in milliseconds. */
   requestStartTimes: Map<string, number>;
+  /** stepKey → first native streamed output delta timestamp in milliseconds. */
+  firstOutputTimes: Map<string, number>;
   /** Native tool call id → tool name, used to complete tool.result events. */
   toolNames: Map<string, string>;
   /** Accumulated conversation messages for the next llm.request's
@@ -64,6 +66,7 @@ export function newState(): DshEventAggregatorState {
     cachedHeader: undefined,
     emittedRequest: new Set(),
     requestStartTimes: new Map(),
+    firstOutputTimes: new Map(),
     toolNames: new Map(),
     inputMessages: [],
     inputMessagesOverflowed: false,
@@ -77,6 +80,7 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.cachedHeader = undefined;
   state.emittedRequest.clear();
   state.requestStartTimes.clear();
+  state.firstOutputTimes.clear();
   state.toolNames.clear();
   state.inputMessages = [];
   state.inputMessagesOverflowed = false;
@@ -105,6 +109,12 @@ function rememberToolNames(content: unknown, state: DshEventAggregatorState): vo
     const name = asString(value.name);
     if (callId && name) setBounded(state.toolNames, callId, name);
   }
+}
+
+function isStreamedOutputDelta(chunkType: string | undefined): boolean {
+  return chunkType === 'reasoning-delta'
+    || chunkType === 'text-delta'
+    || chunkType === 'tool-call-delta';
 }
 
 function stepKey(sid: string, turn: number, step: number): string {
@@ -281,12 +291,31 @@ export function transformDshRecord(
     case 'assistant/chunk': {
       const chunk = asObject(data.chunk) ?? {};
       const chunkType = asString(chunk.type);
+      const key = sid && turn !== undefined && step !== undefined
+        ? stepKey(sid, turn, step)
+        : undefined;
+
+      // DSH exposes native stream deltas for reasoning, text, and tool calls.
+      // Keep the first such source timestamp so the eventual llm.response can
+      // report TTFT relative to request/context (or the step/start fallback).
+      // block-start is intentionally excluded because it is stream metadata,
+      // not a generated token. Record this before returning llm.request so a
+      // stream whose first record is already a delta does not lose its TTFT.
+      if (key && isStreamedOutputDelta(chunkType) && !state.firstOutputTimes.has(key)) {
+        setBounded(state.firstOutputTimes, key, time);
+      }
+
+      if (chunkType === 'finish' && key) {
+        const reason = asObject(chunk.reason) ?? {};
+        const kind = asString(reason.kind);
+        if (kind) setBounded(state.pendingFinish, key, kind);
+      }
+
       // Emit llm.request on the first chunk of a step (any subtype) — at
       // this point all input for the step has landed (user/message for
       // step 1, prior step's assistant/message + tool/result for steps
       // 2+). The accumulator snapshot is the LLM's input context.
-      if (sid && turn !== undefined && step !== undefined && state.cachedHeader) {
-        const key = stepKey(sid, turn, step);
+      if (key && state.cachedHeader) {
         if (!state.emittedRequest.has(key)) {
           if (state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
           state.emittedRequest.add(key);
@@ -308,11 +337,6 @@ export function transformDshRecord(
               : undefined,
           });
         }
-      }
-      if (chunkType === 'finish' && sid && turn !== undefined && step !== undefined) {
-        const reason = asObject(chunk.reason) ?? {};
-        const kind = asString(reason.kind);
-        if (kind) setBounded(state.pendingFinish, stepKey(sid, turn, step), kind);
       }
       return null;
     }
@@ -347,11 +371,21 @@ export function transformDshRecord(
       const reasoningTokens = asNumber(usage.reasoningTokens);
 
       let finishReasons: string[] | undefined;
+      let timeToFirstToken: number | undefined;
       if (sid && turn !== undefined && step !== undefined) {
-        const kind = state.pendingFinish.get(stepKey(sid, turn, step));
-        state.pendingFinish.delete(stepKey(sid, turn, step));
+        const key = stepKey(sid, turn, step);
+        const kind = state.pendingFinish.get(key);
+        state.pendingFinish.delete(key);
         if (kind && FINISH_REASON_MAP[kind]) {
           finishReasons = [FINISH_REASON_MAP[kind]];
+        }
+
+        const requestStart = state.requestStartTimes.get(key);
+        const firstOutput = state.firstOutputTimes.get(key);
+        state.requestStartTimes.delete(key);
+        state.firstOutputTimes.delete(key);
+        if (requestStart !== undefined && firstOutput !== undefined && firstOutput >= requestStart) {
+          timeToFirstToken = Math.round((firstOutput - requestStart) * 1_000_000);
         }
       }
 
@@ -374,6 +408,7 @@ export function transformDshRecord(
         'gen_ai.response.id': responseId,
         'gen_ai.response.model': model,
         'gen_ai.response.finish_reasons': finishReasons,
+        'gen_ai.response.time_to_first_token': timeToFirstToken,
         'gen_ai.usage.input_tokens': inputTokens,
         'gen_ai.usage.output_tokens': outputTokensTotal,
         'gen_ai.usage.cache_read.input_tokens': cacheRead,

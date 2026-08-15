@@ -57,6 +57,7 @@
 | Cursor CLI | `cursor-cli` | 复用 Cursor Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor-cli.json` |
 | Claude Code | `claude-code` | Hook | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Hook | `BaseInput` | `inputs/codex-transcript/` | `agents.d/codex.json` |
+| DeepSeek Harness | `dsh` | DSH YAML Patch | `BaseSessionInput` | `inputs/dsh-log/` | `agents.d/dsh.json` |
 | Kiro CLI | `kiro-cli` | Hook | `BaseHookInput` / `BaseInput` | `inputs/kiro-cli-*/` | `agents.d/kiro-cli.json` |
 | OpenCode | `opencode` | Plugin-Inject | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
 | MiMo Code | `mimo-code` | Plugin-Inject | `BaseHookInput` | `inputs/mimo-code-log/` | `agents.d/mimo-code.json` |

@@ -117,6 +117,39 @@ describe('DshLogInput state isolation and restart recovery', () => {
     expect(resumed.filter(entry => entry['event.name'] === 'llm.request')).toHaveLength(0);
   });
 
+  it('rehydrates the first-output boundary for TTFT after restart', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'prompt-a'),
+      {
+        type: 'assistant/chunk', sid: 'session-a', time: 15,
+        data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'thinking' } },
+      },
+    ]);
+
+    const first = await makeInput();
+    expect((await first.input.runCollect()).filter(e => e['event.name'] === 'llm.request')).toHaveLength(1);
+    await first.store.save();
+
+    await appendRecords(file, [{
+      type: 'assistant/message', sid: 'session-a', time: 20,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'response-a',
+          content: [{ type: 'reasoning', text: 'thinking' }],
+          source: { provider: 'provider-a', model: 'provider-a-model' },
+        },
+      },
+    }]);
+    const second = await makeInput();
+    const resumed = await second.input.runCollect();
+    expect(resumed.filter(entry => entry['event.name'] === 'llm.request')).toHaveLength(0);
+    const response = resumed.find(entry => entry['event.name'] === 'llm.response');
+    expect(response?.['gen_ai.response.time_to_first_token']).toBe(10_000_000);
+  });
+
   it('restores tool call names across restart', async () => {
     const file = path.join(tmpDir, 'dsh-session-a.jsonl');
     await appendRecords(file, [

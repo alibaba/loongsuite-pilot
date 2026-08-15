@@ -166,6 +166,16 @@ describe('dsh-event-transform (real fixture)', () => {
     ]);
   });
 
+  it('reports TTFT from the request boundary to the first native output delta', async () => {
+    const { entries } = await loadAll();
+    const responses = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(responses.map(e => e['gen_ai.response.time_to_first_token'])).toEqual([
+      671_000_000,
+      591_000_000,
+      943_000_000,
+    ]);
+  });
+
   it('finish_reasons are populated from the streamed finish chunk', async () => {
     const { entries } = await loadAll();
     const responses = entries.filter(e => e['event.name'] === 'llm.response');
@@ -225,6 +235,59 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(r).toBeDefined();
     expect(r!['event.name']).toBe('llm.request');
     expect(r!['gen_ai.input.messages']).toBeUndefined();
+  });
+
+  it('records TTFT when the first assistant chunk is already an output delta', () => {
+    const state = newState();
+    transformDshRecord({
+      type: 'turn/start', sid: 's', time: 1000, data: { turn: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'step/start', sid: 's', time: 1010, data: { turn: 1, step: 1 },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'request/header', sid: 's', time: 1020,
+      data: { header: { config: { provider: 'p', model: 'm' } } },
+    }, ClientType.Dsh, state);
+    transformDshRecord({
+      type: 'request/context', sid: 's', time: 1030, data: { turn: 1, step: 1 },
+    }, ClientType.Dsh, state);
+
+    const request = transformDshRecord({
+      type: 'assistant/chunk', sid: 's', time: 1090,
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'hello' } },
+    }, ClientType.Dsh, state);
+    expect(request?.['event.name']).toBe('llm.request');
+
+    const response = transformDshRecord({
+      type: 'assistant/message', sid: 's', time: 1200,
+      data: {
+        turn: 1,
+        step: 1,
+        message: { id: 'r', content: [{ type: 'text', text: 'hello' }] },
+      },
+    }, ClientType.Dsh, state);
+    expect(response?.['gen_ai.response.time_to_first_token']).toBe(60_000_000);
+  });
+
+  it('omits TTFT when no native request boundary or output delta is available', () => {
+    const state = newState();
+    state.currentTurn = 1;
+    state.currentStep = 1;
+    state.cachedHeader = { model: 'm', provider: 'p' };
+    transformDshRecord({
+      type: 'assistant/chunk', sid: 's', time: 1000,
+      data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+    }, ClientType.Dsh, state);
+    const response = transformDshRecord({
+      type: 'assistant/message', sid: 's', time: 1100,
+      data: {
+        turn: 1,
+        step: 1,
+        message: { id: 'r', content: [{ type: 'text', text: 'done' }] },
+      },
+    }, ClientType.Dsh, state);
+    expect(response?.['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
   it('emits gen_ai.system_instructions and gen_ai.tool.definitions on llm.request from real request/header', async () => {
@@ -336,6 +399,7 @@ describe('dsh-event-transform (correlation isolation)', () => {
     state.inputMessages.push({ role: 'user', parts: [] });
     state.toolNames.set('call', 'read');
     state.requestStartTimes.set('session-a:1:1', 1);
+    state.firstOutputTimes.set('session-a:1:1', 2);
 
     transformDshRecord({
       type: 'turn/end', sid: 'session-a', time: 2, data: { turn: 1 },
@@ -347,6 +411,7 @@ describe('dsh-event-transform (correlation isolation)', () => {
     expect(state.inputMessages).toEqual([]);
     expect(state.toolNames.size).toBe(0);
     expect(state.requestStartTimes.size).toBe(0);
+    expect(state.firstOutputTimes.size).toBe(0);
   });
 });
 

@@ -61,6 +61,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
 | `gen_ai.response.model` | string | Recommended | 实际用于响应的模型。 |
 | `gen_ai.response.finish_reasons` | string[] | Recommended | 生成停止原因，见 [Finish Reasons](#finish-reasons)。 |
+| `gen_ai.response.time_to_first_token` | int | 可获取时 Recommended | 从模型原生请求边界到首个 reasoning、text 或 tool-call 输出的时间，单位纳秒；任一边界缺失或无效时省略。 |
 | `gen_ai.usage.input_tokens` | int | Recommended | 请求消耗的输入 token。 |
 | `gen_ai.usage.output_tokens` | int | Recommended | 响应生成的输出 token。 |
 | `gen_ai.usage.cache_read.input_tokens` | int | Recommended | 从 Provider 缓存读取的输入 token，已包含在 `gen_ai.usage.input_tokens` 中。 |

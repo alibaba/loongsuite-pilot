@@ -15,6 +15,7 @@
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
+| DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
@@ -39,6 +40,31 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## DeepSeek Harness 采集与生命周期
+
+Pilot 通过 `~/.dsh` 目录或 `dsh` 命令检测 DeepSeek Harness。启用
+`dsh` 后，Pilot 会在已设置 `DSH_HOME` 时修改 `$DSH_HOME/cordis.patch.yml`，
+否则修改 `~/.dsh/cordis.patch.yml`，并在其中追加一个
+带 marker 的 Pilot 专属 block，用于加载
+`$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
+首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
+
+插件将 append-only 原生事件写入
+`$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
+`0700`，文件权限为 `0600`。这些源文件包含归一化所需的原生消息和
+工具数据，应当作敏感数据保护；插件在落盘前会过滤类似凭据的 key。
+`captureMessageContent` 只控制归一化输出，不会删除这些源日志中的内容。
+Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream delta
+的时间差计算 LLM TTFT，并以纳秒写入
+`gen_ai.response.time_to_first_token`。
+
+`agent-control.json` 和 `config.json` 中的采集开关均使用 ID `dsh`。
+禁用采集时，Pilot 会先删除 enable marker，使已加载的插件停止写入，
+再只删除 Pilot 所属的 YAML block。DSH 保持启用时，运行时 watchdog
+会修复该 block。卸载会在删除插件资产之前执行相同的属主清理，并保留
+无关 YAML 内容。如果源事件缺少请求边界或输出 delta，Pilot 会省略 TTFT，
+不会伪造为 0。
 
 ## OpenClaw 兼容性与生命周期
 
@@ -75,7 +101,7 @@ Pilot 会上报原生 finish reason 和耗时，不会伪造消息或补零 Toke
 使用 `--agents` 跳过交互选择：
 
 ```bash
-bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor"
+bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor,dsh"
 ```
 
 安装器仍会检查所选 Agent 是否存在于当前机器上，再部署对应采集能力。
@@ -90,6 +116,7 @@ bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,curs
   "tools": {
     "claude-code": "on",
     "cursor": "auto",
+    "dsh": "on",
     "qoder": "off"
   }
 }
@@ -116,6 +143,7 @@ loongsuite-pilot restart
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
+    "dsh": { "enabled": true, "captureMessageContent": false },
     "openclaw": { "enabled": true, "captureMessageContent": false },
     "cursor": { "enabled": true, "captureMessageContent": true }
   }
