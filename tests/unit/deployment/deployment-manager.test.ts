@@ -178,6 +178,41 @@ describe('DeploymentManager', () => {
       expect(afterDisable).not.toContain('/opt/toggle.sh');
     });
 
+    it('removes the DSH YAML block and enabled marker when DSH is disabled', async () => {
+      const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
+      const patchPath = path.join(tmpDir, 'dsh-home', 'cordis.patch.yml');
+      await fs.mkdir(path.dirname(pluginPath), { recursive: true });
+      await fs.writeFile(pluginPath, 'export default function apply() {}\n');
+      const def: AgentDefinition = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: [], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: pluginPath,
+          patchPath,
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      expect((await mgr.deployAll(() => true))[0].success).toBe(true);
+      expect(await fs.readFile(patchPath, 'utf-8')).toContain('PILOT-OBSERVABILITY-MANAGED');
+      expect(await fs.readFile(path.join(path.dirname(pluginPath), '.collection-enabled'), 'utf-8'))
+        .toBe('enabled\n');
+
+      const [disabled] = await mgr.deployAll(() => false);
+      expect(disabled).toMatchObject({ success: true, skipped: true });
+      await expect(fs.stat(patchPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(path.join(path.dirname(pluginPath), '.collection-enabled')))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8')).dsh)
+        .toBeUndefined();
+    });
+
     it('does not touch settings for an agent disabled without a prior deployment', async () => {
       const settingsPath = path.join(tmpDir, 'never-deployed-hooks.json');
       const def: AgentDefinition = {

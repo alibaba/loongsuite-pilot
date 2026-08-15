@@ -2282,6 +2282,34 @@ function Remove-PilotInstallationFiles {
 }
 
 # ============================================================
+# Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
+# Unix and Windows both execute assets/plugins/dsh/cleanup.mjs.
+# ============================================================
+function Remove-DshYamlPatch {
+    $pluginDir = Join-Path $DataDir "plugins\dsh"
+    $cleanupScript = Join-Path $pluginDir "cleanup.mjs"
+    $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+    $patchPath = Join-Path $dshHome "cordis.patch.yml"
+
+    if (-not (Test-Path -LiteralPath $cleanupScript)) {
+        if ((Test-Path -LiteralPath $patchPath) -and
+            (Select-String -LiteralPath $patchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)) {
+            throw "DSH cleanup helper is missing; refusing to remove plugin assets still referenced by $patchPath"
+        }
+        return
+    }
+    if (-not $script:NODE_BIN) {
+        throw "No usable Node.js; cannot safely remove the DSH YAML patch"
+    }
+
+    & $script:NODE_BIN $cleanupScript --patch $patchPath --plugin-dir $pluginDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "DSH YAML patch cleanup failed; Pilot assets were preserved"
+    }
+    Msg "    ✅ 已清理 DSH YAML patch" "    ✅ Cleaned DSH YAML patch"
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 function Cmd-Uninstall {
@@ -2299,6 +2327,10 @@ function Cmd-Uninstall {
     # Resolve the pinned runtime before installation files (including node-bin)
     # are removed. JSON config cleanup must also work when Node is absent from PATH.
     $script:NODE_BIN = Resolve-Node
+
+    Msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
+    Remove-DshYamlPatch
+    Write-Host ""
 
     # Read the persisted target before the default data/install directory is removed.
     Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."

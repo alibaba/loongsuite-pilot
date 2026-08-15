@@ -17,9 +17,14 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('DshYamlPatchStrategy');
 
 const DEFAULT_PATCH_PATH = path.join(os.homedir(), '.dsh', 'cordis.patch.yml');
+export const DSH_ENABLED_MARKER = '.collection-enabled';
 
 const BEGIN_PREFIX = '# BEGIN ';
 const END_PREFIX = '# END ';
+const LOCK_SUFFIX = '.loongsuite-pilot.lock';
+const LOCK_TIMEOUT_MS = 2_000;
+const LOCK_RETRY_MS = 25;
+const STALE_LOCK_MS = 30_000;
 
 /**
  * Manages a single marked YAML block inside deepseek-harness's machine-wide
@@ -34,11 +39,13 @@ const END_PREFIX = '# END ';
  *     `undeploy(def)` — which only sees `AgentDefinition`, not in-memory
  *     deploy state — can decide whether to delete a now-empty file
  *     (Pilot created it) or keep it (user pre-existing, even if empty).
- *   - Concurrency: read original bytes → sha256 h0. Compose new bytes,
- *     write tmpfile → fsync → atomic rename. Before rename, re-read
- *     current bytes → sha256 h1. If `h1 !== h0`, abort + retry once
- *     (re-reading h0). `stat` (mtime/size) is a fast-path precheck
- *     only — same size/mtime but different bytes still rejects.
+ *   - Pilot writers share a bounded, stale-recoverable owner-token lock.
+ *     Each write reads original bytes → sha256 h0, writes and fsyncs a temp
+ *     file, then performs a second byte-hash check immediately before atomic
+ *     rename. If the target changed, the temp is removed and composition is
+ *     retried once from the newest bytes. Non-cooperating external editors do
+ *     not honor the lock, so the final read/rename pair is deliberately not
+ *     described as a formal cross-process CAS.
  */
 export class DshYamlPatchStrategy implements DeployStrategy {
   private readonly dataDir: string;
@@ -57,6 +64,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     const pluginPath = this.resolvePluginPath(cfg);
     const pluginHash = await this.sha256File(pluginPath);
     if (!pluginHash) return true;
+    if (!(await fileExists(this.resolveEnabledMarkerPath(cfg)))) return true;
     const pluginUrl = pathToFileURL(pluginPath).href;
     const fileBytes = await this.readBytes(this.resolvePatchPath(cfg));
     const block = this.findPilotBlock(fileBytes, cfg.marker);
@@ -84,92 +92,136 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     }
 
     const patchPath = this.resolvePatchPath(cfg);
+    const lockToken = await this.acquirePatchLock(patchPath);
+    if (!lockToken) {
+      return {
+        success: false,
+        agentId: def.id,
+        deployMode: 'dsh-yaml-patch',
+        error: 'timed out waiting for DSH patch lock',
+      };
+    }
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const originalBytes = await this.readBytes(patchPath);
-      const existedBefore = originalBytes.length > 0 || (await fileExists(patchPath));
-      const h0 = this.sha256Bytes(originalBytes);
-      const mode = await this.resolveMode(patchPath, existedBefore);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const originalBytes = await this.readBytes(patchPath);
+        const existedBefore = originalBytes.length > 0 || (await fileExists(patchPath));
+        const h0 = this.sha256Bytes(originalBytes);
+        const mode = await this.resolveMode(patchPath, existedBefore);
 
-      const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
-      if (parsed.conflictBlock) {
-        return {
-          success: false,
-          agentId: def.id,
-          deployMode: 'dsh-yaml-patch',
-          error: `conflict: existing block with marker ${cfg.marker} is not Pilot-managed (path/id mismatch)`,
-        };
-      }
-      let createdFileFlag: boolean;
-      if (parsed.existingBlock) {
-        const existing = this.extractCreatedFlag(parsed.existingBlock);
-        if (existing === 'true' || existing === 'false') {
-          createdFileFlag = existing === 'true';
+        const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
+        if (
+          parsed.conflictBlock
+          || (parsed.existingBlock && !parsed.existingBlock.includes(`# entryId=${cfg.entryId}\n`))
+        ) {
+          return {
+            success: false,
+            agentId: def.id,
+            deployMode: 'dsh-yaml-patch',
+            error: `conflict: existing block with marker ${cfg.marker} is not Pilot-managed (path/id mismatch)`,
+          };
+        }
+        let createdFileFlag: boolean;
+        if (parsed.existingBlock) {
+          const existing = this.extractCreatedFlag(parsed.existingBlock);
+          if (existing === 'true' || existing === 'false') {
+            createdFileFlag = existing === 'true';
+          } else {
+            createdFileFlag = !existedBefore;
+          }
         } else {
           createdFileFlag = !existedBefore;
         }
-      } else {
-        createdFileFlag = !existedBefore;
-      }
-      const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag);
-      let nextBytes: Buffer;
-      if (parsed.existingBlock) {
-        nextBytes = Buffer.concat([parsed.before, Buffer.from(newBlock), parsed.after]);
-      } else {
-        const sep = originalBytes.length > 0 && !originalBytes.toString('utf-8').endsWith('\n')
-          ? Buffer.from('\n')
-          : Buffer.alloc(0);
-        nextBytes = Buffer.concat([originalBytes, sep, Buffer.from(newBlock)]);
-      }
+        const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag);
+        let nextBytes: Buffer;
+        if (parsed.existingBlock) {
+          nextBytes = Buffer.concat([parsed.before, Buffer.from(newBlock), parsed.after]);
+        } else {
+          const sep = originalBytes.length > 0 && !originalBytes.toString('utf-8').endsWith('\n')
+            ? Buffer.from('\n')
+            : Buffer.alloc(0);
+          nextBytes = Buffer.concat([originalBytes, sep, Buffer.from(newBlock)]);
+        }
 
-      const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
-      if (wrote) return { success: true, agentId: def.id, deployMode: 'dsh-yaml-patch' };
-      logger.warn('concurrent modification detected, retrying once', { path: patchPath, attempt });
+        const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
+        if (wrote) {
+          try {
+            await this.createEnabledMarker(cfg);
+          } catch (err) {
+            logger.error('failed to enable DSH collection marker', { error: String(err) });
+            return {
+              success: false,
+              agentId: def.id,
+              deployMode: 'dsh-yaml-patch',
+              error: `failed to create DSH collection marker: ${String(err)}`,
+            };
+          }
+          return { success: true, agentId: def.id, deployMode: 'dsh-yaml-patch' };
+        }
+        logger.warn('concurrent modification detected, retrying once', { path: patchPath, attempt });
+      }
+      return {
+        success: false,
+        agentId: def.id,
+        deployMode: 'dsh-yaml-patch',
+        error: 'concurrent modification detected; aborting after retry',
+      };
+    } finally {
+      await this.releasePatchLock(patchPath, lockToken);
     }
-    return {
-      success: false,
-      agentId: def.id,
-      deployMode: 'dsh-yaml-patch',
-      error: 'concurrent modification detected; aborting after retry',
-    };
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
     const cfg = def.dshYamlPatch;
     if (!cfg) return false;
-    const patchPath = this.resolvePatchPath(cfg);
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const originalBytes = await this.readBytes(patchPath);
-      const existedBefore = originalBytes.length > 0 || (await fileExists(patchPath));
-      if (!existedBefore) return true;
-      const h0 = this.sha256Bytes(originalBytes);
-      const mode = await this.resolveMode(patchPath, true);
-
-      const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
-      if (parsed.conflictBlock) {
-        logger.warn('undeploy refused: existing block marker mismatch', { path: patchPath });
-        return false;
-      }
-      if (!parsed.existingBlock) {
-        return true;
-      }
-
-      const createdFile = this.extractCreatedFlag(parsed.existingBlock);
-      const nextBytes = Buffer.concat([parsed.before, parsed.after]);
-
-      if (createdFile === 'true' && nextBytes.toString('utf-8').trim().length === 0) {
-        const changed = await this.deleteIfUnchanged(patchPath, h0);
-        if (changed) return true;
-        logger.warn('concurrent modification during undeploy delete, retrying', { path: patchPath, attempt });
-        continue;
-      }
-
-      const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
-      if (wrote) return true;
-      logger.warn('concurrent modification during undeploy, retrying', { path: patchPath, attempt });
+    try {
+      await this.removeEnabledMarker(cfg);
+    } catch (err) {
+      logger.warn('failed to disable DSH collection marker', { error: String(err) });
+      return false;
     }
-    return false;
+    const patchPath = this.resolvePatchPath(cfg);
+    const lockToken = await this.acquirePatchLock(patchPath);
+    if (!lockToken) return false;
+
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const originalBytes = await this.readBytes(patchPath);
+        const existedBefore = originalBytes.length > 0 || (await fileExists(patchPath));
+        if (!existedBefore) return true;
+        const h0 = this.sha256Bytes(originalBytes);
+        const mode = await this.resolveMode(patchPath, true);
+
+        const parsed = this.splitOnPilotBlock(originalBytes, cfg.marker);
+        if (
+          parsed.conflictBlock
+          || (parsed.existingBlock && !parsed.existingBlock.includes(`# entryId=${cfg.entryId}\n`))
+        ) {
+          logger.warn('undeploy refused: existing block marker mismatch', { path: patchPath });
+          return false;
+        }
+        if (!parsed.existingBlock) {
+          return true;
+        }
+
+        const createdFile = this.extractCreatedFlag(parsed.existingBlock);
+        const nextBytes = Buffer.concat([parsed.before, parsed.after]);
+
+        if (createdFile === 'true' && nextBytes.toString('utf-8').trim().length === 0) {
+          const changed = await this.deleteIfUnchanged(patchPath, h0);
+          if (changed) return true;
+          logger.warn('concurrent modification during undeploy delete, retrying', { path: patchPath, attempt });
+          continue;
+        }
+
+        const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
+        if (wrote) return true;
+        logger.warn('concurrent modification during undeploy, retrying', { path: patchPath, attempt });
+      }
+      return false;
+    } finally {
+      await this.releasePatchLock(patchPath, lockToken);
+    }
   }
 
   // ─── Block composition / parsing ───
@@ -246,6 +298,10 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     return DEFAULT_PATCH_PATH;
   }
 
+  private resolveEnabledMarkerPath(cfg: DshYamlPatchConfig): string {
+    return path.join(path.dirname(this.resolvePluginPath(cfg)), DSH_ENABLED_MARKER);
+  }
+
   private async readBytes(p: string): Promise<Buffer> {
     try {
       return await fs.readFile(p);
@@ -288,28 +344,129 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     h0: string,
     mode: number | undefined,
   ): Promise<boolean> {
-    const currentBytes = await this.readBytes(target);
-    const h1 = this.sha256Bytes(currentBytes);
-    if (h1 !== h0) return false;
-
     await fs.mkdir(path.dirname(target), { recursive: true });
     const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    const handle = await fs.open(tmp, 'w', mode ?? 0o644);
     try {
-      await handle.write(nextBytes);
-      await handle.sync();
+      const currentBytes = await this.readBytes(target);
+      if (this.sha256Bytes(currentBytes) !== h0) return false;
+
+      const handle = await fs.open(tmp, 'wx', mode ?? 0o644);
+      try {
+        await handle.write(nextBytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+
+      // Re-check after the temp file is durable. This closes the previous
+      // deterministic TOCTOU window where an external edit made during fsync
+      // was unconditionally overwritten by rename. A non-cooperating writer
+      // can still race the final read/rename pair; Pilot writers share the lock.
+      const finalBytes = await this.readBytes(target);
+      if (this.sha256Bytes(finalBytes) !== h0) return false;
+      await fs.rename(tmp, target);
+      await this.syncDirectory(path.dirname(target));
+      return true;
     } finally {
-      await handle.close();
+      await fs.unlink(tmp).catch(err => {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          logger.warn('failed to remove DSH YAML temp file', { path: tmp, error: String(err) });
+        }
+      });
     }
-    await fs.rename(tmp, target);
-    return true;
   }
 
   private async deleteIfUnchanged(target: string, h0: string): Promise<boolean> {
     const currentBytes = await this.readBytes(target);
-    const h1 = this.sha256Bytes(currentBytes);
-    if (h1 !== h0) return false;
+    if (this.sha256Bytes(currentBytes) !== h0) return false;
+    const finalBytes = await this.readBytes(target);
+    if (this.sha256Bytes(finalBytes) !== h0) return false;
     await fs.unlink(target);
+    await this.syncDirectory(path.dirname(target));
     return true;
+  }
+
+  private async createEnabledMarker(cfg: DshYamlPatchConfig): Promise<void> {
+    const marker = this.resolveEnabledMarkerPath(cfg);
+    await fs.mkdir(path.dirname(marker), { recursive: true });
+    const tmp = `${marker}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+      const handle = await fs.open(tmp, 'wx', 0o600);
+      try {
+        await handle.write('enabled\n');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(tmp, marker);
+      if (process.platform !== 'win32') await fs.chmod(marker, 0o600);
+      await this.syncDirectory(path.dirname(marker));
+    } finally {
+      await fs.unlink(tmp).catch(() => {});
+    }
+  }
+
+  private async removeEnabledMarker(cfg: DshYamlPatchConfig): Promise<void> {
+    const marker = this.resolveEnabledMarkerPath(cfg);
+    try {
+      await fs.unlink(marker);
+      await this.syncDirectory(path.dirname(marker));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+
+  private async acquirePatchLock(target: string): Promise<string | null> {
+    const lockPath = `${target}${LOCK_SUFFIX}`;
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    while (Date.now() <= deadline) {
+      try {
+        const handle = await fs.open(lockPath, 'wx', 0o600);
+        try {
+          await handle.write(token);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        return token;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        try {
+          const stat = await fs.stat(lockPath);
+          if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+            await fs.unlink(lockPath);
+            continue;
+          }
+        } catch (statErr) {
+          if ((statErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        }
+        await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
+      }
+    }
+    return null;
+  }
+
+  private async releasePatchLock(target: string, token: string): Promise<void> {
+    const lockPath = `${target}${LOCK_SUFFIX}`;
+    try {
+      const owner = await fs.readFile(lockPath, 'utf-8');
+      if (owner === token) await fs.unlink(lockPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('failed to release DSH patch lock', { path: lockPath, error: String(err) });
+      }
+    }
+  }
+
+  private async syncDirectory(dir: string): Promise<void> {
+    try {
+      const handle = await fs.open(dir, 'r');
+      try { await handle.sync(); } finally { await handle.close(); }
+    } catch {
+      // Directory fsync is unsupported on some platforms/filesystems. The
+      // temp file itself is already durable, so keep deployment fail-open.
+    }
   }
 }

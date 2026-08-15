@@ -290,6 +290,7 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -593,6 +594,37 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /** Self-heal the DSH YAML patch and its collection-enabled marker. */
+  private buildDshYamlPatchInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'dsh-yaml-patch' || !def.dshYamlPatch) continue;
+      const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
+      targets.push({
+        id: `dsh-yaml-patch:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await fileExists(pluginPath))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
+          }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove DSH YAML patch for ${def.id}`);
         },
       });
     }

@@ -108,21 +108,16 @@ export class DeploymentManager {
   }
 
   /**
-   * Handle a hook agent the user has turned off (config.agents[<id>].enabled ===
-   * false). Skipping (re)deployment alone is not enough: a hook installed on a
-   * prior run — while the agent was still enabled — stays in the tool's
-   * settings file and keeps firing. So when a deployed-agents record exists we
-   * actively undeploy it (mirroring the intercept watchdog's disabled-cleanup),
-   * then drop the record so this runs at most once per disable.
+   * Handle a hook or DSH YAML agent the user has turned off. Skipping
+   * (re)deployment alone is not enough: an already-installed intercept keeps
+   * firing, so a prior deployment record triggers its DSH-specific cleanup.
    *
    * Gated on an existing state record: an agent the user has never enabled has
    * no record, so we never touch its settings file (matching the "does not
    * detect or deploy disabled agents" contract).
    *
-   * Scope is limited to hook agents — plugin-probe / plugin-inject /
-   * directory-plugin integrations self-heal through their own enabled-gated
-   * watchdog targets and carry heavier undeploy semantics (uninstall scripts,
-   * JSONC rewrites), so their disable path is intentionally left unchanged.
+   * Scope remains limited to hook and dsh-yaml-patch. Other deployment modes
+   * retain their existing lifecycle behavior.
    *
    * The record is dropped only once cleanup succeeds. Hook uninstall is
    * idempotent (a no-op when nothing matches — hook-manager.ts), so a failure
@@ -138,15 +133,23 @@ export class DeploymentManager {
       skipped: true,
     };
 
-    if (def.deployMode !== 'hook' || !this.state[def.id]) {
+    if (
+      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch')
+      || !this.state[def.id]
+    ) {
       logger.debug('agent excluded from deployment', { agentId: def.id });
       return result;
     }
 
-    logger.info('agent disabled — removing previously deployed hook', { agentId: def.id });
+    logger.info('agent disabled — removing previously deployed intercept', {
+      agentId: def.id,
+      deployMode: def.deployMode,
+    });
     let ok = false;
     try {
-      ok = await this.hookStrategy.undeploy(def);
+      ok = def.deployMode === 'hook'
+        ? await this.hookStrategy.undeploy(def)
+        : await this.dshYamlPatchStrategy.undeploy(def);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
@@ -154,7 +157,7 @@ export class DeploymentManager {
     if (!ok) {
       // Keep the record so the idempotent cleanup is retried next start.
       logger.warn('agent disable undeploy incomplete — keeping record to retry', { agentId: def.id });
-      return { ...result, success: false, skipped: false, error: 'hook undeploy incomplete' };
+      return { ...result, success: false, skipped: false, error: `${def.deployMode} undeploy incomplete` };
     }
 
     delete this.state[def.id];
