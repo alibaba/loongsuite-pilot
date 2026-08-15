@@ -104,7 +104,7 @@ function Resolve-NodeBin {
                     else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
     $pinFile = Join-Path $pilotDataDir "node-bin"
     if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
+        $pinned = (Get-Content -Path $pinFile -Encoding UTF8 -ErrorAction SilentlyContinue).Trim([char]0xFEFF)
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
 

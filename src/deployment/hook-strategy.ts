@@ -917,4 +917,50 @@ export class HookStrategy implements DeployStrategy {
       await writeJsonFile(settingsPath, existing);
     }
   }
+
+  /**
+   * Roll back the extraSettings we wrote via `applyExtraSettings`
+   * during deploy. Best-effort: only deletes leaf values that
+   * EXACTLY match the extraSettings we wrote; nested objects that
+   * contain user-set siblings are left intact. Round 8 fix
+   * (PR #233, fangxiu-wf review finding #5) — upstream `removeExtraSettings`
+   * was not adopted because PR #244 refactored it away. Inline
+   * minimal copy here, scoped to the undeploy rollback path.
+   */
+  private async removeExtraSettings(hookConfig: AgentHookConfig): Promise<void> {
+    const settingsPath = resolvePlatformSettingsPath(hookConfig);
+    const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
+    if (!existing) return;
+    const extra = hookConfig.extraSettings!;
+
+    const stripLeaves = (
+      target: Record<string, unknown>,
+      src: Record<string, unknown>,
+    ): boolean => {
+      let changed = false;
+      for (const [key, value] of Object.entries(src)) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const child = target[key];
+          if (child && typeof child === 'object' && !Array.isArray(child)) {
+            const childObj = child as Record<string, unknown>;
+            if (stripLeaves(childObj, value as Record<string, unknown>)) {
+              if (Object.keys(childObj).length === 0) delete target[key];
+              changed = true;
+            }
+          }
+        } else if (key in target && target[key] === value) {
+          delete target[key];
+          changed = true;
+        }
+      }
+      return changed;
+    };
+
+    if (!stripLeaves(existing, extra)) return;
+    await writeJsonFile(settingsPath, existing);
+    logger.info('settings.extraSettings rolled back', {
+      settingsPath,
+      keys: Object.keys(extra),
+    });
+  }
 }

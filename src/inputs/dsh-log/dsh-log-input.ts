@@ -118,13 +118,20 @@ export class DshLogInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
+    // Round 24 (PR #233): align signature with BaseSessionInput.processSessionLine
+    // (Round 3 changed the abstract to return AgentActivityEntry[] to support
+    // paired llm.request + llm.response emission). PR #266 by fangxiu-wf
+    // overrode `collect()` to use processDshFile() instead, so this method is
+    // a stub-only typecheck placeholder; the runtime path never calls it.
+    // Wrap the result of processRecord to satisfy the new contract.
     const runtime = this.fileStates.get(filePath) ?? {
       aggregator: newState(),
       inode: 0,
     };
     this.fileStates.set(filePath, runtime);
-    return this.processRecord(record, filePath, 0, runtime);
+    const entry = await this.processRecord(record, filePath, 0, runtime);
+    return entry ? [entry] : [];
   }
 
   private async processDshFile(filePath: string): Promise<AgentActivityEntry[]> {
