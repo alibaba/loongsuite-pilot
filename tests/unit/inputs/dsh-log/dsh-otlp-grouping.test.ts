@@ -40,7 +40,13 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
           content: [{ type: 'text', text: 'done' }],
           source: { provider: 'deepseek', model: 'deepseek-test' },
         },
-        usage: { inputTokens: 1, outputTokens: 1 },
+        usage: {
+          inputTokens: 3,
+          outputTokens: 5,
+          cacheReadTokens: 7,
+          cacheWriteTokens: 11,
+          reasoningTokens: 2,
+        },
       },
     },
   ];
@@ -94,6 +100,13 @@ describe('DSH session-scoped turn ids in OTLP buffering', () => {
     expect(llmSpans).toHaveLength(2);
     expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
       .toEqual([1_000_000, 1_000_000]);
+    for (const span of [...llmSpans, ...agentSpans]) {
+      expect(span.attributes['gen_ai.usage.input_tokens']).toBe(21);
+      expect(span.attributes['gen_ai.usage.output_tokens']).toBe(5);
+      expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+      expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(11);
+      expect(span.attributes['gen_ai.usage.total_tokens']).toBe(26);
+    }
     for (const span of captured) {
       expect(span.resource.attributes['gen_ai.agent.type']).toBe('dsh');
       expect(span.resource.attributes['gen_ai.agent.system']).toBe('dsh');
