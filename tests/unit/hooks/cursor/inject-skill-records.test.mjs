@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import {
   filterSkillsForReadInjection,
   injectSkillRecords,
@@ -141,6 +142,273 @@ describe('injectSkillRecords', () => {
     expect(toolCallRecord['gen_ai.tool.call.id']).toBe(toolResultRecord['gen_ai.tool.call.id']);
   });
 
+  it('should backfill the synthetic skill exchange into subsequent LLM inputs', () => {
+    const sourceCall = {
+      type: 'tool_call',
+      id: 'existing-call',
+      name: 'Grep',
+      arguments: { pattern: 'needle' },
+    };
+    const sourceResponse = {
+      type: 'tool_call_response',
+      id: 'existing-call',
+      response: 'matched',
+    };
+    const firstResponse = makeLlmResponse({
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [sourceCall] }],
+    });
+    const secondRequest = makeLlmRequest({
+      'event.id': 'evt-req-002',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'step_2',
+      'gen_ai.input.messages_delta': [
+        { role: 'assistant', parts: [sourceCall] },
+        { role: 'tool', parts: [sourceResponse] },
+      ],
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        { role: 'assistant', parts: [sourceCall] },
+        { role: 'tool', parts: [sourceResponse] },
+      ],
+    });
+    const laterRequest = makeLlmRequest({
+      'event.id': 'evt-req-003',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'step_3',
+      'gen_ai.input.messages_delta': [
+        { role: 'assistant', parts: [{ type: 'tool_call', id: 'later-call', name: 'Shell' }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'later-call', response: 'ok' }] },
+      ],
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        { role: 'assistant', parts: [sourceCall] },
+        { role: 'tool', parts: [sourceResponse] },
+        { role: 'assistant', parts: [{ type: 'tool_call', id: 'later-call', name: 'Shell' }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'later-call', response: 'ok' }] },
+      ],
+    });
+    const records = [firstResponse, secondRequest, laterRequest];
+
+    injectSkillRecords(records, [makeSkill()]);
+
+    const skillCall = firstResponse['gen_ai.output.messages'][0].parts
+      .find(part => part.type === 'tool_call' && part.name === 'Read');
+    expect(skillCall).toBeDefined();
+
+    const secondDelta = secondRequest['gen_ai.input.messages_delta'];
+    expect(secondDelta.map(message => message.role))
+      .toEqual(['assistant', 'tool', 'tool']);
+    expect(secondDelta[0].parts.map(part => part.id))
+      .toEqual(['existing-call', skillCall.id]);
+    expect(secondDelta.slice(1).map(message => message.parts[0].id))
+      .toEqual(['existing-call', skillCall.id]);
+    expect(secondDelta[2].parts[0]).toMatchObject({
+      type: 'tool_call_response',
+      id: skillCall.id,
+      response: '',
+    });
+
+    for (const request of [secondRequest, laterRequest]) {
+      const fullMessages = request['gen_ai.input.messages'];
+      const assistantParts = fullMessages
+        .find(message => message.role === 'assistant' &&
+          message.parts.some(part => part.id === 'existing-call')).parts;
+      const toolParts = fullMessages
+        .find(message => message.role === 'tool' &&
+          message.parts.some(part => part.id === 'existing-call')).parts;
+      expect(assistantParts.filter(part => part.id === skillCall.id)).toHaveLength(1);
+      expect(toolParts.filter(part => part.id === skillCall.id)).toHaveLength(0);
+      expect(fullMessages.find(message => message.role === 'tool' &&
+        message.parts[0]?.id === skillCall.id)?.parts).toHaveLength(1);
+    }
+
+    // Only the immediate next request receives this exchange in its delta.
+    expect(laterRequest['gen_ai.input.messages_delta'].flatMap(message => message.parts)
+      .some(part => part.id === skillCall.id)).toBe(false);
+  });
+
+  it('should create assistant/tool history when the source response had no ordinary tools', () => {
+    const firstResponse = makeLlmResponse();
+    const secondRequest = makeLlmRequest({
+      'event.id': 'evt-req-002',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'step_2',
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+      ],
+    });
+    const laterRequest = makeLlmRequest({
+      'event.id': 'evt-req-003',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'step_3',
+      'gen_ai.input.messages_delta': [
+        { role: 'assistant', parts: [{ type: 'tool_call', id: 'later-call', name: 'Shell' }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'later-call', response: 'ok' }] },
+      ],
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        { role: 'assistant', parts: [{ type: 'tool_call', id: 'later-call', name: 'Shell' }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'later-call', response: 'ok' }] },
+      ],
+    });
+    const records = [firstResponse, secondRequest, laterRequest];
+
+    injectSkillRecords(records, [makeSkill()]);
+
+    const skillCall = firstResponse['gen_ai.output.messages'][0].parts
+      .find(part => part.type === 'tool_call' && part.name === 'Read');
+    expect(secondRequest['gen_ai.input.messages_delta'].map(message => message.role))
+      .toEqual(['assistant', 'tool']);
+    expect(secondRequest['gen_ai.input.messages'].map(message => message.role))
+      .toEqual(['user', 'assistant', 'tool']);
+    expect(secondRequest['gen_ai.input.messages'][1].parts[0].id).toBe(skillCall.id);
+    expect(secondRequest['gen_ai.input.messages'][2].parts[0].id).toBe(skillCall.id);
+    expect(laterRequest['gen_ai.input.messages'].map(message => message.role))
+      .toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+    expect(laterRequest['gen_ai.input.messages'][1].parts[0].id).toBe(skillCall.id);
+    expect(laterRequest['gen_ai.input.messages'][3].parts[0].id).toBe('later-call');
+  });
+
+  it('should preserve the synthetic skill exchange in the converted next LLM span', async () => {
+    const common = {
+      trace_id: '0123456789abcdef0123456789abcdef',
+      'gen_ai.session.id': 'session-conversion',
+      'gen_ai.turn.id': 'turn-conversion',
+      'gen_ai.agent.type': 'cursor',
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.request.model': 'test-model',
+      'user.id': 'user-conversion',
+    };
+    const sourceCall = {
+      type: 'tool_call', id: 'existing-call', name: 'Grep', arguments: { pattern: 'x' },
+    };
+    const sourceResponse = {
+      type: 'tool_call_response', id: 'existing-call', response: 'matched',
+    };
+    const reasoningPart = { type: 'reasoning', content: 'inspect first' };
+    const firstResponse = {
+      ...makeLlmResponse({
+        ...common,
+        'gen_ai.step.id': 'turn-conversion:s1',
+        time_unix_nano: '2000000000',
+        observed_time_unix_nano: '2000000000',
+        'gen_ai.response.model': 'test-model',
+        'gen_ai.response.finish_reasons': ['tool_calls'],
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [reasoningPart, sourceCall],
+          finish_reason: 'tool_calls',
+        }],
+      }),
+    };
+    const secondRequest = {
+      ...makeLlmRequest({
+        ...common,
+        'event.id': 'evt-request-2',
+        'gen_ai.step.id': 'turn-conversion:s2',
+        time_unix_nano: '4000000000',
+        observed_time_unix_nano: '4000000000',
+        'gen_ai.input.messages_delta': [
+          { role: 'assistant', parts: [reasoningPart, sourceCall] },
+          { role: 'tool', parts: [sourceResponse] },
+        ],
+        'gen_ai.input.messages': [
+          { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+          { role: 'assistant', parts: [reasoningPart, sourceCall] },
+          { role: 'tool', parts: [sourceResponse] },
+        ],
+      }),
+    };
+    const records = [
+      {
+        ...common,
+        'event.id': 'evt-request-1',
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'turn-conversion:s1',
+        time_unix_nano: '1000000000',
+        observed_time_unix_nano: '1000000000',
+        'gen_ai.input.messages_delta': [
+          { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        ],
+        'gen_ai.input.messages': [
+          { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        ],
+      },
+      {
+        ...common,
+        'event.id': 'evt-tool-call',
+        'event.name': 'tool.call',
+        'gen_ai.step.id': 'turn-conversion:s1',
+        'gen_ai.tool.name': 'Grep',
+        'gen_ai.tool.call.id': 'existing-call',
+        time_unix_nano: '2000000000',
+        observed_time_unix_nano: '2000000000',
+      },
+      {
+        ...common,
+        'event.id': 'evt-tool-result',
+        'event.name': 'tool.result',
+        'gen_ai.step.id': 'turn-conversion:s1',
+        'gen_ai.tool.name': 'Grep',
+        'gen_ai.tool.call.id': 'existing-call',
+        time_unix_nano: '3000000000',
+        observed_time_unix_nano: '3000000000',
+      },
+      firstResponse,
+      secondRequest,
+      {
+        ...common,
+        'event.id': 'evt-response-2',
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'turn-conversion:s2',
+        'gen_ai.response.model': 'test-model',
+        'gen_ai.response.finish_reasons': ['stop'],
+        time_unix_nano: '5000000000',
+        observed_time_unix_nano: '5000000000',
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [{ type: 'text', content: 'done' }],
+          finish_reason: 'stop',
+        }],
+      },
+    ];
+
+    injectSkillRecords(records, [makeSkill()]);
+    const skillCallId = firstResponse['gen_ai.output.messages'][0].parts
+      .find(part => part.type === 'tool_call' && part.name === 'Read').id;
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      expect(conversion.warnings).toEqual([]);
+      const llmSpans = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llmSpans).toHaveLength(2);
+      const secondInput = JSON.parse(String(
+        llmSpans[1].attributes['gen_ai.input.messages'],
+      ));
+      expect(secondInput.map(message => message.role))
+        .toEqual(['user', 'assistant', 'tool', 'tool']);
+      expect(secondInput[1].parts.map(part => part.type))
+        .toEqual(['reasoning', 'tool_call', 'tool_call']);
+      const skillParts = secondInput
+        .flatMap(message => message.parts)
+        .filter(part => part.id === skillCallId);
+      expect(skillParts.map(part => part.type)).toEqual([
+        'tool_call',
+        'tool_call_response',
+      ]);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
+  });
+
   it('should assign strictly increasing timestamps relative to llm.response', () => {
     const baseTime = '1700000000000000000';
     const records = [makeLlmResponse({ time_unix_nano: baseTime })];
@@ -206,6 +474,15 @@ describe('injectSkillRecords', () => {
     expect(records).toHaveLength(0);
   });
 
+  it('should not modify records when the skill list is empty', () => {
+    const records = [makeLlmResponse()];
+    const before = JSON.parse(JSON.stringify(records));
+
+    injectSkillRecords(records, []);
+
+    expect(records).toEqual(before);
+  });
+
   it('should append tool_call parts without overwriting existing output.messages', () => {
     const existingParts = [
       { type: 'text', text: 'existing response' },
@@ -255,7 +532,18 @@ describe('injectSkillRecords', () => {
 
   it('should apply captureMessageContent=false to injected response and tool records', () => {
     const skillPath = '/Users/alice/.cursor/skills/private-skill/SKILL.md';
-    const records = [makeLlmResponse()];
+    const records = [
+      makeLlmResponse(),
+      makeLlmRequest({
+        'event.id': 'evt-req-002',
+        'gen_ai.turn.id': 'turn-001',
+        'gen_ai.step.id': 'step_2',
+        'gen_ai.agent.type': 'cursor',
+        'gen_ai.input.messages': [
+          { role: 'user', parts: [{ type: 'text', content: 'private prompt' }] },
+        ],
+      }),
+    ];
     const runtimeConfig = {
       agents: {
         cursor: { captureMessageContent: false },
@@ -272,7 +560,10 @@ describe('injectSkillRecords', () => {
     expect(records[1]['gen_ai.tool.call.arguments']).toBeUndefined();
     expect(records[1]['gen_ai.skill.name']).toBe('private-skill');
     expect(records[2]['gen_ai.skill.name']).toBe('private-skill');
+    expect(records[3]['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(records[3]['gen_ai.input.messages']).toBeUndefined();
     expect(JSON.stringify(records)).not.toContain(skillPath);
+    expect(JSON.stringify(records)).not.toContain('private prompt');
   });
 
   it('should synthesize Read records for a manually attached skill path', () => {

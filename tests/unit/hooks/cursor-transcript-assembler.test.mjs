@@ -320,7 +320,7 @@ describe('buildCursorRecordsFromTranscript', () => {
     it('step 2 input preserves the assistant tool call before its matching result', () => {
       const messages = records[5]['gen_ai.input.messages'];
       expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
-      expect(messages[1].parts[0]).toMatchObject({
+      expect(messages[1].parts.find(part => part.type === 'tool_call')).toMatchObject({
         type: 'tool_call',
         id: 'tool-ws-001',
         name: 'WebSearch',
@@ -491,6 +491,44 @@ describe('buildCursorRecordsFromTranscript', () => {
       const parts = lastResp['gen_ai.output.messages'][0].parts;
       expect(parts.some(p => p.type === 'text')).toBe(true);
     });
+  });
+
+  it('expands multiple previous tools into independent assistant/tool message pairs', () => {
+    const transcriptPath = writeTranscript([
+      { role: 'user', message: { content: [{ type: 'text', text: '<user_query>\ninspect\n</user_query>' }] } },
+      {
+        role: 'assistant',
+        message: { content: [
+          { type: 'text', text: 'checking' },
+          { type: 'tool_use', id: 'call-read', name: 'Read', input: { file_path: 'a' } },
+          { type: 'tool_use', id: 'call-shell', name: 'Shell', input: { command: 'pwd' } },
+        ] },
+      },
+      { role: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } },
+      { type: 'turn_ended', status: 'success' },
+    ]);
+    const records = buildCursorRecordsFromTranscript(transcriptPath, [
+      makePromptEvent({ prompt: 'inspect' }),
+      makeThoughtEvent({ text: 'checking' }),
+      makePreToolUse({ tool_name: 'Read', tool_use_id: 'call-read' }),
+      makePostToolUse({ tool_name: 'Read', tool_use_id: 'call-read' }),
+      makePreToolUse({ tool_name: 'Shell', tool_use_id: 'call-shell', _journal_ts: iso(3200) }),
+      makePostToolUse({ tool_name: 'Shell', tool_use_id: 'call-shell', _journal_ts: iso(4000) }),
+      makeResponseEvent({ text: 'done' }),
+      makeStopEvent(),
+    ], { stopConversationId: 'conv-abc' });
+
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'].endsWith(':s2')
+    );
+    expect(secondRequest['gen_ai.input.messages'].map(message => message.role))
+      .toEqual(['user', 'assistant', 'tool', 'tool']);
+    expect(secondRequest['gen_ai.input.messages'][1].parts.map(part => part.type))
+      .toEqual(['reasoning', 'tool_call', 'tool_call']);
+    expect(secondRequest['gen_ai.input.messages'].slice(2)
+      .map(message => message.parts[0].id))
+      .toEqual(['call-read', 'call-shell']);
   });
 
   describe('SPEC compliance', () => {

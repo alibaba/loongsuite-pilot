@@ -391,7 +391,7 @@ function buildParentSteps(events, ctx) {
     if (!currentLlmResponse) return;
     const toolCalls = stepToolCalls.get(currentStepId);
     appendToolCallParts(currentLlmResponse, toolCalls);
-    previousAssistantToolMessage = toolCallsToMessage(toolCalls);
+    previousAssistantToolMessage = llmResponseToInputAssistantMessage(currentLlmResponse);
     applyToolCallResponseTiming(currentLlmResponse, toolCalls);
 
     // Guard: if LLM request start >= response end (buffered-tool scenario),
@@ -685,23 +685,53 @@ function cloneMessages(messages) {
   return JSON.parse(JSON.stringify(messages));
 }
 
-/** Build a tool-role message from collected tool results (used as delta input on s2+ steps). */
-function toolResultsToMessage(toolResults) {
-  const parts = toolResults.map(tr => ({
+/** Build one tool response part from a collected result. */
+function toolResultToPart(toolResult) {
+  return {
     type: 'tool_call_response',
-    id: tr.toolUseId || null,
-    response: tr.error || stringify(tr.result),
-  }));
-  return { role: 'tool', parts };
+    id: toolResult.toolUseId || null,
+    response: toolResult.error || stringify(toolResult.result),
+  };
+}
+
+/**
+ * Preserve the previous LLM output as one assistant message, then emit one
+ * tool-role message per completed response. This mirrors the causal sequence:
+ * assistant(reasoning/text + all calls), tool(result A), tool(result B).
+ */
+function toolExchangeMessages(assistantToolMessage, toolResults) {
+  const calls = Array.isArray(assistantToolMessage?.parts)
+    ? assistantToolMessage.parts.filter(part => part?.type === 'tool_call')
+    : [];
+  const usedResultIndexes = new Set();
+  const messages = assistantToolMessage
+    ? [cloneMessages([assistantToolMessage])[0]]
+    : [];
+
+  for (const call of calls) {
+    const resultIndex = toolResults.findIndex((result, index) =>
+      !usedResultIndexes.has(index) && (result.toolUseId || null) === (call.id || null)
+    );
+    if (resultIndex >= 0) {
+      usedResultIndexes.add(resultIndex);
+      messages.push({ role: 'tool', parts: [toolResultToPart(toolResults[resultIndex])] });
+    }
+  }
+
+  for (let index = 0; index < toolResults.length; index++) {
+    if (usedResultIndexes.has(index)) continue;
+    messages.push({ role: 'tool', parts: [toolResultToPart(toolResults[index])] });
+  }
+  return messages;
 }
 
 /**
  * Build per-step delta messages and update cumulative input.
  *
  * - isFirst step: delta includes the user prompt (already pre-seeded in cumulative).
- * - s2+ steps: delta includes the previous assistant tool-call message followed
- *   by the tool-role message containing its results. Both are appended to the
- *   cumulative input in source order.
+ * - s2+ steps: delta includes the complete previous assistant output followed
+ *   by one tool message per completed result. They are appended to cumulative
+ *   input in source order.
  *
  * Callers are responsible for resetting previousToolResults after this call.
  */
@@ -720,14 +750,12 @@ function buildDeltaMessages(
     });
   }
   if (previousToolResults.length > 0) {
-    if (previousAssistantToolMessage) {
-      const assistantMessage = cloneMessages([previousAssistantToolMessage])[0];
-      deltaMessages.push(assistantMessage);
-      cumulativeInputMessages.push(cloneMessages([assistantMessage])[0]);
-    }
-    const toolMessage = toolResultsToMessage(previousToolResults);
-    deltaMessages.push(toolMessage);
-    cumulativeInputMessages.push({ ...toolMessage, parts: [...toolMessage.parts] });
+    const exchangeMessages = toolExchangeMessages(
+      previousAssistantToolMessage,
+      previousToolResults,
+    );
+    deltaMessages.push(...cloneMessages(exchangeMessages));
+    cumulativeInputMessages.push(...cloneMessages(exchangeMessages));
   }
   return deltaMessages;
 }
@@ -869,17 +897,14 @@ function appendToolCallParts(llmResponse, toolCalls) {
   }
 }
 
-function toolCallsToMessage(toolCalls) {
-  if (!toolCalls || toolCalls.length === 0) return null;
-  return {
-    role: 'assistant',
-    parts: toolCalls.map(tc => ({
-      type: 'tool_call',
-      id: tc.toolUseId || null,
-      name: tc.toolName,
-      arguments: parseMaybeJson(tc.toolInput),
-    })),
-  };
+function llmResponseToInputAssistantMessage(llmResponse) {
+  const outputMessages = llmResponse?.['gen_ai.output.messages'];
+  const assistant = Array.isArray(outputMessages)
+    ? outputMessages.find(message => message?.role === 'assistant')
+    : null;
+  if (!assistant || !Array.isArray(assistant.parts)) return null;
+  if (!assistant.parts.some(part => part?.type === 'tool_call')) return null;
+  return { role: 'assistant', parts: cloneMessages(assistant.parts) };
 }
 
 function applyToolCallResponseTiming(llmResponse, toolCalls) {

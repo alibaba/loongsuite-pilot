@@ -484,7 +484,7 @@ describe('Cursor react assembler', () => {
     const thirdDelta = thirdRequest?.['gen_ai.input.messages_delta'] ?? [];
     expect(thirdDelta.map((message: Record<string, unknown>) => message.role))
       .toEqual(['assistant', 'tool']);
-    expect(thirdDelta[0]?.parts?.[0]).toMatchObject({
+    expect(thirdDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
       type: 'tool_call',
       id: 'call-normal-shell',
       name: 'Shell',
@@ -566,7 +566,7 @@ describe('Cursor react assembler', () => {
     const secondDelta = requests[1]?.['gen_ai.input.messages_delta'] ?? [];
     expect(secondDelta.map((message: Record<string, unknown>) => message.role))
       .toEqual(['assistant', 'tool']);
-    expect(secondDelta[0]?.parts?.[0]).toMatchObject({
+    expect(secondDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
       type: 'tool_call',
       id: 'call-failing-read',
     });
@@ -863,7 +863,7 @@ describe('Cursor react assembler', () => {
       // Delta on s2 preserves the assistant call immediately before its result.
       expect(secondStepDelta).toHaveLength(2);
       expect(secondStepDelta.map(message => message.role)).toEqual(['assistant', 'tool']);
-      expect(secondStepDelta[0]?.parts?.[0]).toMatchObject({
+      expect(secondStepDelta[0]?.parts?.find(part => part.type === 'tool_call')).toMatchObject({
         type: 'tool_call',
         id: 'call-subagent',
         name: 'Subagent',
@@ -1196,9 +1196,12 @@ describe('Cursor react assembler', () => {
       expect(parentRequests).toHaveLength(3);
       expect(firstStepTaskCalls).toHaveLength(2);
       expect(secondStepDelta.map((message: Record<string, unknown>) => message.role))
-        .toEqual(['assistant', 'tool']);
-      expect(secondStepDelta[0]?.parts).toHaveLength(2);
-      expect(secondStepDelta[1]?.parts).toHaveLength(2);
+        .toEqual(['assistant', 'tool', 'tool']);
+      expect(secondStepDelta[0]?.parts
+        ?.filter((part: Record<string, unknown>) => part.type === 'tool_call')).toHaveLength(2);
+      expect(secondStepDelta.slice(1).every((message: Record<string, unknown>) =>
+        Array.isArray(message.parts) && message.parts.length === 1
+      )).toBe(true);
       expect(BigInt(secondRequest!.time_unix_nano)).toBeGreaterThanOrEqual(BigInt(ns(600)));
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
@@ -1280,7 +1283,7 @@ describe('Cursor react assembler', () => {
     // Delta on s2 preserves the assistant call immediately before its result.
     expect(secondStepDelta).toHaveLength(2);
     expect(secondStepDelta.map(message => message.role)).toEqual(['assistant', 'tool']);
-    expect(secondStepDelta[0]?.parts?.[0]).toMatchObject({
+    expect(secondStepDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
       type: 'tool_call',
       id: 'call-subagent-fallback',
       name: 'Subagent',
@@ -1582,7 +1585,7 @@ describe('Cursor react assembler', () => {
     // s2: delta = [assistant tool call, tool result].
     const s2Delta = llmRequests[1]!['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
     expect(s2Delta.map(message => message.role)).toEqual(['assistant', 'tool']);
-    expect(s2Delta[0]?.parts?.[0]).toMatchObject({
+    expect(s2Delta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
       type: 'tool_call',
       id: 'call-1',
       name: 'ls',
@@ -1622,7 +1625,7 @@ describe('Cursor react assembler', () => {
       ));
       expect(convertedInput.map((message: Record<string, unknown>) => message.role))
         .toEqual(['user', 'assistant', 'tool']);
-      expect(convertedInput[1].parts[0]).toMatchObject({
+      expect(convertedInput[1].parts.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
         type: 'tool_call',
         id: 'call-1',
       });
@@ -1763,14 +1766,18 @@ describe('Cursor react assembler', () => {
     expect(s1ToolCalls).toHaveLength(2);
     expect(s1ToolResults).toHaveLength(2);
 
-    // s2 input preserves both parallel assistant calls before their tool results.
+    // s2 input preserves the complete assistant output, then one response per tool.
     const s2Delta = s2Request!['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Delta.map(message => message.role)).toEqual(['assistant', 'tool']);
-    expect(s2Delta[0]!.parts).toHaveLength(2);
-    expect(s2Delta[1]!.parts).toHaveLength(2);
+    expect(s2Delta.map(message => message.role))
+      .toEqual(['assistant', 'tool', 'tool']);
+    expect(s2Delta[0].parts.filter(part => part.type === 'tool_call').map(part => part.id))
+      .toEqual(['tool-aaa', 'tool-bbb']);
+    expect(s2Delta.slice(1).map(message => message.parts[0]?.id))
+      .toEqual(['tool-aaa', 'tool-bbb']);
 
     const s2Full = s2Request!['gen_ai.input.messages'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Full.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(s2Full.map(message => message.role))
+      .toEqual(['user', 'assistant', 'tool', 'tool']);
 
     // s2 llm.response should carry the final text but NO tool_call parts.
     const s2Output = s2Response!['gen_ai.output.messages'] as Array<{ parts: Array<Record<string, unknown>> }>;
