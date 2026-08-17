@@ -102,6 +102,32 @@ describe('buildTurnRecords — basic shape', () => {
     }
   });
 
+  test('stamps invocation span attributes on every record without overriding structure', () => {
+    const turn = makeTurn({ llmCalls: [makeLlmCall()] });
+    const spanAttributes = {
+      'multica.issue.id': 'AGE-277',
+      'multica.user.id': 'staff-1',
+      trace_id: 'caller-trace-id',
+    };
+    const { records } = buildTurnRecords(
+      turn,
+      0,
+      'sess-1',
+      INITIAL_HASH,
+      'u-1',
+      'end_turn',
+      '/work',
+      {},
+      spanAttributes,
+    );
+    for (const record of records) {
+      expect(record['multica.issue.id']).toBe('AGE-277');
+      expect(record['multica.user.id']).toBe('staff-1');
+      expect(record.trace_id).toMatch(/^[0-9a-f]{32}$/);
+      expect(record.trace_id).not.toBe('caller-trace-id');
+    }
+  });
+
   test('turn.id format = <sessionId>:t<N> (C2)', () => {
     const turn = makeTurn({ llmCalls: [makeLlmCall()] });
     const { records } = buildTurnRecords(turn, 2, 'sess-1', INITIAL_HASH, 'u-1', 'end_turn');
