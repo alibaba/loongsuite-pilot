@@ -152,23 +152,12 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       });
     }
     if (i > 0 && prevToolResults.length > 0) {
-      if (previousAssistantToolMessage) {
-        const assistantMessage = cloneMessage(previousAssistantToolMessage);
-        inputMessageDelta.push(assistantMessage);
-        cumulativeInputMessages.push(cloneMessage(assistantMessage));
-      }
-      // NOTE: tool_output from journal postToolUse may contain GB18030-garbled text.
-      // Omit response content to avoid garbled data in output; structure is preserved.
-      const toolMessage = {
-        role: 'tool',
-        parts: prevToolResults.map(tr => ({
-          type: 'tool_call_response',
-          id: tr.tool_use_id || null,
-          response: '',
-        })),
-      };
-      inputMessageDelta.push(toolMessage);
-      cumulativeInputMessages.push(cloneMessage(toolMessage));
+      const exchangeMessages = toolExchangeMessages(
+        previousAssistantToolMessage,
+        prevToolResults,
+      );
+      inputMessageDelta.push(...exchangeMessages.map(cloneMessage));
+      cumulativeInputMessages.push(...exchangeMessages.map(cloneMessage));
     }
     const inputMessages = cumulativeInputMessages.map(cloneMessage);
 
@@ -298,7 +287,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     records.push(respRecord);
     const assistantToolParts = outputParts.filter(part => part.type === 'tool_call');
     previousAssistantToolMessage = assistantToolParts.length > 0
-      ? { role: 'assistant', parts: assistantToolParts.map(part => ({ ...part })) }
+      ? { role: 'assistant', parts: outputParts.map(part => cloneMessage(part)) }
       : null;
     prevToolResults = step.toolResults;
   }
@@ -308,6 +297,49 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
 
 function cloneMessage(message) {
   return JSON.parse(JSON.stringify(message));
+}
+
+/** Preserve one complete assistant output, followed by one message per tool result. */
+function toolExchangeMessages(assistantToolMessage, toolResults) {
+  const calls = Array.isArray(assistantToolMessage?.parts)
+    ? assistantToolMessage.parts.filter(part => part?.type === 'tool_call')
+    : [];
+  const usedResultIndexes = new Set();
+  const messages = assistantToolMessage
+    ? [cloneMessage(assistantToolMessage)]
+    : [];
+
+  for (const call of calls) {
+    const resultIndex = toolResults.findIndex((result, index) =>
+      !usedResultIndexes.has(index) &&
+      (result.tool_use_id || null) === (call.id || null)
+    );
+    if (resultIndex >= 0) {
+      usedResultIndexes.add(resultIndex);
+      messages.push({
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: toolResults[resultIndex].tool_use_id || null,
+          // Journal output may contain GB18030-garbled text. Preserve structure only.
+          response: '',
+        }],
+      });
+    }
+  }
+
+  for (let index = 0; index < toolResults.length; index++) {
+    if (usedResultIndexes.has(index)) continue;
+    messages.push({
+      role: 'tool',
+      parts: [{
+        type: 'tool_call_response',
+        id: toolResults[index].tool_use_id || null,
+        response: '',
+      }],
+    });
+  }
+  return messages;
 }
 
 // ─── Transcript Parser ───
