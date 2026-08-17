@@ -398,13 +398,6 @@ function transcriptCheckpoint(
   return stateStore.get(`codex-transcript:${transcript}`).extra?.codexTranscript as Record<string, unknown>;
 }
 
-function globalProcessedTurnIds(stateStore: StateStore): string[] {
-  const global = stateStore.get('codex-transcript').extra?.codexTranscriptGlobal as {
-    emittedTerminalTurnIds?: string[];
-  } | undefined;
-  return global?.emittedTerminalTurnIds ?? [];
-}
-
 describe('CodexTranscriptInput', () => {
   it('extracts the single-level subagent relationship from owning session metadata', async () => {
     const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
@@ -473,7 +466,6 @@ describe('CodexTranscriptInput', () => {
     }
     await waitFor(() => [...childTranscripts.values()].every(transcript =>
       Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent)));
-    expect(globalProcessedTurnIds(stateStore)).not.toContain('parent-turn-1');
     expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 0)).toBe(true);
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
@@ -510,10 +502,6 @@ describe('CodexTranscriptInput', () => {
         }),
       );
     }
-    expect(globalProcessedTurnIds(stateStore)).toEqual(expect.arrayContaining([
-      'parent-turn-1',
-      ...CHILD_FIXTURES.map(fixture => fixture.turnId),
-    ]));
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
       pendingFusion: null,
       activeTurn: null,
@@ -708,8 +696,8 @@ describe('CodexTranscriptInput', () => {
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
       activeTurn: null,
       pendingSubagent: null,
-      emittedTerminalTurnIds: ['child-turn-1'],
     });
+    expect(transcriptCheckpoint(stateStore, childTranscript).forkBootstrap).toBeUndefined();
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
       activeTurn: null,
       pendingFusion: null,
@@ -1115,7 +1103,7 @@ describe('CodexTranscriptInput', () => {
     });
   });
 
-  it('uses exact parent turn ownership when child metadata has no creation timestamp', async () => {
+  it('skips the copied prefix when child metadata has no creation timestamp', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-turn-owner-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createInput(root);
@@ -1885,12 +1873,11 @@ describe('CodexTranscriptInput', () => {
     const checkpoint = transcriptCheckpoint(stateStore, transcript) as {
       activeTurn?: unknown;
       pendingTerminal?: unknown;
-      emittedTerminalTurnIds?: string[];
+      forkBootstrap?: unknown;
     };
     expect(checkpoint.activeTurn).toBeNull();
     expect(checkpoint.pendingTerminal).toBeNull();
-    expect(checkpoint.emittedTerminalTurnIds).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
-    expect(globalProcessedTurnIds(stateStore)).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
+    expect(checkpoint.forkBootstrap).toBeUndefined();
     expect(debug).toHaveBeenCalledWith(
       'processed terminal Codex turn without observable entries',
       expect.objectContaining({ turnId: controlTurnId, terminalStatus: 'interrupted' }),
@@ -1946,17 +1933,12 @@ describe('CodexTranscriptInput', () => {
       scanOffset?: number;
       activeTurn?: unknown;
       pendingTerminal?: unknown;
-      emittedTerminalTurnIds?: string[];
+      forkBootstrap?: unknown;
     };
     expect(checkpoint.scanOffset).toBe((await fs.stat(transcript)).size);
     expect(checkpoint.activeTurn).toBeNull();
     expect(checkpoint.pendingTerminal).toBeNull();
-    expect(checkpoint.emittedTerminalTurnIds).toEqual(
-      expect.arrayContaining([...normalTurnIds, controlTurnId]),
-    );
-    expect(globalProcessedTurnIds(stateStore)).toEqual(
-      expect.arrayContaining([...normalTurnIds, controlTurnId]),
-    );
+    expect(checkpoint.forkBootstrap).toBeUndefined();
     expect(debug).toHaveBeenCalledWith(
       'processed terminal Codex turn without observable entries',
       expect.objectContaining({ turnId: controlTurnId, terminalStatus: 'interrupted' }),
@@ -2026,12 +2008,11 @@ describe('CodexTranscriptInput', () => {
     const checkpoint = transcriptCheckpoint(stateStore, fork) as {
       activeTurn?: unknown;
       pendingTerminal?: unknown;
-      emittedTerminalTurnIds?: string[];
+      forkBootstrap?: unknown;
     };
     expect(checkpoint.activeTurn).toBeNull();
     expect(checkpoint.pendingTerminal).toBeNull();
-    expect(checkpoint.emittedTerminalTurnIds).toEqual([forkTurnId]);
-    expect(globalProcessedTurnIds(stateStore)).not.toContain(controlTurnId);
+    expect(checkpoint.forkBootstrap).toBeUndefined();
 
     await stateStore.save();
     const restarted = await createDormantInput(root);
@@ -2055,9 +2036,11 @@ describe('CodexTranscriptInput', () => {
     await processTranscriptOnce(restarted.input, secondFork);
 
     expect(responsesForTurn(restarted.entries, restartedTurnId)).toHaveLength(1);
-    expect((transcriptCheckpoint(restarted.stateStore, secondFork) as {
-      emittedTerminalTurnIds?: string[];
-    }).emittedTerminalTurnIds).toEqual([restartedTurnId]);
+    expect(transcriptCheckpoint(restarted.stateStore, secondFork)).toMatchObject({
+      activeTurn: null,
+      pendingTerminal: null,
+    });
+    expect(transcriptCheckpoint(restarted.stateStore, secondFork).forkBootstrap).toBeUndefined();
     expect(debug).not.toHaveBeenCalledWith(
       'processed terminal Codex turn without observable entries',
       expect.objectContaining({ turnId: controlTurnId }),
@@ -2113,14 +2096,11 @@ describe('CodexTranscriptInput', () => {
     const checkpoint = transcriptCheckpoint(recovered.stateStore, transcript) as {
       activeTurn?: unknown;
       pendingTerminal?: unknown;
-      emittedTerminalTurnIds?: string[];
+      forkBootstrap?: unknown;
     };
     expect(checkpoint.activeTurn).toBeNull();
     expect(checkpoint.pendingTerminal).toBeNull();
-    expect(checkpoint.emittedTerminalTurnIds).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
-    expect(globalProcessedTurnIds(recovered.stateStore)).toEqual(
-      expect.arrayContaining([controlTurnId, normalTurnId]),
-    );
+    expect(checkpoint.forkBootstrap).toBeUndefined();
   });
 
   it('retains a truly unparseable pending range and does not scan later work', async () => {
@@ -2201,7 +2181,7 @@ describe('CodexTranscriptInput', () => {
     );
   });
 
-  it('does not re-emit completed turns copied into a forked Codex transcript file', async () => {
+  it('does not suppress matching turn IDs across independent transcript files', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-'));
     tempDirs.push(root);
     const { input, entries, sessionDir } = await createInput(root);
@@ -2247,13 +2227,13 @@ describe('CodexTranscriptInput', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     await input.stop();
 
-    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(2);
     expect(responsesForTurn(entries, 'turn-2')).toHaveLength(1);
     expect(responsesForTurn(entries, 'turn-1')[0]?.['gen_ai.usage.total_tokens']).toBe(110);
     expect(responsesForTurn(entries, 'turn-2')[0]?.['gen_ai.usage.total_tokens']).toBe(132);
   });
 
-  it('keeps fork dedupe after restarting the Codex transcript input', async () => {
+  it('does not restore cross-transcript turn-ID suppression after restart', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-restart-'));
     tempDirs.push(root);
     const first = await createInput(root);
@@ -2273,6 +2253,8 @@ describe('CodexTranscriptInput', () => {
     await first.input.stop();
 
     const restarted = await createInput(root);
+    const debug = vi.fn();
+    (restarted.input as unknown as { logger: { debug: typeof debug } }).logger.debug = debug;
     const forkedHistory = simpleCompletedTurn(
       'session-1',
       'turn-1',
@@ -2301,12 +2283,16 @@ describe('CodexTranscriptInput', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     await restarted.input.stop();
 
-    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(0);
+    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(1);
     expect(responsesForTurn(restarted.entries, 'turn-2')).toHaveLength(1);
     expect(responsesForTurn(restarted.entries, 'turn-2')[0]?.['gen_ai.usage.total_tokens']).toBe(132);
+    expect(debug).not.toHaveBeenCalledWith(
+      'skipped terminal Codex turn already present in global registry',
+      expect.anything(),
+    );
   });
 
-  it('persists global fork dedupe after baselining an inode-changed transcript file', async () => {
+  it('does not let an inode baseline suppress matching IDs in another transcript', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-inode-'));
     tempDirs.push(root);
     const first = await createInput(root);
@@ -2378,7 +2364,7 @@ describe('CodexTranscriptInput', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     await restarted.input.stop();
 
-    expect(responsesForTurn(restarted.entries, 'turn-2')).toHaveLength(0);
+    expect(responsesForTurn(restarted.entries, 'turn-2')).toHaveLength(1);
     expect(responsesForTurn(restarted.entries, 'turn-3')).toHaveLength(1);
     expect(responsesForTurn(restarted.entries, 'turn-3')[0]?.['gen_ai.usage.total_tokens']).toBe(330);
   });
@@ -2807,6 +2793,340 @@ describe('CodexTranscriptInput', () => {
       ];
     };
 
+    const expectStartupCopiedBaselineNotToPoisonParent = async (
+      ownerPayload: (parentThreadId: string) => Record<string, unknown>,
+    ): Promise<void> => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-startup-baseline-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const parent = uuidV7At('2026-08-05T09:00:00.000Z', '000000000041');
+      const owner = uuidV7At('2026-08-05T10:00:00.000Z', '000000000042');
+      const parentTurn = uuidV7At('2026-08-05T09:30:00.000Z', '000000000043');
+      const childTurn = uuidV7At('2026-08-05T10:00:00.010Z', '000000000044');
+      const parentMeta = record('2026-08-05T09:00:00.000Z', 'session_meta', {
+        id: parent, thread_source: 'user', model_provider: 'openai',
+      });
+      const parentTranscript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T09-00-00-${parent}.jsonl`,
+        [parentMeta, ...turnBlock(parentTurn, '2026-08-05T09:30:00.000Z')].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      const parentStat = await fs.stat(parentTranscript);
+      const parentScanOffset = Buffer.byteLength(parentMeta + '\n');
+      stateStore.update(`codex-transcript:${parentTranscript}`, {
+        lastOffset: parentScanOffset,
+        extra: {
+          codexTranscript: {
+            inode: parentStat.ino,
+            scanOffset: parentScanOffset,
+            activeTurn: null,
+            pendingTerminal: null,
+            pendingFusion: null,
+            pendingSubagent: null,
+            ownerSessionMetaOffset: 0,
+            emittedTerminalTurnIds: [],
+          },
+        },
+      });
+
+      await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: owner,
+            model_provider: 'openai',
+            ...ownerPayload(parent),
+          }),
+          ...turnBlock(parentTurn, '2026-08-05T09:30:00.000Z'),
+          ...turnBlock(childTurn, '2026-08-05T10:00:00.010Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+
+      await input.start();
+      await input.stop();
+
+      expect(responsesForTurn(entries, parentTurn)).toHaveLength(1);
+      expect(responsesForTurn(entries, childTurn)).toHaveLength(0);
+    };
+
+    it('does not let a startup-baselined user fork suppress an uncollected parent turn', async () => {
+      await expectStartupCopiedBaselineNotToPoisonParent(parentThreadId => ({
+        forked_from_id: parentThreadId,
+        thread_source: 'user',
+      }));
+    });
+
+    it('does not let a startup-baselined subagent suppress an uncollected parent turn', async () => {
+      await expectStartupCopiedBaselineNotToPoisonParent(parentThreadId => ({
+        forked_from_id: parentThreadId,
+        thread_source: 'subagent',
+        source: {
+          subagent: {
+            thread_spawn: {
+              parent_thread_id: parentThreadId,
+              depth: 1,
+            },
+          },
+        },
+      }));
+    });
+
+    it('keeps probing after a startup baseline while copied history is still materializing', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-startup-materialize-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const parent = uuidV7At('2026-08-05T09:00:00.000Z', '000000000061');
+      const owner = uuidV7At('2026-08-05T10:00:00.000Z', '000000000062');
+      const firstCopiedTurn = uuidV7At('2026-08-05T09:20:00.000Z', '000000000063');
+      const laterCopiedTurn = uuidV7At('2026-08-05T09:30:00.000Z', '000000000064');
+      const childTurn = uuidV7At('2026-08-05T10:00:00.010Z', '000000000065');
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: owner, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          ...turnBlock(firstCopiedTurn, '2026-08-05T09:20:00.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      const baselineSize = (await fs.stat(transcript)).size;
+
+      await input.start();
+      expect(entries).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: baselineSize,
+        forkBootstrap: {
+          searchOffset: expect.any(Number),
+        },
+      });
+      // Subsequent calls intentionally drive processFile directly. Stop the
+      // public lifecycle first so its serialized collection cycle cannot race
+      // the test-only direct invocation and manufacture duplicate emissions.
+      await input.stop();
+
+      await fs.appendFile(transcript, [
+        ...turnBlock(laterCopiedTurn, '2026-08-05T09:30:00.000Z'),
+        ...turnBlock(childTurn, '2026-08-05T10:00:00.010Z'),
+      ].join('\n') + '\n', 'utf8');
+      await processTranscriptOnce(input, transcript);
+
+      expect(responsesForTurn(entries, firstCopiedTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, laterCopiedTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        activeTurn: null,
+        pendingTerminal: null,
+      });
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+    });
+
+    it('rebuilds an owned turn that was already active at the startup fork baseline', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-startup-active-tail-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const parent = uuidV7At('2026-08-05T09:00:00.000Z', '000000000071');
+      const owner = uuidV7At('2026-08-05T10:00:00.000Z', '000000000072');
+      const copiedTurn = uuidV7At('2026-08-05T09:30:00.000Z', '000000000073');
+      const ownedTurn = uuidV7At('2026-08-05T10:00:00.010Z', '000000000074');
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: owner, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          ...turnBlock(copiedTurn, '2026-08-05T09:30:00.000Z'),
+          record('2026-08-05T10:00:00.010Z', 'turn_context', {
+            turn_id: ownedTurn, model: 'gpt-5.5', cwd: '/tmp/owned',
+          }),
+          record('2026-08-05T10:00:01.010Z', 'event_msg', {
+            type: 'task_started', turn_id: ownedTurn,
+          }),
+          record('2026-08-05T10:00:02.010Z', 'response_item', {
+            type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue owned turn' }],
+          }),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      const baselineSize = (await fs.stat(transcript)).size;
+
+      await input.start();
+
+      expect(entries).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: baselineSize,
+        activeTurn: {
+          turnId: ownedTurn,
+          startOffset: baselineSize,
+          model: 'gpt-5.5',
+          cwd: '/tmp/owned',
+        },
+      });
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+      await input.stop();
+
+      await fs.appendFile(transcript, [
+        record('2026-08-05T10:00:03.010Z', 'event_msg', {
+          type: 'agent_message', message: 'owned result', phase: 'final',
+        }),
+        record('2026-08-05T10:00:04.010Z', 'event_msg', tokenUsage(100, 10)),
+        record('2026-08-05T10:00:05.010Z', 'event_msg', {
+          type: 'task_complete', turn_id: ownedTurn, last_agent_message: 'owned result',
+        }),
+      ].join('\n') + '\n', 'utf8');
+      await processTranscriptOnce(input, transcript);
+
+      expect(responsesForTurn(entries, copiedTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, ownedTurn)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        activeTurn: null,
+        pendingTerminal: null,
+      });
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+    });
+
+    it('resumes a bounded owned-tail rebuild after restart', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-startup-large-tail-'));
+      tempDirs.push(root);
+      const first = await createDormantInput(root);
+      const parent = uuidV7At('2026-08-05T09:00:00.000Z', '000000000081');
+      const owner = uuidV7At('2026-08-05T10:00:00.000Z', '000000000082');
+      const copiedTurn = uuidV7At('2026-08-05T09:30:00.000Z', '000000000083');
+      const ownedTurn = uuidV7At('2026-08-05T10:00:00.010Z', '000000000084');
+      const filler = 'x'.repeat(64 * 1024);
+      const ownedTailPadding: string[] = [];
+      for (let index = 0; index < 270; index++) {
+        ownedTailPadding.push(record('2026-08-05T10:00:03.010Z', 'event_msg', {
+          type: 'owned_tail_padding', filler,
+        }));
+      }
+      const transcript = await writeTranscriptNamed(
+        first.sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: owner, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          ...turnBlock(copiedTurn, '2026-08-05T09:30:00.000Z'),
+          record('2026-08-05T10:00:00.010Z', 'turn_context', {
+            turn_id: ownedTurn, model: 'gpt-5.5', cwd: '/tmp/large-owned',
+          }),
+          record('2026-08-05T10:00:01.010Z', 'event_msg', {
+            type: 'task_started', turn_id: ownedTurn,
+          }),
+          record('2026-08-05T10:00:02.010Z', 'response_item', {
+            type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue large owned turn' }],
+          }),
+          ...ownedTailPadding,
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      const baselineSize = (await fs.stat(transcript)).size;
+      expect(baselineSize).toBeGreaterThan(16 * 1024 * 1024);
+
+      await first.input.start();
+      const firstCheckpoint = transcriptCheckpoint(first.stateStore, transcript);
+      expect(firstCheckpoint).toMatchObject({
+        scanOffset: baselineSize,
+        activeTurn: null,
+        forkBootstrap: {
+          state: 'baseline-tail',
+          tailCandidate: { turnId: ownedTurn },
+        },
+      });
+      expect((firstCheckpoint.forkBootstrap as { searchOffset: number }).searchOffset)
+        .toBeLessThan(baselineSize);
+      expect(first.entries).toHaveLength(0);
+      await first.stateStore.save();
+      await first.input.stop();
+
+      const restarted = await createDormantInput(root);
+      await restarted.input.start();
+      expect(restarted.entries).toHaveLength(0);
+      expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({
+        scanOffset: baselineSize,
+        activeTurn: {
+          turnId: ownedTurn,
+          startOffset: baselineSize,
+          model: 'gpt-5.5',
+          cwd: '/tmp/large-owned',
+        },
+      });
+      expect(transcriptCheckpoint(restarted.stateStore, transcript).forkBootstrap).toBeUndefined();
+      await restarted.input.stop();
+
+      await fs.appendFile(transcript, [
+        record('2026-08-05T10:00:04.010Z', 'event_msg', {
+          type: 'agent_message', message: 'large owned result', phase: 'final',
+        }),
+        record('2026-08-05T10:00:05.010Z', 'event_msg', tokenUsage(100, 10)),
+        record('2026-08-05T10:00:06.010Z', 'event_msg', {
+          type: 'task_complete', turn_id: ownedTurn, last_agent_message: 'large owned result',
+        }),
+      ].join('\n') + '\n', 'utf8');
+      await processTranscriptOnce(restarted.input, transcript);
+
+      expect(responsesForTurn(restarted.entries, copiedTurn)).toHaveLength(0);
+      expect(responsesForTurn(restarted.entries, ownedTurn)).toHaveLength(1);
+    }, 30_000);
+
+    it('uses a Hook that arrives before a startup baseline to anchor a later non-UUID turn', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-startup-hook-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
+      const parent = 'aaaaaaaa-0061-4061-8061-000000000061';
+      const owner = 'cccccccc-0062-4062-8062-000000000062';
+      const copiedTurn = 'parent-turn-startup-hook';
+      const childTurn = 'child-turn-startup-hook';
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        [
+          record('2026-08-05T10:00:00.000Z', 'session_meta', {
+            id: owner, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          ...turnBlock(copiedTurn, '2026-08-05T09:20:00.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      const baselineSize = (await fs.stat(transcript)).size;
+      await writeWakeupMarker(wakeupDir, owner, {
+        session_id: owner,
+        initial_turn_id: childTurn,
+        transcript_path: transcript,
+        hook_event: 'user-prompt-submit',
+      });
+
+      await input.start();
+      expect(entries).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: baselineSize,
+        forkBootstrap: { initialTurnId: childTurn },
+      });
+      await input.stop();
+
+      await fs.appendFile(
+        transcript,
+        turnBlock(childTurn, '2026-08-05T10:00:00.010Z').join('\n') + '\n',
+        'utf8',
+      );
+      await processTranscriptOnce(input, transcript);
+      await processTranscriptOnce(input, transcript);
+
+      expect(responsesForTurn(entries, copiedTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        activeTurn: null,
+        pendingTerminal: null,
+      });
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+    });
+
     it('keeps a fork rollout pending until an initial-turn Hook arrives', async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-await-hook-'));
       tempDirs.push(root);
@@ -2950,8 +3270,6 @@ describe('CodexTranscriptInput', () => {
 
       expect(responsesForTurn(entries, parentTurn)).toHaveLength(0);
       expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
-      expect(globalProcessedTurnIds(stateStore)).not.toContain(parentTurn);
-      expect(globalProcessedTurnIds(stateStore)).toContain(childTurn);
 
       const parentTranscript = await writeTranscriptNamed(
         sessionDir,
@@ -3021,6 +3339,69 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, parentTurn)).toHaveLength(0);
       expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
       expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+    });
+
+    it('baselines a consumed fork replacement without poisoning parent dedupe', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-inode-consumed-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const parent = uuidV7At('2026-08-05T09:00:00.000Z', '000000000051');
+      const owner = uuidV7At('2026-08-05T10:00:00.000Z', '000000000052');
+      const parentTurn = uuidV7At('2026-08-05T09:30:00.000Z', '000000000053');
+      const childTurn = uuidV7At('2026-08-05T10:00:00.010Z', '000000000054');
+      const text = [
+        record('2026-08-05T10:00:00.000Z', 'session_meta', {
+          id: owner, forked_from_id: parent, thread_source: 'user', model_provider: 'openai',
+        }),
+        ...turnBlock(parentTurn, '2026-08-05T09:30:00.000Z'),
+        ...turnBlock(childTurn, '2026-08-05T10:00:00.010Z'),
+      ].join('\n') + '\n';
+      const transcript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T10-00-00-${owner}.jsonl`,
+        text,
+        { bootstrapFork: false },
+      );
+
+      await processTranscriptOnce(input, transcript);
+      expect(responsesForTurn(entries, parentTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        activeTurn: null,
+        pendingTerminal: null,
+      });
+      expect(transcriptCheckpoint(stateStore, transcript).forkBootstrap).toBeUndefined();
+
+      const originalStat = await fs.stat(transcript);
+      const replacement = `${transcript}.replacement`;
+      await fs.writeFile(replacement, text, 'utf8');
+      await fs.rename(replacement, transcript);
+      expect((await fs.stat(transcript)).ino).not.toBe(originalStat.ino);
+
+      await processTranscriptOnce(input, transcript);
+
+      expect(responsesForTurn(entries, parentTurn)).toHaveLength(0);
+      expect(responsesForTurn(entries, childTurn)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        activeTurn: null,
+        pendingTerminal: null,
+        forkBootstrap: expect.any(Object),
+      });
+
+      const parentTranscript = await writeTranscriptNamed(
+        sessionDir,
+        `rollout-2026-08-05T09-00-00-${parent}.jsonl`,
+        [
+          record('2026-08-05T09:00:00.000Z', 'session_meta', {
+            id: parent, thread_source: 'user', model_provider: 'openai',
+          }),
+          ...turnBlock(parentTurn, '2026-08-05T09:30:00.000Z'),
+        ].join('\n') + '\n',
+        { bootstrapFork: false },
+      );
+      await processTranscriptOnce(input, parentTranscript);
+
+      expect(responsesForTurn(entries, parentTurn)).toHaveLength(1);
     });
 
     it('accepts a session-matched initial anchor when transcript paths differ', async () => {

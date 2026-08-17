@@ -1,8 +1,5 @@
 import type { JsonValue } from '../../types/index.js';
 
-export const MAX_EMITTED_TERMINAL_TURNS = 100;
-export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
-
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
 export interface CodexTranscriptInputContext {
@@ -86,8 +83,7 @@ export interface CodexPendingTerminalTurn {
   sourceRecordCount?: number;
 }
 
-/** First-owned-turn bootstrap for a fork/subagent rollout. */
-export interface CodexForkBootstrap {
+interface CodexForkBootstrapBase {
   /** Hook-provided first turn owned by this rollout. */
   initialTurnId?: string;
   /** Terminal Hook evidence for an owned turn; it may not be the first one. */
@@ -96,8 +92,23 @@ export interface CodexForkBootstrap {
   searchOffset: number;
 }
 
+/** First-owned-turn bootstrap for a fork/subagent rollout. */
+export type CodexForkBootstrap = CodexForkBootstrapBase & (
+  /** A file discovered while Pilot is running; retain until owned bytes advance. */
+  | { state: 'live-pending' }
+  /** A startup no-replay file whose first owned turn has not been located yet. */
+  | { state: 'baseline-search' }
+  /** A bounded no-output rebuild below the startup baseline. */
+  | {
+      state: 'baseline-tail';
+      /** Last unfinished owned candidate reconstructed below the baseline scanOffset. */
+      tailCandidate?: CodexActiveTranscriptTurn;
+    }
+);
+
 export interface CodexTranscriptCheckpoint {
   inode: number;
+  /** No-replay floor and next byte for normal event collection. Never rewound by fork probing. */
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
@@ -111,15 +122,8 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Present until the first owned range is located and actually consumed. */
+  /** Independent ownership probe; searchOffset never acts as the normal collection cursor. */
   forkBootstrap?: CodexForkBootstrap;
-  /** Terminal turns already processed by this transcript, including empty control turns. */
-  emittedTerminalTurnIds: string[];
-}
-
-export interface CodexTranscriptGlobalState {
-  /** Bounded cross-transcript registry; the persisted name is retained for compatibility. */
-  emittedTerminalTurnIds: string[];
 }
 
 export interface CodexTranscriptMeta {

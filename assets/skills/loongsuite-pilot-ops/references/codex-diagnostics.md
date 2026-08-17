@@ -36,7 +36,7 @@ codex                    # 启动 TUI
 
 或者：如果存在任何 `Untrusted` / `Modified` hook，**`codex` 启动时会自动弹出 "Hooks need review" 对话框**——这是最常见的发现入口，无需手工查询。
 
-我们的 5 个 hook（`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`）应当全部为 **`Trusted`** 或 **`Managed`**。
+我们的 5 个 hook（`SessionStart` / `UserPromptSubmit` / `SubagentStart` / `SubagentStop` / `Stop`）应当全部为 **`Trusted`** 或 **`Managed`**。
 
 | 状态 | 含义 | 处理 |
 |------|------|------|
