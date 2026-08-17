@@ -78,4 +78,59 @@ describe('OtlpTraceFlusher - endpoint normalization', () => {
       }),
     );
   });
+
+  it('uses traceEndpoint as an exact URL', async () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{
+        name: 'primary',
+        traceEndpoint: 'https://traces.example.com/custom/traces/',
+      }],
+      protocol: 'http/protobuf',
+      serviceName: 'test',
+    });
+
+    await flusher.exportSpansForAgent('codex', []);
+    await flusher.shutdown();
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://traces.example.com/custom/traces/',
+      }),
+    );
+  });
+
+  it('prefers traceEndpoint when both route fields are present', async () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{
+        name: 'primary',
+        endpoint: 'https://legacy.example.com/otlp',
+        traceEndpoint: 'https://traces.example.com/custom/traces',
+      }],
+      protocol: 'http/protobuf',
+      serviceName: 'test',
+    });
+
+    await flusher.exportSpansForAgent('codex', []);
+    await flusher.shutdown();
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://traces.example.com/custom/traces',
+      }),
+    );
+  });
+
+  it('rejects an invalid traceEndpoint with a clear error', () => {
+    expect(() => new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{
+        name: 'primary',
+        traceEndpoint: 'not a URL',
+      }],
+      protocol: 'http/protobuf',
+      serviceName: 'test',
+    })).toThrow('[otlp-trace] traceEndpoint must be an absolute HTTP(S) URL');
+  });
 });
