@@ -46,6 +46,7 @@ export enum ClientType {
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
   Dsh = 'dsh',
+  TraeCn = 'trae-cn',
 
 }
 
