@@ -78,4 +78,25 @@ describe('OtlpTraceFlusher - endpoint normalization', () => {
       }),
     );
   });
+
+  it('uses traceEndpoint as an exact URL', async () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{
+        name: 'primary',
+        traceEndpoint: 'https://traces.example.com/custom/traces',
+      }],
+      protocol: 'http/protobuf',
+      serviceName: 'test',
+    });
+
+    await flusher.exportSpansForAgent('codex', []);
+    await flusher.shutdown();
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'https://traces.example.com/custom/traces',
+      }),
+    );
+  });
 });
