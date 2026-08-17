@@ -35,6 +35,7 @@ import {
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveOtlpTraceUrl } from '../utils/otlp-endpoint.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 
 const logger = createLogger('ConfigLoader');
@@ -170,6 +171,7 @@ export interface ConfigFile {
 
   otlpTrace?: {
     endpoint?: string;
+    traceEndpoint?: string;
     headers?: Record<string, string>;
     resourceAttributes?: Record<string, string>;
     serviceName?: string;
@@ -672,9 +674,10 @@ function buildFlushersConfig(
  *   - inner config.innerTrace.otlp[]  (managed generic OTLP backends)
  *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
- * Endpoints are deduped by normalized URL + license-key + project. Conversion
- * happens once; serviceName / resourceAttributes / captureMessageContent are
- * therefore shared across all backends. Requires collectTrace=true.
+ * Routes are deduped by normalized URL + full headers + serviceName.
+ * Conversion happens once; serviceName / resourceAttributes /
+ * captureMessageContent are therefore shared across all backends. Requires
+ * collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   if (!config.collectTrace) return undefined;
@@ -692,9 +695,23 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   const innerPrefix = config.serviceName ? undefined : config.innerTrace?.serviceNamePrefix;
   const innerServiceName = innerPrefix && innerPrefix !== userServiceName ? innerPrefix : undefined;
 
-  // 1. User generic OTLP (endpoint via env or config).
-  const userOtlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
-  if (userOtlpEndpoint) {
+  // 1. User generic OTLP. The signal-specific route wins over the legacy
+  // endpoint while preserving the legacy environment-variable precedence.
+  const envTraceEndpoint = nonEmpty(env('LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT'));
+  const envLegacyEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT');
+  const fileTraceEndpoint = nonEmpty(config.otlpTrace?.traceEndpoint);
+  let userTraceEndpoint: string | undefined;
+  let userLegacyEndpoint: string | undefined;
+  if (envTraceEndpoint !== undefined) {
+    userTraceEndpoint = envTraceEndpoint;
+  } else if (envLegacyEndpoint !== undefined) {
+    userLegacyEndpoint = envLegacyEndpoint;
+  } else if (fileTraceEndpoint !== undefined) {
+    userTraceEndpoint = fileTraceEndpoint;
+  } else {
+    userLegacyEndpoint = config.otlpTrace?.endpoint;
+  }
+  if (userTraceEndpoint || userLegacyEndpoint) {
     let headers: Record<string, string> | undefined;
     const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
     if (envHeaders) {
@@ -705,7 +722,8 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     }
     endpoints.push({
       name: 'user-otlp',
-      endpoint: userOtlpEndpoint,
+      endpoint: userLegacyEndpoint,
+      traceEndpoint: userTraceEndpoint,
       headers,
       compression: config.otlpTrace?.compression,
     });
@@ -726,10 +744,11 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
   const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
   innerOtlp.forEach((ep, i) => {
-    if (!ep.endpoint) return;
+    if (!ep.endpoint && !ep.traceEndpoint) return;
     endpoints.push({
       name: ep.name ?? `inner-otlp-${i}`,
       endpoint: ep.endpoint,
+      traceEndpoint: ep.traceEndpoint,
       headers: ep.headers,
       compression: ep.compression,
       serviceName: innerServiceName,
@@ -795,18 +814,18 @@ function stableHeaderKey(headers?: Record<string, string>): string {
 }
 
 /**
- * Dedup by normalized URL + full headers + serviceName. Because the CMS shorthand
- * encodes license-key / project / workspace as headers, this subsumes those fields
- * and also distinguishes generic OTLP backends that share a URL but differ in auth
- * headers — so a managed backend is never silently folded into a user endpoint.
- * serviceName is included so the same URL under two service names is kept as two
- * distinct backends. First occurrence wins.
+ * Dedup by resolved trace URL + full headers + serviceName. Because the CMS
+ * shorthand encodes license-key, project, and workspace as headers, those
+ * fields remain tenant boundaries. First occurrence wins.
  */
 function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
   const seen = new Set<string>();
   const result: OtlpEndpoint[] = [];
   for (const ep of endpoints) {
-    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
+    const commonKey = `${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
+    const traceRoute = resolveOtlpTraceUrl(ep);
+    if (!traceRoute) continue;
+    const key = `${traceRoute}|${commonKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);

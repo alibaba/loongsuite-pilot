@@ -59,7 +59,10 @@ export interface MaskConfig {
 }
 
 export interface OtlpTraceRawConfig {
+  /** Legacy trace endpoint. Prefer traceEndpoint for signal-specific routing. */
   endpoint?: string;
+  /** Full OTLP trace endpoint, used as-is. Takes precedence over endpoint. */
+  traceEndpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
   serviceName?: string;
@@ -76,7 +79,10 @@ export interface OtlpTraceRawConfig {
 /** A single OTLP trace backend (managed inner or user), export-time only. */
 export interface OtlpEndpointEntry {
   name?: string;
-  endpoint: string;
+  /** Legacy trace endpoint. Prefer traceEndpoint for new configurations. */
+  endpoint?: string;
+  /** Full OTLP trace endpoint, used as-is. */
+  traceEndpoint?: string;
   headers?: Record<string, string>;
   compression?: 'none' | 'gzip';
 }
@@ -220,7 +226,10 @@ export interface FlusherConfig {
 /** A resolved OTLP backend the flusher exports to (name required for logging). */
 export interface OtlpEndpoint {
   name: string;
-  endpoint: string;
+  /** Legacy trace route retained for compatibility. */
+  endpoint?: string;
+  /** Full signal-specific trace route, used as-is. */
+  traceEndpoint?: string;
   headers?: Record<string, string>;
   compression?: 'none' | 'gzip';
   /** Overrides the shared config.serviceName for this backend's spans. */

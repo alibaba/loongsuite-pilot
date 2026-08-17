@@ -13,7 +13,7 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
   "collectTrace": true,
   "serviceName": "my-agent-service",
   "otlpTrace": {
-    "endpoint": "https://otel-collector.example.com",
+    "traceEndpoint": "https://traces.example.com/v1/otel/traces",
     "headers": {
       "Authorization": "Bearer token"
     },
@@ -31,7 +31,8 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 |--------|------|
 | `collectTrace` | Trace 上报总开关。 |
 | `serviceName` | 所有 Agent、OTLP 后端和 SLS 后端共用的唯一 `service.name`。 |
-| `otlpTrace.endpoint` | OTLP HTTP base URL。如果路径未以 `/v1/traces` 结尾，Pilot 会自动追加。 |
+| `otlpTrace.traceEndpoint` | 完整的 OTLP HTTP Trace 地址，其路径（包括末尾 `/`）按配置使用；优先于 `endpoint`。 |
+| `otlpTrace.endpoint` | 兼容旧配置的 Trace 基础地址，Pilot 会按需追加 `/v1/traces`。 |
 | `otlpTrace.headers` | 发送到 OTLP endpoint 的请求头。 |
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
@@ -45,7 +46,8 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 |----------|------|
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 所有 Agent 和上报后端共用的唯一服务名。 |
-| `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP Trace endpoint。 |
+| `LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT` | 完整的信号级 OTLP Trace 地址，路径按配置使用；优先于旧环境变量和文件配置。 |
+| `LOONGSUITE_PILOT_OTLP_ENDPOINT` | 兼容旧配置的 OTLP Trace 基础地址；优先于文件配置，并按需追加 `/v1/traces`。 |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | OTLP 请求头 JSON 字符串。 |
 
 ## ARMS/CMS 兼容 Trace 输出
@@ -102,7 +104,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
   "otlp": [
     {
       "name": "team-collector",
-      "endpoint": "https://collector.internal:4318",
+      "traceEndpoint": "https://traces.internal:4318/v1/traces",
       "headers": { "x-token": "..." },
       "compression": "gzip"
     }
@@ -123,7 +125,8 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 |------|------|------|
 | `serviceNamePrefix` | 顶层 | **所有**托管后端的 service name 前缀——trace(`otlp[]`/`cms[]`,作为 `service.name`)与 log(`sls[]`,作为 `__service_name__` tag)——用于与用户后端区分。可选;省略时回退到用户的 `serviceNamePrefix`(即不做区分)。用户配置的顶层 `serviceName` 会覆盖此前缀。 |
 | `otlp[].name` / `cms[].name` | 两者 | 用于日志与失败日志文件名的标签。可选(默认 `inner-otlp-<i>` / `inner-cms-<i>`)。 |
-| `otlp[].endpoint` | otlp | OTLP HTTP 基础 URL(自动补 `/v1/traces`)。 |
+| `otlp[].traceEndpoint` | otlp | 完整的 OTLP HTTP Trace 地址，其路径（包括末尾 `/`）按配置使用；优先于 `endpoint`。 |
+| `otlp[].endpoint` | otlp | 兼容旧配置的 Trace 基础地址（自动补 `/v1/traces`）。 |
 | `otlp[].headers` | otlp | 请求 header(如鉴权 token)。 |
 | `otlp[].compression` | otlp | `gzip`(默认)或 `none`。 |
 | `cms[].endpoint` | cms | ARMS/CMS trace endpoint。 |
