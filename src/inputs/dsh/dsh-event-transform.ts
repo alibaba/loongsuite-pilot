@@ -375,7 +375,15 @@ export function transformDshRecord(
       const content = data.content;
       const msgId = asString((asObject(data) ?? {}).id);
       const userParts = normalizeUserParts(content);
+      const sourceKind = asString(asObject(data.source)?.kind);
+
+      // Every user-role message is part of the model-visible conversation,
+      // including context injected by plugins. Only a native human prompt,
+      // however, is a top-level ENTRY/AGENT input. Source-less records retain
+      // the legacy behavior for JSONL captured before DSH exposed `source`.
       addInputMessage(state, { role: 'user', parts: userParts });
+      if (data.source !== undefined && sourceKind !== 'user') return null;
+
       return buildAgentActivityEntry({
         ...common,
         'event.name': 'other',

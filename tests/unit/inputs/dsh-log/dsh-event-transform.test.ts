@@ -135,13 +135,25 @@ describe('dsh-event-transform (real fixture)', () => {
     expect([...traceIds][0]).toMatch(/^[a-f0-9]{32}$/);
   });
 
-  it('user/message emits an "other" event with input.messages_delta', async () => {
-    const { entries } = await loadAll();
+  it('emits top-level input only for the original source.kind=user message', async () => {
+    const { records, entries } = await loadAll();
+    const messageSources = records
+      .filter(record => record.type === 'user/message')
+      .map(record => (record.data as { source?: { kind?: string } }).source?.kind);
+    expect(messageSources).toEqual(['user', 'plugin']);
+
     const userEvents = entries.filter(e => e['event.name'] === 'other');
-    expect(userEvents.length).toBeGreaterThan(0);
+    expect(userEvents).toHaveLength(1);
     const delta = userEvents[0]['gen_ai.input.messages_delta'] as { role: string; parts: unknown[] }[];
     expect(delta[0].role).toBe('user');
     expect(delta[0].parts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(delta)).toContain('Create a hello.txt file');
+    expect(JSON.stringify(delta)).not.toContain('Current runtime context');
+
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    const firstInput = JSON.stringify(requests[0]['gen_ai.input.messages']);
+    expect(firstInput).toContain('Create a hello.txt file');
+    expect(firstInput).toContain('Current runtime context');
   });
 
   it('llm.request and llm.response timestamps differ (non-zero LLM duration)', async () => {
@@ -465,6 +477,63 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(request?.['event.name']).toBe('llm.request');
     expect(request?.['gen_ai.request.model']).toBeUndefined();
     expect(request?.['gen_ai.system_instructions']).toBeUndefined();
+  });
+});
+
+describe('dsh-event-transform (message sources)', () => {
+  it.each(['plugin', 'future-injected-source'])(
+    'keeps source.kind=%s in LLM context without emitting top-level user input',
+    (kind) => {
+      const state = newState();
+      state.currentTurn = 1;
+      state.currentStep = 1;
+
+      const injected = transformDshRecord({
+        type: 'user/message',
+        sid: 'session-a',
+        time: 1,
+        data: {
+          turn: 1,
+          source: { kind },
+          content: [{ type: 'text', text: 'injected context' }],
+        },
+      }, ClientType.Dsh, state);
+      expect(injected).toBeNull();
+
+      const request = transformDshRecord({
+        type: 'assistant/chunk',
+        sid: 'session-a',
+        time: 2,
+        data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+      }, ClientType.Dsh, state);
+      expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('injected context');
+    },
+  );
+
+  it('preserves the top-level projection for legacy records without source', () => {
+    const entry = transformDshRecord({
+      type: 'user/message',
+      sid: 'legacy-session',
+      time: 1,
+      data: { content: [{ type: 'text', text: 'legacy prompt' }] },
+    }, ClientType.Dsh, newState());
+
+    expect(entry?.['event.name']).toBe('other');
+    expect(JSON.stringify(entry?.['gen_ai.input.messages_delta'])).toContain('legacy prompt');
+  });
+
+  it('does not treat a malformed present source as a human prompt', () => {
+    const entry = transformDshRecord({
+      type: 'user/message',
+      sid: 'session-a',
+      time: 1,
+      data: {
+        source: {},
+        content: [{ type: 'text', text: 'unclassified context' }],
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(entry).toBeNull();
   });
 });
 
