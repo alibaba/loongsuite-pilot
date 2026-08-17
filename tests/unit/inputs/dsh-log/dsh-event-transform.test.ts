@@ -114,6 +114,52 @@ describe('dsh-event-transform (real fixture)', () => {
     }
   });
 
+  it('maps real DSH disjoint usage into cumulative Pilot token fields', async () => {
+    const { entries } = await loadAll();
+    const responses = entries
+      .filter(e => e['event.name'] === 'llm.response')
+      .sort((a, b) => (a['gen_ai.step.id'] as string).localeCompare(b['gen_ai.step.id'] as string));
+
+    expect(responses.map(r => ({
+      input: r['gen_ai.usage.input_tokens'],
+      output: r['gen_ai.usage.output_tokens'],
+      cacheRead: r['gen_ai.usage.cache_read.input_tokens'],
+    }))).toEqual([
+      { input: 7_493, output: 105, cacheRead: 0 },
+      { input: 7_632, output: 46, cacheRead: 7_552 },
+      { input: 7_723, output: 36, cacheRead: 7_552 },
+    ]);
+  });
+
+  it('includes cache writes in input without double-counting reasoning', () => {
+    const r = transformDshRecord({
+      type: 'assistant/message',
+      sid: 's',
+      time: 1000,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          source: { provider: 'test', model: 'test-model' },
+        },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 20,
+          cacheWriteTokens: 30,
+          reasoningTokens: 4,
+        },
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(r!['gen_ai.usage.input_tokens']).toBe(60);
+    expect(r!['gen_ai.usage.output_tokens']).toBe(5);
+    expect(r!['gen_ai.usage.cache_read.input_tokens']).toBe(20);
+    expect(r!['gen_ai.usage.cache_creation.input_tokens']).toBe(30);
+  });
+
   it('emits paired tool.call + tool.result with matching call.id', async () => {
     const { entries } = await loadAll();
     const calls = entries.filter(e => e['event.name'] === 'tool.call');

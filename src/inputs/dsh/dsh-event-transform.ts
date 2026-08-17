@@ -403,10 +403,16 @@ export function transformDshRecord(
       const responseId = asString(message.id);
       const content = message.content;
       const usage = asObject(data.usage) ?? {};
-      const inputTokens = asNumber(usage.inputTokens);
+      const uncachedInputTokens = asNumber(usage.inputTokens);
       const outputTokens = asNumber(usage.outputTokens);
       const cacheRead = asNumber(usage.cacheReadTokens);
-      const reasoningTokens = asNumber(usage.reasoningTokens);
+      const cacheWrite = asNumber(usage.cacheWriteTokens);
+
+      // DSH reports disjoint input buckets, while Pilot's public schema defines
+      // cache-read and cache-creation tokens as subsets of input_tokens.
+      const inputTokens = uncachedInputTokens === undefined
+        ? undefined
+        : uncachedInputTokens + (cacheRead ?? 0) + (cacheWrite ?? 0);
 
       let finishReasons: string[] | undefined;
       let timeToFirstToken: number | undefined;
@@ -427,10 +433,6 @@ export function transformDshRecord(
         }
       }
 
-      const outputTokensTotal = outputTokens !== undefined && reasoningTokens !== undefined
-        ? outputTokens + reasoningTokens
-        : outputTokens;
-
       const assistantParts = normalizeAssistantParts(content);
       rememberToolNames(content, state);
 
@@ -448,8 +450,11 @@ export function transformDshRecord(
         'gen_ai.response.finish_reasons': finishReasons,
         'gen_ai.response.time_to_first_token': timeToFirstToken,
         'gen_ai.usage.input_tokens': inputTokens,
-        'gen_ai.usage.output_tokens': outputTokensTotal,
+        // DSH outputTokens already includes its optional reasoningTokens
+        // breakdown, so forwarding the total avoids counting reasoning twice.
+        'gen_ai.usage.output_tokens': outputTokens,
         'gen_ai.usage.cache_read.input_tokens': cacheRead,
+        'gen_ai.usage.cache_creation.input_tokens': cacheWrite,
         'gen_ai.output.messages': toJsonValue([{
           role: 'assistant',
           parts: assistantParts,
