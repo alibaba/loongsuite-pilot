@@ -164,8 +164,14 @@ describe('EVENT_LOG_TO_TRACE_SPEC §11 self-check (real fixture)', () => {
     expect(secondInput.map(message => message.role)).toEqual([
       'user', 'assistant', 'tool', 'tool', 'tool',
     ]);
-    const assistantCallIds = secondInput
-      .find(message => message.role === 'assistant').parts
+    const assistantMessages = secondInput.filter(message => message.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+    const assistantParts = assistantMessages[0].parts;
+    expect(assistantParts.filter(part => part.type === 'reasoning')).toHaveLength(1);
+    expect(assistantParts.filter(part => part.type === 'text')).toHaveLength(1);
+    const firstOutput = JSON.parse(llmSpans[0].attributes['gen_ai.output.messages']);
+    expect(assistantParts).toEqual(firstOutput[0].parts);
+    const assistantCallIds = assistantParts
       .filter(part => part.type === 'tool_call')
       .map(part => part.id);
     const toolResponseIds = secondInput
