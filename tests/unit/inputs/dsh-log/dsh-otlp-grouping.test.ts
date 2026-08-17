@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -16,7 +18,12 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
   const records: Record<string, unknown>[] = [
     { type: 'turn/start', sid, time: baseTime, data: { turn: 1 } },
     { type: 'step/start', sid, time: baseTime + 1, data: { turn: 1, step: 1 } },
-    { type: 'user/message', sid, time: baseTime + 2, data: { content: [{ type: 'text', text: 'hello' }] } },
+    {
+      type: 'user/message',
+      sid,
+      time: baseTime + 2,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] },
+    },
     {
       type: 'request/header', sid, time: baseTime + 3,
       data: { header: { config: { provider: 'deepseek', model: 'deepseek-test' } } },
@@ -49,7 +56,24 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
     .filter((entry): entry is AgentActivityEntry => entry !== null);
 }
 
-describe('DSH session-scoped turn ids in OTLP buffering', () => {
+interface SpanMessage {
+  role?: string;
+  parts?: Array<{ content?: string }>;
+}
+
+function readInputMessages(span: ReadableSpan): SpanMessage[] {
+  return JSON.parse(String(span.attributes['gen_ai.input.messages'])) as SpanMessage[];
+}
+
+function messageText(message: SpanMessage): string {
+  return message.parts?.map(part => part.content ?? '').join('') ?? '';
+}
+
+function compareSpanStart(a: ReadableSpan, b: ReadableSpan): number {
+  return a.startTime[0] - b.startTime[0] || a.startTime[1] - b.startTime[1];
+}
+
+describe('DSH event-to-span OTLP flow', () => {
   let captured: ReadableSpan[];
   let flusher: OtlpTraceFlusher;
 
@@ -98,5 +122,43 @@ describe('DSH session-scoped turn ids in OTLP buffering', () => {
       expect(span.resource.attributes['gen_ai.agent.type']).toBe('dsh');
       expect(span.resource.attributes['gen_ai.agent.system']).toBe('dsh');
     }
+  });
+
+  it('keeps injected context on LLM spans but excludes it from ENTRY and AGENT', async () => {
+    const fixturePath = path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl');
+    const fixture = await fs.readFile(fixturePath, 'utf8');
+    const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const state = newState();
+    const entries = records
+      .map(record => transformDshRecord(record, ClientType.Dsh, state))
+      .filter((entry): entry is AgentActivityEntry => entry !== null);
+
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+
+    const entry = captured.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+    const agent = captured.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+    expect(entry).toBeDefined();
+    expect(agent).toBeDefined();
+
+    const entryInput = readInputMessages(entry!);
+    const agentInput = readInputMessages(agent!);
+    expect(entryInput).toHaveLength(1);
+    expect(agentInput).toEqual(entryInput);
+    expect(messageText(entryInput[0])).toContain('Create a hello.txt file');
+    expect(messageText(entryInput[0])).not.toContain('Current runtime context');
+
+    const llmSpans = captured
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+      .sort(compareSpanStart);
+    expect(llmSpans).toHaveLength(3);
+    const llmInputs = llmSpans.map(readInputMessages);
+    expect(llmInputs.map(messages => messages.map(message => message.role))).toEqual([
+      ['user', 'user'],
+      ['user', 'user', 'assistant', 'tool'],
+      ['user', 'user', 'assistant', 'tool', 'assistant', 'tool'],
+    ]);
+    expect(messageText(llmInputs[0][0])).toContain('Create a hello.txt file');
+    expect(messageText(llmInputs[0][1])).toContain('Current runtime context');
   });
 });
