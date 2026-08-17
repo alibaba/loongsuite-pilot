@@ -7,7 +7,7 @@ set -euo pipefail
 #   $PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh <subcommand>
 #
 # Subcommand 与 Codex hook event 一一对应:
-#   session-start / user-prompt-submit / pre-tool-use / post-tool-use / stop
+#   session-start / user-prompt-submit / subagent-start / subagent-stop / stop
 #
 # Fail-open 原则: 任何错误都输出 "{}" 并 exit 0,不阻塞宿主 agent。
 

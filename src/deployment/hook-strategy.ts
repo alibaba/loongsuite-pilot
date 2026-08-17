@@ -19,8 +19,13 @@ import {
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
+  CODEX_HOOK_EVENT_KEYS,
+  type InstalledCodexCommandHandler,
+  type InstalledCodexHookLocation,
+  installedHookStateKey,
   writeTrustedHashes,
   removeTrustBlock,
+  removeTrustStateKeys,
   verifyTrustHashes,
 } from './codex-trust-writer.js';
 
@@ -156,23 +161,21 @@ export class HookStrategy implements DeployStrategy {
   private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook?.trustToml;
     if (!cfg || !def.hook) return false;
-
-    const hookCommand = resolveHome(def.hook.hookCommand);
-    const eventToCommand: Record<string, string> = {};
-    for (const event of def.hook.events) {
-      eventToCommand[event] = formatHookCommand(
-        hookCommand, event, def.hook.eventSubcommand, def.id,
-      );
+    try {
+      const locations = await this.resolveInstalledCodexHooks(def);
+      return !verifyTrustHashes({
+        configPath: resolveHome(cfg.configPath),
+        hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+        locations,
+        marker: cfg.marker,
+      }).valid;
+    } catch (err) {
+      logger.warn('could not resolve installed Codex hooks for trust verification', {
+        agentId: def.id,
+        error: String(err),
+      });
+      return true;
     }
-    const eventToGroupIndex = await this.resolveGroupIndices(def);
-    return !verifyTrustHashes({
-      configPath: resolveHome(cfg.configPath),
-      hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
-      hookEvents: def.hook.events,
-      eventToCommand,
-      eventToGroupIndex,
-      marker: cfg.marker,
-    }).valid;
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
@@ -198,6 +201,27 @@ export class HookStrategy implements DeployStrategy {
       }
 
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+      let retiredTrustKeys: string[] = [];
+      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
+        try {
+          const retiredEvents = retiredHookDefs.map(
+            definition => definition.hookJsonPath.at(-1)!,
+          );
+          const locations = await this.resolveInstalledCodexHooks(def, retiredEvents, true);
+          const hooksJsonAbsPath = path.resolve(resolveHome(hookConfig.settingsPath));
+          retiredTrustKeys = Object.values(locations).map(
+            location => installedHookStateKey(hooksJsonAbsPath, location),
+          );
+        } catch (err) {
+          // Cleanup must be conservative: if ownership cannot be proven from the
+          // installed handler, leave stale state behind rather than deleting a
+          // third-party hook's position-based trust entry.
+          logger.warn('could not resolve retired Codex hook trust ownership', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
       for (const retiredHookDef of retiredHookDefs) {
         const removed = await this.hookManager.uninstallHook(retiredHookDef);
         if (!removed) {
@@ -206,11 +230,9 @@ export class HookStrategy implements DeployStrategy {
       }
       if (hookConfig.trustToml && retiredHookDefs.length > 0) {
         const trust = hookConfig.trustToml;
-        removeTrustBlock(
+        removeTrustStateKeys(
           resolveHome(trust.configPath),
-          trust.marker,
-          path.resolve(resolveHome(hookConfig.settingsPath)),
-          retiredHookDefs.map(definition => definition.hookJsonPath.at(-1)!),
+          retiredTrustKeys,
         );
       }
 
@@ -238,17 +260,11 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
-      // Codex 类 hook 需要写 trust hash 到 config.toml(forceBypass 应急通道由 pilot
-      // config.json 的 agents.<id>.trust.forceBypass 控制 — 后续可由 hook-watchdog 读取)
+      // Codex 类 hook 需要写 trust hash 到 config.toml。
+      // Hook trust bypass 仅是 Codex 进程级 CLI 参数，不是合法的 config.toml 字段；
+      // Pilot 不拥有 Codex 启动入口，因此这里不能提供 bypass 通道。
       if (hookConfig.trustToml) {
-        try {
-          await this.writeCodexTrust(def);
-        } catch (err) {
-          logger.error('codex trust write failed (deploy continues)', {
-            agentId: def.id,
-            error: String(err),
-          });
-        }
+        await this.writeCodexTrust(def);
       }
 
       logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
@@ -269,7 +285,8 @@ export class HookStrategy implements DeployStrategy {
 
   /**
    * 写 Codex trust hash + 立即自洽性校验(Q8)。
-   * 校验失败仅记 logger.error,不阻塞 deploy(让 hook-watchdog 活性检查兜底重试)。
+   * 定位、写入或本地校验失败时必须阻止 deploy 成功，避免产生“hook 存在但不可执行”
+   * 的静默部署状态。
    *
    * 注:command 字符串必须与 HookManager.installHook 写入 hooks.json 时一致,否则 hash 对不上。
    * HookManager nested format 写入的 command 就是原始 def.hook.hookCommand + 末尾空格 + subcommand
@@ -288,49 +305,25 @@ export class HookStrategy implements DeployStrategy {
     const cfg = def.hook!.trustToml!;
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
-    const hookCommand = resolveHome(def.hook!.hookCommand);
+    const locations = await this.resolveInstalledCodexHooks(def);
 
-    // 构建 event → 实际写入 hooks.json 的完整 command(与 buildHookDefinitions 一致)
-    const eventToCmd: Record<string, string> = {};
-    for (const ev of def.hook!.events) {
-      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand, def.id);
-    }
-
-    // 回读 hooks.json,算出每个 event 中 pilot hook 的实际 group index。
-    // 当其他第三方 hook(如 r2c)排在前面时,pilot 的 hook 会被 push 到后面的位置。
-    // trust hash 的 key 必须用实际 index,否则 codex 端校验失败(静默 Untrusted)。
-    const eventToGroupIndex = await this.resolveGroupIndices(def);
-
-    writeTrustedHashes({
+    const changed = writeTrustedHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
       marker: cfg.marker,
-      forceBypass: process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1',
     });
-
-    if (process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1') {
-      logger.warn('Codex trust bypass enabled via LOONGSUITE_PILOT_CODEX_FORCE_BYPASS — hook trust verification is DISABLED', { agentId: def.id });
-    }
 
     const verify = verifyTrustHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
       marker: cfg.marker,
     });
     if (!verify.valid) {
-      logger.error('codex trust hash verification failed', {
-        agentId: def.id,
-        mismatches: verify.mismatches,
-      });
-    } else {
-      logger.info('codex trust hash verified', { agentId: def.id });
+      throw new Error(`codex trust hash verification failed: ${verify.mismatches.join('; ')}`);
     }
+    logger.info('codex trust block self-check passed', { agentId: def.id, changed });
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
@@ -340,6 +333,22 @@ export class HookStrategy implements DeployStrategy {
     // firing, since current events don't cover them.
     const retiredHookDefs = this.buildRetiredHookDefinitions(def);
     const hookDefs = [...this.buildHookDefinitions(def), ...retiredHookDefs];
+    let ownedTrustKeys: string[] = [];
+    if (def.hook?.trustToml) {
+      try {
+        const events = hookDefs.map(hookDef => hookDef.hookJsonPath.at(-1)!);
+        const locations = await this.resolveInstalledCodexHooks(def, events, true);
+        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
+        ownedTrustKeys = Object.values(locations).map(
+          location => installedHookStateKey(hooksJsonAbsPath, location),
+        );
+      } catch (err) {
+        logger.warn('could not resolve Codex hook trust ownership before undeploy', {
+          agentId: def.id,
+          error: String(err),
+        });
+      }
+    }
     let allOk = true;
     for (const hookDef of hookDefs) {
       const ok = await this.hookManager.uninstallHook(hookDef);
@@ -350,12 +359,7 @@ export class HookStrategy implements DeployStrategy {
       try {
         const cfg = def.hook.trustToml;
         const configPath = resolveHome(cfg.configPath);
-        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
-        const retiredEvents = retiredHookDefs.map(d => d.hookJsonPath.at(-1) as string);
-        removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, [
-          ...def.hook.events,
-          ...retiredEvents,
-        ]);
+        removeTrustBlock(configPath, cfg.marker, ownedTrustKeys);
       } catch (err) {
         logger.warn('codex trust cleanup failed (non-blocking)', { error: String(err) });
       }
@@ -364,45 +368,75 @@ export class HookStrategy implements DeployStrategy {
     return allOk;
   }
 
-  /**
-   * 回读 hooks.json,找到 pilot hook command 在每个 event 数组中的实际 group index。
-   * 支持 nested format({hooks:[{command}]}) 和 flat format({command})两种结构。
-   */
-  private async resolveGroupIndices(def: AgentDefinition): Promise<Record<string, number>> {
-    const result: Record<string, number> = {};
+  /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */
+  private async resolveInstalledCodexHooks(
+    def: AgentDefinition,
+    eventNames: readonly string[] = def.hook!.events,
+    allowMissing = false,
+  ): Promise<Record<string, InstalledCodexHookLocation>> {
+    const result: Record<string, InstalledCodexHookLocation> = {};
     const hookCommand = resolveHome(def.hook!.hookCommand);
-
-    try {
-      const settings = await readJsonFile<Record<string, unknown>>(def.hook!.settingsPath);
-      const hooks = (settings as any)?.hooks;
-      if (!hooks || typeof hooks !== 'object') {
-        return result;
-      }
-
-      for (const event of def.hook!.events) {
-        const arr = hooks[event];
-        if (!Array.isArray(arr)) continue;
-        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand, def.id);
-        for (let i = 0; i < arr.length; i++) {
-          const entry = arr[i];
-          // nested: {hooks: [{command}]}
-          if (Array.isArray(entry?.hooks)) {
-            if (entry.hooks.some((h: any) => h.command === cmd)) {
-              result[event] = i;
-              break;
-            }
-          }
-          // flat: {command}
-          if (entry?.command === cmd) {
-            result[event] = i;
-            break;
-          }
-        }
-      }
-    } catch {
-      // 读取失败时 fallback 全 0(首次安装、无其他 hook 时是对的)
+    const settingsPath = resolveHome(def.hook!.settingsPath);
+    const settings = await readJsonFile<Record<string, unknown>>(settingsPath);
+    const hooks = (settings as { hooks?: Record<string, unknown> } | null)?.hooks;
+    if (!hooks || typeof hooks !== 'object') {
+      throw new Error(`installed hooks object missing: ${settingsPath}`);
     }
 
+    for (const eventName of eventNames) {
+      const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
+      if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
+      const groups = hooks[eventName];
+      if (!Array.isArray(groups)) {
+        if (allowMissing) continue;
+        throw new Error(`installed hook event missing: ${eventName}`);
+      }
+      const command = formatHookCommand(
+        hookCommand, eventName, def.hook!.eventSubcommand, def.id,
+      );
+      const matches: InstalledCodexHookLocation[] = [];
+      groups.forEach((rawGroup, groupIndex) => {
+        if (!rawGroup || typeof rawGroup !== 'object') return;
+        const group = rawGroup as Record<string, unknown>;
+        const handlers = Array.isArray(group.hooks) ? group.hooks : [group];
+        handlers.forEach((rawHandler, handlerIndex) => {
+          if (!rawHandler || typeof rawHandler !== 'object') return;
+          const handler = rawHandler as Record<string, unknown>;
+          if (handler.command !== command) return;
+          if (handler.type !== undefined && handler.type !== 'command') return;
+          const installed: InstalledCodexCommandHandler = {
+            type: 'command',
+            command,
+            ...(typeof handler.commandWindows === 'string'
+              ? { commandWindows: handler.commandWindows }
+              : typeof handler.command_windows === 'string'
+                ? { commandWindows: handler.command_windows }
+                : {}),
+            ...(typeof handler.timeout === 'number' ? { timeout: handler.timeout } : {}),
+            ...(typeof handler.async === 'boolean' ? { async: handler.async } : {}),
+            ...(typeof handler.statusMessage === 'string' ? { statusMessage: handler.statusMessage } : {}),
+            ...(typeof handler.additionalContextLimit === 'number'
+              ? { additionalContextLimit: handler.additionalContextLimit }
+              : {}),
+          };
+          matches.push({
+            eventName,
+            eventKey,
+            groupIndex,
+            handlerIndex: Array.isArray(group.hooks) ? handlerIndex : 0,
+            ...(typeof group.matcher === 'string' ? { matcher: group.matcher } : {}),
+            handler: installed,
+          });
+        });
+      });
+      if (matches.length === 0 && allowMissing) continue;
+      if (matches.length !== 1) {
+        throw new Error(
+          `expected exactly one installed Pilot handler for ${eventName}; found ${matches.length}`,
+        );
+      }
+      result[eventName] = matches[0]!;
+    }
     return result;
   }
 
