@@ -33,6 +33,7 @@ function runHook(subcommand, payload, extraEnv = {}) {
   delete env.AGENTTEAMS_WORKER_NAME;
   delete env.AGENTTEAMS_INSTANCE_ID;
   delete env.AGENTTEAMS_TOKEN;
+  delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
   Object.assign(env, extraEnv);
   const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
@@ -233,6 +234,59 @@ describe('hook-processor: cmdStop end-to-end', () => {
     expect(turn2.every((record) => record['gen_ai.agent.name'] === 'reviewer')).toBe(true);
     expect(turn1[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-01');
     expect(turn2[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-02');
+    expect(JSON.stringify(records)).not.toContain('must-not-leak');
+  });
+
+  test('binds per-invocation span attributes to each resumed turn without stale values', () => {
+    const sid = 'sess-span-attrs-resume-1';
+    const transcriptPath = writeTranscript(sid, [
+      userRec('u1', 'q1', '2026-06-17T08:00:00.000Z', sid),
+      assistantRec('a1', [{ text: 'a1' }], '2026-06-17T08:00:10.000Z', {}, sid),
+    ]);
+    const payload = {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      cwd: '/work',
+      stop_reason: 'end_turn',
+    };
+
+    runHook('stop', payload, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: [
+        'multica.issue.id=issue-1',
+        'multica.user.id=staff-1',
+        'gen_ai.agent.name=must-not-overwrite',
+        'multica.api_token=must-not-leak',
+      ].join(','),
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u2', 'q2', '2026-06-17T08:01:00.000Z', sid),
+      assistantRec('a2', [{ text: 'a2' }], '2026-06-17T08:01:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+    runHook('stop', payload, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-2,multica.user.id=staff-2',
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u3', 'q3', '2026-06-17T08:02:00.000Z', sid),
+      assistantRec('a3', [{ text: 'a3' }], '2026-06-17T08:02:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+    runHook('stop', payload);
+
+    const records = readEmittedRecords();
+    const turn1 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t1`);
+    const turn2 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t2`);
+    const turn3 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t3`);
+    expect(turn1.length).toBeGreaterThan(0);
+    expect(turn2.length).toBeGreaterThan(0);
+    expect(turn3.length).toBeGreaterThan(0);
+    expect(turn1.every((record) => record['multica.issue.id'] === 'issue-1')).toBe(true);
+    expect(turn1.every((record) => record['multica.user.id'] === 'staff-1')).toBe(true);
+    expect(turn2.every((record) => record['multica.issue.id'] === 'issue-2')).toBe(true);
+    expect(turn2.every((record) => record['multica.user.id'] === 'staff-2')).toBe(true);
+    expect(turn3.every((record) => record['multica.issue.id'] === undefined)).toBe(true);
+    expect(turn3.every((record) => record['multica.user.id'] === undefined)).toBe(true);
+    expect(records.every((record) => record['gen_ai.agent.name'] !== 'must-not-overwrite')).toBe(true);
     expect(JSON.stringify(records)).not.toContain('must-not-leak');
   });
 
