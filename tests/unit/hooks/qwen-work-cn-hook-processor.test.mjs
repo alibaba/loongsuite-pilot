@@ -171,6 +171,12 @@ describe('QwenWorkCN hook processor', () => {
       ['reasoning', 'tool_call'],
       ['reasoning', 'text'],
     ]);
+    expect(events.filter(event => event['event.name'] === 'llm.request').map(event =>
+      (event['gen_ai.input.messages_delta'] || []).map(message => message.role))).toEqual([
+      ['user'],
+      ['assistant', 'tool'],
+      ['assistant', 'tool'],
+    ]);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
@@ -186,6 +192,23 @@ describe('QwenWorkCN hook processor', () => {
       expect(conversion.spans
         .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
         .every(span => span.duration[0] > 0 || span.duration[1] > 0)).toBe(true);
+      const convertedInputs = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .map(span => JSON.parse(span.attributes['gen_ai.input.messages']));
+      expect(convertedInputs.map(messages => messages.map(message => message.role))).toEqual([
+        ['user'],
+        ['user', 'assistant', 'tool'],
+        ['user', 'assistant', 'tool', 'assistant', 'tool'],
+      ]);
+      expect(convertedInputs[1][1].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'call-1',
+        name: 'Glob',
+      });
+      expect(convertedInputs[1][2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'call-1',
+      });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

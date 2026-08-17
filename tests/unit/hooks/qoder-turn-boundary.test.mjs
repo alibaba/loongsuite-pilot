@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -111,7 +112,7 @@ function readHistory(agentId = 'qoder') {
 }
 
 describe('qoder-hook-processor turn boundary markers', () => {
-  it('marks the user input as turn start and the final llm.response as turn end', () => {
+  it('marks turn boundaries and preserves tool-call history in the final LLM span', async () => {
     writeTranscript(ideTurnRows());
 
     expect(runProcessor().status).toBe(0);
@@ -131,6 +132,44 @@ describe('qoder-hook-processor turn boundary markers', () => {
     expect(ends[0]['event.name']).toBe('llm.response');
     expect(ends[0]['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
     expect(records[records.length - 1]).toBe(ends[0]);
+
+    const requests = records.filter(r => r['event.name'] === 'llm.request');
+    expect(requests[1]['gen_ai.input.messages_delta']).toEqual([
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'call-1',
+          name: 'Bash',
+          arguments: { command: 'ls' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'call-1', response: 'a.txt' }],
+      },
+    ]);
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      const llmSpans = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      const secondInput = JSON.parse(String(
+        llmSpans[1]?.attributes['gen_ai.input.messages'],
+      ));
+      expect(secondInput.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+      expect(secondInput[1].parts[0]).toMatchObject({ type: 'tool_call', id: 'call-1' });
+      expect(secondInput[2].parts[0]).toMatchObject({ type: 'tool_call_response', id: 'call-1' });
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
 
     // Both markers share one turn, and the events in between carry neither.
     expect(starts[0]['gen_ai.turn.id']).toBe(ends[0]['gen_ai.turn.id']);

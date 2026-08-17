@@ -331,7 +331,7 @@ describe('parseQwenTranscript', () => {
     expect(result.turns[0].llmCalls[0].assistantUuid).toBe('a-main');
   });
 
-  test('inputMessagesDeltaRecords contains user/tool_result between steps', () => {
+  test('inputMessagesDeltaRecords contains user then assistant/tool_result history between steps', () => {
     const file = path.join(TMP, 't.jsonl');
     writeJsonl(file, [
       userRec('u1', 'q'),                                                       // step 1 input
@@ -344,8 +344,8 @@ describe('parseQwenTranscript', () => {
     const step2Delta = result.turns[0].llmCalls[1].inputMessagesDeltaRecords;
     expect(step1Delta).toHaveLength(1);
     expect(step1Delta[0].type).toBe('user');
-    expect(step2Delta).toHaveLength(1);
-    expect(step2Delta[0].type).toBe('tool_result');
+    expect(step2Delta).toHaveLength(2);
+    expect(step2Delta.map(record => record.type)).toEqual(['assistant', 'tool_result']);
   });
 
   test('requestStartTime: step 1 uses user.timestamp, step 2 uses tool_result.timestamp', () => {
