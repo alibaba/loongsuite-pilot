@@ -37,6 +37,8 @@ describe('pid-utils identity-first liveness', () => {
 
   it('matches strict collector and updater command identities', () => {
     expect(isCommandMatch('/usr/bin/node /home/a/.loongsuite-pilot/bin/collector-daemon.js', COLLECTOR_PROCESS_PATTERNS)).toBe(true);
+    expect(isCommandMatch('/home/a/.local/bin/loongsuite-pilot run-service', COLLECTOR_PROCESS_PATTERNS)).toBe(true);
+    expect(isCommandMatch('/home/a/.local/bin/loongsuite-pilot run-service-helper', COLLECTOR_PROCESS_PATTERNS)).toBe(false);
     expect(isCommandMatch('/usr/bin/node /home/a/.loongsuite-pilot/bin/updater-daemon.js', UPDATER_PROCESS_PATTERNS)).toBe(true);
     expect(isCommandMatch('/usr/bin/node unrelated.js', COLLECTOR_PROCESS_PATTERNS)).toBe(false);
     expect(isCommandMatch('/usr/bin/node unrelated.js', UPDATER_PROCESS_PATTERNS)).toBe(false);

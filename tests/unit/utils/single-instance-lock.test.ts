@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { acquireSingleInstanceLock } from '../../../src/utils/single-instance-lock.js';
 import { readProcessCommand } from '../../../src/utils/pid-utils.js';
 
@@ -79,17 +81,28 @@ describe('acquireSingleInstanceLock', () => {
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid + 1);
   });
 
-  it('with patterns, takes over a lock whose live pid runs a non-matching command (pid reuse)', () => {
-    // Our own pid is alive, but its command line is the test runner — not a
-    // collector. This simulates a recycled pid after the real holder crashed: the
-    // pid-liveness check alone would wrongly block, but the command-identity check
-    // recognizes it as stale and lets us take over.
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  it('with patterns, refuses to evict a live external pid whose command does not match', async () => {
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    await once(holder, 'spawn');
 
-    const { lock } = acquireSingleInstanceLock(lockPath, ['collector-daemon-never-matches-vitest']);
-    expect(lock).not.toBeNull();
-    expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
+    try {
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, startedAt: Date.now() }));
+
+      const { lock, holderPid } = acquireSingleInstanceLock(
+        lockPath,
+        ['collector-daemon-never-matches-node-child'],
+      );
+      expect(lock).toBeNull();
+      expect(holderPid).toBe(holder.pid);
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(holder.pid);
+    } finally {
+      const exited = once(holder, 'exit');
+      holder.kill();
+      await exited;
+    }
   });
 
   it('takes over a stale lock from an older process instance that reused our pid', () => {

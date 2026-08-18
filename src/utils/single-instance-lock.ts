@@ -3,8 +3,6 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   isProcessAlive,
-  readProcessCommand,
-  isCommandMatch,
   type ProcessCommandPattern,
 } from './pid-utils.js';
 
@@ -64,46 +62,28 @@ function readLock(lockPath: string): LockPayload | null {
   return null;
 }
 
-// A lock is stale when its recorded holder is no longer a daemon we expect. For a *healthy*
-// holder age is deliberately NOT part of the check: these are long-running daemons, so any age
-// threshold on a matching holder would eventually evict a perfectly healthy one and reopen the
-// very duplication window this lock exists to close.
+// A lock is stale only when its recorded holder is no longer alive. Command-line identity is
+// deliberately not used to evict a live holder: launchers and wrappers can introduce new command
+// shapes (for example `loongsuite-pilot run-service`) that lag behind the process-pattern list.
+// Treating an unknown-but-live command as stale lets a second collector delete a valid lock and
+// duplicate every record. Prefer failing closed until the live pid exits.
 //
 // Conditions that make a lock stale:
 //  1. The recorded pid is not alive. `isProcessAlive` treats EPERM as alive (matters on
 //     Windows, where a foreign-owned process still means "occupied").
-//  2. The pid IS alive but its command line is readable and is not one of our daemons. On Unix a
-//     pid can be recycled after the holder crashes without releasing; the recycled pid would
-//     otherwise be misread as a live holder and block every future start. A readable command line
-//     that still matches is a genuine second daemon — exactly what we want to keep out.
-//  3. The pid is alive but its command line is UNREADABLE (foreign-owned / permission-denied /
-//     transient) AND the lock is implausibly old. We can't confirm identity, so we stay
-//     conservative (held) for a fresh lock; but an unreadable holder older than
-//     UNREADABLE_HOLDER_MAX_AGE_MS is almost certainly a crashed daemon whose pid was reused by an
-//     uninspectable process — without this escape valve such a lock would deadlock every future
-//     start forever. Healthy daemons of ours expose a readable, matching command line and take
-//     branch 2, so they are never aged out here.
-const UNREADABLE_HOLDER_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h — generous; only breaks true deadlocks
+//  2. A lock carrying this process's pid has no matching process-local owner token, which means
+//     it belongs to an older process instance whose pid was reused.
 
 function isStale(
   lockPath: string,
   lock: LockPayload | null,
-  patterns?: readonly ProcessCommandPattern[],
+  _patterns?: readonly ProcessCommandPattern[],
 ): boolean {
   if (!lock) return true;
   if (lock.pid === process.pid) {
     return !lock.ownerId || activeLockOwners.get(lockPath) !== lock.ownerId;
   }
-  if (!isProcessAlive(lock.pid)) return true;
-  if (!patterns || patterns.length === 0) return false;
-  const command = readProcessCommand(lock.pid);
-  if (!command) {
-    return (
-      typeof lock.startedAt === 'number' &&
-      Date.now() - lock.startedAt > UNREADABLE_HOLDER_MAX_AGE_MS
-    );
-  }
-  return !isCommandMatch(command, patterns);
+  return !isProcessAlive(lock.pid);
 }
 
 function writeOwnLock(lockPath: string, ownerId: string): void {
@@ -161,12 +141,12 @@ function makeHandle(lockPath: string, ownerId: string): SingleInstanceLock {
  *
  * - No live holder → creates the lockfile atomically and returns a handle.
  * - Live holder → returns `{ lock: null, holderPid }`; the caller should log and exit.
- * - Stale lockfile (dead holder, or a reused pid running a different program) → the
+ * - Stale lockfile (dead holder, or this process's pid with no live owner token) → the
  *   stale file is removed and the lock is taken.
  *
- * When `patterns` are supplied, a lockfile whose pid is alive is only honored if that
- * process's command line matches one of the patterns — closing the Unix pid-reuse
- * window. Omit `patterns` to fall back to a pid-liveness-only check.
+ * `patterns` is retained for API compatibility with callers. It is not used to evict a
+ * live holder: an incomplete command allowlist must never reopen the duplicate-collector
+ * window this lock exists to close.
  */
 export function acquireSingleInstanceLock(
   lockPath: string,

@@ -21,7 +21,7 @@ export const COLLECTOR_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
   'collector-daemon.js',
   '/bin/collector-daemon',
   '\\bin\\collector-daemon',
-  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+run(?:\s|$)/,
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+(?:run|run-service)(?:\s|$)/,
 ];
 
 export const UPDATER_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
