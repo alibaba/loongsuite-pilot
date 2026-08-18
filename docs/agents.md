@@ -16,6 +16,7 @@ type differences are called out in the notes.
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
 | Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
+| DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
@@ -42,12 +43,42 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
 
+## DeepSeek Harness Collection And Lifecycle
+
+Pilot detects DeepSeek Harness from `~/.dsh` or the `dsh` command. When `dsh`
+is enabled, Pilot appends one marked, Pilot-owned block to
+`$DSH_HOME/cordis.patch.yml` when `DSH_HOME` is set, otherwise
+`~/.dsh/cordis.patch.yml`. That block loads the packaged plugin
+from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
+preserved. Start a new DSH process after first enabling or reinstalling the
+integration so the host loads the current patch.
+
+The plugin writes append-only native events to
+`$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory
+is mode `0700` and files are mode `0600`. These source files contain the native
+message and tool data needed for normalization, so treat them as sensitive;
+credential-shaped keys are filtered before writing. `captureMessageContent`
+controls normalized output and does not remove content from these source logs.
+Pilot derives LLM TTFT from the native request boundary to the first reasoning,
+text, or tool-call stream delta and reports it in nanoseconds as
+`gen_ai.response.time_to_first_token`.
+
+The normal `agent-control.json` and `config.json` gates use the ID `dsh`.
+Disabling collection removes an enable marker first, so an already-loaded
+plugin stops writing, then removes only Pilot's marked YAML block. The runtime
+watchdog repairs the block while DSH remains enabled. Uninstall performs the
+same owned-block cleanup before removing plugin assets and preserves unrelated
+YAML content. If the source lacks a request boundary or an output delta, Pilot
+omits TTFT instead of fabricating zero.
+
 ## OpenClaw Compatibility And Lifecycle
 
-Pilot supports stable OpenClaw releases `>=2026.5.12`. Prerelease builds and
-older versions are rejected before Pilot changes the OpenClaw configuration.
-During deployment, Pilot adds its module path to `plugins.load.paths` and adds
-this entry to the active OpenClaw configuration:
+Pilot supports OpenClaw releases `>=2026.5.12`. The plugin package declares
+this minimum host version, and OpenClaw checks it against the running host when
+loading the plugin. Incompatible hosts skip the plugin with a diagnostic;
+Pilot never launches the OpenClaw CLI to determine its version. During
+deployment, Pilot adds its plugin package directory to `plugins.load.paths`
+and adds this entry to the active OpenClaw configuration:
 
 ```json
 {
@@ -64,9 +95,10 @@ this entry to the active OpenClaw configuration:
 
 `allowConversationAccess` is required for the native conversation lifecycle
 hooks that carry per-call messages and usage. Pilot creates a private backup
-before migrating a legacy plugin-array configuration. Upgrade and uninstall
-only replace or remove Pilot's own path and entry; unrelated plugins and their
-settings are preserved.
+before migrating a legacy plugin-array configuration. Upgrade also replaces
+the previous Pilot single-file load path with the package directory. Uninstall
+removes both forms plus Pilot's entry; unrelated plugins and their settings are
+preserved.
 
 The injected plugin writes append-only source events below
 `~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
@@ -79,7 +111,7 @@ and timing without inventing content or zero token counts.
 Use `--agents` to skip the interactive selection step:
 
 ```bash
-bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor"
+bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor,dsh"
 ```
 
 The installer still checks whether each selected agent exists on the machine before deploying collection capabilities.
@@ -94,6 +126,7 @@ Use `~/.loongsuite-pilot/agent-control.json` for simple admission control:
   "tools": {
     "claude-code": "on",
     "cursor": "auto",
+    "dsh": "on",
     "qoder": "off"
   }
 }
@@ -120,6 +153,7 @@ Use `config.json` when you need to control message content capture:
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
+    "dsh": { "enabled": true, "captureMessageContent": false },
     "openclaw": { "enabled": true, "captureMessageContent": false },
     "cursor": { "enabled": true, "captureMessageContent": true }
   }

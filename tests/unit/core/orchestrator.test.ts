@@ -1,9 +1,50 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AnalyticsConfig } from '../../../src/types/index.js';
 
+const { mockLoggerWarn } = vi.hoisted(() => ({
+  mockLoggerWarn: vi.fn(),
+}));
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
+  }),
+}));
+
+const mockRuntimeWriterStart = vi.fn();
+const mockRuntimeWriterStop = vi.fn();
+const mockMetricsSummaryStart = vi.fn();
+const mockMetricsSummaryStop = vi.fn();
+const mockMetricsSummaryConstructor = vi.fn();
+const mockStatusBarSyncDesiredState = vi.fn().mockResolvedValue(undefined);
+const mockStatusBarStop = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../src/status-bar/index.js', () => ({
+  RuntimeWriter: vi.fn().mockImplementation(() => ({
+    start: mockRuntimeWriterStart,
+    stop: mockRuntimeWriterStop,
+  })),
+  MetricsSummaryWriter: vi.fn().mockImplementation((...args: unknown[]) => {
+    mockMetricsSummaryConstructor(...args);
+    return {
+      start: mockMetricsSummaryStart,
+      stop: mockMetricsSummaryStop,
+    };
+  }),
+  StatusBarAppManager: vi.fn().mockImplementation(() => ({
+    syncDesiredState: mockStatusBarSyncDesiredState,
+    stop: mockStatusBarStop,
+  })),
+}));
+
+const mockDashboardStart = vi.fn().mockResolvedValue(undefined);
+const mockDashboardStop = vi.fn().mockResolvedValue(undefined);
+const mockDashboardConstructor = vi.fn();
+vi.mock('../../../src/dashboard/index.js', () => ({
+  DashboardServer: vi.fn().mockImplementation((options: unknown) => {
+    mockDashboardConstructor(options);
+    return {
+      start: mockDashboardStart,
+      stop: mockDashboardStop,
+    };
   }),
 }));
 
@@ -67,6 +108,15 @@ vi.mock('@alicloud/log', () => ({
 
 vi.mock('axios', () => ({
   default: { post: vi.fn().mockResolvedValue({ status: 200 }) },
+}));
+
+// This suite exercises orchestration only; loading the native sqlite binding is
+// unnecessary and makes the test depend on the local Node ABI.
+vi.mock('sqlite3', () => ({
+  default: {
+    Database: vi.fn(),
+    OPEN_READONLY: 1,
+  },
 }));
 
 vi.mock('../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js', () => ({
@@ -205,6 +255,9 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       metricsSummaryIntervalMs: 60_000,
       runtimeRefreshIntervalMs: 30_000,
     },
+    dashboard: {
+      port: 8765,
+    },
     agents: {},
     ...overrides,
   };
@@ -217,6 +270,63 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
+      const orch = new Orchestrator(makeConfig({
+        dashboard: {
+          port: 19_001,
+        },
+        statusBar: {
+          enabled: false,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+
+      await orch.start();
+
+      expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryConstructor).toHaveBeenCalledWith(
+        '/tmp/test-data',
+        expect.objectContaining({ enabled: false }),
+        '/tmp/output',
+      );
+      expect(mockDashboardStart).toHaveBeenCalledOnce();
+      expect(mockDashboardConstructor).toHaveBeenCalledWith(expect.objectContaining({ port: 19_001 }));
+      expect(mockStatusBarSyncDesiredState).not.toHaveBeenCalled();
+
+      await orch.stop();
+      expect(mockDashboardStop).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
+    it('keeps starting and stops safely when the dashboard rejects', async () => {
+      mockDashboardStart.mockRejectedValueOnce(new Error('dashboard exploded'));
+      const events: string[] = [];
+      const orch = new Orchestrator(makeConfig({
+        statusBar: {
+          enabled: true,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+      orch.on('started', () => events.push('started'));
+
+      await expect(orch.start()).resolves.toBeUndefined();
+
+      expect(events).toEqual(['started']);
+      expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(true);
+      if (process.platform === 'darwin') {
+        expect(mockStatusBarSyncDesiredState).toHaveBeenCalledWith(true);
+      }
+      expect(mockLoggerWarn).toHaveBeenCalledWith('dashboard start failed (non-fatal)', {
+        error: 'Error: dashboard exploded',
+      });
+
+      await expect(orch.stop()).resolves.toBeUndefined();
+      expect(mockDashboardStop).toHaveBeenCalledOnce();
+      expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(false);
+    });
+
     it('calls subsystems in correct order', async () => {
       const callOrder: string[] = [];
       mockEnsureDir.mockImplementation(async () => { callOrder.push('ensureDir'); });

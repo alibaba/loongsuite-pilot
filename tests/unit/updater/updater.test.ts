@@ -782,7 +782,7 @@ describe('Updater', () => {
       expect(rmCalls.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('does not start monitor when monitor was not already running', async () => {
+    it('restarts only the collector because the dashboard shares its lifecycle', async () => {
       setupForDownload();
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
@@ -791,35 +791,7 @@ describe('Updater', () => {
         ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
       );
       expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor', 'start']);
-    });
-
-    it('restarts monitor after update when monitor was already running', async () => {
-      setupForDownload();
-      const realKill = process.kill;
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
-        if (pid === 12345 && signal === 0) return true;
-        throw new Error('not running');
-      }) as typeof process.kill);
-      mockFsReadFile.mockImplementation((filePath: string) => {
-        if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
-        if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
-        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
-        return Promise.reject(new Error('ENOENT'));
-      });
-
-      const updater = new Updater(makeConfig(), tmpDir);
-      await updater.check();
-
-      const loongsuitePilotCalls = mockExecFile.mock.calls
-        .filter(([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'))
-        .map(([, args]) => args);
-      expect(loongsuitePilotCalls).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'stop']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'start']);
-
-      killSpy.mockRestore();
-      process.kill = realKill;
+      expect(loongsuitePilotCalls.map(([, args]) => args).flat()).not.toContain('monitor');
     });
   });
 

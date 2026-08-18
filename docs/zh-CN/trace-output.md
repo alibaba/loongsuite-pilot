@@ -11,12 +11,12 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 ```json
 {
   "collectTrace": true,
+  "serviceName": "my-agent-service",
   "otlpTrace": {
     "endpoint": "https://otel-collector.example.com",
     "headers": {
       "Authorization": "Bearer token"
     },
-    "serviceName": "loongsuite-pilot",
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
@@ -30,9 +30,10 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | 配置项 | 说明 |
 |--------|------|
 | `collectTrace` | Trace 上报总开关。 |
+| `serviceName` | 所有 Agent、OTLP 后端和 SLS 后端共用的唯一 `service.name`。 |
 | `otlpTrace.endpoint` | OTLP HTTP base URL。如果路径未以 `/v1/traces` 结尾，Pilot 会自动追加。 |
 | `otlpTrace.headers` | 发送到 OTLP endpoint 的请求头。 |
-| `otlpTrace.serviceName` | 导出 span 使用的 service name。 |
+| `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
 | `otlpTrace.captureMessageContent` | Trace 输出是否可以包含消息内容。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
@@ -43,6 +44,7 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | 环境变量 | 说明 |
 |----------|------|
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
+| `LOONGSUITE_PILOT_SERVICE_NAME` | 所有 Agent 和上报后端共用的唯一服务名。 |
 | `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP Trace endpoint。 |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | OTLP 请求头 JSON 字符串。 |
 
@@ -119,7 +121,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 
 | 字段 | 适用 | 说明 |
 |------|------|------|
-| `serviceNamePrefix` | 顶层 | **所有**托管后端的 service name 前缀——trace(`otlp[]`/`cms[]`,作为 `service.name`)与 log(`sls[]`,作为 `__service_name__` tag)——用于与用户后端区分。可选;省略时回退到用户的 `serviceNamePrefix`(即不做区分)。 |
+| `serviceNamePrefix` | 顶层 | **所有**托管后端的 service name 前缀——trace(`otlp[]`/`cms[]`,作为 `service.name`)与 log(`sls[]`,作为 `__service_name__` tag)——用于与用户后端区分。可选;省略时回退到用户的 `serviceNamePrefix`(即不做区分)。用户配置的顶层 `serviceName` 会覆盖此前缀。 |
 | `otlp[].name` / `cms[].name` | 两者 | 用于日志与失败日志文件名的标签。可选(默认 `inner-otlp-<i>` / `inner-cms-<i>`)。 |
 | `otlp[].endpoint` | otlp | OTLP HTTP 基础 URL(自动补 `/v1/traces`)。 |
 | `otlp[].headers` | otlp | 请求 header(如鉴权 token)。 |
@@ -129,7 +131,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 | `cms[].project` | cms | 作为 `x-arms-project` 发送。省略时从 endpoint 域名提取。 |
 | `cms[].workspace` | cms | 作为 `x-cms-workspace` 发送。 |
 
-每个 `cms[]` 条目会展开为一个带 `x-arms-*` / `x-cms-*` header 的 OTLP 后端;只要存在 CMS 后端,就会附加 `acs.arms.service.feature=genai_app` 资源属性(如上所述为共享)。此处设置 `serviceNamePrefix` 后,托管后端会以 `<serviceNamePrefix>-<agent>` 上报,用户后端仍用用户前缀;此时 span 会按不同 `service.name` 各转换一次(通常两次——用户与托管)。托管配置格式错误(例如 `otlp`/`cms` 写成非数组)会被忽略,而不会导致采集失败。
+每个 `cms[]` 条目会展开为一个带 `x-arms-*` / `x-cms-*` header 的 OTLP 后端;只要存在 CMS 后端,就会附加 `acs.arms.service.feature=genai_app` 资源属性(如上所述为共享)。此处设置 `serviceNamePrefix` 后,托管后端会以 `<serviceNamePrefix>-<agent>` 上报,用户后端仍用用户前缀;此时 span 会按不同 `service.name` 各转换一次(通常两次——用户与托管)。如果用户设置了顶层 `serviceName`，所有用户与托管后端都会改用这个唯一值。托管配置格式错误(例如 `otlp`/`cms` 写成非数组)会被忽略,而不会导致采集失败。
 
 ## 后端接入示例
 
@@ -310,8 +312,9 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
 - 保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。目前支持 claude-code、codex、qoder 和 opencode。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。目前支持 claude-code、codex、qoder、qwen-code-cli 和 opencode。
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
+- Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
 
 ## 验证 Trace 输出

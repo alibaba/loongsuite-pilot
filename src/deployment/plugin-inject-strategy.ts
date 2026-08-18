@@ -1,7 +1,5 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AgentDefinition,
   DeployResult,
@@ -14,7 +12,6 @@ import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('PluginInjectStrategy');
-const execFileAsync = promisify(execFile);
 
 const DEFAULT_OPENCLAW_ENTRY_CONFIG = {
   enabled: true,
@@ -123,16 +120,6 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
-      const versionError = await this.checkMinimumVersion(config);
-      if (versionError) {
-        return {
-          success: false,
-          agentId: def.id,
-          deployMode: 'plugin-inject',
-          error: versionError,
-        };
-      }
-
       const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {
         return {
@@ -175,68 +162,15 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
   }
 
-  private async checkMinimumVersion(config: PluginInjectConfig): Promise<string | null> {
-    const check = config.versionCheck;
-    if (!check) return null;
-    if (check.command.length === 0 || !check.command[0]) {
-      return 'invalid version check: command must not be empty';
-    }
-
-    const minimum = this.parseVersion(check.minimum);
-    if (!minimum || minimum.suffix) {
-      return `invalid minimum supported version: ${check.minimum}`;
-    }
-
-    try {
-      const { stdout, stderr } = await execFileAsync(check.command[0], check.command.slice(1), {
-        timeout: 10_000,
-        maxBuffer: 64 * 1024,
-        windowsHide: true,
-      });
-      const detected = this.parseVersion(`${stdout}\n${stderr}`);
-      if (!detected) {
-        return `unable to determine target version; requires >= ${check.minimum}`;
-      }
-      if (detected.suffix && !/^\d+(?:\.\d+)*$/.test(detected.suffix)) {
-        return `unsupported prerelease target version ${detected.raw}; requires >= ${check.minimum}`;
-      }
-      if (this.compareVersionCore(detected.core, minimum.core) < 0) {
-        return `unsupported target version ${detected.raw}; requires >= ${check.minimum}`;
-      }
-      return null;
-    } catch (err) {
-      return `target version check failed; requires >= ${check.minimum}: ${String(err)}`;
-    }
-  }
-
-  private parseVersion(text: string): { raw: string; core: [number, number, number]; suffix?: string } | null {
-    const match = text.match(/(?:^|[^0-9])v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/m);
-    if (!match) return null;
-    const raw = `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ''}`;
-    return {
-      raw,
-      core: [Number(match[1]), Number(match[2]), Number(match[3])],
-      suffix: match[4],
-    };
-  }
-
-  private compareVersionCore(
-    left: [number, number, number],
-    right: [number, number, number],
-  ): number {
-    for (let i = 0; i < left.length; i++) {
-      if (left[i] !== right[i]) return left[i] - right[i];
-    }
-    return 0;
-  }
-
   async undeploy(def: AgentDefinition): Promise<boolean> {
     const config = def.pluginInject;
     if (!config) return false;
 
     try {
       const configPath = await this.findConfigFile(config, false);
-      if (!configPath) return false;
+      // Idempotent cleanup: a removed Agent/config directory means there is no
+      // remaining Pilot spec to clean up.
+      if (!configPath) return true;
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
@@ -315,7 +249,7 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private resolveSpec(spec: string): string {
-    return spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    return this.normalizeSpecForComparison(spec.replace(/\$PILOT_DATA/g, this.dataDir));
   }
 
   private matchesSpec(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
@@ -325,7 +259,12 @@ export class PluginInjectStrategy implements DeployStrategy {
         ? String(entry[0])
         : '';
 
-    return entryStr === resolvedSpec || entryStr.includes(pluginId);
+    return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
+      || entryStr.includes(pluginId);
+  }
+
+  private normalizeSpecForComparison(spec: string): string {
+    return process.platform === 'win32' ? spec.replace(/\\/g, '/') : spec;
   }
 
   private flatArrayInject(
@@ -404,6 +343,31 @@ export class PluginInjectStrategy implements DeployStrategy {
     return entry.includes(pluginId);
   }
 
+  private openclawReplacementMatches(entry: string, replacementSpec: string): boolean {
+    const resolvedReplacement = this.resolveSpec(replacementSpec);
+    const isPathReplacement = replacementSpec.includes('$PILOT_DATA')
+      || resolvedReplacement.startsWith('file://')
+      || path.isAbsolute(resolvedReplacement);
+
+    if (!isPathReplacement) return entry.includes(replacementSpec);
+
+    return path.normalize(this.toOpenclawPath(entry))
+      === path.normalize(this.toOpenclawPath(resolvedReplacement));
+  }
+
+  private openclawRemovalMatches(
+    entry: unknown,
+    resolvedSpec: string,
+    config: PluginInjectConfig,
+  ): boolean {
+    if (this.pathMatches(entry, resolvedSpec, config.pluginId)) return true;
+    if (typeof entry !== 'string') return false;
+
+    return config.replaceSpecs?.some(
+      (old) => this.openclawReplacementMatches(entry, old),
+    ) ?? false;
+  }
+
   private openclawHasPlugin(
     json: Record<string, unknown>,
     resolvedSpec: string,
@@ -465,7 +429,7 @@ export class PluginInjectStrategy implements DeployStrategy {
           : null;
       if (!legacySpec) continue;
       if (this.pathMatches(legacySpec, resolvedSpec, config.pluginId)) continue;
-      if (config.replaceSpecs?.some((old) => legacySpec.includes(old))) continue;
+      if (config.replaceSpecs?.some((old) => this.openclawReplacementMatches(legacySpec, old))) continue;
       const migratedPath = this.toOpenclawPath(legacySpec);
       if (!paths.includes(migratedPath)) paths.push(migratedPath);
     }
@@ -474,7 +438,7 @@ export class PluginInjectStrategy implements DeployStrategy {
       const before = paths.length;
       const filtered = paths.filter((entry) => {
         if (typeof entry !== 'string') return true;
-        return !config.replaceSpecs!.some((old) => entry.includes(old));
+        return !config.replaceSpecs!.some((old) => this.openclawReplacementMatches(entry, old));
       });
       if (filtered.length !== before) {
         load.paths = filtered;
@@ -533,7 +497,7 @@ export class PluginInjectStrategy implements DeployStrategy {
     if (load && Array.isArray(load.paths)) {
       const before = (load.paths as unknown[]).length;
       const filtered = (load.paths as unknown[]).filter(
-        (entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId),
+        (entry) => !this.openclawRemovalMatches(entry, resolvedSpec, config),
       );
       if (filtered.length !== before) {
         load.paths = filtered;

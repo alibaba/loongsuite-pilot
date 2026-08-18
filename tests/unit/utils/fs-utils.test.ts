@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   cleanStaleTmpFiles,
+  readJsonFile,
+  writeJsonFile,
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
 
@@ -67,5 +69,57 @@ describe('cleanStaleTmpFiles', () => {
     )).rejects.toThrow('file changed before write');
 
     await expect(fs.readFile(target, 'utf8')).resolves.toBe('{"model":"new"}\n');
+  });
+});
+
+// readJsonFile swallows parse errors and returns null, which every caller reads as
+// "file absent" -> fall back to defaults. That makes a leading UTF-8 BOM far worse
+// than a parse failure: deployment state or user config silently resets to empty
+// instead of erroring. And BOMs arrive routinely on Windows — PowerShell 5.1's
+// `Set-Content -Encoding UTF8` always writes one (no utf8NoBOM before PS 6), and so
+// does Notepad. scripts/loongsuite-pilot.ps1's rollback path writes
+// deployed-agents.json exactly that way; see tests/unit/scripts/ps1-json-encoding.test.mjs.
+describe('readJsonFile', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'read-json-test-'));
+  });
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('parses a file written with a UTF-8 BOM (PowerShell 5.1 -Encoding UTF8)', async () => {
+    const target = path.join(dir, 'deployed-agents.json');
+    // Byte-for-byte what `Set-Content -Encoding UTF8` produces: EF BB BF + UTF-8.
+    await fs.writeFile(target, Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(JSON.stringify({ 'hermes-agent': { targetDir: 'C:\\Users\\张三\\p' } }), 'utf8'),
+    ]));
+
+    const state = await readJsonFile<Record<string, { targetDir: string }>>(target);
+    // Not just non-null: a BOM must not degrade to "{}" either, or a rollback would
+    // wipe the very entries it is meant to prune.
+    expect(state).not.toBeNull();
+    expect(state!['hermes-agent'].targetDir).toBe('C:\\Users\\张三\\p');
+  });
+
+  it('parses the same content without a BOM', async () => {
+    const target = path.join(dir, 'config.json');
+    await fs.writeFile(target, JSON.stringify({ a: 1 }), 'utf8');
+    expect(await readJsonFile<{ a: number }>(target)).toEqual({ a: 1 });
+  });
+
+  it('strips only a leading BOM, leaving one inside a string untouched', async () => {
+    const target = path.join(dir, 'inner-bom.json');
+    await writeJsonFile(target, { note: 'a\uFEFFb' });
+    expect(await readJsonFile<{ note: string }>(target)).toEqual({ note: 'a\uFEFFb' });
+  });
+
+  it('still returns null for a missing file and for malformed JSON', async () => {
+    expect(await readJsonFile(path.join(dir, 'nope.json'))).toBeNull();
+    const broken = path.join(dir, 'broken.json');
+    await fs.writeFile(broken, '\uFEFF{"a":', 'utf8');
+    expect(await readJsonFile(broken)).toBeNull();
   });
 });

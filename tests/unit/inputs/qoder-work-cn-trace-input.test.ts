@@ -135,7 +135,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(toolResultNano).toBeLessThan(step2StartNano);
   });
 
-  it('includes tool results in input.messages_delta for subsequent steps', async () => {
+  it('includes assistant tool calls before tool results in subsequent input deltas', async () => {
     const lines = buildTwoTurnSession({
       sessionId: 'sess-toolmsg',
       turn1: {
@@ -162,7 +162,18 @@ describe('QoderWorkTraceInput (CN variant)', () => {
 
     const inputMessages = step2Request!['gen_ai.input.messages_delta'] as Array<Record<string, unknown>>;
     expect(inputMessages).toBeDefined();
-    expect(inputMessages.length).toBeGreaterThan(0);
+    expect(inputMessages.map(message => message.role)).toEqual(['assistant', 'tool']);
+
+    const assistantMsg = inputMessages[0];
+    expect(assistantMsg).toMatchObject({
+      role: 'assistant',
+      parts: [{
+        type: 'tool_call',
+        id: 'tc-1',
+        name: 'Read',
+        arguments: { path: '/tmp/x.txt' },
+      }],
+    });
 
     const toolMsg = inputMessages.find(m => m.role === 'tool');
     expect(toolMsg).toBeDefined();

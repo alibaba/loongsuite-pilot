@@ -23,7 +23,8 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
-  "serviceNamePrefix": "loongsuite-pilot"
+  "dashboard": { "port": 8765 },
+  "serviceName": "my-agent-service"
 }
 ```
 
@@ -34,7 +35,9 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
-| `serviceNamePrefix` | Service name prefix used by reporting backends. |
+| `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
+| `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
+| `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
 
 Equivalent environment variables:
 
@@ -46,6 +49,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
+| `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 

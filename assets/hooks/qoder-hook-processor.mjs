@@ -1016,6 +1016,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   const assignedContent = assignContentToBoundaries(boundaries, contentEvents);
 
   // For each LLM call boundary, produce events
+  let toolCallsForNextStep = [];
   let toolResultsForNextStep = [];
   for (let i = 0; i < boundaries.length; i++) {
     const boundary = boundaries[i];
@@ -1023,6 +1024,15 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     const content = assignedContent[i] || [];
     const startNanos = isoToUnixNanos(boundary.startTs);
     const endNanos = boundary.endTs ? isoToUnixNanos(boundary.endTs) : startNanos;
+    const previousToolCallIds = new Set(toolCallsForNextStep.map(tc => tc.id).filter(Boolean));
+    const currentContentToolResults = extractToolResults(content);
+    const inputToolResultsById = new Map();
+    for (const result of [...toolResultsForNextStep, ...currentContentToolResults]) {
+      if (result.toolId && previousToolCallIds.has(result.toolId)) {
+        inputToolResultsById.set(result.toolId, result);
+      }
+    }
+    const inputToolResults = [...inputToolResultsById.values()];
 
     // Pre-scan: extract model name from this step's assistant rows (CLI has message.model)
     const stepModel = content.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'auto';
@@ -1033,11 +1043,23 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     if (i === 0 && userRow) {
       inputDelta = [{ role: 'user', parts: buildUserMessageParts(extractUserText(userRow), contentEvents, agentType) }];
       emitRequest = true;
-    } else if (toolResultsForNextStep.length > 0) {
-      inputDelta = toolResultsForNextStep.map(tr => ({
+    } else if (inputToolResults.length > 0) {
+      inputDelta = [];
+      if (toolCallsForNextStep.length > 0) {
+        inputDelta.push({
+          role: 'assistant',
+          parts: toolCallsForNextStep.map(tc => ({
+            type: 'tool_call',
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.input,
+          })),
+        });
+      }
+      inputDelta.push(...inputToolResults.map(tr => ({
         role: 'tool',
         parts: [{ type: 'tool_call_response', id: tr.toolId, response: tr.result }],
-      }));
+      })));
     }
 
     if (emitRequest) {
@@ -1061,7 +1083,6 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     // Build merged llm.response (multi-parts)
     const outputParts = [];
     const toolCalls = [];
-    toolResultsForNextStep = [];
     let responseId = undefined;
     let lastAssistantTs = null;
     let firstAssistantTs = null;
@@ -1090,21 +1111,16 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
             });
           }
         }
-      } else if (row.type === 'user' && isToolResult(row)) {
-        const blocks = Array.isArray(row.message?.content) ? row.message.content : [];
-        for (const block of blocks) {
-          if (block.type === 'tool_result') {
-            const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
-            toolResultsForNextStep.push({
-              toolId: block.tool_use_id,
-              result: resultText,
-              isError: block.is_error === true,
-              resultTs: row.timestamp,
-            });
-          }
-        }
       }
     }
+    const currentToolCallIds = new Set(toolCalls.map(tc => tc.id).filter(Boolean));
+    toolResultsForNextStep = currentContentToolResults
+      .filter(result => result.toolId && currentToolCallIds.has(result.toolId));
+    toolCallsForNextStep = toolCalls.map(tc => ({
+      id: tc.id,
+      name: tc.name,
+      input: tc.input,
+    }));
 
     // When startTs == endTs (no distinguishable progress boundary), use assistant timestamp as end
     let responseEndNanos = endNanos;
@@ -1335,6 +1351,23 @@ function ensureEndAfterStart(startNanos, candidateEndNanos) {
 function isToolResult(row) {
   const content = row.message?.content;
   return Array.isArray(content) && content.length > 0 && content[0].type === 'tool_result';
+}
+
+function extractToolResults(rows) {
+  const results = [];
+  for (const row of rows) {
+    if (row.type !== 'user' || !isToolResult(row)) continue;
+    for (const block of row.message?.content || []) {
+      if (block.type !== 'tool_result') continue;
+      results.push({
+        toolId: block.tool_use_id,
+        result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+        isError: block.is_error === true,
+        resultTs: row.timestamp,
+      });
+    }
+  }
+  return results;
 }
 
 function isMetaUser(row) {

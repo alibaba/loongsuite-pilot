@@ -40,6 +40,7 @@ import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 import {
   sanitizeObject,
@@ -65,14 +66,25 @@ const AGENT_ID = 'qwen-code-cli';
 const INVOCATION_RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
   agentId: AGENT_ID,
 });
+const INVOCATION_SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
+  agentId: AGENT_ID,
+});
 
-function bindInvocationResourceContext(state) {
+function bindInvocationContext(state) {
   if (Object.keys(INVOCATION_RESOURCE_ATTRIBUTES).length > 0) {
     state.resource_attributes = INVOCATION_RESOURCE_ATTRIBUTES;
   } else {
     // A session can be resumed without custom identity variables. Do not
     // retain a stale worker identity from an earlier invocation.
     delete state.resource_attributes;
+  }
+
+  if (Object.keys(INVOCATION_SPAN_ATTRIBUTES).length > 0) {
+    state.span_attributes = INVOCATION_SPAN_ATTRIBUTES;
+  } else {
+    // A session can be resumed by another invocation. Clear the previous
+    // invocation's attributes instead of leaking them into the next turn.
+    delete state.span_attributes;
   }
 }
 
@@ -189,7 +201,7 @@ async function cmdStop() {
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const state = loadState(sessionId);
-  bindInvocationResourceContext(state);
+  bindInvocationContext(state);
   if (!state.transcript_path && event.transcript_path) {
     state.transcript_path = event.transcript_path;
   }
@@ -321,6 +333,7 @@ async function exportSession(state, stopReason) {
     const { records, hash } = buildTurnRecords(
       turn, baseTurnCount + i, sessionId, logHash, userId, turnStopReason, cwd,
       state.resource_attributes,
+      state.span_attributes,
     );
     allRecords.push(...records);
     logHash = hash;
@@ -365,6 +378,7 @@ async function exportSession(state, stopReason) {
  * @param turnStopReason Stop reason for the last LLM call in this turn
  * @param cwd       Optional working dir for agent.qwen-code-cli.cwd
  * @param resourceAttributes  Invocation-scoped resource attributes captured by the Stop hook
+ * @param spanAttributes  Invocation-scoped top-level attributes captured by the Stop hook
  * @returns {{records: object[], hash: string}}
  */
 export function buildTurnRecords(
@@ -376,12 +390,18 @@ export function buildTurnRecords(
   turnStopReason,
   cwd,
   resourceAttributes = {},
+  spanAttributes = {},
 ) {
   const records = [];
   const safeResourceAttributes = resourceAttributes &&
     typeof resourceAttributes === 'object' &&
     !Array.isArray(resourceAttributes)
     ? resourceAttributes
+    : {};
+  const safeSpanAttributes = spanAttributes &&
+    typeof spanAttributes === 'object' &&
+    !Array.isArray(spanAttributes)
+    ? spanAttributes
     : {};
   // [C2] turn.id = <sessionId>:t<N>
   const turnId = `${sessionId}:t${turnIndex + 1}`;
@@ -390,6 +410,9 @@ export function buildTurnRecords(
   const traceId = generateTraceId();
 
   const baseFields = {
+    // Caller-supplied attributes are spread first so structural fields always
+    // win, even though parseSpanAttributesFromEnv already rejects reserved keys.
+    ...safeSpanAttributes,
     trace_id: traceId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': turnId,

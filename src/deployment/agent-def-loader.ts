@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
+import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -97,9 +98,50 @@ export class AgentDefLoader {
       && mode !== 'plugin-inject'
       && mode !== 'directory-plugin'
       && mode !== 'detection-only'
+      && mode !== 'dsh-yaml-patch'
     ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
+    }
+    if (mode === 'dsh-yaml-patch') {
+      const cfg = obj.dshYamlPatch as Record<string, unknown> | null;
+      if (!cfg || typeof cfg !== 'object') {
+        logger.warn('invalid dsh-yaml-patch definition: missing dshYamlPatch', { file: filePath });
+        return false;
+      }
+      for (const field of ['pluginSource', 'entryId', 'marker'] as const) {
+        const v = cfg[field];
+        if (typeof v !== 'string' || v.length === 0) {
+          logger.warn('invalid dsh-yaml-patch definition: field must be non-empty string', { file: filePath, field });
+          return false;
+        }
+      }
+      if (cfg.patchPath !== undefined && (typeof cfg.patchPath !== 'string' || cfg.patchPath.length === 0)) {
+        logger.warn('invalid dsh-yaml-patch definition: patchPath must be non-empty string', { file: filePath });
+        return false;
+      }
+    }
+    if (obj.piSdk !== undefined) {
+      const piSdk = obj.piSdk as Record<string, unknown> | null;
+      const pluginInject = obj.pluginInject as Record<string, unknown> | null;
+      const id = obj.id;
+      const normalizedDataDir = this.dataDir.replace(/\\/g, '/').replace(/\/$/, '');
+      if (
+        mode !== 'plugin-inject'
+        || !isValidPiSdkAgentId(id)
+        || isReservedPiSdkAgentId(id)
+        || !piSdk
+        || piSdk.schemaVersion !== 1
+        || typeof piSdk.agentDir !== 'string'
+        || piSdk.agentDir.length === 0
+        || !pluginInject
+        || pluginInject.configKey !== 'extensions'
+        || pluginInject.pluginId !== `loongsuite-pilot-pi-sdk-${id}`
+        || pluginInject.pluginSpec !== `${normalizedDataDir}/plugins/pi-coding-agent/agents/${id}.mjs`
+      ) {
+        logger.warn('invalid PI SDK Agent definition', { file: filePath });
+        return false;
+      }
     }
     return true;
   }

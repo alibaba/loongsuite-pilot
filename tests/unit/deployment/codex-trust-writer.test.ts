@@ -4,7 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   computeHookTrustHash,
+  computeInstalledHookTrustHash,
   hookStateKey,
+  installedHookStateKey,
+  type InstalledCodexHookLocation,
   writeTrustedHashes,
   removeTrustBlock,
   verifyTrustHashes,
@@ -56,6 +59,75 @@ describe('codex-trust-writer 算法', () => {
 
   test('未知 event 抛错', () => {
     expect(() => computeHookTrustHash('Unknown', 'cmd')).toThrow(/Unknown hook event/);
+  });
+
+  test('matches Codex hashes for installed matcher-sensitive Pilot hooks', () => {
+    const command = '/Users/yunshen/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh';
+    expect(computeHookTrustHash('SessionStart', `${command} session-start`, '*')).toBe(
+      'sha256:474a9671344eabd67eeda6fc6dc5c152e22ee474e067ff28885da1230e334512',
+    );
+    expect(computeHookTrustHash('SubagentStart', `${command} subagent-start`, '*')).toBe(
+      'sha256:b35e26cd3fd1c65960cbb8a5b62720743729d447b720a62f4a78bf2bf19edcde',
+    );
+    expect(computeHookTrustHash('SubagentStop', `${command} subagent-stop`, '*')).toBe(
+      'sha256:d7d2dee53aeaca1819c85d2781ef97e6056768187eef9186a1eef8dc3e0dbc91',
+    );
+  });
+
+  test('ignores matcher for UserPromptSubmit and Stop', () => {
+    expect(computeHookTrustHash('UserPromptSubmit', 'cmd', '*')).toBe(
+      computeHookTrustHash('UserPromptSubmit', 'cmd'),
+    );
+    expect(computeHookTrustHash('Stop', 'cmd', '*')).toBe(
+      computeHookTrustHash('Stop', 'cmd'),
+    );
+  });
+
+  test('distinguishes absent, empty, and wildcard matcher for matcher events', () => {
+    const hashes = [
+      computeHookTrustHash('SessionStart', 'cmd'),
+      computeHookTrustHash('SessionStart', 'cmd', ''),
+      computeHookTrustHash('SessionStart', 'cmd', '*'),
+    ];
+    expect(new Set(hashes).size).toBe(3);
+  });
+
+  test('normalizes installed handler fields and uses the real handler index', () => {
+    const base: InstalledCodexHookLocation = {
+      eventName: 'SessionStart',
+      eventKey: 'session_start',
+      groupIndex: 2,
+      handlerIndex: 3,
+      matcher: '*',
+      handler: {
+        type: 'command',
+        command: 'unix-command',
+        commandWindows: 'windows-command',
+        timeout: 0,
+        async: true,
+        statusMessage: 'running',
+        additionalContextLimit: 4_096,
+      },
+    };
+    expect(installedHookStateKey('/abs/hooks.json', base)).toBe(
+      '/abs/hooks.json:session_start:2:3',
+    );
+    expect(computeInstalledHookTrustHash(base, 'linux')).not.toBe(
+      computeInstalledHookTrustHash(base, 'win32'),
+    );
+    expect(computeInstalledHookTrustHash(base, 'linux')).not.toBe(
+      computeInstalledHookTrustHash({
+        ...base,
+        handler: { ...base.handler, statusMessage: undefined },
+      }, 'linux'),
+    );
+    expect(computeInstalledHookTrustHash({
+      ...base,
+      handler: { ...base.handler, additionalContextLimit: 2_500 },
+    }, 'linux')).toBe(computeInstalledHookTrustHash({
+      ...base,
+      handler: { ...base.handler, additionalContextLimit: undefined },
+    }, 'linux'));
   });
 });
 
@@ -157,18 +229,25 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
   });
 
-  test('forceBypass=true 时写入 bypass_hook_trust = true', () => {
-    writeTrustedHashes({
+  test('removes the unsupported legacy bypass_hook_trust field', () => {
+    const opts = {
       configPath,
       hooksJsonAbsPath: '/abs/hooks.json',
       hookEvents: HOOK_EVENTS,
       eventToCommand: EVENT_TO_CMD,
       eventToGroupIndex: EVENT_TO_GROUP_0,
       marker: 'otel-codex-hook',
-      forceBypass: true,
+    } as const;
+    writeTrustedHashes(opts);
+    fs.writeFileSync(configPath, `bypass_hook_trust = true\n${fs.readFileSync(configPath, 'utf-8')}`);
+
+    expect(verifyTrustHashes(opts)).toEqual({
+      valid: false,
+      mismatches: ['unsupported config field bypass_hook_trust'],
     });
-    const content = fs.readFileSync(configPath, 'utf-8');
-    expect(content).toContain('bypass_hook_trust = true');
+    expect(writeTrustedHashes(opts)).toBe(true);
+    expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('bypass_hook_trust = true');
+    expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
   });
 
   test('幂等重写: 两次 write 不产生重复段', () => {
@@ -224,7 +303,9 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     ].join('\n');
     fs.writeFileSync(configPath, trustAndUserData, 'utf-8');
 
-    const removed = removeTrustBlock(configPath, 'otel-codex-hook', '/abs/hooks.json', HOOK_EVENTS);
+    const removed = removeTrustBlock(configPath, 'otel-codex-hook', [
+      '/abs/hooks.json:session_start:0:0',
+    ]);
     expect(removed).toBe(true);
     const content = fs.readFileSync(configPath, 'utf-8');
     // trust 条目 + marker 都被删
@@ -235,6 +316,31 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     // 用户的 marketplace 数据保留
     expect(content).toContain('[marketplaces.openai-bundled]');
     expect(content).toContain('source_type = "local"');
+  });
+
+  test('removeTrustBlock 不删除 marker 范围内的第三方 hook trust', () => {
+    const pilotKey = '/abs/hooks.json:session_start:0:0';
+    const thirdPartyKey = '/abs/hooks.json:session_start:1:0';
+    fs.writeFileSync(configPath, [
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${pilotKey}"]`,
+      'trusted_hash = "sha256:PILOT"',
+      '',
+      `[hooks.state."${thirdPartyKey}"]`,
+      'enabled = false',
+      'trusted_hash = "sha256:THIRD_PARTY"',
+      '',
+      '# END otel-codex-hook trust',
+    ].join('\n'), 'utf-8');
+
+    removeTrustBlock(configPath, 'otel-codex-hook', [pilotKey]);
+
+    const content = fs.readFileSync(configPath, 'utf-8');
+    expect(content).not.toContain(pilotKey);
+    expect(content).not.toContain('sha256:PILOT');
+    expect(content).toContain(`[hooks.state."${thirdPartyKey}"]`);
+    expect(content).toContain('enabled = false');
+    expect(content).toContain('sha256:THIRD_PARTY');
   });
 
   test('verify 检测 hash 不一致', () => {
@@ -304,5 +410,72 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
       marker: 'otel-codex-hook',
     });
     expect(result.valid).toBe(true);
+  });
+
+  test('does not inherit enabled from a different hook previously at the same key', () => {
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SubagentStart',
+      eventKey: 'subagent_start',
+      groupIndex: 1,
+      handlerIndex: 1,
+      matcher: '*',
+      handler: { type: 'command', command: 'pilot subagent-start' },
+    };
+    fs.writeFileSync(configPath, [
+      '[hooks.state."/abs/hooks.json:subagent_start:0:0"]',
+      'trusted_hash = "sha256:THIRD_PARTY"',
+      '',
+      '# BEGIN otel-codex-hook trust',
+      '[hooks.state."/abs/hooks.json:subagent_start:1:1"]',
+      'enabled = false',
+      'trusted_hash = "sha256:STALE"',
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n'));
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      locations: { SubagentStart: location },
+      marker: 'otel-codex-hook',
+    };
+
+    expect(writeTrustedHashes(opts)).toBe(true);
+    const repaired = fs.readFileSync(configPath, 'utf8');
+    expect(repaired).toContain('sha256:THIRD_PARTY');
+    expect(repaired).not.toContain('enabled = false');
+    expect(repaired).not.toContain('sha256:STALE');
+    expect(writeTrustedHashes(opts)).toBe(false);
+  });
+
+  test('preserves enabled only when key and trusted hash both match Pilot', () => {
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SubagentStart',
+      eventKey: 'subagent_start',
+      groupIndex: 0,
+      handlerIndex: 0,
+      matcher: '*',
+      handler: { type: 'command', command: 'pilot subagent-start' },
+    };
+    const key = installedHookStateKey('/abs/hooks.json', location);
+    const hash = computeInstalledHookTrustHash(location);
+    fs.writeFileSync(configPath, [
+      'bypass_hook_trust = true',
+      `[hooks.state."${key}"]`,
+      'enabled = false',
+      `trusted_hash = "${hash}"`,
+      '',
+    ].join('\n'));
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      locations: { SubagentStart: location },
+      marker: 'otel-codex-hook',
+    };
+
+    expect(writeTrustedHashes(opts)).toBe(true);
+    const repaired = fs.readFileSync(configPath, 'utf8');
+    expect(repaired).not.toContain('bypass_hook_trust');
+    expect(repaired).toContain('enabled = false');
+    expect(repaired).toContain(`trusted_hash = "${hash}"`);
   });
 });

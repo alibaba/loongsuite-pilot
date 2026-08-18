@@ -19,6 +19,47 @@ Choose the lightest integration that the target agent supports.
 
 Prefer hooks or plugins when they can emit structured event records. They are easier to normalize and usually provide better coverage for tool calls and token usage.
 
+## Register a Custom Agent Built on the PI High-level SDK
+
+A custom Agent built with `@earendil-works/pi-coding-agent` does not need to
+add a Pilot dependency or application-level instrumentation. The application
+must use `createAgentSession({ agentDir })` with the standard
+`DefaultResourceLoader`, or an equivalent loader that still loads
+`agentDir/settings.json` extensions. Register it once:
+
+```bash
+loongsuite-pilot agent register pi-sdk \
+  --id acme-code \
+  --name "Acme Code Agent" \
+  --agent-dir ~/.acme/pi-agent \
+  --detect-path ~/.acme \
+  --detect-command acme-code
+```
+
+`--detect-path` and `--detect-command` are repeatable, and at least one is
+required. Pilot generates an identity wrapper, injects it into the supplied PI
+settings, and persists a local definition for discovery, self-healing,
+upgrades, and uninstall cleanup. If an `AgentSession` already exists, restart
+the custom Agent or call `session.reload()` after registration.
+
+The `agentDir` must be dedicated to this custom Agent. Do not reuse the built-in
+PI directory (`~/.pi/agent`) or share one directory between custom Agents:
+PI loads every configured extension in that directory, which would duplicate
+telemetry and mix Agent identities. This does not change the custom Agent's
+normal startup command or SDK call.
+
+```bash
+loongsuite-pilot agent list
+loongsuite-pilot agent doctor acme-code
+loongsuite-pilot agent unregister acme-code
+```
+
+The custom identity is emitted as `gen_ai.agent.type/id/name`, with
+`gen_ai.agent.system=pi` and `gen_ai.framework=pi-coding-agent`, matching the
+built-in Agent because both use the same high-level SDK. Direct `pi-agent-core`
+usage, in-memory settings, and custom resource loaders that ignore PI
+extensions are outside this registration contract.
+
 ## Required Pieces
 
 Every new agent integration should provide:
@@ -90,12 +131,13 @@ Important fields:
 |-------|---------|
 | `id` | Stable agent ID used in config, output, and admission control. |
 | `displayName` | Human-readable agent name. |
-| `deployMode` | `hook`, `plugin-inject`, `directory-plugin`, or `plugin-probe`. |
+| `deployMode` | `hook`, `plugin-inject`, `directory-plugin`, `plugin-probe`, or the built-in DSH-specific `dsh-yaml-patch`. |
 | `detection.paths` | Local paths that indicate the agent is installed. |
 | `detection.commands` | Commands that indicate the agent is installed. |
 | `hook` | Hook settings path, events, command, and format. Required for hook mode. |
 | `pluginInject` | Config paths and plugin spec. Required for plugin injection mode. |
 | `directoryPlugin` | Managed source and target directories. Required for native directory plugin mode. |
+| `dshYamlPatch` | DSH plugin source, entry ID, and ownership marker. Required only for the built-in `dsh-yaml-patch` mode. |
 | `input` | Source type and source location for the collector input. |
 
 `pluginInject.configKey` can target an array field other than the default
