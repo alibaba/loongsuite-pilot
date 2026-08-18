@@ -131,6 +131,7 @@ export class DeploymentManager {
       agentId: def.id,
       deployMode: def.deployMode,
       skipped: true,
+      reason: 'disabled',
     };
 
     if (
@@ -229,7 +230,13 @@ export class DeploymentManager {
     const detected = await strategy.detect(def);
     if (!detected) {
       logger.debug('agent not detected, skipping', { agentId: def.id });
-      return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
+      return {
+        success: true,
+        agentId: def.id,
+        deployMode: def.deployMode,
+        skipped: true,
+        reason: 'not-detected',
+      };
     }
 
     const record = this.state[def.id];
@@ -245,8 +252,17 @@ export class DeploymentManager {
       if (def.deployMode === 'dsh-yaml-patch' && record && !record.dshPatchPath) {
         record.dshPatchPath = this.dshYamlPatchStrategy.resolvePatchPathForRecord(def, record);
       }
+      // Also the terminal state for detection-only agents: they share another
+      // agent's hook, so needsDeploy() is always false and "detected but nothing
+      // to write" is a fully satisfied integration, not a missing one.
       logger.debug('agent already deployed, skipping', { agentId: def.id });
-      return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
+      return {
+        success: true,
+        agentId: def.id,
+        deployMode: def.deployMode,
+        skipped: true,
+        reason: 'up-to-date',
+      };
     }
 
     logger.info('deploying agent', { agentId: def.id, deployMode: def.deployMode });

@@ -1211,6 +1211,33 @@ cmd_agent() {
     esac
 }
 
+cmd_deploy() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    # Deliberately no collector restart afterwards: this command exists for image
+    # builds, where nothing is running yet and starting a daemon inside a build
+    # layer would leave a half-written state file baked into the image. A running
+    # collector re-reads its deployment state on its own next cycle.
+    exec "$node_bin" "$entry" deploy "$@"
+}
+
 cmd_token_usage() {
     ensure_dirs
 
@@ -2182,6 +2209,9 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
+    echo "                    --require <ids>  comma-separated agent ids that must deploy"
+    echo "                    --json           machine-readable result"
     echo "  token-usage     Show token usage TUI"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
@@ -2198,6 +2228,7 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    deploy)      shift; cmd_deploy "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
     span-attr)   shift; cmd_span_attr "$@" ;;

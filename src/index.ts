@@ -28,6 +28,21 @@ async function main(): Promise<void> {
     return;
   }
 
+  // One-shot deployment. The collector deploys hooks/plugins itself on startup,
+  // but only as a daemon side effect; image builds need it as a foreground step
+  // with an exit code (see runDeployCommand).
+  if (command === 'deploy') {
+    const { runDeployCommand } = await import('./deployment/deploy-command.js');
+    try {
+      process.exitCode = await runDeployCommand(args);
+    } catch (err) {
+      console.error(`loongsuite-pilot deploy: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+    flushLogsSync();
+    return;
+  }
+
   const config = await loadConfig();
 
   const dataDir = resolveHome(config.dataDir);
