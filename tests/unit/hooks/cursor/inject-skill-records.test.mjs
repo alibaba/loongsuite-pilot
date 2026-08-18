@@ -227,6 +227,82 @@ describe('injectSkillRecords', () => {
       .some(part => part.id === skillCall.id)).toBe(false);
   });
 
+  it('should never backfill a parent Skill exchange into subagent requests', () => {
+    const sourceCall = {
+      type: 'tool_call', id: 'parent-call', name: 'Agent', arguments: { task: 'inspect' },
+    };
+    const firstResponse = makeLlmResponse({
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [sourceCall] }],
+    });
+    const childInput = [
+      { role: 'assistant', parts: [{ type: 'reasoning', content: 'child reasoning' }] },
+    ];
+    const childRequest = makeLlmRequest({
+      'event.id': 'evt-child-request',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'turn-001:sub:child:s1',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.id': 'child-conversation',
+      'gen_ai.input.messages_delta': childInput,
+      'gen_ai.input.messages': childInput,
+    });
+    const originalChildRequest = structuredClone(childRequest);
+    const records = [firstResponse, childRequest];
+
+    injectSkillRecords(records, [makeSkill()]);
+
+    expect(childRequest).toEqual(originalChildRequest);
+    const skillCall = firstResponse['gen_ai.output.messages'][0].parts
+      .find(part => part.type === 'tool_call' && part.name === 'Read');
+    expect(skillCall).toBeDefined();
+    expect(JSON.stringify(childRequest)).not.toContain(skillCall.id);
+  });
+
+  it('should reuse the prior assistant when the source tool call id is null', () => {
+    const reasoning = { type: 'reasoning', content: 'inspect first' };
+    const sourceCall = {
+      type: 'tool_call', id: null, name: 'Read', arguments: { path: '/tmp/a' },
+    };
+    const sourceResponse = {
+      type: 'tool_call_response', id: null, response: 'file body',
+    };
+    const sourceAssistant = { role: 'assistant', parts: [reasoning, sourceCall] };
+    const firstResponse = makeLlmResponse({
+      'gen_ai.output.messages': [sourceAssistant],
+    });
+    const secondRequest = makeLlmRequest({
+      'event.id': 'evt-req-null-id',
+      'gen_ai.turn.id': 'turn-001',
+      'gen_ai.step.id': 'step_2',
+      'gen_ai.input.messages_delta': [
+        structuredClone(sourceAssistant),
+        { role: 'tool', parts: [sourceResponse] },
+      ],
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+        structuredClone(sourceAssistant),
+        { role: 'tool', parts: [sourceResponse] },
+      ],
+    });
+    const records = [firstResponse, secondRequest];
+
+    injectSkillRecords(records, [makeSkill()]);
+
+    const skillCall = firstResponse['gen_ai.output.messages'][0].parts
+      .find(part => part.type === 'tool_call' && part.name === 'Read' && part.id);
+    for (const messages of [
+      secondRequest['gen_ai.input.messages_delta'],
+      secondRequest['gen_ai.input.messages'],
+    ]) {
+      const assistants = messages.filter(message => message.role === 'assistant');
+      expect(assistants).toHaveLength(1);
+      expect(assistants[0].parts).toEqual([reasoning, sourceCall, skillCall]);
+      expect(messages.filter(message => message.role === 'tool')).toHaveLength(2);
+      expect(messages.find(message =>
+        message.role === 'tool' && message.parts[0]?.id === skillCall.id)).toBeDefined();
+    }
+  });
+
   it('should create assistant/tool history when the source response had no ordinary tools', () => {
     const firstResponse = makeLlmResponse();
     const secondRequest = makeLlmRequest({
