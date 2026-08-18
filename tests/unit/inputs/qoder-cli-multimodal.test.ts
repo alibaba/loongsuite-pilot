@@ -63,6 +63,25 @@ function cliEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEnt
 
 describe('extractInputImagePaths / extractToolImagePaths', () => {
   it('parses paste Image:source and @ relative/absolute paths', () => {
+    if (process.platform === 'win32') {
+      const cwd = 'C:\\Users\\me\\workspace';
+      expect(extractInputImagePaths(
+        '[Image: source: C:\\tmp\\clip.png.png]',
+      )).toEqual([path.win32.normalize('C:\\tmp\\clip.png.png')]);
+      expect(extractInputImagePaths(
+        '@loongsuite-pilot/picture/pipeline.jpg 这个图像是上个图像的扩展？',
+        cwd,
+      )).toEqual([path.win32.resolve(cwd, 'loongsuite-pilot/picture/pipeline.jpg')]);
+      expect(extractInputImagePaths(
+        '@C:\\Users\\me\\Documents\\picture\\pipeline.jpg 这个图是一样的？',
+      )).toEqual([path.win32.normalize('C:\\Users\\me\\Documents\\picture\\pipeline.jpg')]);
+      expect(extractInputImagePaths(
+        '[Image: source: docs/_assets/img/dashboard.png, original 2556x1656, displayed at 2000x1296]',
+        cwd,
+      )).toEqual([path.win32.resolve(cwd, 'docs/_assets/img/dashboard.png')]);
+      return;
+    }
+
     const cwd = '/Users/me/workspace';
     expect(extractInputImagePaths(
       '[Image: source: /tmp/clip.png.png]',
@@ -81,6 +100,20 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
   });
 
   it('parses Read image / Image file / ImageGen tool texts', () => {
+    if (process.platform === 'win32') {
+      const cwd = 'C:\\Users\\me\\proj';
+      expect(extractToolImagePaths('Read image: picture/pipeline.jpg (52KB)', cwd)).toEqual([
+        path.win32.resolve(cwd, 'picture/pipeline.jpg'),
+      ]);
+      expect(extractToolImagePaths('Image file: C:\\tmp\\a.png')).toEqual([
+        path.win32.normalize('C:\\tmp\\a.png'),
+      ]);
+      expect(extractToolImagePaths(
+        'Image generated successfully! The absolute path of the image is: C:\\tmp\\gen.png\nRequest ID: x',
+      )).toEqual([path.win32.normalize('C:\\tmp\\gen.png')]);
+      return;
+    }
+
     const cwd = '/Users/me/proj';
     expect(extractToolImagePaths('Read image: picture/pipeline.jpg (52KB)', cwd)).toEqual([
       path.join(cwd, 'picture/pipeline.jpg'),
@@ -94,10 +127,19 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
   it('ignores glob listings and non-image @ mentions', () => {
     expect(extractToolImagePaths('docs/_assets/img/dashboard.png\npicture/pipeline.jpg')).toEqual([]);
     expect(extractInputImagePaths('hello @someone please look')).toEqual([]);
-    expect(extractInputImagePaths('picture/pipeline.jpg这个是什么？', '/tmp')).toEqual([]);
+    expect(extractInputImagePaths(
+      'picture/pipeline.jpg这个是什么？',
+      process.platform === 'win32' ? 'C:\\tmp' : '/tmp',
+    )).toEqual([]);
   });
 
   it('resolveImagePath joins cwd only for relative paths', () => {
+    if (process.platform === 'win32') {
+      expect(resolveImagePath('C:\\abs\\a.png', 'C:\\cwd')).toBe(path.win32.normalize('C:\\abs\\a.png'));
+      expect(resolveImagePath('rel\\a.png', 'C:\\cwd')).toBe(path.win32.resolve('C:\\cwd', 'rel\\a.png'));
+      return;
+    }
+
     expect(resolveImagePath('/abs/a.png', '/cwd')).toBe(path.normalize('/abs/a.png'));
     expect(resolveImagePath('rel/a.png', '/cwd')).toBe(path.resolve('/cwd', 'rel/a.png'));
   });
