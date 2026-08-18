@@ -48,6 +48,8 @@
     "test:e2e:docker": "npm run test:e2e:l2",
     "test:e2e:docker:down": "npm run test:e2e:l2:down",
     "test:e2e:remote": "npm run test:e2e:l2:remote",
+    "otel:local": "node scripts/local-otel-viewer.mjs",
+    "trae-cn:install-local": "node scripts/install-trae-cn-local.mjs",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {

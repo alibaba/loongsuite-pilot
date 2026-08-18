@@ -18,6 +18,8 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import { appendRowsToHistory } from './shared/hook-processor-base.mjs';
 
 const AGENT_ID = 'trae-cn';
 const DEFAULT_PORT = 9100;
@@ -42,10 +44,19 @@ const keepSystemChars = Number(val('--keep-system-chars') || process.env.LOONGSU
 const keepUserChars = Number(val('--keep-user-chars') || process.env.LOONGSUITE_TRAE_CN_KEEP_USER_CHARS || 120);
 
 let seq = 0;
+const emittedSupplemental = new Set();
 fs.mkdirSync(captureDir, { recursive: true });
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function unixNanos(date = new Date()) {
+  return String(BigInt(date.getTime()) * 1000000n);
+}
+
+function spanId() {
+  return crypto.randomBytes(8).toString('hex');
 }
 
 function appendCapture(record) {
@@ -103,6 +114,125 @@ function summarizeMessages(messages) {
   });
 }
 
+function summarizeToolDefinitions(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  return tools.map(tool => {
+    const fn = tool?.function || {};
+    return {
+      type: tool?.type,
+      name: fn.name || tool?.name,
+      required: Array.isArray(fn.parameters?.required) ? fn.parameters.required : undefined,
+    };
+  });
+}
+
+function traceReadyBody(body, currentMessages) {
+  if (!body || typeof body !== 'object') return undefined;
+  return sanitize({
+    ...body,
+    messages: currentMessages,
+    tools: summarizeToolDefinitions(body.tools),
+  });
+}
+
+function currentTurnMessages(messages) {
+  if (!Array.isArray(messages)) return undefined;
+  const lastUserIndex = messages.reduce((last, message, index) => message?.role === 'user' ? index : last, -1);
+  return lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
+}
+
+function extractToolCalls(messages, turnId) {
+  if (!Array.isArray(messages)) return undefined;
+  const calls = [];
+  for (const message of messages) {
+    for (const call of message?.tool_calls || []) {
+      const index = calls.length;
+      calls.push({
+        id: call?.id,
+        name: call?.function?.name || call?.name,
+        type: call?.type,
+        arguments: call?.function?.arguments ?? call?.arguments,
+        'gen_ai.step.id': turnId ? `${turnId}:s${index + 2}` : undefined,
+        'agent.trae.tool_seq': index + 1,
+      });
+    }
+  }
+  return calls.length ? sanitize(calls) : undefined;
+}
+
+function textFromMessage(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map(part => typeof part === 'string' ? part : (part?.content || part?.text || '')).filter(Boolean).join(' ');
+  if (Array.isArray(message?.parts)) return message.parts.map(part => typeof part === 'string' ? part : (part?.content || part?.text || '')).filter(Boolean).join(' ');
+  return '';
+}
+
+function parseArguments(raw) {
+  if (!raw) return undefined;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+function appendSupplementalSubagentEvents({ turn, currentMessages, currentToolCalls, now = new Date() }) {
+  if (!turn?.trace_id || !turn?.['gen_ai.turn.id'] || !Array.isArray(currentToolCalls)) return;
+  const toolResults = new Map();
+  for (const message of currentMessages || []) {
+    if (message?.role === 'tool' && message.tool_call_id) toolResults.set(message.tool_call_id, message);
+  }
+  const rows = [];
+  for (const call of currentToolCalls) {
+    if (call?.name !== 'Task' || !call.id) continue;
+    const key = `${turn.trace_id}:${call.id}`;
+    const args = parseArguments(call.arguments);
+    const result = toolResults.get(call.id);
+    const resultText = result ? textFromMessage(result) : undefined;
+    const common = {
+      'user.id': '',
+      'gen_ai.session.id': '',
+      'gen_ai.turn.id': turn['gen_ai.turn.id'],
+      'gen_ai.step.id': call['gen_ai.step.id'] || turn['gen_ai.step.id'],
+      'gen_ai.agent.type': AGENT_ID,
+      'gen_ai.agent.name': 'General Purpose Agent',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.subagent.parent_tool_call.id': call.id,
+      'gen_ai.tool.name': 'Task',
+      'gen_ai.tool.call.id': call.id,
+      'gen_ai.tool.call.exec.id': call.id,
+      'agent.trae.hook_event_name': 'ModelProxySubagent',
+      'agent.trae.model_proxy_supplemental': true,
+      'agent.trae.tool_seq': call['agent.trae.tool_seq'],
+      trace_id: turn.trace_id,
+      observed_time_unix_nano: unixNanos(now),
+      time_unix_nano: unixNanos(now),
+    };
+    if (!emittedSupplemental.has(`${key}:call`)) {
+      rows.push(JSON.stringify({
+        ...common,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.arguments': sanitize(args),
+        'gen_ai.input.messages': args?.query ? [{ role: 'user', parts: [{ type: 'text', content: args.query }] }] : undefined,
+        span_id: spanId(),
+      }));
+      emittedSupplemental.add(`${key}:call`);
+    }
+    if (resultText && !emittedSupplemental.has(`${key}:result`)) {
+      rows.push(JSON.stringify({
+        ...common,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': sanitize(resultText),
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: resultText }] }],
+        'tool.result.status': 'success',
+        span_id: spanId(),
+      }));
+      emittedSupplemental.add(`${key}:result`);
+    }
+  }
+  appendRowsToHistory(AGENT_ID, AGENT_ID, rows);
+}
+
 function latestTurnContext() {
   const dir = path.join(dataDir, 'state', AGENT_ID, 'turns');
   try {
@@ -155,6 +285,9 @@ const server = http.createServer((req, res) => {
     const safeHeaders = sanitizeHeaders(req.headers);
     delete safeHeaders.headers['x-upstream-target'];
     const turn = latestTurnContext();
+    const currentMessages = currentTurnMessages(body?.messages);
+    const currentToolCalls = extractToolCalls(currentMessages, turn['gen_ai.turn.id']);
+    appendSupplementalSubagentEvents({ turn, currentMessages, currentToolCalls });
 
     appendCapture({
       id,
@@ -168,7 +301,12 @@ const server = http.createServer((req, res) => {
       ...safeHeaders,
       body_chars: bodyBuf.length,
       body: body ? sanitize(body) : undefined,
+      trace_body: traceReadyBody(body, currentMessages),
       messages_summary: summarizeMessages(body?.messages),
+      tools_summary: summarizeToolDefinitions(body?.tools),
+      current_turn_messages: currentMessages ? sanitize(currentMessages) : undefined,
+      current_turn_messages_summary: summarizeMessages(currentMessages),
+      current_turn_tool_calls: currentToolCalls,
       model: body?.model ?? null,
       stream: Boolean(body?.stream),
     });

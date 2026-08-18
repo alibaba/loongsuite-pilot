@@ -413,6 +413,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
       return entry['agent.openclaw.hook'] === 'llm_output';
     }
+    // TRAE CN's official Stop hook currently has no finish_reason and may be
+    // emitted multiple times. Notification(idle_prompt) is the stable turn
+    // boundary used by the hook processor to clear turn state, so flush OTLP
+    // buffers on the same signal.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'trae-cn') {
+      return entry['agent.trae.hook_event_name'] === 'Notification'
+        && entry['agent.trae.notification_type'] === 'idle_prompt';
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 

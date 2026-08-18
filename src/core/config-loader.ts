@@ -693,6 +693,10 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   const innerServiceName = innerPrefix && innerPrefix !== userServiceName ? innerPrefix : undefined;
 
   // 1. User generic OTLP (endpoint via env or config).
+  // Local validation mode keeps only this explicit OTLP backend and skips any
+  // CMS/managed trace endpoints. This is intentionally env-only so production
+  // config files are not mutated by local smoke tests.
+  const localOtlpOnly = envBool('LOONGSUITE_PILOT_OTLP_LOCAL_ONLY', false);
   const userOtlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
   if (userOtlpEndpoint) {
     let headers: Record<string, string> | undefined;
@@ -712,7 +716,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   }
 
   // 2. User CMS/ARMS shorthand (legacy path — now additive, not exclusive).
-  if (config.cms.enabled && config.cms.endpoint) {
+  if (!localOtlpOnly && config.cms.enabled && config.cms.endpoint) {
     endpoints.push(cmsEntryToOtlpEndpoint('user-cms', {
       endpoint: config.cms.endpoint,
       licenseKey: config.cms.licenseKey,
@@ -724,7 +728,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   // Guard with Array.isArray: managed data_config.json is control-plane pushed,
   // so a non-array (object/string) serialization must not throw here — mirrors
   // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
-  const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
+  const innerOtlp = !localOtlpOnly && Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
   innerOtlp.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push({
@@ -737,7 +741,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   });
 
   // 4. Inner managed CMS/ARMS shorthand backends.
-  const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
+  const innerCms = !localOtlpOnly && Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
   innerCms.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push(

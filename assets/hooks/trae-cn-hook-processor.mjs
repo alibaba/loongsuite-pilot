@@ -13,10 +13,12 @@
  *
  * 埋点时机 → GenAI event.name 映射：
  *   SessionStart     → other        （会话起点，不开轮次）
- *   UserPromptSubmit → llm.request  （prompt → gen_ai.input.messages）
+ *   UserPromptSubmit → other        （做法 A：prompt → gen_ai.input.messages_delta，
+ *                                    归并到 ENTRY/AGENT 输入，不再伪造整轮 LLM span）
  *   PreToolUse       → tool.call    （tool_input → gen_ai.tool.call.arguments）
  *   PostToolUse      → tool.result  （tool_response → gen_ai.tool.call.result / tool.result.status）
- *   Stop             → llm.response （last_assistant_message → gen_ai.output.messages）
+ *   Stop             → llm.response （last_assistant_message → gen_ai.output.messages，
+ *                                    末尾唯一的最终合成 LLM；同时喂给 AGENT 输出）
  *   Notification     → other        （idle_prompt 兼作轮次终止信号）
  *
  * ⚠️ Stop 的官方 payload 只有 stop_hook_active / loop_count / last_assistant_message：
@@ -78,7 +80,7 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv();
 /** 埋点时机 → GenAI 事件名 */
 const EVENT_NAME_MAP = {
   sessionstart: 'other',
-  userpromptsubmit: 'llm.request',
+  userpromptsubmit: 'other',
   pretooluse: 'tool.call',
   posttooluse: 'tool.result',
   stop: 'llm.response',
@@ -206,21 +208,14 @@ function clearTurnState(sessionId) {
  * - UserPromptSubmit：开新轮
  * - 其他事件且无状态：说明 pilot 在会话中途启动，惰性补一个轮次而不是丢事件
  *
- * step 划分：gen_ai.step.id 的语义是「一次 ReAct 迭代」，下游按它把
- * llm.request/response 与 tool.call/result 组成 STEP{ LLM, TOOL... }，且每个 STEP 恰好 1 个 LLM
- *（scripts/validate-trace.mjs 强制）。TRAE 的 hook 只在轮次首尾给出模型信号
- * （UserPromptSubmit / Stop），中间每次推理未暴露，所以一轮 = 一个 step：
- * 首尾两条配成唯一的 LLM span，工具作为其兄弟 TOOL span。
+ * step 划分：一轮对话仍然只对应一条 Trace；step 用于表达本轮内的操作序列。
+ * - UserPromptSubmit 映射为 event.name='other'（做法 A），不占 step，由 converter 归并到 AGENT 输入；
+ * - Stop 的 llm.response 代表本轮最终合成，固定落在 s1（本轮唯一的 LLM，也喂给 AGENT 输出）；
+ * - PreToolUse / PostToolUse 按稳定 tool_call_id 复用同一个工具 step，step 从 s2 开始；
+ * - 这样不会按 hook 到达顺序盲目自增，也不会把 tool.call 和 tool.result 拆散。
  *
- * 按事件自增 step 是错的：会把同一次调用的 tool.call 与 tool.result 拆到两个 step，
- * 把 llm.request 和 llm.response 拆到首尾两个 step，结果是一堆没有 LLM 的破碎 STEP。
- *
- * ⚠️ ReAct 迭代边界无法从 hook 事件流推出。曾用「PreToolUse 出现在 PostToolUse 之后
- * 就算新一批」的启发式，实测是错的：TRAE 边流式接收 tool call 边执行，一次 LLM 响应里的
- * 三个工具到达顺序是 Pre(LS) → Post(LS) → Pre(Read) → Pre(RunCommand) → Post…，
- * 该启发式会把同一批拆成两批。真边界只在 ai-agent 日志的 `[commit_toolcall_result]`
- * 那一行，hook 侧看不到。所以这里只记诚实的东西：工具在本轮内的调用序号
- * （agent.trae.tool_seq），Pre / Post 靠 tool_call_id 共享同一序号。
+ * 注意：TRAE 官方 hook 不暴露每次中间 LLM 推理边界；真正的 ReAct LLM 子轮次需要
+ * 模型代理 current_turn_messages 或 ai-agent 日志补充。这里先保证工具/子任务不全部挤在 s1。
  */
 function resolveTurnContext(sessionId, sourceEvent, payloadTurnId, eventName, toolCallId) {
   const source = sourceEvent.toLowerCase();
@@ -263,8 +258,10 @@ function resolveTurnContext(sessionId, sourceEvent, payloadTurnId, eventName, to
   state.stepId = state.stepId || `${state.turnId}:s1`;
   state.toolSeqById = state.toolSeqById || {};
 
-  // 工具调用序号在 PreToolUse 时分配，PostToolUse 靠 tool_call_id 复用同一个号
+  // 工具调用序号在 PreToolUse 时分配，PostToolUse 靠 tool_call_id 复用同一个号。
+  // stepId 也按 tool_call_id 稳定复用：主 LLM 是 s1，工具操作从 s2 开始。
   let toolSeq;
+  let eventStepId = state.stepId;
   if (eventName === 'tool.call' || eventName === 'tool.result') {
     if (toolCallId && state.toolSeqById[toolCallId]) {
       toolSeq = state.toolSeqById[toolCallId];
@@ -273,10 +270,11 @@ function resolveTurnContext(sessionId, sourceEvent, payloadTurnId, eventName, to
       state.toolCount = toolSeq;
       if (toolCallId) state.toolSeqById[toolCallId] = toolSeq;
     }
+    eventStepId = `${state.turnId}:s${toolSeq + 1}`;
   }
 
   saveTurnState(sessionId, state);
-  return { ...state, toolSeq };
+  return { ...state, stepId: eventStepId, toolSeq };
 }
 
 // ─── 记录构建 ───
@@ -407,8 +405,9 @@ function buildRecord(payload, sourceEvent, runtimeConfig, now) {
 
   const isToolCall = eventName === 'tool.call';
   const isToolResult = eventName === 'tool.result';
-  const isLlmRequest = eventName === 'llm.request';
   const isLlmResponse = eventName === 'llm.response';
+  // UserPromptSubmit 现在映射为 event.name='other'（做法 A），靠 source 事件名识别用户输入。
+  const isUserPrompt = sourceEvent.toLowerCase() === 'userpromptsubmit';
 
   const toolStatus = isToolResult
     ? normalizeStatus(firstString(payload, CANDIDATES.status), exitCode, toolResult)
@@ -423,8 +422,8 @@ function buildRecord(payload, sourceEvent, runtimeConfig, now) {
     Array.isArray(message?.parts) && message.parts.some(part => part?.type === 'reasoning' && part?.content),
   ));
 
-  // prompt 统一包成 OTel GenAI 的 messages 结构
-  const inputMessages = isLlmRequest && prompt
+  // prompt 统一包成 OTel GenAI 的 messages 结构；作为做法 A 的 messages_delta 归入 AGENT 输入。
+  const inputMessages = isUserPrompt && prompt
     ? [{ role: 'user', parts: [{ type: 'text', content: prompt }] }]
     : undefined;
 
@@ -447,7 +446,9 @@ function buildRecord(payload, sourceEvent, runtimeConfig, now) {
     'gen_ai.request.model': model,
     'gen_ai.response.model': model,
 
-    'gen_ai.input.messages': inputMessages ? toJsonValue(inputMessages) : undefined,
+    // 做法 A：用户输入走 messages_delta，converter 会把 event.name='other' 携带的 delta 归并到 ENTRY/AGENT，
+    // 而不会把它当成一个 LLM span（避免与 Stop 的 llm.response 配成横跨整轮的假 LLM）。
+    'gen_ai.input.messages_delta': inputMessages ? toJsonValue(inputMessages) : undefined,
     'gen_ai.input.messages_hash': inputMessages ? hashJson(inputMessages) : undefined,
     'gen_ai.output.messages': outputMessages ? toJsonValue(outputMessages) : undefined,
     'gen_ai.response.finish_reasons': finishReason ? [finishReason] : undefined,
@@ -474,8 +475,8 @@ function buildRecord(payload, sourceEvent, runtimeConfig, now) {
     'gen_ai.observability.missing.usage_tokens.reason': isLlmResponse ? 'trae_cn_hook_payload_has_no_usage' : undefined,
     'gen_ai.observability.missing.reasoning': isLlmResponse && !hasReasoning ? true : undefined,
     'gen_ai.observability.missing.reasoning.reason': isLlmResponse && !hasReasoning ? 'trae_cn_hook_payload_has_no_reasoning' : undefined,
-    'gen_ai.observability.missing.system_prompt': isLlmRequest ? true : undefined,
-    'gen_ai.observability.missing.system_prompt.reason': isLlmRequest ? 'trae_cn_hook_payload_has_user_prompt_only' : undefined,
+    'gen_ai.observability.missing.system_prompt': isUserPrompt ? true : undefined,
+    'gen_ai.observability.missing.system_prompt.reason': isUserPrompt ? 'trae_cn_hook_payload_has_user_prompt_only' : undefined,
 
     'workspace.path': cwd,
 
