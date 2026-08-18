@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>TRAE CN Trace Demo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+:root{--bg:#0b1020;--panel:#11182a;--line:#26314d;--fg:#d8e1f2;--dim:#8893aa;--blue:#4c9aff;--green:#3fb950;--orange:#f5a623;--purple:#b96cd9;--red:#ff6b6b;--cyan:#34c3a0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:12px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif}header{height:52px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);background:#0e1528;position:sticky;top:0;z-index:2}h1{font-size:15px;margin:0 12px 0 0}input{background:#0b1020;border:1px solid var(--line);border-radius:5px;color:var(--fg);padding:6px 8px}button{background:#1d2a45;border:1px solid var(--line);border-radius:5px;color:var(--fg);padding:6px 10px;cursor:pointer}button:hover{border-color:var(--blue)}main{display:grid;grid-template-columns:minmax(560px,1.25fr) minmax(360px,.75fr);height:calc(100vh - 52px)}#left,#right{overflow:auto;padding:12px}#right{border-left:1px solid var(--line);background:#090e1b}.banner{padding:8px 10px;border:1px solid #664b14;background:#2b210e;color:#f0c674;border-radius:6px;margin-bottom:10px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}.tab{padding:5px 9px;border:1px solid var(--line);border-radius:14px;color:var(--dim);cursor:pointer}.tab.active{color:var(--fg);border-color:var(--blue);background:#4c9aff1f}.row{display:grid;grid-template-columns:430px 1fr 74px;gap:8px;align-items:center;padding:3px 6px;border-bottom:1px solid #ffffff08}.row:hover{background:#ffffff08}.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.barbox{height:13px;background:#ffffff0a;border-radius:3px;position:relative}.bar{height:100%;min-width:2px;border-radius:3px;position:absolute}.dur{text-align:right;color:var(--dim);font-family:Menlo,monospace}.badge{font-size:10px;border-radius:4px;padding:1px 5px;margin-right:5px;color:#07101d}.k-ENTRY{background:#7c6cff}.k-AGENT{background:var(--blue)}.k-STEP{background:var(--cyan)}.k-LLM{background:var(--orange)}.k-TOOL{background:var(--green)}.k-SUBAGENT{background:var(--purple)}.sub{background:#b96cd90d}.miss{color:var(--red);border:1px solid #803535;background:#2a1114;border-radius:5px;padding:1px 5px;margin:2px;display:inline-block}.ok{color:var(--green)}pre{white-space:pre-wrap;word-break:break-word;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:420px;overflow:auto}.sec{margin:0 0 12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0e1528}.sec h2{font-size:12px;margin:0;padding:7px 9px;background:#131d33;border-bottom:1px solid var(--line)}.sec .body{padding:9px}.chip{display:inline-block;border:1px solid var(--line);border-radius:12px;padding:2px 7px;margin:2px;color:var(--dim)}.empty{color:var(--dim);padding:30px;text-align:center}.err{color:var(--red)}a{color:var(--blue)}
+</style>
+</head>
+<body>
+<header>
+  <h1>TRAE CN Trace Demo</h1>
+  <input id="session" size="30" placeholder="session id；留空显示当前日志全部 Trace" />
+  <button id="reload">重新构建</button>
+  <button id="auto">自动刷新：关</button>
+  <span id="meta"></span>
+</header>
+<main>
+  <div id="left"><div class="empty">加载中…</div></div>
+  <div id="right"><div class="empty">点击左侧 span 查看详情</div></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);let DATA=null,ACTIVE=0,SEL=null,timer=null;
+const COLOR={ENTRY:'#7c6cff',AGENT:'#4c9aff',STEP:'#34c3a0',LLM:'#f5a623',TOOL:'#3fb950',SUBAGENT:'#b96cd9'};
+function esc(v){return String(v??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function dur(ms){if(ms==null)return'—';return ms<1000?ms+'ms':(ms/1000).toFixed(2)+'s'}
+function flat(s,d=0,out=[],ins=false){const sub=ins||s.kind==='SUBAGENT';out.push({s,d,sub});for(const c of s.children||[])flat(c,d+1,out,sub);return out}
+function missAttrs(a){return Object.keys(a||{}).filter(k=>k.startsWith('gen_ai.observability.missing.')&&a[k]===true)}
+function renderTrace(){if(!DATA){return}const traces=DATA.traces||[];if(!traces.length){$('#left').innerHTML='<div class="empty">未找到 trace。换 session 或确认 TRAE 已产生日志。</div>';return}const tabs='<div class="tabs">'+traces.map((t,i)=>`<span class="tab ${i===ACTIVE?'active':''}" onclick="ACTIVE=${i};renderTrace()">Turn ${t.turnIndex||i+1} <span>${dur(t.durationMs)}</span></span>`).join('')+'</div>';const t=traces[ACTIVE]||traces[0];const rows=flat(t.root).map(({s,d,sub})=>{const a=s.attributes||{};const m=missAttrs(a);const off=Math.max(0,(s.startMs-(t.root.startMs||s.startMs)));const pct=t.durationMs?Math.min(100,off/t.durationMs*100):0;const w=t.durationMs?Math.max(.3,(s.durationMs||1)/t.durationMs*100):1;return `<div class="row ${sub?'sub':''}" onclick='selectSpan(${JSON.stringify(s.spanId)})'><div class="name" style="padding-left:${d*16}px"><span class="badge k-${s.kind}">${s.kind}</span>${esc(s.name||s.spanName||s.kind)} ${m.length?'<span class="miss">缺 '+m.length+'</span>':''}</div><div class="barbox"><div class="bar" style="left:${pct}%;width:${w}%;background:${COLOR[s.kind]||'#888'}"></div></div><div class="dur">${dur(s.durationMs)}</div></div>`}).join('');$('#left').innerHTML=banner()+tabs+rows;renderDetails(SEL)}
+function banner(){const cap=DATA.modelCapture||{};const rows=cap.rows||[];const last=[...rows].reverse().find(r=>r.kind==='llm.response.capture');let txt=`Trace ${DATA.traces?.length||0} 条；Hook ${DATA.sources?.hookEventsCount||0} 条；Model capture ${cap.count||0} 条；匹配 LLM ${DATA.sources?.modelCapture?.matched||0}/${DATA.sources?.modelCapture?.count||0}`;if(last)txt+=`；最近模型 status=${last.status} SSE=${last.is_sse} reasoning=${last.sse_total_reasoning_chars??'—'}`;return `<div class="banner">${esc(txt)}</div>`}
+window.selectSpan=id=>{SEL=id;renderDetails(id)};
+function findSpan(id,s=(DATA.traces?.[ACTIVE]||{}).root){if(!s)return null;if(s.spanId===id)return s;for(const c of s.children||[]){const x=findSpan(id,c);if(x)return x}return null}
+function renderDetails(id){const s=id?findSpan(id):null;if(!s){renderCapture();return}const a=s.attributes||{};const miss=missAttrs(a);$('#right').innerHTML=`<div class="sec"><h2>${esc(s.kind)} · ${esc(s.name||s.spanName||'')}</h2><div class="body"><div class="chip">${esc(s.spanId)}</div><div class="chip">${dur(s.durationMs)}</div>${miss.map(k=>`<div class="miss">${esc(k)}：${esc(a[k+'.reason']||a[k+'.reason'.replace('missing.','missing.') ]||'missing')}</div>`).join('')}</div></div><div class="sec"><h2>Attributes</h2><div class="body"><pre>${esc(JSON.stringify(a,null,2))}</pre></div></div><div class="sec"><h2>Events</h2><div class="body"><pre>${esc(JSON.stringify(s.events||[],null,2))}</pre></div></div>`}
+function renderCapture(){const cap=DATA?.modelCapture||{};const rows=cap.rows||[];const recent=rows.slice(-20);const summary=recent.map(r=>({kind:r.kind,status:r.status,model:r.model,stream:r.stream,is_sse:r.is_sse,delta:r.sse_total_delta_chars,reasoning:r.sse_total_reasoning_chars,trace_id:r.trace_id,turn:r['gen_ai.turn.id'],missing_reasoning:r['gen_ai.observability.missing.reasoning']}));$('#right').innerHTML=`<div class="sec"><h2>模型捕获 / 自定义模型代理</h2><div class="body"><div class="chip">exists=${cap.exists}</div><div class="chip">count=${cap.count||0}</div><div class="chip">dir=${esc(cap.dir||'')}</div><pre>${esc(JSON.stringify(summary,null,2))}</pre></div></div>`}
+async function pickSession(){const typed=$('#session').value.trim();return typed||'all'}
+async function load(){const sid=await pickSession();const qs=sid?`?session=${encodeURIComponent(sid)}`:'';$('#meta').textContent='构建中…';const [trace,cap]=await Promise.all([fetch('/api/trace'+qs).then(r=>r.json()),fetch('/api/model-capture').then(r=>r.json())]);DATA=trace;DATA.modelCapture=cap;$('#meta').textContent=`session=${trace.sessionId||sid} build=${trace.buildMs||0}ms lines=${trace.stats?.linesRead||0} modelMatched=${trace.sources?.modelCapture?.matched||0}/${trace.sources?.modelCapture?.count||0}`;ACTIVE=0;SEL=null;renderTrace()}
+$('#reload').onclick=()=>load().catch(e=>{$('#left').innerHTML='<pre class="err">'+esc(e.stack||e)+'</pre>'});$('#auto').onclick=()=>{if(timer){clearInterval(timer);timer=null;$('#auto').textContent='自动刷新：关'}else{timer=setInterval(()=>load().catch(()=>{}),5000);$('#auto').textContent='自动刷新：开'}};load().catch(e=>{$('#left').innerHTML='<pre class="err">'+esc(e.stack||e)+'</pre>'});
+</script>
+</body>
+</html>

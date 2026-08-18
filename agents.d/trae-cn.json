@@ -1,0 +1,34 @@
+{
+  "id": "trae-cn",
+  "displayName": "TRAE CN",
+  "deployMode": "hook",
+  "detection": {
+    "paths": [
+      "~/.trae-cn",
+      "~/Library/Application Support/Trae CN"
+    ],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.trae-cn/hooks.json",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop",
+      "Notification"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/trae-cn-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "as-is",
+    "replaceHookCommands": [
+      "trae-cn-loongsuite-pilot-hook"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/trae-cn/history"
+  }
+}

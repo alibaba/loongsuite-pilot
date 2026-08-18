@@ -57,6 +57,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { TraeCNInput } from '../inputs/trae-cn/trae-cn-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -130,6 +131,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'trae-cn-hook': 'trae-cn',
     'dsh-log': 'dsh',
   };
 
@@ -1448,6 +1450,28 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['hermes-agent-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- TRAE CN (Hook JSONL + optional custom-model proxy side channel) ---
+    const traeCNLogDir = path.join(this.dataDir, 'logs', 'trae-cn', 'history');
+    await ensureDir(traeCNLogDir);
+    const traeCNInput = new TraeCNInput({
+      stateStore: this.stateStore,
+      logDir: traeCNLogDir,
+      pollIntervalMs: listenerCfg['trae-cn-hook']?.pollInterval,
+    });
+    this.inputManager.registerInput(traeCNInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(traeCNInput, {
+        watchPaths: TraeCNInput.getWatchPaths(),
+        isAvailable: TraeCNInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-cn-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'trae-cn-hook',
+            listenerCfg['trae-cn-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['trae-cn-hook']?.pollInterval,
       }),
     );
 

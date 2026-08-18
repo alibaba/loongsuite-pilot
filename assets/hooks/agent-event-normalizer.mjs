@@ -275,12 +275,16 @@ export function inferProviderName(record) {
   if (/deepseek/.test(model)) return 'deepseek';
   if (/gemini/.test(model)) return 'gcp.gemini';
   if (/grok|xai|x_ai/.test(model)) return 'x_ai';
+  if (/doubao|volcengine/.test(model)) return 'bytedance.doubao';
 
   const agentType = (getStringValue(record, 'gen_ai.agent.type') || '').toLowerCase();
   if (agentType.includes('codex')) return 'openai';
   if (agentType.includes('claude')) return 'anthropic';
   if (agentType.includes('qoder') || agentType.includes('qwen')) return 'qwen';
   if (agentType.includes('gemini')) return 'gcp.gemini';
+  // 不按 agent.type 猜 TRAE 的 provider：TRAE CN 是多模型宿主（实测同一客户端跑的是
+  // aliyuncs//qwen3.7-max），按客户端硬编码成豆包会把大部分会话标错。拿不到模型名时
+  // 交回 unknown，由上面的 model 分支在有模型信息时给出正确答案。
   return 'unknown';
 }
 
