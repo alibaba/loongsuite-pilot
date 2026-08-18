@@ -126,6 +126,49 @@ describe('ps1 installer variants wire the managed node runtime', () => {
   }
 });
 
+// The npm install fallback is the only path that can fail for a reason the user
+// has to read. Piping it through `tail -1` / `Select-Object -Last 1` left exactly
+// one line of npm's failure report -- the path of a debug log that a container
+// build layer or CI runner throws away -- so real failures arrived unexplainable.
+describe('npm install fallback stays diagnosable', () => {
+  for (const f of SH_VARIANTS) {
+    const present = existsSync(resolve('deploy', f));
+    const sh = present ? readFileSync(resolve('deploy', f), 'utf-8') : '';
+    it.skipIf(!present)(`${f} does not discard npm output through tail`, () => {
+      expect(sh).not.toMatch(/install --production --no-optional[^\n]*\|\s*tail/);
+    });
+    it.skipIf(!present)(`${f} dumps npm output and ~/.npm/_logs on failure`, () => {
+      expect(sh).toMatch(/dump_npm_failure\(\)\s*\{/);
+      const helper = sh.slice(sh.indexOf('dump_npm_failure() {'));
+      expect(helper).toContain('_logs');
+      expect(helper).toMatch(/tail -n 40/);
+      const fallback = sh.slice(sh.indexOf('预编译 node_modules 不可用，回退 npm install'));
+      expect(fallback).toContain('dump_npm_failure');
+    });
+    it.skipIf(!present)(`${f} retries registry fetches beyond the npm default`, () => {
+      expect(sh).toContain('--fetch-retries 5');
+      expect(sh).toContain('--fetch-retry-maxtimeout');
+    });
+  }
+
+  for (const f of PS1_VARIANTS) {
+    const present = existsSync(resolve('deploy', f));
+    const ps1 = present ? readFileSync(resolve('deploy', f), 'utf-8') : '';
+    it.skipIf(!present)(`${f} does not discard npm output through Select-Object`, () => {
+      expect(ps1).not.toMatch(/install --omit=dev[^\n]*\|\s*Select-Object -Last 1/);
+    });
+    it.skipIf(!present)(`${f} dumps the captured npm output on failure`, () => {
+      expect(ps1).toMatch(/function Show-NpmFailure\s*\{/);
+      const fallback = ps1.slice(ps1.indexOf('Prebuilt node_modules unavailable'));
+      expect(fallback).toContain('Show-NpmFailure $npmLog');
+    });
+    it.skipIf(!present)(`${f} retries registry fetches beyond the npm default`, () => {
+      expect(ps1).toContain('--fetch-retries 5');
+      expect(ps1).toContain('--fetch-retry-maxtimeout');
+    });
+  }
+});
+
 describe('hook fallbacks prefer the managed runtime node', () => {
   for (const f of HOOK_SH) {
     const sh = readFileSync(resolve(f), 'utf-8');

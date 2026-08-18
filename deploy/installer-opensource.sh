@@ -488,6 +488,28 @@ run_npm() {
 }
 # <<< managed-node-runtime <<<
 
+dump_npm_failure() {
+    # dump_npm_failure <file-with-npm-output>
+    #
+    # npm's own failure report ends in a single line pointing at
+    # ~/.npm/_logs/<ts>-debug-0.log. Where this fallback actually runs unattended — a
+    # container build layer, a CI runner — that file is discarded before anyone can read
+    # it, so the pointer is all that survives and the cause is lost. Print the captured
+    # output instead, plus the debug log's error lines while the filesystem still has them.
+    local out="$1" log="" logs_dir=""
+    if [ -s "$out" ]; then
+        msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
+        tail -n 40 "$out"
+    fi
+    logs_dir="${npm_config_cache:-$HOME/.npm}/_logs"
+    log=$(ls -t "$logs_dir"/*.log 2>/dev/null | head -1 || true)
+    if [ -n "$log" ] && [ -f "$log" ]; then
+        msg "    ---- npm 调试日志 $log（末 40 条 error 行）----" \
+            "    ---- npm debug log $log (last 40 error lines) ----"
+        grep -E '^[0-9]+ error' "$log" | tail -n 40 || tail -n 40 "$log"
+    fi
+}
+
 check_deps() {
     msg "==> 检查依赖..." "==> Checking dependencies..."
 
@@ -881,10 +903,20 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
+        # Retries: this path pulls ~185 packages from the registry, so a single reset
+        # connection used to fail the whole install (npm defaults to 2 retries).
+        local npm_out
+        npm_out=$(mktemp) || npm_out="${TMPDIR:-/tmp}/loongsuite-pilot-npm-install.log"
+        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional \
+                --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
+                >"$npm_out" 2>&1); then
             msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+            dump_npm_failure "$npm_out"
+            rm -f "$npm_out"
             return 1
         fi
+        tail -n 1 "$npm_out"
+        rm -f "$npm_out"
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
