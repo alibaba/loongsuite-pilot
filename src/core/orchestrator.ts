@@ -336,6 +336,12 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      // Same condition as the updater watchdog above, deliberately: whether an updater is
+      // supposed to exist decides both whether we restart it and whether its absence is
+      // worth an alarm. Auto-update resolves to disabled whenever no package source is
+      // configured, and the updater exits immediately on that config — so a missing pid
+      // there is the expected state, not a fault.
+      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
     await this.metricsWriter.start();
 
