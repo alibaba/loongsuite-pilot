@@ -148,7 +148,81 @@ function applyPolicy(record, runtimeConfig) {
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function toolCallIdsFromMessages(messages) {
+  const ids = new Set();
+  if (!Array.isArray(messages)) return ids;
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.parts)) continue;
+    for (const part of message.parts) {
+      if (part?.type === 'tool_call' && part.id) ids.add(part.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Merge synthetic Skill reads into the previous round's single assistant
+ * output, then add one independent tool-role response message per Skill read.
+ */
+function mergeSkillExchange(
+  messages,
+  sourceToolCallIds,
+  sourceHadToolCalls,
+  callParts,
+  responseParts,
+) {
+  const merged = Array.isArray(messages) ? cloneJson(messages) : [];
+  const existingPartIds = new Set(merged.flatMap(message =>
+    Array.isArray(message?.parts) ? message.parts.map(part => part?.id).filter(Boolean) : []
+  ));
+  const pendingCalls = callParts.filter(part => !existingPartIds.has(part.id));
+  if (pendingCalls.length === 0) return merged;
+
+  const responseById = new Map(responseParts.map(part => [part.id, part]));
+  const responseMessages = pendingCalls.flatMap(call => {
+    const response = responseById.get(call.id);
+    return response ? [{ role: 'tool', parts: [cloneJson(response)] }] : [];
+  });
+
+  let assistantIndex = merged.findIndex(message =>
+    message?.role === 'assistant' &&
+    message.parts?.some(part => part?.id && sourceToolCallIds.has(part.id))
+  );
+  // Cursor can omit tool_use_id while still preserving the prior assistant in
+  // request history. In that case reuse the first assistant (the target is the
+  // first LLM response) instead of creating a second, Skill-only assistant.
+  // Keep the no-source-tool path unchanged: there is no prior tool assistant to
+  // reuse, so the synthetic exchange must remain its own assistant message.
+  if (assistantIndex < 0 && sourceHadToolCalls) {
+    assistantIndex = merged.findIndex(message => message?.role === 'assistant');
+  }
+
+  if (assistantIndex < 0) {
+    const firstHistoryIndex = merged.findIndex(message =>
+      message?.role === 'assistant' || message?.role === 'tool'
+    );
+    const insertAt = firstHistoryIndex >= 0 ? firstHistoryIndex : merged.length;
+    merged.splice(
+      insertAt,
+      0,
+      { role: 'assistant', parts: cloneJson(pendingCalls) },
+      ...responseMessages,
+    );
+  } else {
+    merged[assistantIndex].parts.push(...cloneJson(pendingCalls));
+    let insertAt = assistantIndex + 1;
+    while (insertAt < merged.length && merged[insertAt]?.role === 'tool') insertAt++;
+    merged.splice(insertAt, 0, ...responseMessages);
+  }
+  return merged;
+}
+
 function injectSkillRecords(records, skills, runtimeConfig = {}) {
+  if (!Array.isArray(skills) || skills.length === 0) return;
   // Skill-to-step alignment is best-effort: attach detected reads to the first
   // assembled LLM response. Cursor's assemblers synthesize a response even for
   // thought-only and implicit tool steps, so never attach output to a request.
@@ -167,6 +241,11 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
   const outputMsgs = Array.isArray(llmRecord['gen_ai.output.messages'])
     ? llmRecord['gen_ai.output.messages']
     : [];
+  const sourceToolCallIds = toolCallIdsFromMessages(outputMsgs);
+  const sourceHadToolCalls = outputMsgs.some(message =>
+    message?.role === 'assistant' &&
+    message.parts?.some(part => part?.type === 'tool_call')
+  );
 
   let assistantMsg = outputMsgs.find(m => m.role === 'assistant');
   if (!assistantMsg) {
@@ -185,6 +264,55 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
   }
   llmRecord['gen_ai.output.messages'] = outputMsgs;
   records[targetLlmIdx] = applyPolicy(llmRecord, runtimeConfig);
+
+  const skillCallParts = skillEntries.map(({ skill, toolCallId }) => ({
+    type: 'tool_call',
+    id: toolCallId,
+    name: 'Read',
+    arguments: { path: skill.skillPath },
+  }));
+  // Preserve the call/response relationship without copying SKILL.md content.
+  const skillResponseParts = skillEntries.map(({ toolCallId }) => ({
+    type: 'tool_call_response',
+    id: toolCallId,
+    response: '',
+  }));
+
+  // The assemblers computed request history before this post-assembly injection.
+  // Backfill the immediate next request's delta/full messages, then keep the
+  // synthetic exchange in every later full context for this same turn.
+  const targetTraceId = llmRecord.trace_id;
+  const targetTurnId = llmRecord['gen_ai.turn.id'];
+  const laterRequestIndexes = [];
+  for (let index = targetLlmIdx + 1; index < records.length; index++) {
+    const record = records[index];
+    if (record['event.name'] !== 'llm.request') continue;
+    if (record['gen_ai.agent.scope'] === 'subagent') continue;
+    if (targetTraceId && record.trace_id !== targetTraceId) continue;
+    if (targetTurnId && record['gen_ai.turn.id'] !== targetTurnId) continue;
+    laterRequestIndexes.push(index);
+  }
+  for (let index = 0; index < laterRequestIndexes.length; index++) {
+    const requestIndex = laterRequestIndexes[index];
+    const request = records[requestIndex];
+    if (index === 0) {
+      request['gen_ai.input.messages_delta'] = mergeSkillExchange(
+        request['gen_ai.input.messages_delta'],
+        sourceToolCallIds,
+        sourceHadToolCalls,
+        skillCallParts,
+        skillResponseParts,
+      );
+    }
+    request['gen_ai.input.messages'] = mergeSkillExchange(
+      request['gen_ai.input.messages'],
+      sourceToolCallIds,
+      sourceHadToolCalls,
+      skillCallParts,
+      skillResponseParts,
+    );
+    records[requestIndex] = applyPolicy(request, runtimeConfig);
+  }
 
   // Create tool.call + tool.result record pairs for each skill read
   const insertRecords = [];
