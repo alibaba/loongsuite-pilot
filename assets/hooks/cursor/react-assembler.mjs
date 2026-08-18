@@ -710,7 +710,10 @@ function toolExchangeMessages(assistantToolMessage, toolResults) {
 
   for (const call of calls) {
     const resultIndex = toolResults.findIndex((result, index) =>
-      !usedResultIndexes.has(index) && (result.toolUseId || null) === (call.id || null)
+      !usedResultIndexes.has(index) &&
+      typeof call.id === 'string' && call.id.length > 0 &&
+      typeof result.toolUseId === 'string' && result.toolUseId.length > 0 &&
+      result.toolUseId === call.id
     );
     if (resultIndex >= 0) {
       usedResultIndexes.add(resultIndex);

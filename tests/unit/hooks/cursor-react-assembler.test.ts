@@ -637,6 +637,38 @@ describe('Cursor react assembler', () => {
     expect(requests).toHaveLength(2);
   });
 
+  it('only pairs tool calls and results when both have non-empty ids', () => {
+    const base = {
+      conversation_id: 'conv-null-id-pairing',
+      generation_id: 'turn-null-id-pairing',
+    };
+    const { records } = assembleTurn([
+      { ...base, _journal_ts: iso(0), hook_event: 'beforeSubmitPrompt', prompt: 'inspect files' },
+      { ...base, _journal_ts: iso(100), hook_event: 'afterAgentThought', text: 'Inspecting.', duration_ms: 50 },
+      { ...base, _journal_ts: iso(200), hook_event: 'preToolUse', tool_name: 'Read', tool_use_id: 'call-read', tool_input: {} },
+      { ...base, _journal_ts: iso(210), hook_event: 'preToolUse', tool_name: 'Shell', tool_input: {} },
+      { ...base, _journal_ts: iso(220), hook_event: 'preToolUse', tool_name: 'Grep', tool_use_id: 'call-grep', tool_input: {} },
+      { ...base, _journal_ts: iso(300), hook_event: 'postToolUse', tool_name: 'Read', tool_output: 'read without id' },
+      { ...base, _journal_ts: iso(310), hook_event: 'postToolUse', tool_name: 'Grep', tool_use_id: 'call-grep', tool_output: 'grep with id' },
+      { ...base, _journal_ts: iso(320), hook_event: 'postToolUse', tool_name: 'Shell', tool_output: 'shell without id' },
+      { ...base, _journal_ts: iso(500), hook_event: 'afterAgentThought', text: 'Done inspecting.', duration_ms: 50 },
+      { ...base, _journal_ts: iso(600), hook_event: 'stop', status: 'completed' },
+    ], { stopConversationId: base.conversation_id });
+
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-null-id-pairing:s2'
+    );
+    const toolParts = (secondRequest?.['gen_ai.input.messages_delta'] ?? [])
+      .filter((message: Record<string, unknown>) => message.role === 'tool')
+      .map((message: { parts: Array<Record<string, unknown>> }) => message.parts[0]);
+
+    expect(toolParts.map((part: Record<string, unknown>) => part.id))
+      .toEqual(['call-grep', undefined, undefined]);
+    expect(toolParts.map((part: Record<string, unknown>) => part.response))
+      .toEqual(['grep with id', 'read without id', 'shell without id']);
+  });
+
   it('guards LLM spans by moving start before the earliest buffered tool call', () => {
     const { records } = assembleTurn([
       {

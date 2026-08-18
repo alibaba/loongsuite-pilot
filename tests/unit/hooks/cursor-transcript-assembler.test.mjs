@@ -531,6 +531,43 @@ describe('buildCursorRecordsFromTranscript', () => {
       .toEqual(['call-read', 'call-shell']);
   });
 
+  it('only pairs tool calls and results when both have non-empty ids', () => {
+    const transcriptPath = writeTranscript([
+      { role: 'user', message: { content: [{ type: 'text', text: '<user_query>inspect</user_query>' }] } },
+      {
+        role: 'assistant',
+        message: { content: [
+          { type: 'text', text: 'checking' },
+          { type: 'tool_use', id: 'transcript-read', name: 'Read', input: {} },
+          { type: 'tool_use', id: 'transcript-shell', name: 'Shell', input: {} },
+          { type: 'tool_use', id: 'transcript-grep', name: 'Grep', input: {} },
+        ] },
+      },
+      { role: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } },
+      { type: 'turn_ended', status: 'success' },
+    ]);
+    const records = buildCursorRecordsFromTranscript(transcriptPath, [
+      makePromptEvent({ prompt: 'inspect' }),
+      makeThoughtEvent({ text: 'checking' }),
+      makePreToolUse({ tool_name: 'Read', tool_use_id: 'call-read', _journal_ts: iso(1500) }),
+      makePreToolUse({ tool_name: 'Shell', tool_use_id: undefined, _journal_ts: iso(1600) }),
+      makePreToolUse({ tool_name: 'Grep', tool_use_id: 'call-grep', _journal_ts: iso(1700) }),
+      makePostToolUse({ tool_name: 'Read', tool_use_id: undefined, _journal_ts: iso(3000) }),
+      makePostToolUse({ tool_name: 'Grep', tool_use_id: 'call-grep', _journal_ts: iso(3100) }),
+      makePostToolUse({ tool_name: 'Shell', tool_use_id: undefined, _journal_ts: iso(3200) }),
+      makeResponseEvent({ text: 'done' }),
+      makeStopEvent(),
+    ], { stopConversationId: 'conv-abc' });
+
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'].endsWith(':s2')
+    );
+    expect(secondRequest['gen_ai.input.messages'].slice(2)
+      .map(message => message.parts[0].id))
+      .toEqual(['call-grep', undefined, undefined]);
+  });
+
   describe('SPEC compliance', () => {
     it('STEP count == LLM call count', () => {
       const transcriptPath = weatherTranscript();

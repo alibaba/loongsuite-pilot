@@ -296,7 +296,9 @@ function toolExchangeMessages(assistantToolMessage, toolResults) {
   for (const call of calls) {
     const resultIndex = toolResults.findIndex((result, index) =>
       !usedResultIndexes.has(index) &&
-      (result.tool_use_id || null) === (call.id || null)
+      typeof call.id === 'string' && call.id.length > 0 &&
+      typeof result.tool_use_id === 'string' && result.tool_use_id.length > 0 &&
+      result.tool_use_id === call.id
     );
     if (resultIndex >= 0) {
       usedResultIndexes.add(resultIndex);
