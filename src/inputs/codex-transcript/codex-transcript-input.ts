@@ -777,6 +777,12 @@ export class CodexTranscriptInput extends BaseInput {
       : undefined;
     if (closedStepCount > 0) {
       activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+      if (extraction.nextStepStartedAtMs !== undefined) {
+        activeTurn.nextStepStartedAtMs = extraction.nextStepStartedAtMs;
+      }
+      if (extraction.lastCumulativeTokenTotal !== undefined) {
+        activeTurn.lastCumulativeTokenTotal = extraction.lastCumulativeTokenTotal;
+      }
     }
 
     const consumedEndOffset = terminal
@@ -2107,12 +2113,20 @@ function updateActiveTurnMetadata(
 
 function partialTurnOptions(activeTurn: CodexActiveTranscriptTurn): {
   startedAtMs: number;
+  nextStepStartedAtMs?: number;
+  lastCumulativeTokenTotal?: number;
   model?: string;
   cwd?: string;
   developerInstructions?: string;
 } {
   return {
     startedAtMs: activeTurn.startedAtMs,
+    ...(activeTurn.nextStepStartedAtMs !== undefined
+      ? { nextStepStartedAtMs: activeTurn.nextStepStartedAtMs }
+      : {}),
+    ...(activeTurn.lastCumulativeTokenTotal !== undefined
+      ? { lastCumulativeTokenTotal: activeTurn.lastCumulativeTokenTotal }
+      : {}),
     ...(activeTurn.model ? { model: activeTurn.model } : {}),
     ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
     ...(activeTurn.developerInstructions ? { developerInstructions: activeTurn.developerInstructions } : {}),
@@ -2160,6 +2174,12 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     turnId: active.turnId,
     startOffset: active.startOffset,
     startedAtMs: active.startedAtMs,
+    ...(typeof active.nextStepStartedAtMs === 'number'
+      ? { nextStepStartedAtMs: active.nextStepStartedAtMs }
+      : {}),
+    ...(typeof active.lastCumulativeTokenTotal === 'number'
+      ? { lastCumulativeTokenTotal: active.lastCumulativeTokenTotal }
+      : {}),
     ...(model ? { model } : {}),
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),

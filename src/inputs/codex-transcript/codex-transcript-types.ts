@@ -23,6 +23,10 @@ export interface CodexActiveTranscriptTurn {
   turnId: string;
   startOffset: number;
   startedAtMs: number;
+  /** Start-time proxy for the first LLM wave reconstructed by the next incremental scan. */
+  nextStepStartedAtMs?: number;
+  /** Session-cumulative token total at the last committed incremental boundary. */
+  lastCumulativeTokenTotal?: number;
   /** Turn-scoped context is needed after incremental recovery advances past turn_context. */
   model?: string;
   cwd?: string;
@@ -179,6 +183,9 @@ export interface CodexPartialTurnExtraction {
   committedStepCount: number;
   committedStepRanges: CodexTranscriptSourceRange[];
   consumedEndOffset: number;
+  /** Continuation state aligned with consumedEndOffset, never with an uncommitted suffix. */
+  nextStepStartedAtMs?: number;
+  lastCumulativeTokenTotal?: number;
 }
 
 export interface CodexExtractedTranscriptTurn {
