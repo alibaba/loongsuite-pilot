@@ -147,6 +147,58 @@ describe('DeploymentManager', () => {
       });
     });
 
+    // `skipped: true` on its own is ambiguous — "not installed here" and "already in
+    // place" are opposite outcomes, and `deploy --require` (the image-build gate) has
+    // to fail on the first and pass on the second. So the reason is part of the
+    // contract, not diagnostic decoration.
+    describe('skip reasons', () => {
+      function hookDef(id: string): AgentDefinition {
+        return {
+          id,
+          displayName: id,
+          deployMode: 'hook',
+          detection: { paths: [], commands: [] },
+          hook: {
+            settingsPath: path.join(tmpDir, `${id}.json`),
+            events: ['Stop'],
+            hookCommand: `/opt/${id}.sh`,
+            format: 'flat',
+          },
+        };
+      }
+
+      it('reports not-detected when the agent is absent', async () => {
+        await writeAgentDef(hookDef('absent-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(false);
+
+        const [result] = await makeManager().deployAll();
+        expect(result).toMatchObject({ success: true, skipped: true, reason: 'not-detected' });
+      });
+
+      it('reports up-to-date on a second deploy into the same dataDir', async () => {
+        // Container mode deliberately keeps deployed-agents.json in the image, so a
+        // derived image rebuilding on top of an instrumented base lands here. Reporting
+        // anything but "satisfied" would make every rebuild fail.
+        await writeAgentDef(hookDef('repeat-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(true);
+
+        const mgr = makeManager();
+        const first = (await mgr.deployAll())[0];
+        expect(first.success).toBe(true);
+        expect(first.skipped).toBeFalsy();
+        expect((await mgr.deployAll())[0])
+          .toMatchObject({ success: true, skipped: true, reason: 'up-to-date' });
+      });
+
+      it('reports disabled when the caller gates the agent off', async () => {
+        await writeAgentDef(hookDef('gated-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(true);
+
+        const [result] = await makeManager().deployAll(() => false);
+        expect(result).toMatchObject({ success: true, skipped: true, reason: 'disabled' });
+      });
+    });
+
     it('undeploys a hook agent that was deployed then disabled', async () => {
       const settingsPath = path.join(tmpDir, 'toggle-hooks.json');
       const def: AgentDefinition = {

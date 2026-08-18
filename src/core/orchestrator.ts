@@ -7,6 +7,10 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import {
+  isAgentGatedEnabled as isAgentGatedEnabledIn,
+  resolvePilotDir as resolvePilotDirIn,
+} from '../deployment/deploy-command.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
@@ -332,6 +336,12 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      // Same condition as the updater watchdog above, deliberately: whether an updater is
+      // supposed to exist decides both whether we restart it and whether its absence is
+      // worth an alarm. Auto-update resolves to disabled whenever no package source is
+      // configured, and the updater exits immediately on that config — so a missing pid
+      // there is the expected state, not a fault.
+      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
     await this.metricsWriter.start();
 
@@ -1539,9 +1549,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    const agents = this.config.agents;
-    if (!agents || Object.keys(agents).length === 0) return true;
-    return agents[agentId]?.enabled !== false;
+    return isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**
@@ -1577,49 +1585,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
-    try {
-      const currentFile = path.join(this.dataDir, 'current');
-      const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
-      if (versionName) {
-        const versionDir = path.join(this.dataDir, 'versions', versionName);
-        if (fsSync.existsSync(versionDir)) {
-          logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
-          return versionDir;
-        }
-      }
-    } catch {
-      // current file doesn't exist — legacy or dev layout
-    }
-
-    const legacyPackageDir = path.join(this.dataDir, 'package');
-    if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
-      return legacyPackageDir;
-    }
-
-    try {
-      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-      const candidates = [
-        path.resolve(moduleDir, '..'),
-        path.resolve(moduleDir, '..', '..'),
-      ];
-      for (const modulePackageDir of candidates) {
-        const packageJson = path.join(modulePackageDir, 'package.json');
-        const agentsDir = path.join(modulePackageDir, 'agents.d');
-        if (
-          fsSync.existsSync(packageJson)
-          && fsSync.existsSync(agentsDir)
-          && fsSync.statSync(packageJson).isFile()
-          && fsSync.statSync(agentsDir).isDirectory()
-        ) {
-          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
-          return modulePackageDir;
-        }
-      }
-    } catch {
-      // Module URL is invalid or the runtime package does not include required assets.
-    }
-
-    return this.dataDir;
+    return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {

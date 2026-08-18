@@ -258,11 +258,27 @@ export interface AgentDefinition {
 
 // ─── Deploy Result ───
 
+/**
+ * Why a deploy was skipped. `skipped: true` alone is ambiguous — "the agent is
+ * not installed here" and "its integration is already in place" are opposite
+ * outcomes, and `loongsuite-pilot deploy --require` has to treat them
+ * differently (the first is a build failure, the second is success).
+ */
+export type DeploySkipReason =
+  /** detect() found no agent on this machine — nothing was instrumented. */
+  | 'not-detected'
+  /** Integration already present (includes detection-only agents, which never write). */
+  | 'up-to-date'
+  /** Turned off by the config.agents gate, so it was undeployed instead. */
+  | 'disabled';
+
 export interface DeployResult {
   success: boolean;
   agentId: string;
   deployMode: DeployMode;
   skipped?: boolean;
+  /** Set whenever `skipped` is true. */
+  reason?: DeploySkipReason;
   error?: string;
 }
 

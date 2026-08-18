@@ -1248,6 +1248,36 @@ function Cmd-Log {
 }
 
 # ============================================================
+# CMD: deploy (one-shot hook/plugin deployment, for image builds)
+# ============================================================
+function Cmd-Deploy {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Deploy CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    # No collector restart afterwards -- see the shell cmd_deploy for why.
+    & $nodeBin $entry "deploy" @SubArgs
+    exit $LASTEXITCODE
+}
+
+# ============================================================
 # CMD: token-usage (foreground token usage CLI)
 # ============================================================
 function Cmd-TokenUsage {
@@ -1405,6 +1435,9 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
+    Write-Host "                    --require <ids>  comma-separated agent ids that must deploy"
+    Write-Host "                    --json           machine-readable result"
     Write-Host "  token-usage     Show token usage TUI"
     Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
@@ -1425,6 +1458,7 @@ switch ($Command.ToLower()) {
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
+    "deploy"             { Cmd-Deploy }
     "token-usage"        { Cmd-TokenUsage }
     "tokens"             { Cmd-TokenUsage }
     "rollback"           { Cmd-Rollback }
