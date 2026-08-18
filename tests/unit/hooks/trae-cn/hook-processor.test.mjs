@@ -74,6 +74,21 @@ function todayName() {
   return `trae-cn-${yyyy}-${mm}-${dd}.jsonl`;
 }
 
+function readOtlpDebugSpans() {
+  const dir = path.join(dataDir, 'logs', 'otlp-debug');
+  if (!fs.existsSync(dir)) return [];
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  const out = [];
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(dir, f), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      out.push(JSON.parse(line));
+    }
+  }
+  return out;
+}
+
 describe('trae-cn hook processor', () => {
   test('agents.d/trae-cn.json declares all 6 hook events', () => {
     const def = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
@@ -224,11 +239,23 @@ describe('trae-cn hook processor', () => {
     expect(llmReq['gen_ai.input.messages'][0].parts[0].content).toBe('');
   });
 
-  test('Notification idle_prompt clears session state', () => {
+  test('Notification idle_prompt preserves turn_index for next turn (round 5 #5)', () => {
     runFixture('user-prompt-submit', 'user-prompt-submit.json');
-    expect(readState('trae-cn-smoke-session')).not.toBeNull();
+    const stateBefore = readState('trae-cn-smoke-session');
+    expect(stateBefore.turn_index).toBe(1);
     runFixture('notification', 'notification-idle.json');
-    expect(readState('trae-cn-smoke-session')).toBeNull();
+    // State is now a minimal stub retaining turn_index (NOT fully cleared)
+    // so the next UserPromptSubmit can increment to t2/t3 instead of t1.
+    const stateAfter = readState('trae-cn-smoke-session');
+    expect(stateAfter).not.toBeNull();
+    expect(stateAfter.turn_index).toBe(1);
+    expect(stateAfter.llm_response_emitted).toBe(true);
+    // Next turn should increment to t2.
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const stateNext = readState('trae-cn-smoke-session');
+    expect(stateNext.turn_index).toBe(2);
+    expect(stateNext.turn_id).toBe('trae-cn-smoke-session:t2');
+    expect(stateNext.step_id).toBe('trae-cn-smoke-session:t2:s1');
   });
 
   test('Notification non-idle type does not clear state', () => {
@@ -311,5 +338,515 @@ describe('trae-cn hook processor', () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
+  });
+
+  // ─── Round 5 fixes ───
+
+  test('round 5 #1: model + provider extracted from stdin payload (forward-compat)', () => {
+    // Simulate TRAE-CN hook payload carrying model_info per
+    // trae-session-trace-path.md §4.2.
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-smoke-session',
+      cwd: '/home/dev/demo-project',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      agent_type: 'solo_agent',
+      prompt: 'hello',
+      model_info: {
+        model_name: 'aliyuncs//qwen3.7-max',
+        provider: 'aliyuncs',
+        display_name: 'Qwen3.7-Max',
+      },
+    });
+    const records = readEmittedJsonl();
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    expect(llmReq['gen_ai.request.model']).toBe('aliyuncs//qwen3.7-max');
+    expect(llmReq['gen_ai.provider.name']).toBe('aliyuncs');
+    const entry = records.find((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    expect(entry['gen_ai.request.model']).toBe('aliyuncs//qwen3.7-max');
+  });
+
+  test('round 5 #2: usage tokens extracted from Stop hook usage object (OpenAI format)', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-usage-session',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'hi',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-usage-session',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'done',
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 34,
+        total_tokens: 46,
+      },
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response'
+      && r['gen_ai.session.id'] === 'trae-cn-usage-session');
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(12);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(34);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(46);
+  });
+
+  test('round 5 #2: usage tokens extracted from alternate input_tokens format', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-alt-usage',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'hi',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-alt-usage',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'ok',
+      usage: { input_tokens: 7, output_tokens: 11, total_tokens: 18 },
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response'
+      && r['gen_ai.session.id'] === 'trae-cn-alt-usage');
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(7);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(11);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(18);
+  });
+
+  test('round 5 #3: every span carries startTimeUnixNano + endTimeUnixNano with end>start', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('pre-tool-use', 'pre-tool-use.json');
+    runFixture('post-tool-use', 'post-tool-use.json');
+    runFixture('stop', 'stop.json');
+    const records = readEmittedJsonl();
+    expect(records.length).toBeGreaterThanOrEqual(7);
+    for (const r of records) {
+      expect(typeof r.startTimeUnixNano).toBe('string');
+      expect(typeof r.endTimeUnixNano).toBe('string');
+      const start = BigInt(r.startTimeUnixNano);
+      const end = BigInt(r.endTimeUnixNano);
+      expect(end).toBeGreaterThan(start);
+    }
+  });
+
+  test('round 5 #3: LLM span end (stop time) > start (prompt time)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('stop', 'stop.json');
+    const records = readEmittedJsonl();
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    // Both LLM records share span_id; start = prompt_timestamp (01:00:00)
+    // end = stop_timestamp (01:00:05) → duration ≈ 5s.
+    expect(BigInt(llmReq.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(llmReq.startTimeUnixNano));
+    expect(BigInt(llmRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(llmRes.startTimeUnixNano));
+    const durationMs = Number(BigInt(llmRes.endTimeUnixNano)
+      - BigInt(llmRes.startTimeUnixNano)) / 1e6;
+    expect(durationMs).toBeGreaterThanOrEqual(4000);
+  });
+
+  test('round 5 #3: TOOL span end (post-tool time) > start (pre-tool time)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('pre-tool-use', 'pre-tool-use.json');
+    runFixture('post-tool-use', 'post-tool-use.json');
+    const records = readEmittedJsonl();
+    const toolCall = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.call');
+    const toolRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.result');
+    expect(BigInt(toolCall.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolCall.startTimeUnixNano));
+    expect(BigInt(toolRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolRes.startTimeUnixNano));
+    // Both share span_id; start = call time (01:00:01), end = result time (01:00:02).
+    expect(toolCall.span_id).toBe(toolRes.span_id);
+    expect(BigInt(toolRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolCall.startTimeUnixNano));
+  });
+
+  test('round 5 #4: OTLP otlp-debug JSONL written when env flag set', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const otlpDir = path.join(dataDir, 'logs', 'otlp-debug');
+    expect(fs.existsSync(otlpDir)).toBe(true);
+    const files = fs.readdirSync(otlpDir).filter((f) => f.endsWith('.jsonl'));
+    expect(files.length).toBeGreaterThan(0);
+    const otlpText = fs.readFileSync(path.join(otlpDir, files[0]), 'utf-8');
+    const otlpSpans = otlpText.trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    expect(otlpSpans.length).toBeGreaterThan(0);
+    const first = otlpSpans[0];
+    // OTLP-shape: traceId / spanId / parentSpanId / name / kind / startTimeUnixNano
+    // / endTimeUnixNano / attributes / status.
+    expect(first.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(first.spanId).toMatch(/^[0-9a-f]{16}$/);
+    expect(typeof first.startTimeUnixNano).toBe('string');
+    expect(typeof first.endTimeUnixNano).toBe('string');
+    expect(first.attributes['gen_ai.span.kind']).toBe('ENTRY');
+    expect(first.status).toBeDefined();
+    expect(typeof first.status.code).toBe('number');
+  });
+
+  test('round 5 #4: OTLP JSONL absent without env flag (no spurious writes)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const otlpDir = path.join(dataDir, 'logs', 'otlp-debug');
+    if (fs.existsSync(otlpDir)) {
+      const files = fs.readdirSync(otlpDir).filter((f) => f.endsWith('.jsonl'));
+      expect(files.length).toBe(0);
+    }
+  });
+
+  test('round 5 #5: multi-turn conversation produces t1, t2, t3 unique turn.id', () => {
+    // Turn 1
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'turn 1',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'a1',
+    });
+    // Turn 2
+    runHook('notification', {
+      session_id: 'trae-cn-multi-turn',
+      timestamp: '2026-08-18T01:00:06.000Z',
+      notification_type: 'idle_prompt',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:10.000Z',
+      prompt: 'turn 2',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:15.000Z',
+      last_assistant_message: 'a2',
+    });
+    // Turn 3
+    runHook('notification', {
+      session_id: 'trae-cn-multi-turn',
+      timestamp: '2026-08-18T01:00:16.000Z',
+      notification_type: 'idle_prompt',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:20.000Z',
+      prompt: 'turn 3',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:25.000Z',
+      last_assistant_message: 'a3',
+    });
+
+    const records = readEmittedJsonl();
+    const turnIds = new Set(records.map((r) => r['gen_ai.turn.id']));
+    expect(turnIds.has('trae-cn-multi-turn:t1')).toBe(true);
+    expect(turnIds.has('trae-cn-multi-turn:t2')).toBe(true);
+    expect(turnIds.has('trae-cn-multi-turn:t3')).toBe(true);
+    const stepIds = new Set(records.map((r) => r['gen_ai.step.id']));
+    expect(stepIds.has('trae-cn-multi-turn:t1:s1')).toBe(true);
+    expect(stepIds.has('trae-cn-multi-turn:t2:s1')).toBe(true);
+    expect(stepIds.has('trae-cn-multi-turn:t3:s1')).toBe(true);
+    // 3 unique step.id satisfies准出铁律 #4 「3+ unique step.id」.
+    expect(stepIds.size).toBeGreaterThanOrEqual(3);
+  });
+
+  // ─── Round 6 fixes (#1-#5) ────────────────────────────────────────────
+
+  test('round 6 #3: every span carries gen_ai.user.id (not just user.id)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const records = readEmittedJsonl();
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.user.id']).toBeTruthy();
+      expect(r['user.id']).toBeTruthy();
+    }
+  });
+
+  test('round 6 #4: OTLP spans carry resource.attributes.service.name="trae-cn"', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const spans = readOtlpDebugSpans();
+    expect(spans.length).toBeGreaterThan(0);
+    for (const s of spans) {
+      expect(s.resource).toBeDefined();
+      expect(s.resource.attributes).toBeDefined();
+      expect(s.resource.attributes['service.name']).toBe('trae-cn');
+    }
+  });
+
+  test('round 6 #5: OTLP dual-record merge — LLM req+resp become 1 span with both messages', () => {
+    // Full 4-event happy path: user-prompt-submit + pre-tool-use + post-tool-use + stop
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    // Group by spanId — each span_id should map to exactly one OTLP span.
+    const byId = new Map();
+    for (const s of spans) {
+      if (!byId.has(s.spanId)) byId.set(s.spanId, []);
+      byId.get(s.spanId).push(s);
+    }
+    for (const [id, group] of byId) {
+      expect(group.length).toBe(1); // merge produced 1 span per spanId
+    }
+    const llmSpans = spans.filter((s) =>
+      s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans.length).toBe(1); // req + resp merged into 1 LLM span
+    const llm = llmSpans[0];
+    expect(llm.attributes['gen_ai.input.messages']).toBeTruthy();
+    expect(llm.attributes['gen_ai.output.messages']).toBeTruthy();
+    // TOOL call+result merge: 1 TOOL span carrying both arguments and result
+    const toolSpans = spans.filter((s) =>
+      s.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpans.length).toBe(1);
+    const tool = toolSpans[0];
+    expect(tool.attributes['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(tool.attributes['gen_ai.tool.call.result']).toBeDefined();
+  });
+
+  test('round 6 #2: ENTRY/AGENT/STEP endTimeUnixNano rewritten at Stop >= child end', () => {
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    // Build span map by spanId (after merge, each id has 1 span).
+    const map = new Map(spans.map((s) => [s.spanId, s]));
+    const childrenByParent = new Map();
+    for (const s of spans) {
+      if (!s.parentSpanId) continue;
+      if (!childrenByParent.has(s.parentSpanId)) {
+        childrenByParent.set(s.parentSpanId, []);
+      }
+      childrenByParent.get(s.parentSpanId).push(s);
+    }
+    // For every parent (ENTRY, AGENT, STEP), parent.end >= child.end.
+    for (const [parentId, children] of childrenByParent) {
+      const parent = map.get(parentId);
+      if (!parent) continue;
+      const pEnd = BigInt(parent.endTimeUnixNano);
+      for (const c of children) {
+        const cEnd = BigInt(c.endTimeUnixNano);
+        expect(cEnd <= pEnd).toBe(true);
+      }
+    }
+  });
+
+  test('round 6 #1: usage tokens accumulate from PreToolUse payload (forward-compat)', () => {
+    // Simulate a PreToolUse event carrying usage (forward-compat scenario
+    // matching tester hint (b): trae-cn may pass token usage via tool_input).
+    const sessionId = 'trae-cn-usage-fwd';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:00.000Z',
+      prompt: 'hello',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:02.000Z',
+      tool_use_id: 'toolu_fwd_usage',
+      tool_name: 'Read',
+      tool_input: {
+        file_path: '/tmp/x.txt',
+        usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
+      },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:03.000Z',
+      tool_use_id: 'toolu_fwd_usage',
+      tool_name: 'Read',
+      tool_response: { content: [{ type: 'text', text: 'hi' }] },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(11);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(22);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(33);
+  });
+
+  test('round 6 #1: usage tokens accumulate from Notification streaming chunk (forward-compat)', () => {
+    // Simulate a streaming Notification event carrying usage (forward-compat
+    // scenario matching tester hint (a): Qwen/OpenAI streaming chunk's final
+    // chunk carries usage). tester confirmed production emits only idle_prompt,
+    // so this test only verifies the forward-compat path.
+    const sessionId = 'trae-cn-usage-stream';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:00.000Z',
+      prompt: 'hello',
+    });
+    // Streaming chunk with usage in data.usage (Qwen-style)
+    runHook('notification', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:02.000Z',
+      notification_type: 'streaming',
+      data: { usage: { input_tokens: 8, output_tokens: 16, total_tokens: 24 } },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(8);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(16);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(24);
+  });
+
+  test('round 7: llmResponseRecord synthesizes tool_call part from pending_tool_calls', () => {
+    // PreToolUse captures tool_name + arguments; PostToolUse keeps it (marked
+    // completed, not deleted); Stop synthesizes a tool_call part on the LLM
+    // response so semantic.tool_matches_llm_output can match the TOOL span.
+    const sessionId = 'trae-cn-r7-synth';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:00.000Z',
+      prompt: 'write hello.js',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:01.000Z',
+      tool_use_id: 'toolu_r7_01',
+      tool_name: 'write_file',
+      tool_input: { path: '/tmp/hello.js', content: 'console.log("hi")' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:02.000Z',
+      tool_use_id: 'toolu_r7_01',
+      tool_name: 'write_file',
+      tool_response: { exit_code: 0, success: true, stdout: 'wrote 27 bytes' },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(Array.isArray(output)).toBe(true);
+    expect(output.length).toBe(1);
+    const parts = output[0].parts;
+    expect(Array.isArray(parts)).toBe(true);
+    // Text part + 1 synthesized tool_call part
+    const toolCallParts = parts.filter((p) => p.type === 'tool_call');
+    expect(toolCallParts.length).toBe(1);
+    const tc = toolCallParts[0];
+    expect(tc.id).toBe('toolu_r7_01');
+    expect(tc.name).toBe('write_file');
+    expect(tc.tool_name).toBe('write_file');
+    expect(tc.arguments).toEqual({ path: '/tmp/hello.js', content: 'console.log("hi")' });
+    // Cross-check: TOOL span has matching gen_ai.tool.call.id + gen_ai.tool.name
+    const toolSpans = records.filter((r) => r['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpans.length).toBeGreaterThan(0);
+    const matchingTool = toolSpans.find((r) =>
+      r['gen_ai.tool.call.id'] === 'toolu_r7_01' &&
+      r['gen_ai.tool.name'] === 'write_file');
+    expect(matchingTool).toBeDefined();
+  });
+
+  test('round 7: pending_tool_calls cleared after Stop — next turn not contaminated', () => {
+    // Stop clears pending_tool_calls so the next turn's LLM response does
+    // not re-declare the previous turn's tool_call parts.
+    const sessionId = 'trae-cn-r7-clear';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:00.000Z',
+      prompt: 'first turn',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:01.000Z',
+      tool_use_id: 'toolu_r7_first',
+      tool_name: 'write_file',
+      tool_input: { path: '/tmp/a.txt', content: 'a' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:02.000Z',
+      tool_use_id: 'toolu_r7_first',
+      tool_name: 'write_file',
+      tool_response: { exit_code: 0, success: true },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:05.000Z',
+      last_assistant_message: 'first done',
+    });
+    // Second turn — no tools
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:10.000Z',
+      prompt: 'second turn',
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:15.000Z',
+      last_assistant_message: 'second done',
+    });
+    const records = readEmittedJsonl();
+    const llmResponses = records.filter((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    // records are appended in time order, so the last llm.response is from
+    // the second turn (the one that must NOT carry the first turn's tool_call).
+    const secondTurnResponse = llmResponses[llmResponses.length - 1];
+    expect(secondTurnResponse).toBeDefined();
+    const out = secondTurnResponse['gen_ai.output.messages'];
+    expect(Array.isArray(out)).toBe(true);
+    const contaminated = out.some((m) =>
+      Array.isArray(m.parts) &&
+      m.parts.some((p) =>
+        p.type === 'tool_call' && p.id === 'toolu_r7_first'));
+    expect(contaminated).toBe(false);
   });
 });
