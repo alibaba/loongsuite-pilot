@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -108,7 +109,7 @@ export async function writeTextFileAtomic(
     }
   }
 
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = atomicTmpPath(path);
   try {
     await fsp.writeFile(tmp, text, 'utf8');
     // Re-check after preparing the temporary file. This narrows the remaining
@@ -124,7 +125,7 @@ export async function writeTextFileAtomic(
     if (code === 'ENOENT') {
       await fsp.unlink(tmp).catch(() => {});
       await ensureDir(dir);
-      const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
+      const tmp2 = atomicTmpPath(path);
       try {
         await fsp.writeFile(tmp2, text, 'utf8');
         if (options.expected) {
@@ -169,6 +170,10 @@ export async function writeJsonFile(
   await writeTextFileAtomic(path, `${JSON.stringify(data, null, 2)}\n`);
 }
 
+function atomicTmpPath(path: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+}
+
 /**
  * Removes stale `.tmp` files left behind by interrupted atomic writes (e.g. process
  * killed mid-rename). Call once at startup for directories that use writeJsonFile.
@@ -184,7 +189,7 @@ export async function cleanStaleTmpFiles(dir: string, maxAgeMs = 60_000): Promis
   try {
     const entries = await fsp.readdir(dir);
     for (const f of entries) {
-      if (!/\.(\d+)\.\d+\.tmp$/.test(f)) continue;
+      if (!/\.(\d+)\.\d+(?:\.[^.]+)?\.tmp$/.test(f)) continue;
       const full = nodePath.join(dir, f);
       try {
         const st = await fsp.stat(full);

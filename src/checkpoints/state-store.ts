@@ -17,7 +17,9 @@ function cloneState(s: InputState): InputState {
 export class StateStore {
   private readonly states: Map<string, InputState> = new Map();
   private readonly filePath: string;
-  private dirty = false;
+  private revision = 0;
+  private persistedRevision = 0;
+  private savePromise: Promise<void> | null = null;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -27,7 +29,8 @@ export class StateStore {
     const data = await readJsonFile<StateFileShape | null>(this.filePath);
     this.states.clear();
     if (!data || typeof data !== 'object' || data === null) {
-      this.dirty = false;
+      this.revision = 0;
+      this.persistedRevision = 0;
       return;
     }
     for (const [id, st] of Object.entries(data)) {
@@ -35,19 +38,22 @@ export class StateStore {
         this.states.set(id, cloneState(st as InputState));
       }
     }
-    this.dirty = false;
+    this.revision = 0;
+    this.persistedRevision = 0;
   }
 
-  async save(): Promise<void> {
-    if (!this.dirty) {
-      return;
+  save(): Promise<void> {
+    if (this.persistedRevision === this.revision) {
+      return Promise.resolve();
     }
-    const out: StateFileShape = {};
-    for (const [k, v] of this.states) {
-      out[k] = cloneState(v);
+
+    if (!this.savePromise) {
+      this.savePromise = this.flushPendingRevisions().finally(() => {
+        this.savePromise = null;
+      });
     }
-    await writeJsonFile(this.filePath, out);
-    this.dirty = false;
+
+    return this.savePromise;
   }
 
   get(inputId: string): InputState {
@@ -56,7 +62,7 @@ export class StateStore {
 
   set(inputId: string, state: InputState): void {
     this.states.set(inputId, cloneState(state));
-    this.dirty = true;
+    this.revision++;
   }
 
   update(inputId: string, partial: Partial<InputState>): void {
@@ -66,12 +72,12 @@ export class StateStore {
       merged.extra = { ...current.extra, ...partial.extra };
     }
     this.states.set(inputId, cloneState(merged));
-    this.dirty = true;
+    this.revision++;
   }
 
   delete(inputId: string): boolean {
     const deleted = this.states.delete(inputId);
-    if (deleted) this.dirty = true;
+    if (deleted) this.revision++;
     return deleted;
   }
 
@@ -93,5 +99,18 @@ export class StateStore {
 
   setRowId(inputId: string, rowId: number): void {
     this.update(inputId, { lastRowId: rowId });
+  }
+
+  private async flushPendingRevisions(): Promise<void> {
+    while (this.persistedRevision < this.revision) {
+      const targetRevision = this.revision;
+      const out: StateFileShape = {};
+      for (const [k, v] of this.states) {
+        out[k] = cloneState(v);
+      }
+
+      await writeJsonFile(this.filePath, out);
+      this.persistedRevision = targetRevision;
+    }
   }
 }
