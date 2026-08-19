@@ -99,6 +99,74 @@ describe('AgentDefLoader', () => {
     expect(defs[0].displayName).toBe('Cursor Local Override');
   });
 
+  it('loads a valid registered PI SDK definition and rejects malformed markers', async () => {
+    const valid = {
+      id: 'acme-code',
+      displayName: 'Acme Code',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['/tmp/acme'], commands: ['acme'] },
+      piSdk: { schemaVersion: 1, agentDir: '/tmp/acme/pi' },
+      pluginInject: {
+        configPaths: ['/tmp/acme/pi/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/agents/acme-code.mjs',
+        pluginId: 'loongsuite-pilot-pi-sdk-acme-code',
+        configKey: 'extensions',
+      },
+    };
+    await fs.writeFile(path.join(localDir, 'valid.json'), JSON.stringify(valid));
+    await fs.writeFile(path.join(localDir, 'invalid.json'), JSON.stringify({
+      ...valid,
+      id: 'broken-pi-sdk',
+      pluginInject: { ...valid.pluginInject, configKey: 'plugins' },
+    }));
+    await fs.writeFile(path.join(localDir, 'spoofed.json'), JSON.stringify({
+      ...valid,
+      id: 'spoofed-pi-sdk',
+      pluginInject: {
+        ...valid.pluginInject,
+        pluginId: 'loongsuite-pilot-pi-sdk-someone-else',
+      },
+    }));
+
+    const defs = await makeLoader().load();
+
+    expect(defs.map(def => def.id)).toEqual(['acme-code']);
+    expect(defs[0].piSdk).toEqual({ schemaVersion: 1, agentDir: '/tmp/acme/pi' });
+  });
+
+  it('rejects a local PI SDK definition that shadows a built-in Agent id', async () => {
+    const builtin = {
+      id: 'pi-coding-agent',
+      displayName: 'Pi Coding Agent',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['~/.pi/agent'], commands: ['pi'] },
+      pluginInject: {
+        configPaths: ['~/.pi/agent/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/index.mjs',
+        pluginId: 'loongsuite-pilot-pi-coding-agent',
+        configKey: 'extensions',
+      },
+    };
+    const shadow = {
+      ...builtin,
+      displayName: 'Shadowed Pi',
+      piSdk: { schemaVersion: 1, agentDir: '/tmp/shadow-pi' },
+      pluginInject: {
+        configPaths: ['/tmp/shadow-pi/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/agents/pi-coding-agent.mjs',
+        pluginId: 'loongsuite-pilot-pi-sdk-pi-coding-agent',
+        configKey: 'extensions',
+      },
+    };
+    await fs.writeFile(path.join(builtinDir, 'pi.json'), JSON.stringify(builtin));
+    await fs.writeFile(path.join(localDir, 'pi-shadow.json'), JSON.stringify(shadow));
+
+    const defs = await makeLoader().load();
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({ id: 'pi-coding-agent', displayName: 'Pi Coding Agent' });
+  });
+
   it('replaces $PILOT_DIR and $PILOT_DATA variables', async () => {
     const def = {
       id: 'var-test',
@@ -267,6 +335,77 @@ describe('AgentDefLoader', () => {
 
     const defs = await loader.load();
     expect(defs).toHaveLength(0);
+  });
+
+  describe('dsh-yaml-patch validation', () => {
+    const validDsh = {
+      id: 'dsh',
+      displayName: 'DeepSeek Harness',
+      deployMode: 'dsh-yaml-patch',
+      detection: { paths: ['~/.dsh'], commands: ['dsh'] },
+      dshYamlPatch: {
+        pluginSource: '$PILOT_DATA/plugins/dsh/plugin.mjs',
+        entryId: 'loongsuite-pilot-observability',
+        marker: 'PILOT-OBSERVABILITY-MANAGED',
+      },
+    };
+
+    it('loads a valid dsh-yaml-patch definition', async () => {
+      await fs.writeFile(path.join(builtinDir, 'dsh.json'), JSON.stringify(validDsh));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(1);
+      expect(defs[0].dshYamlPatch?.entryId).toBe('loongsuite-pilot-observability');
+    });
+
+    it('rejects an unknown deployMode', async () => {
+      await fs.writeFile(path.join(builtinDir, 'unknown.json'), JSON.stringify({
+        ...validDsh,
+        id: 'unknown-mode',
+        deployMode: 'made-up-mode',
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when dshYamlPatch is missing', async () => {
+      await fs.writeFile(path.join(builtinDir, 'missing-cfg.json'), JSON.stringify({
+        ...validDsh,
+        id: 'missing-cfg',
+        dshYamlPatch: undefined,
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when required field is empty', async () => {
+      await fs.writeFile(path.join(builtinDir, 'empty-entry.json'), JSON.stringify({
+        ...validDsh,
+        id: 'empty-entry',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, entryId: '' },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when field has wrong type', async () => {
+      await fs.writeFile(path.join(builtinDir, 'wrong-type.json'), JSON.stringify({
+        ...validDsh,
+        id: 'wrong-type',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, marker: 123 },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
+
+    it('rejects dsh-yaml-patch when patchPath is non-empty but wrong type', async () => {
+      await fs.writeFile(path.join(builtinDir, 'bad-path.json'), JSON.stringify({
+        ...validDsh,
+        id: 'bad-path',
+        dshYamlPatch: { ...validDsh.dshYamlPatch, patchPath: 42 },
+      }));
+      const defs = await makeLoader().load();
+      expect(defs).toHaveLength(0);
+    });
   });
 
 });

@@ -19,12 +19,22 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 
 vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/utils/fs-utils.js')>();
-  return { ...actual, fileExists: vi.fn() };
+  return { ...actual, fileExists: vi.fn(), directoryExists: vi.fn() };
+});
+
+vi.mock('../../../src/pi-sdk/pi-sdk-agent-registry.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/pi-sdk/pi-sdk-agent-registry.js')>();
+  return { ...actual, ensureRegisteredPiSdkWrappers: vi.fn() };
 });
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
-import { fileExists } from '../../../src/utils/fs-utils.js';
+import { directoryExists, fileExists } from '../../../src/utils/fs-utils.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  PiSdkRegistryBusyError,
+} from '../../../src/pi-sdk/pi-sdk-agent-registry.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
 const DATA_DIR = '/tmp/orch-plugin-inject-test';
 
@@ -41,8 +51,14 @@ function callBuild(orch: Orchestrator) {
       precondition: () => Promise<boolean>;
       check: () => Promise<boolean>;
       repair: () => Promise<void>;
+      cleanup?: () => Promise<void>;
     }>;
   }).buildPluginInjectInterceptTargets();
+}
+
+function callWrapperRestore(orch: Orchestrator): Promise<void> {
+  return (orch as unknown as { restoreRegisteredPiSdkWrappers: () => Promise<void> })
+    .restoreRegisteredPiSdkWrappers();
 }
 
 function pluginInjectDef(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
@@ -79,6 +95,7 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
   let getDefinitions: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
+  let undeployAgent: ReturnType<typeof vi.fn>;
   let orch: Orchestrator;
 
   beforeEach(() => {
@@ -86,7 +103,8 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
     getDefinitions = vi.fn();
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
-    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle });
+    undeployAgent = vi.fn();
+    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle, undeployAgent });
   });
 
   it('only builds targets for plugin-inject agents', () => {
@@ -138,6 +156,29 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       expect(await target.precondition()).toBe(true);
       // file gate is resolved against $PILOT_DATA → dataDir
       expect(fileExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/opencode/plugin.mjs`);
+    });
+
+    it('accepts an existing OpenClaw directory plugin asset', async () => {
+      getDefinitions.mockReturnValue([
+        pluginInjectDef({
+          id: 'openclaw',
+          pluginInject: {
+            configPaths: ['~/.openclaw/openclaw.json'],
+            pluginSpec: 'file://$PILOT_DATA/plugins/openclaw',
+            pluginId: 'loongsuite-pilot-openclaw',
+            configShape: 'openclaw-nested',
+          },
+        }),
+      ]);
+      vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(directoryExists).mockResolvedValue(true);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const [target] = callBuild(orch);
+      expect(await target.precondition()).toBe(true);
+      expect(fileExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/openclaw`);
+      expect(directoryExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/openclaw`);
+      expect(detectAgent).toHaveBeenCalled();
     });
 
     it('skips the file gate for non-file specs (e.g. npm package)', async () => {
@@ -214,5 +255,100 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       const [target] = callBuild(orch);
       await expect(target.repair()).rejects.toThrow('no config file');
     });
+  });
+
+  describe('cleanup (remove injection when disabled)', () => {
+    it('delegates to DeploymentManager.undeployAgent', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef()]);
+      undeployAgent.mockResolvedValue(true);
+
+      const [target] = callBuild(orch);
+      await target.cleanup?.();
+
+      expect(undeployAgent).toHaveBeenCalledWith(expect.objectContaining({ id: 'opencode' }));
+    });
+
+    it('throws when cleanup cannot remove the injected spec', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef()]);
+      undeployAgent.mockResolvedValue(false);
+
+      const [target] = callBuild(orch);
+      await expect(target.cleanup?.()).rejects.toThrow('failed to remove injected plugin');
+    });
+  });
+});
+
+describe('Orchestrator PI SDK shared input gating', () => {
+  it('keeps the shared PI input enabled when built-in PI is disabled but a registered SDK Agent is enabled', () => {
+    const orch = new Orchestrator({
+      dataDir: DATA_DIR,
+      agents: {
+        'pi-coding-agent': { enabled: false, captureMessageContent: true },
+        'acme-code': { enabled: true, captureMessageContent: true },
+      },
+    } as never);
+    (orch as unknown as { deploymentManager: unknown }).deploymentManager = {
+      getDefinitions: () => [
+        pluginInjectDef({ id: 'pi-coding-agent' }),
+        pluginInjectDef({
+          id: 'acme-code',
+          piSdk: { schemaVersion: 1, agentDir: '/tmp/acme/pi' },
+        }),
+      ],
+    };
+
+    const enabled = (orch as unknown as { isAnyPiSdkAgentEnabled: () => boolean }).isAnyPiSdkAgentEnabled();
+
+    expect(enabled).toBe(true);
+  });
+});
+
+describe('Orchestrator PI SDK wrapper restore failure handling', () => {
+  let orch: Orchestrator;
+  let alarmManager: AlarmManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orch = new Orchestrator({ dataDir: DATA_DIR } as never);
+    alarmManager = new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test-user' });
+    (orch as unknown as { alarmManager: AlarmManager }).alarmManager = alarmManager;
+  });
+
+  it('does not record a degraded startup alarm after successful recovery', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockResolvedValue(1);
+
+    await callWrapperRestore(orch);
+
+    expect(alarmManager.serialize()).toEqual([]);
+  });
+
+  it('records a bounded-busy degradation without blocking startup', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockRejectedValue(new PiSdkRegistryBusyError(42));
+
+    await expect(callWrapperRestore(orch)).resolves.toBeUndefined();
+
+    expect(alarmManager.serialize()).toContainEqual(expect.objectContaining({
+      alarm_type: 'DEGRADED_STARTUP_ALARM',
+      alarm_level: '2',
+      alarm_message: expect.stringContaining('remained busy after bounded retries'),
+      input_name: 'pi-coding-agent-log',
+    }));
+  });
+
+  it('records a sanitized degradation for non-busy restore failures', async () => {
+    vi.mocked(ensureRegisteredPiSdkWrappers).mockRejectedValue(
+      new Error('permission denied for /Users/private/acme/settings.json'),
+    );
+
+    await expect(callWrapperRestore(orch)).resolves.toBeUndefined();
+
+    const [alarm] = alarmManager.serialize();
+    expect(alarm).toMatchObject({
+      alarm_type: 'DEGRADED_STARTUP_ALARM',
+      alarm_level: '2',
+      input_name: 'pi-coding-agent-log',
+    });
+    expect(alarm.alarm_message).not.toContain('/Users/private');
+    expect(alarm.alarm_message).toContain('run agent doctor');
   });
 });

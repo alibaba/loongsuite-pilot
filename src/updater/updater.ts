@@ -285,7 +285,6 @@ export class Updater {
         latest_version: target.version,
       });
 
-      await this.restartMonitorIfRunning();
       await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
@@ -1045,46 +1044,6 @@ export class Updater {
         stdout: stdout || undefined,
         stderr: stderr || undefined,
       });
-    }
-  }
-
-  private async restartMonitorIfRunning(): Promise<void> {
-    const monitorPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-monitor.pid');
-    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-dashboard.pid');
-    const monitorRunning = await this.isPidFileRunning(monitorPidFile);
-    const dashboardRunning = await this.isPidFileRunning(dashboardPidFile);
-
-    if (!monitorRunning && !dashboardRunning) return;
-
-    logger.info('restarting monitor after update');
-    try {
-      const bin = this.paths.loongsuitePilotBin;
-      if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'stop',
-        ], { timeout: 30_000 });
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'start',
-        ], { timeout: 30_000 });
-      } else {
-        await execFileAsync(bin, ['monitor', 'stop'], { timeout: 30_000 });
-        await execFileAsync(bin, ['monitor', 'start'], { timeout: 30_000 });
-      }
-      logger.info('monitor restarted');
-    } catch (err) {
-      logger.warn('monitor restart failed', { error: String(err) });
-    }
-  }
-
-  private async isPidFileRunning(pidFile: string): Promise<boolean> {
-    try {
-      const raw = await fs.readFile(pidFile, 'utf-8');
-      const pid = Number(raw.trim());
-      if (!Number.isInteger(pid) || pid <= 0) return false;
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
     }
   }
 

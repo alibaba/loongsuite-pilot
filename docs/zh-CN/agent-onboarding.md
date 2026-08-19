@@ -19,6 +19,50 @@
 
 如果 Hook 或插件可以输出结构化事件，优先使用它们。这通常更容易归一化，也更容易覆盖工具调用和 token 用量。
 
+## 注册基于 PI 高层 SDK 的自研 Agent
+
+使用 `@earendil-works/pi-coding-agent` 高层 SDK 构建的自研 Agent 不需要新增
+Pilot Hook 或在应用代码中引入 Pilot。先确保应用通过
+`createAgentSession({ agentDir })` 使用标准 `DefaultResourceLoader`（或等价地继续加载
+`agentDir/settings.json` 中的 `extensions`），然后执行一次注册：
+
+```bash
+loongsuite-pilot agent register pi-sdk \
+  --id acme-code \
+  --name "Acme Code Agent" \
+  --agent-dir ~/.acme/pi-agent \
+  --detect-path ~/.acme \
+  --detect-command acme-code
+```
+
+`--detect-path` 和 `--detect-command` 都可重复提供，但至少需要一个。注册命令会：
+
+- 在 Pilot 数据目录生成只携带该 Agent 身份的 PI extension 包装器；
+- 将包装器注入指定 `agentDir/settings.json` 的 `extensions`；
+- 在 `agents.d.local` 持久化定义，供启动检测、watchdog、升级和卸载使用；
+- 由服务 CLI 在 collector 已运行时自动重启 collector。
+
+如果自研 Agent 已经创建了 `AgentSession`，注册后需要重启 Agent，或调用
+`session.reload()` 重新加载 extensions。日常启动和使用 Agent 的方式不变。
+
+`agentDir` 必须是该自研 Agent 独享的目录：不能使用内置 PI CLI 的
+`~/.pi/agent`，不同自研 Agent 之间也不能共用。PI 会加载目录中配置的全部
+extensions；共用目录会导致重复采集以及 Agent 身份串标。该约束不改变自研
+Agent 原有的启动命令和 SDK 调用方式。
+
+管理命令：
+
+```bash
+loongsuite-pilot agent list
+loongsuite-pilot agent doctor acme-code
+loongsuite-pilot agent unregister acme-code
+```
+
+注册身份会输出为自研 Agent 自己的 `gen_ai.agent.type/id/name`，同时输出
+`gen_ai.agent.system=pi` 和 `gen_ai.framework=pi-coding-agent`；由于二者使用相同的
+高层 SDK，该值与内置 Pi Agent 保持一致。直接使用 `pi-agent-core`、内存
+settings 或不会加载 PI extensions 的自定义 ResourceLoader 不在该注册能力的覆盖范围内。
+
 ## 必要组成
 
 一个新的 Agent 集成通常需要：
@@ -90,12 +134,13 @@ Hook 示例：
 |------|------|
 | `id` | 稳定 Agent ID，用于配置、输出和准入控制。 |
 | `displayName` | 用户可读 Agent 名称。 |
-| `deployMode` | `hook`、`plugin-inject`、`directory-plugin` 或 `plugin-probe`。 |
+| `deployMode` | `hook`、`plugin-inject`、`directory-plugin`、`plugin-probe`，或内置 DSH 专用的 `dsh-yaml-patch`。 |
 | `detection.paths` | 可用于判断 Agent 是否安装的本地路径。 |
 | `detection.commands` | 可用于判断 Agent 是否安装的命令。 |
 | `hook` | Hook settings 路径、事件、命令和格式。Hook 模式必填。 |
 | `pluginInject` | 配置路径和插件 spec。插件注入模式必填。 |
 | `directoryPlugin` | Pilot 管理的源目录和目标目录。原生目录插件模式必填。 |
+| `dshYamlPatch` | DSH 插件源、entry ID 和属主 marker；仅内置 `dsh-yaml-patch` 模式必填。 |
 | `input` | collector input 使用的数据源类型和位置。 |
 
 `pluginInject.configKey` 可指定默认 `plugin` / `plugins` 之外的数组字段，

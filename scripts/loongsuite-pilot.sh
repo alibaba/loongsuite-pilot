@@ -11,16 +11,13 @@ BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
 PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
 UPDATER_PID_FILE="$DATA_DIR/loongsuite-pilot-updater.pid"
+LEGACY_MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
+LEGACY_DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
-MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
-DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
 SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
-MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
-DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
-MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
@@ -114,24 +111,174 @@ sync_installed_scripts_from_version() {
     mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
 }
 
+process_matches_installed_entry() {
+    local pid="$1"
+    local kind="$2"
+    local expected_entry=""
+    local expected_arg=""
+    local expected_process=""
+    case "$kind" in
+        collector)
+            expected_entry="$BOOTSTRAP_DIR/collector-daemon.js"
+            expected_process=node
+            ;;
+        updater)
+            expected_entry="$BOOTSTRAP_DIR/updater-daemon.js"
+            expected_process=node
+            ;;
+        collector-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run
+            expected_process=shell
+            ;;
+        updater-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run-updater
+            expected_process=shell
+            ;;
+        *) return 1 ;;
+    esac
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
+
+    local process_name
+    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    process_name="${process_name##*/}"
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        *) return 1 ;;
+    esac
+
+    # Linux exposes the real NUL-separated argv. Require the bootstrap script
+    # to be Node argv[1] (or the installed shell script + exact subcommand), so
+    # a command which merely mentions the path cannot be mistaken for Pilot.
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_arg=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            case "$arg_index" in
+                1) argv_entry="$arg" ;;
+                2) argv_arg="$arg" ;;
+            esac
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "$argv_entry" = "$expected_entry" ] || return 1
+        if [ -n "$expected_arg" ]; then
+            [ "$argv_arg" = "$expected_arg" ] && [ "$argv_count" -eq 3 ]
+        else
+            [ "$argv_count" -eq 2 ]
+        fi
+        return
+    fi
+
+    # macOS has no /proc cmdline. Pair the exact final argv text with the
+    # process-name and uid checks above; -ww prevents path truncation.
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    local expected_suffix="$expected_entry"
+    [ -n "$expected_arg" ] && expected_suffix="$expected_suffix $expected_arg"
+    if [ "$expected_process" = shell ] && [ "$command_line" = "$expected_suffix" ]; then
+        return 0
+    fi
+    [[ "$command_line" == *" $expected_suffix" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
+    local command_executable="${command_prefix##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+find_current_user_processes() {
+    local kind="$1"
+    local pid=""
+    local process_name=""
+    while read -r pid process_name; do
+        process_name="${process_name##*/}"
+        case "$kind:$process_name" in
+            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            *) continue ;;
+        esac
+        process_matches_installed_entry "$pid" "$kind" && echo "$pid"
+    done < <(ps -U "$(id -u)" -o pid= -o ucomm= 2>/dev/null || true)
+}
+
+find_installed_collector_pid() {
+    find_current_user_processes collector | head -n 1
+}
+
 is_running() {
+    local pid=""
     if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if process_matches_installed_entry "$pid" collector; then
             return 0
         fi
         rm -f "$PID_FILE"
     fi
+
+    # launchd may briefly start a duplicate wrapper which overwrites the PID
+    # file before the collector's single-instance lock makes it exit. Recover
+    # only the current user's process whose final argument is this install's
+    # exact bootstrap path; another checkout or a shell inspecting the path
+    # cannot match this suffix.
+    pid=$(find_installed_collector_pid)
+    if process_matches_installed_entry "$pid" collector; then
+        local pid_tmp="$PID_FILE.tmp.$$"
+        printf '%s\n' "$pid" > "$pid_tmp"
+        mv -f "$pid_tmp" "$PID_FILE"
+        return 0
+    fi
     return 1
+}
+
+stop_installed_collector_processes() {
+    local attempt
+    local pid
+    local matched
+    for attempt in 1 2 3 4 5; do
+        matched=false
+        local kind
+        while read -r pid kind; do
+            [ -n "$pid" ] || continue
+            if process_matches_installed_entry "$pid" "$kind"; then
+                matched=true
+                kill "$pid" 2>/dev/null || true
+            fi
+        done < <({
+            find_current_user_processes collector-wrapper | while read -r pid; do echo "$pid collector-wrapper"; done
+            find_current_user_processes collector | while read -r pid; do echo "$pid collector"; done
+        } | sort -u)
+        [ "$matched" = true ] || return 0
+        sleep 0.2
+    done
+}
+
+stop_installed_updater_processes() {
+    local pid
+    local kind
+    while read -r pid kind; do
+        [ -n "$pid" ] || continue
+        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
+    done < <({
+        find_current_user_processes updater-wrapper | while read -r pid; do echo "$pid updater-wrapper"; done
+        find_current_user_processes updater | while read -r pid; do echo "$pid updater"; done
+    } | sort -u)
 }
 
 is_pid_file_running() {
     local pid_file="$1"
+    local kind="$2"
     if [ -f "$pid_file" ]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             return 0
         fi
         rm -f "$pid_file"
@@ -141,20 +288,91 @@ is_pid_file_running() {
 
 stop_pid_file() {
     local pid_file="$1"
-    if is_pid_file_running "$pid_file"; then
+    local kind="$2"
+    if is_pid_file_running "$pid_file" "$kind"; then
         local pid
         pid=$(cat "$pid_file")
-        kill "$pid" 2>/dev/null || true
+        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
         local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+        while process_matches_installed_entry "$pid" "$kind" && [ $count -lt 10 ]; do
             sleep 1
             count=$((count + 1))
         done
-        if kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             kill -9 "$pid" 2>/dev/null || true
         fi
     fi
     rm -f "$pid_file"
+}
+
+# One-way migration cleanup for releases that managed the old sampler and
+# dashboard as standalone processes. A stale PID can be reused, so a PID-file
+# process is stopped only when its command line still names the expected script.
+# The private cleanup must not be exposed as a new `monitor` CLI command.
+cleanup_legacy_monitor_process() {
+    local pid_file="$1"
+    local script_name="$2"
+    local pid=""
+    if [ -f "$pid_file" ]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if legacy_monitor_process_matches "$pid" "$script_name"; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    fi
+}
+
+legacy_monitor_process_matches() {
+    local pid="$1"
+    local script_name="$2"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
+
+    local expected_process=""
+    case "$script_name" in
+        *.sh) expected_process=shell ;;
+        *.mjs) expected_process=node ;;
+        *) return 1 ;;
+    esac
+
+    local process_name
+    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    process_name="${process_name##*/}"
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) ;;
+        *) return 1 ;;
+    esac
+
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "${argv_entry##*/}" = "$script_name" ] && [ "$argv_count" -eq 2 ]
+        return
+    fi
+
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    [[ "$command_line" == *"/$script_name" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#script_name}-1}"
+    local command_executable="${command_prefix%% *}"
+    command_executable="${command_executable##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cleanup_legacy_monitor_processes() {
+    cleanup_legacy_monitor_process "$LEGACY_MONITOR_PID_FILE" "monitor-loongsuite-pilot.sh"
+    cleanup_legacy_monitor_process "$LEGACY_DASHBOARD_PID_FILE" "serve-loongsuite-pilot-monitor.mjs"
 }
 
 updater_process_exists() {
@@ -419,6 +637,7 @@ cmd_run_updater() {
 # ---- User-facing commands ----
 
 cmd_start() {
+    cleanup_legacy_monitor_processes
     for arg in "$@"; do
         case "$arg" in
             --system-service)
@@ -465,7 +684,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-    cmd_monitor_stop >/dev/null 2>&1 || true
+    cleanup_legacy_monitor_processes
     autostart_remove 2>/dev/null || true
 
     local target_user
@@ -498,100 +717,25 @@ cmd_stop() {
             ;;
     esac
 
-    # Stop PID-file tracked process
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    fi
+    # Recover a missing/stale PID first, then signal only a verified collector.
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
 
     # Stop updater PID-file tracked process
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
 
-    # Kill any remaining orphan processes
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
+    # A launchd wrapper may still be between startup and exec after unload.
+    # Retry exact installed paths so it cannot later become an orphan collector.
+    stop_installed_collector_processes
+    stop_installed_updater_processes
 
     rm -f "$PID_FILE"
     echo "✅ loongsuite-pilot stopped"
 }
 
-cmd_process_monitor_start() {
-    if is_pid_file_running "$MONITOR_PID_FILE"; then
-        echo "✅ loongsuite-pilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
-        return 0
-    fi
-
-    ensure_dirs
-    local script
-    script=$(resolve_script "monitor-loongsuite-pilot.sh") || {
-        echo "❌ monitor script missing"
-        exit 1
-    }
-
-    nohup bash "$script" >> "$MONITOR_LOG_FILE" 2>&1 &
-    echo "$!" > "$MONITOR_PID_FILE"
-    echo "✅ loongsuite-pilot process monitor started (PID $!)"
-}
-
-cmd_process_monitor_stop() {
-    stop_pid_file "$MONITOR_PID_FILE"
-    pkill -f "monitor-loongsuite-pilot\.sh" 2>/dev/null || true
-    echo "✅ loongsuite-pilot process monitor stopped"
-}
-
-cmd_dashboard_start() {
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then
-        echo "✅ loongsuite-pilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
-        return 0
-    fi
-
-    ensure_dirs
-    local script node_bin
-    script=$(resolve_script "serve-loongsuite-pilot-monitor.mjs") || {
-        echo "❌ dashboard script missing"
-        exit 1
-    }
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    nohup "$node_bin" "$script" >> "$DASHBOARD_LOG_FILE" 2>&1 &
-    echo "$!" > "$DASHBOARD_PID_FILE"
-    echo "✅ loongsuite-pilot dashboard started (PID $!)"
-    echo "   open http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
-}
-
-cmd_dashboard_stop() {
-    stop_pid_file "$DASHBOARD_PID_FILE"
-    pkill -f "serve-loongsuite-pilot-monitor\.mjs" 2>/dev/null || true
-    echo "✅ loongsuite-pilot dashboard stopped"
-}
-
-cmd_monitor_start() {
-    cmd_process_monitor_start
-    cmd_dashboard_start
-    echo "✅ loongsuite-pilot monitor is running"
-    echo "   dashboard: http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
-}
-
-cmd_monitor_stop() {
-    cmd_dashboard_stop
-    cmd_process_monitor_stop
-    echo "✅ loongsuite-pilot monitor stopped"
-}
-
 # Restart only the collector (used by updater after deploying a new version)
 cmd_restart_collector() {
+    cleanup_legacy_monitor_processes
     local target_user
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-${target_user}.service"
@@ -620,22 +764,9 @@ cmd_restart_collector() {
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
-
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
+    stop_installed_collector_processes
 
     sleep 1
 
@@ -770,8 +901,8 @@ cmd_restart_updater() {
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
+    stop_installed_updater_processes
 
     sleep 1
 
@@ -874,6 +1005,82 @@ cmd_restart() {
     cmd_start
 }
 
+dashboard_port() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo 8765
+        return
+    }
+    "$node_bin" -e '
+const fs = require("node:fs");
+const path = process.argv[1];
+let port;
+try { port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port; } catch {}
+process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
+' "$CONFIG_FILE" 2>/dev/null || echo 8765
+}
+
+dashboard_data_dir() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo "$DATA_DIR"
+        return
+    }
+    LOONGSUITE_PILOT_LAUNCHER_DATA_DIR="$DATA_DIR" "$node_bin" -e '
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const configPath = process.argv[1];
+let configured;
+try { configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir; } catch {}
+let dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || configured || process.env.LOONGSUITE_PILOT_LAUNCHER_DATA_DIR;
+if (dataDir === "~") dataDir = os.homedir();
+else if (dataDir.startsWith("~/")) dataDir = path.join(os.homedir(), dataDir.slice(2));
+process.stdout.write(dataDir);
+' "$CONFIG_FILE" 2>/dev/null || echo "$DATA_DIR"
+}
+
+dashboard_is_available() {
+    local port="$1"
+    local effective_data_dir
+    effective_data_dir=$(dashboard_data_dir)
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const http = require("node:http");
+const crypto = require("node:crypto");
+const path = require("node:path");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: Number(process.argv[1]),
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  const expectedInstance = crypto.createHash("sha256")
+    .update(path.resolve(process.argv[2]))
+    .digest("hex");
+  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
+    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
+  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+' "$port" "$effective_data_dir" >/dev/null 2>&1
+}
+
 cmd_status() {
     local ver_info=""
     local version_dir
@@ -886,26 +1093,22 @@ cmd_status() {
 
     if is_running; then
         local pid
+        local port
         pid=$(cat "$PID_FILE")
+        port=$(dashboard_port)
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
+        if dashboard_is_available "$port"; then
+            echo "   dashboard: http://127.0.0.1:${port}/"
+        else
+            echo "   dashboard: unavailable (http://127.0.0.1:${port}/)"
+        fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi
-    if is_pid_file_running "$UPDATER_PID_FILE"; then
+    if is_pid_file_running "$UPDATER_PID_FILE" updater; then
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
-    fi
-    local sampler_pid=""
-    local dashboard_pid=""
-    if is_pid_file_running "$MONITOR_PID_FILE"; then sampler_pid=$(cat "$MONITOR_PID_FILE"); fi
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then dashboard_pid=$(cat "$DASHBOARD_PID_FILE"); fi
-    if [ -n "$sampler_pid" ] && [ -n "$dashboard_pid" ]; then
-        echo "   monitor: running (sampler PID $sampler_pid, dashboard PID $dashboard_pid)"
-    elif [ -n "$sampler_pid" ] || [ -n "$dashboard_pid" ]; then
-        echo "   monitor: partially running (sampler PID ${sampler_pid:-stopped}, dashboard PID ${dashboard_pid:-stopped})"
-    else
-        echo "   monitor: stopped"
     fi
     autostart_status
 }
@@ -971,6 +1174,68 @@ cmd_worker() {
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     exec "$node_bin" "$entry" worker "$@"
+}
+
+cmd_agent() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+    local subcommand="${1:-}"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    "$node_bin" "$entry" agent "$@" || return $?
+
+    # The command performs injection/removal synchronously. Restart only an
+    # already-running collector so it reloads definitions and watchdog targets;
+    # do not unexpectedly start a service the user intentionally stopped.
+    case "$subcommand" in
+        register|unregister)
+            if is_running; then
+                cmd_restart_collector
+            fi
+            ;;
+    esac
+}
+
+cmd_deploy() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    # Deliberately no collector restart afterwards: this command exists for image
+    # builds, where nothing is running yet and starting a daemon inside a build
+    # layer would leave a half-written state file baked into the image. A running
+    # collector re-reads its deployment state on its own next cycle.
+    exec "$node_bin" "$entry" deploy "$@"
 }
 
 cmd_token_usage() {
@@ -1320,12 +1585,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/collector-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1334,6 +1635,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1344,6 +1647,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1358,20 +1663,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1382,7 +1687,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi
@@ -1452,12 +1757,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run-updater"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/updater-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1466,6 +1807,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1476,6 +1819,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run-updater >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1490,20 +1835,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1514,7 +1859,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi
@@ -1864,24 +2209,15 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
+    echo "                    --require <ids>  comma-separated agent ids that must deploy"
+    echo "                    --json           machine-readable result"
     echo "  token-usage     Show token usage TUI"
+    echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
-    echo "  monitor start   Start process resource monitor"
-    echo "  monitor stop    Stop process resource monitor"
     echo "  worker ...      Manage local remote-controlled workers"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
-}
-
-cmd_monitor() {
-    case "${1:-}" in
-        start) cmd_monitor_start ;;
-        stop)  cmd_monitor_stop ;;
-        *)
-            echo "Unknown monitor command: ${1:-}"
-            echo "Usage: loongsuite-pilot monitor <start|stop>"
-            exit 1 ;;
-    esac
 }
 
 # ---- Dispatch ----
@@ -1892,11 +2228,12 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    deploy)      shift; cmd_deploy "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
     span-attr)   shift; cmd_span_attr "$@" ;;
-    monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
+    agent)               shift; cmd_agent "$@" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     restart-updater)     cmd_restart_updater ;;

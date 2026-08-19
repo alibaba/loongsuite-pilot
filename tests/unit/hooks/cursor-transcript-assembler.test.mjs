@@ -317,6 +317,22 @@ describe('buildCursorRecordsFromTranscript', () => {
       expect(s1Resp['gen_ai.usage.output_tokens']).toBe(0);
     });
 
+    it('step 2 input preserves the assistant tool call before its matching result', () => {
+      const messages = records[5]['gen_ai.input.messages'];
+      expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+      expect(messages[1].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'tool-ws-001',
+        name: 'WebSearch',
+        arguments: { query: '上海天气' },
+      });
+      expect(messages[2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'tool-ws-001',
+        response: '',
+      });
+    });
+
     it('step 2 llm.response has correct final text', () => {
       const s2Resp = records[6];
       expect(s2Resp['gen_ai.step.id']).toMatch(/:s2$/);

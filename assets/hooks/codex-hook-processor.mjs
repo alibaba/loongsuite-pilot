@@ -116,7 +116,7 @@ function writeTurnSpanContext(input) {
   });
 }
 
-function writeWakeupMarker(input) {
+function writeWakeupMarker(input, hookEvent) {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   if (!sessionId) return;
   const configuredCodexHome = typeof process.env.CODEX_HOME === 'string'
@@ -128,12 +128,47 @@ function writeWakeupMarker(input) {
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
+  const marker = path.join(directory, `${safePathPart(sessionId)}.json`);
+  let initialTurnId = '';
+  let recoveryTurnId = '';
+  try {
+    const existing = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    if (existing && typeof existing.initial_turn_id === 'string') {
+      initialTurnId = existing.initial_turn_id;
+    }
+    if (existing && typeof existing.recovery_turn_id === 'string') {
+      recoveryTurnId = existing.recovery_turn_id;
+    }
+  } catch {
+    // The first Hook for a session has no existing marker.
+  }
+  if (
+    !initialTurnId
+    && !recoveryTurnId
+    && (hookEvent === 'user-prompt-submit' || hookEvent === 'subagent-start')
+    && typeof input.turn_id === 'string'
+  ) {
+    initialTurnId = input.turn_id;
+  }
+  if (
+    (hookEvent === 'stop' || hookEvent === 'subagent-stop')
+    && typeof input.turn_id === 'string'
+    && input.turn_id
+  ) {
+    // A terminal Hook proves this turn belongs to the rollout, but it may be a
+    // later turn when the corresponding Start Hook was missed. Keep it as
+    // recovery evidence rather than overwriting the exact initial anchor.
+    recoveryTurnId = input.turn_id;
+  }
   const payload = {
     session_id: sessionId,
     ...(typeof input.turn_id === 'string' && input.turn_id ? { turn_id: input.turn_id } : {}),
+    ...(initialTurnId ? { initial_turn_id: initialTurnId } : {}),
+    ...(recoveryTurnId ? { recovery_turn_id: recoveryTurnId } : {}),
     ...(typeof input.transcript_path === 'string' && input.transcript_path
       ? { transcript_path: input.transcript_path }
       : {}),
+    hook_event: hookEvent,
     codex_home: codexHome,
     session_dir: path.join(codexHome, 'sessions'),
     ...RESOURCE_ATTRIBUTE_FIELDS,
@@ -147,21 +182,43 @@ function writeWakeupMarker(input) {
   });
 }
 
+function normalizedHookInput(input, subcommand) {
+  if (subcommand !== 'subagent-start' && subcommand !== 'subagent-stop') return input;
+  const childSessionId = typeof input.agent_id === 'string' ? input.agent_id : '';
+  const childTranscriptPath = subcommand === 'subagent-stop'
+    ? input.agent_transcript_path
+    : input.transcript_path;
+  return {
+    ...input,
+    session_id: childSessionId,
+    ...(typeof childTranscriptPath === 'string' && childTranscriptPath
+      ? { transcript_path: childTranscriptPath }
+      : {}),
+  };
+}
+
 function main() {
   const subcommand = (process.argv[2] || '').trim();
   try {
     if (
       subcommand === 'session-start'
       || subcommand === 'user-prompt-submit'
+      || subcommand === 'subagent-start'
+      || subcommand === 'subagent-stop'
       || subcommand === 'stop'
     ) {
-      const input = tryReadStdin();
-      if (subcommand === 'user-prompt-submit' || subcommand === 'stop') {
+      const input = normalizedHookInput(tryReadStdin(), subcommand);
+      if (
+        subcommand === 'user-prompt-submit'
+        || subcommand === 'subagent-start'
+        || subcommand === 'subagent-stop'
+        || subcommand === 'stop'
+      ) {
         // Persist invocation attributes before publishing the wakeup so the
         // asynchronous transcript reader cannot observe the turn first.
         writeTurnSpanContext(input);
       }
-      writeWakeupMarker(input);
+      writeWakeupMarker(input, subcommand);
     }
   } finally {
     process.stdout.write('{}\n');

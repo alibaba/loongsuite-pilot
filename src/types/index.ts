@@ -105,6 +105,9 @@ export interface AnalyticsConfig {
   userId: string;
   collectLog: boolean;
   collectTrace: boolean;
+  /** Exact service.name shared by every agent and backend. */
+  serviceName?: string;
+  /** Legacy base name; agent type is appended when serviceName is unset. */
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
@@ -119,8 +122,11 @@ export interface AnalyticsConfig {
   fileCollection: FileCollectionToggle;
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
+  dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  /** Global multimodal storage. */
+  multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
 }
@@ -138,9 +144,69 @@ export interface UpstreamLinkConfig {
   ttlMs: number;
 }
 
+export const MULTIMODAL_UPLOAD_MODES = [
+  'none',
+  'input',
+  'output',
+  'tool',
+  'both',
+] as const;
+export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
+
+/** uploadMode covers user input. */
+export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
+  return mode === 'input' || mode === 'both';
+}
+
+/** uploadMode covers model output. */
+export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
+  return mode === 'output' || mode === 'both';
+}
+
+/** uploadMode covers tool results. */
+export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
+  return mode === 'tool' || mode === 'both';
+}
+
+export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
+export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+
+export interface MultimodalOssConfig {
+  endpoint: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+export interface MultimodalSlsConfig {
+  endpoint: string;
+  project: string;
+  logstore: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
+export interface MultimodalRuntimeConfig {
+  uploader: MultimodalUploaderKind;
+  storageBasePath: string;
+  oss?: MultimodalOssConfig;
+  sls?: MultimodalSlsConfig;
+}
+
+/** Agent ids with multimodal extraction implemented. */
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+
+/** Per-agent multimodal policy (`uploadMode: none` disables). */
+export interface AgentMultimodalConfig {
+  uploadMode: MultimodalUploadMode;
+}
+
 export interface AgentConfig {
   enabled?: boolean;
   captureMessageContent: boolean;
+  multimodal?: AgentMultimodalConfig;
 }
 
 export type AgentsConfig = Record<string, AgentConfig>;
@@ -168,6 +234,8 @@ export interface OtlpTraceFlusherConfig {
   protocol: 'http/protobuf';
   // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
+  /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
+  appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
   debug?: boolean;
@@ -181,6 +249,26 @@ export interface OtlpTraceFlusherConfig {
 
 export type SlsMode = 'ak' | 'webtracking' | 'apiKey';
 
+export interface SlsTimeoutConfig {
+  /** Overall request timeout in ms (default 30000). Acts as a hard cap when phase timeouts are set. */
+  timeoutMs?: number;
+  /** DNS + TCP + TLS connection timeout in ms (default 10000). Only effective for webtracking mode. */
+  connectTimeoutMs?: number;
+  /** Timeout waiting for response headers in ms (default 30000). Only effective for webtracking mode. */
+  headersTimeoutMs?: number;
+  /** Timeout reading response body in ms (default 15000). Only effective for webtracking mode. */
+  bodyTimeoutMs?: number;
+}
+
+export interface SlsRetryConfig {
+  /** Max number of retry attempts (default 3). */
+  retryMaxAttempts?: number;
+  /** Base delay for exponential backoff in ms (default 1000). */
+  retryBaseDelayMs?: number;
+  /** Whether to add random jitter to backoff delay (default true). */
+  retryJitter?: boolean;
+}
+
 export interface SlsFlusherConfig {
   enabled: boolean;
   /** 上报模式：'ak' 使用 AK/SK 签名，'apiKey' 使用 Bearer API Key，'webtracking' 使用 WebTracking */
@@ -193,7 +281,15 @@ export interface SlsFlusherConfig {
   endpoints: SlsEndpoint[];
   batchMaxSize: number;
   flushIntervalMs: number;
+  /** Exact __service_name__ shared by every agent and endpoint. */
+  serviceName?: string;
   serviceNamePrefix: string;
+  /** Timeout configuration for SLS requests. */
+  timeout?: SlsTimeoutConfig;
+  /** Retry configuration for failed SLS requests. */
+  retry?: SlsRetryConfig;
+  /** Max concurrent flush tasks (default 3). Controls how many endpoint buckets flush in parallel. */
+  flushConcurrency?: number;
 }
 
 export interface SlsEndpoint {
@@ -276,6 +372,10 @@ export interface StatusBarConfig {
   enabled: boolean;
   metricsSummaryIntervalMs: number;
   runtimeRefreshIntervalMs: number;
+}
+
+export interface DashboardConfig {
+  port: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

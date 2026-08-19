@@ -7,7 +7,15 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import {
+  isAgentGatedEnabled as isAgentGatedEnabledIn,
+  resolvePilotDir as resolvePilotDirIn,
+} from '../deployment/deploy-command.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import {
+  ensureRegisteredPiSdkWrappers,
+  isPiSdkRegistryBusyError,
+} from '../pi-sdk/pi-sdk-agent-registry.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
@@ -49,6 +57,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -57,6 +66,12 @@ import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
 import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import {
+  anyAgentMultimodalEnabled,
+  createUploader,
+  isAgentMultimodalEnabled,
+  MultimodalProcessor,
+} from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
@@ -66,6 +81,7 @@ import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
+import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -118,6 +134,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'dsh-log': 'dsh',
   };
 
   private readonly config: AnalyticsConfig;
@@ -139,9 +156,12 @@ export class Orchestrator extends EventEmitter {
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
+  private dashboardServer: DashboardServer | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
+  /** Shared multimodal processor (null when disabled). */
+  private multimodalProcessor: MultimodalProcessor | null = null;
 
   constructor(config: AnalyticsConfig) {
     super();
@@ -206,8 +226,26 @@ export class Orchestrator extends EventEmitter {
       logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
     }
 
+    const multimodalConfig = this.config.multimodal;
+    const agentsWantMultimodal = anyAgentMultimodalEnabled(this.config.agents);
+    this.multimodalProcessor = null;
+    if (agentsWantMultimodal && !multimodalConfig) {
+      logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
+    } else if (multimodalConfig && agentsWantMultimodal) {
+      try {
+        const uploader = createUploader(multimodalConfig);
+        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
+        this.inputManager.setMultimodalProcessor(processor);
+        this.multimodalProcessor = processor;
+        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+      } catch (err) {
+        logger.error('multimodal init failed; disabled for process', { error: String(err) });
+      }
+    }
+
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
+    await this.restoreRegisteredPiSdkWrappers();
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
@@ -256,6 +294,7 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -297,6 +336,12 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      // Same condition as the updater watchdog above, deliberately: whether an updater is
+      // supposed to exist decides both whether we restart it and whether its absence is
+      // worth an alarm. Auto-update resolves to disabled whenever no package source is
+      // configured, and the updater exits immediately on that config — so a missing pid
+      // there is the expected state, not a fault.
+      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
     await this.metricsWriter.start();
 
@@ -307,11 +352,29 @@ export class Orchestrator extends EventEmitter {
     this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
     this.runtimeWriter.start();
 
-    // Status bar metrics/native UI remain optional.
-    if (this.config.statusBar.enabled) {
-      this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
-      this.metricsSummaryWriter.start();
+    // MetricsSummaryWriter is a collector-owned source shared by every local
+    // presentation surface. It must keep running when the optional native menu
+    // bar app is disabled.
+    this.metricsSummaryWriter = new MetricsSummaryWriter(
+      this.dataDir,
+      this.config.statusBar,
+      this.config.flushers.jsonl?.outputDir,
+    );
+    this.metricsSummaryWriter.start();
 
+    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // its loopback port is unavailable. It never opens the system browser.
+    this.dashboardServer = new DashboardServer({
+      dataDir: this.dataDir,
+      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+      port: this.config.dashboard.port,
+    });
+    await this.dashboardServer.start().catch(err => {
+      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+    });
+
+    // Only the native macOS menu bar app remains optional.
+    if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
         await this.statusBarAppManager.syncDesiredState(true).catch(err => {
@@ -330,6 +393,33 @@ export class Orchestrator extends EventEmitter {
     this.legacySlsFailedLogCleanupService.start();
   }
 
+  private async restoreRegisteredPiSdkWrappers(): Promise<void> {
+    try {
+      const restoredWrappers = await ensureRegisteredPiSdkWrappers(this.dataDir);
+      if (restoredWrappers > 0) {
+        logger.info('restored generated PI SDK Agent wrappers', { count: restoredWrappers });
+      }
+    } catch (err) {
+      // Keep unrelated Agent integrations available when a retained PI SDK
+      // registration cannot be restored. The registry helper already bounded
+      // retries for transient lock contention; surface the final degradation
+      // through both local diagnostics and the normal Pilot alarm pipeline.
+      const registryBusy = isPiSdkRegistryBusyError(err);
+      logger.error('failed to restore generated PI SDK Agent wrappers', {
+        error: String(err),
+        registryBusy,
+      });
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM',
+        '2',
+        registryBusy
+          ? 'PI SDK Agent wrapper restore skipped because the registry remained busy after bounded retries'
+          : 'PI SDK Agent wrapper restore failed during startup; inspect local Pilot logs and run agent doctor',
+        { input_name: 'pi-coding-agent-log' },
+      );
+    }
+  }
+
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
@@ -337,7 +427,9 @@ export class Orchestrator extends EventEmitter {
     await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
-    this.metricsSummaryWriter?.stop();
+    await this.dashboardServer?.stop();
+    this.dashboardServer = null;
+    await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
@@ -456,7 +548,7 @@ export class Orchestrator extends EventEmitter {
     for (const def of defs) {
       if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
 
-      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+      const pluginPath = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
 
       targets.push({
         id: `plugin-inject:${def.id}`,
@@ -464,8 +556,12 @@ export class Orchestrator extends EventEmitter {
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
-          // a missing file, or fail repeatedly when no config file exists.
-          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          // a missing asset, or fail repeatedly when no config file exists.
+          if (
+            pluginPath
+            && !(await fileExists(pluginPath))
+            && !(await directoryExists(pluginPath))
+          ) return false;
           return detectAgent(def.detection);
         },
         check: async () => {
@@ -477,6 +573,10 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove injected plugin for ${def.id}`);
         },
       });
     }
@@ -511,10 +611,41 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
+  /** Self-heal the DSH YAML patch and its collection-enabled marker. */
+  private buildDshYamlPatchInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'dsh-yaml-patch' || !def.dshYamlPatch) continue;
+      const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
+      targets.push({
+        id: `dsh-yaml-patch:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await fileExists(pluginPath))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
+          }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove DSH YAML patch for ${def.id}`);
+        },
+      });
+    }
+
+    return targets;
+  }
+
   /**
-   * Resolve a plugin spec to a local file path for existence checks.
+   * Resolve a plugin spec to a local filesystem path for existence checks.
    * Returns null for non-file specs (e.g. npm package names), which skips the
-   * plugin-file precondition gate.
+   * plugin-asset precondition gate.
    */
   private resolvePluginSpecPath(spec: string): string | null {
     const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
@@ -1163,8 +1294,16 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
+    const codexMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      multimodal: {
+        enabled: codexMultimodalEnabled,
+        uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
@@ -1212,13 +1351,19 @@ export class Orchestrator extends EventEmitter {
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
+      // The physical JSONL stream is shared by the built-in PI integration and
+      // every registered high-level SDK Agent. Admission therefore has to be
+      // checked against the identity on each record, not only once for the
+      // shared input, or disabling one Agent would still export its records
+      // while another PI integration keeps the input alive.
+      agentEnabled: agentType => this.isAgentGatedEnabled(agentType),
     });
     this.inputManager.registerInput(piCodingAgentLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
         watchPaths: [piCodingAgentLogDir],
         isAvailable: async () => directoryExists(piCodingAgentLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+        enabled: () => this.isAnyPiSdkAgentEnabled() &&
           this.agentControlManager.resolveEnabled(
             'pi-coding-agent-log',
             listenerCfg['pi-coding-agent-log']?.enabled ?? true,
@@ -1316,6 +1461,28 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
+    const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
+    await ensureDshLogDir(dshLogDir);
+    const dshLogInput = new DshLogInput({
+      stateStore: this.stateStore,
+      sessionDir: dshLogDir,
+      pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(dshLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(dshLogInput, {
+        watchPaths: [dshLogDir],
+        isAvailable: async () => directoryExists(dshLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['dsh-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'dsh-log',
+            listenerCfg['dsh-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1382,9 +1549,20 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    const agents = this.config.agents;
-    if (!agents || Object.keys(agents).length === 0) return true;
-    return agents[agentId]?.enabled !== false;
+    return isAgentGatedEnabledIn(this.config, agentId);
+  }
+
+  /**
+   * The PI JSONL input is shared by the built-in PI CLI and every registered
+   * high-level PI SDK Agent. Keep it alive when at least one of those logical
+   * Agents is enabled; tying it only to `pi-coding-agent` would drop custom
+   * Agent records when the built-in integration is disabled.
+   */
+  private isAnyPiSdkAgentEnabled(): boolean {
+    const definitions = this.deploymentManager?.getDefinitions?.() ?? [];
+    const piDefinitions = definitions.filter(def => def.id === 'pi-coding-agent' || def.piSdk?.schemaVersion === 1);
+    if (piDefinitions.length === 0) return this.isAgentGatedEnabled('pi-coding-agent');
+    return piDefinitions.some(def => this.isAgentGatedEnabled(def.id));
   }
 
   /**
@@ -1407,49 +1585,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
-    try {
-      const currentFile = path.join(this.dataDir, 'current');
-      const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
-      if (versionName) {
-        const versionDir = path.join(this.dataDir, 'versions', versionName);
-        if (fsSync.existsSync(versionDir)) {
-          logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
-          return versionDir;
-        }
-      }
-    } catch {
-      // current file doesn't exist — legacy or dev layout
-    }
-
-    const legacyPackageDir = path.join(this.dataDir, 'package');
-    if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
-      return legacyPackageDir;
-    }
-
-    try {
-      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-      const candidates = [
-        path.resolve(moduleDir, '..'),
-        path.resolve(moduleDir, '..', '..'),
-      ];
-      for (const modulePackageDir of candidates) {
-        const packageJson = path.join(modulePackageDir, 'package.json');
-        const agentsDir = path.join(modulePackageDir, 'agents.d');
-        if (
-          fsSync.existsSync(packageJson)
-          && fsSync.existsSync(agentsDir)
-          && fsSync.statSync(packageJson).isFile()
-          && fsSync.statSync(agentsDir).isDirectory()
-        ) {
-          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
-          return modulePackageDir;
-        }
-      }
-    } catch {
-      // Module URL is invalid or the runtime package does not include required assets.
-    }
-
-    return this.dataDir;
+    return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {

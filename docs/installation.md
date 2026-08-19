@@ -122,17 +122,14 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-Optional local dashboard:
-
-```bash
-loongsuite-pilot monitor start
-```
-
-Then open:
+The local dashboard starts and stops with the collector. Open:
 
 ```text
 http://127.0.0.1:8765/
 ```
+
+The page reads `logs/metrics-summary.json` directly and does not run a second
+aggregation pipeline.
 
 ## Uninstall
 
@@ -173,7 +170,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Pu
 ## Build And Run From Source
 
 ```bash
-git clone https://github.com/loongsuite/loongsuite-pilot.git
+git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 npm install
 npm run build

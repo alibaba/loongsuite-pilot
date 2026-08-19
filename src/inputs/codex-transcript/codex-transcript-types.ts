@@ -1,8 +1,5 @@
 import type { JsonValue } from '../../types/index.js';
 
-export const MAX_EMITTED_TERMINAL_TURNS = 100;
-export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
-
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
 export interface CodexTranscriptInputContext {
@@ -90,8 +87,32 @@ export interface CodexPendingTerminalTurn {
   sourceRecordCount?: number;
 }
 
+interface CodexForkBootstrapBase {
+  /** Hook-provided first turn owned by this rollout. */
+  initialTurnId?: string;
+  /** Terminal Hook evidence for an owned turn; it may not be the first one. */
+  recoveryTurnId?: string;
+  /** How far the append-only rollout has been searched for an owned turn. */
+  searchOffset: number;
+}
+
+/** First-owned-turn bootstrap for a fork/subagent rollout. */
+export type CodexForkBootstrap = CodexForkBootstrapBase & (
+  /** A file discovered while Pilot is running; retain until owned bytes advance. */
+  | { state: 'live-pending' }
+  /** A startup no-replay file whose first owned turn has not been located yet. */
+  | { state: 'baseline-search' }
+  /** A bounded no-output rebuild below the startup baseline. */
+  | {
+      state: 'baseline-tail';
+      /** Last unfinished owned candidate reconstructed below the baseline scanOffset. */
+      tailCandidate?: CodexActiveTranscriptTurn;
+    }
+);
+
 export interface CodexTranscriptCheckpoint {
   inode: number;
+  /** No-replay floor and next byte for normal event collection. Never rewound by fork probing. */
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
@@ -105,13 +126,8 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Terminal turns already processed by this transcript, including empty control turns. */
-  emittedTerminalTurnIds: string[];
-}
-
-export interface CodexTranscriptGlobalState {
-  /** Bounded cross-transcript registry; the persisted name is retained for compatibility. */
-  emittedTerminalTurnIds: string[];
+  /** Independent ownership probe; searchOffset never acts as the normal collection cursor. */
+  forkBootstrap?: CodexForkBootstrap;
 }
 
 export interface CodexTranscriptMeta {
@@ -121,6 +137,8 @@ export interface CodexTranscriptMeta {
   rootSessionId: string;
   threadSource: 'user' | 'subagent' | 'unknown';
   parentThreadId?: string;
+  /** Top-level session_meta.forked_from_id — fork/resume lineage marker. */
+  forkedFromId?: string;
   depth: number;
   createdAtMs?: number;
   agentPath?: string;

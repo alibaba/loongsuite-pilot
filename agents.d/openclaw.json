@@ -11,18 +11,15 @@
       "~/.openclaw/openclaw.json",
       "~/.openclaw/config.json"
     ],
-    "pluginSpec": "file://$PILOT_DATA/plugins/openclaw/plugin.mjs",
+    "pluginSpec": "file://$PILOT_DATA/plugins/openclaw",
     "pluginId": "loongsuite-pilot-openclaw",
     "replaceSpecs": [
       "loongsuite-pilot-openclaw",
-      "loongsuite-pilot-openclaw-smoke"
+      "loongsuite-pilot-openclaw-smoke",
+      "$PILOT_DATA/plugins/openclaw/plugin.mjs"
     ],
     "configShape": "openclaw-nested",
-    "createIfMissing": true,
-    "versionCheck": {
-      "command": ["openclaw", "--version"],
-      "minimum": "2026.5.12"
-    }
+    "createIfMissing": true
   },
   "input": {
     "type": "hook-jsonl",

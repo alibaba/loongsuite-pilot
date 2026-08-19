@@ -1,0 +1,19 @@
+{
+  "id": "dsh",
+  "displayName": "DeepSeek Harness",
+  "deployMode": "dsh-yaml-patch",
+  "detection": {
+    "paths": ["~/.dsh"],
+    "commands": ["dsh"]
+  },
+  "dshYamlPatch": {
+    "pluginSource": "$PILOT_DATA/plugins/dsh/plugin.mjs",
+    "entryId": "loongsuite-pilot-observability",
+    "marker": "PILOT-OBSERVABILITY-MANAGED"
+  },
+  "input": {
+    "type": "session-file-polling",
+    "logDir": "$PILOT_DATA/logs/dsh",
+    "filePattern": "dsh-*.jsonl"
+  }
+}

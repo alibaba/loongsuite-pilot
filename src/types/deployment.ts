@@ -9,7 +9,8 @@ export type DeployMode =
   | 'plugin-probe'
   | 'plugin-inject'
   | 'directory-plugin'
-  | 'detection-only';
+  | 'detection-only'
+  | 'dsh-yaml-patch';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
@@ -159,13 +160,6 @@ export interface PluginInjectConfig {
   configKey?: string;
   /** Create the first config path with an empty object when none exists. */
   createIfMissing?: boolean;
-  /** Refuse deployment before touching config when the target is too old. */
-  versionCheck?: {
-    /** Executable followed by argv entries; executed directly without a shell. */
-    command: string[];
-    /** Minimum supported stable version. */
-    minimum: string;
-  };
 }
 
 export interface AgentRuntimeConfig {
@@ -175,6 +169,21 @@ export interface AgentRuntimeConfig {
   nodeSqliteSince?: string;
   /** 无该 builtin 时的 fallback 行为说明 */
   fallback?: string;
+}
+
+/**
+ * Metadata for a custom Agent built on the high-level
+ * `@earendil-works/pi-coding-agent` SDK.
+ *
+ * PI SDK integrations still deploy through the generic `plugin-inject`
+ * strategy.  This marker identifies definitions managed by the public
+ * `loongsuite-pilot agent ...` CLI so shared input gating, diagnostics, and
+ * uninstall cleanup can include them without introducing another deploy mode.
+ */
+export interface PiSdkIntegrationConfig {
+  schemaVersion: 1;
+  /** Directory passed to createAgentSession({ agentDir }). */
+  agentDir: string;
 }
 
 export interface DirectoryPluginConfig {
@@ -201,6 +210,32 @@ export interface DirectoryPluginActivationConfig {
   disableArgs?: string[];
 }
 
+/**
+ * Config for the `dsh-yaml-patch` deploy mode — Pilot manages a single
+ * marked YAML block inside deepseek-harness's machine-wide user patch
+ * layer (`$DSH_HOME/cordis.patch.yml`) so a plain `dsh` invocation loads
+ * the Pilot plugin without wrappers or aliases.
+ *
+ * The strategy only ever appends/removes its own `# BEGIN/END <marker>`
+ * block; non-Pilot bytes (user rows, comments, formatting) are preserved
+ * verbatim. `entryId` is the stable YAML row id and doubles as the
+ * conflict-detection key — another integration reusing the same id but a
+ * different marker/path is rejected, not overwritten.
+ */
+export interface DshYamlPatchConfig {
+  /** Absolute (variable-expanded) `file://` URL to the Pilot plugin.mjs. */
+  pluginSource: string;
+  /**
+   * Patch YAML path. Defaults to `$DSH_HOME/cordis.patch.yml` when omitted.
+   * `$DSH_HOME` expands to `~/.dsh` unless overridden by the environment.
+   */
+  patchPath?: string;
+  /** Stable YAML row id used by Pilot and referenced in needsDeploy. */
+  entryId: string;
+  /** BEGIN/END marker name surrounding the Pilot-managed block. */
+  marker: string;
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
@@ -211,7 +246,11 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  /** Present only for registered high-level PI SDK Agents. */
+  piSdk?: PiSdkIntegrationConfig;
   directoryPlugin?: DirectoryPluginConfig;
+  /** Present only for `dsh-yaml-patch` agents. */
+  dshYamlPatch?: DshYamlPatchConfig;
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
@@ -219,11 +258,27 @@ export interface AgentDefinition {
 
 // ─── Deploy Result ───
 
+/**
+ * Why a deploy was skipped. `skipped: true` alone is ambiguous — "the agent is
+ * not installed here" and "its integration is already in place" are opposite
+ * outcomes, and `loongsuite-pilot deploy --require` has to treat them
+ * differently (the first is a build failure, the second is success).
+ */
+export type DeploySkipReason =
+  /** detect() found no agent on this machine — nothing was instrumented. */
+  | 'not-detected'
+  /** Integration already present (includes detection-only agents, which never write). */
+  | 'up-to-date'
+  /** Turned off by the config.agents gate, so it was undeployed instead. */
+  | 'disabled';
+
 export interface DeployResult {
   success: boolean;
   agentId: string;
   deployMode: DeployMode;
   skipped?: boolean;
+  /** Set whenever `skipped` is true. */
+  reason?: DeploySkipReason;
   error?: string;
 }
 
@@ -245,6 +300,8 @@ export interface DeployedAgentRecord {
   lastRemoteCheckedAt?: string;
   /** Resolved external target for managed directory plugins. */
   targetDir?: string;
+  /** Resolved cordis.patch.yml path used by the DSH integration lifecycle. */
+  dshPatchPath?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

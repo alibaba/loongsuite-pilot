@@ -40,6 +40,7 @@ export interface MetricsWriterOptions {
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
+  autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
 }
 
@@ -70,6 +71,7 @@ export class MetricsWriter {
       canaryPolicy: opts.canaryPolicy,
       slsEndpoints: opts.slsEndpoints,
       cmsWorkspace: opts.cmsWorkspace,
+      autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
     });
     this.getSnapshot = opts.getSnapshot;

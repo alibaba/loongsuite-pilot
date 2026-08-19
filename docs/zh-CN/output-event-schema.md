@@ -61,6 +61,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
 | `gen_ai.response.model` | string | Recommended | 实际用于响应的模型。 |
 | `gen_ai.response.finish_reasons` | string[] | Recommended | 生成停止原因，见 [Finish Reasons](#finish-reasons)。 |
+| `gen_ai.response.time_to_first_token` | int | 可获取时 Recommended | 从模型原生请求边界到首个 reasoning、text 或 tool-call 输出的时间，单位纳秒；任一边界缺失或无效时省略。 |
 | `gen_ai.usage.input_tokens` | int | Recommended | 请求消耗的输入 token。 |
 | `gen_ai.usage.output_tokens` | int | Recommended | 响应生成的输出 token。 |
 | `gen_ai.usage.cache_read.input_tokens` | int | Recommended | 从 Provider 缓存读取的输入 token，已包含在 `gen_ai.usage.input_tokens` 中。 |
@@ -71,9 +72,10 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | 缓存读取 token 成本，单位 USD。 |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | 缓存写入 token 成本，单位 USD。 |
 | `gen_ai.usage.total_cost` | double | Recommended | 本次事件总成本，单位 USD。 |
-| `gen_ai.input.messages` | json array | Opt-In | 发送给模型的完整消息，可能包含敏感内容。 |
+| `gen_ai.input.messages` | json array | Opt-In | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | 本条事件消息中 `uri` 媒体的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且消息含媒体时写入；`captureMessageContent: false` 时剥离。 |
 | `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
 | `gen_ai.tool.name` | string | `tool.call` 和 `tool.result` Required | 工具名称。 |
 | `gen_ai.tool.call.id` | string | 可获取时 Recommended | 用于关联 `tool.call` 和 `tool.result` 的工具调用 ID。 |
@@ -94,6 +96,17 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `workspace.current_root` | string | Recommended | Git 顶层目录，仅当工作目录是 git 仓库时推断得出。 |
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
+
+## 多模态消息 Parts
+
+当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：
+
+| `parts[].type` | 说明 |
+|----------------|------|
+| `text` | 文本内容。 |
+| `uri` | 已上传或乐观引用的媒体；含 `uri`、`mime_type`，可选 `modality`（例如 `image`）。 |
+
+`uri` 形如 `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` 或 `sls://project/logstore/YYYYMMDD/<sha256>.ext`。内容 hash 编码在对象路径中。`YYYYMMDD` 按事件的**本地**日历日划分（优先取 `time_unix_ms`），非 UTC，与 Python probe 的对象路径约定一致，便于跨 midnight 边界按日期前缀查询。上传失败时 uri 可能 dangling；Pilot 以 fail-open 方式继续采集文本。
 
 ## 自定义 Agent 标识
 

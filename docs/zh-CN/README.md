@@ -26,10 +26,11 @@
 
 | 文档 | 用途 |
 |------|------|
-| [Agent 配置](agents.md) | 选择采集哪些 Agent，并控制消息内容采集。 |
+| [Agent 配置](agents.md) | 选择采集哪些 Agent，并控制消息内容与多模态采集。 |
+| [多模态采集](multimodal.md) | 开启图片 uri 转换/上传，查看各 Agent 与 `uploadMode` 采集范围。 |
 | [自定义 Agent 名称和实例](custom-agent-identity.md) | 设置 `gen_ai.agent.name` 和 `agentteams.instance.id`。 |
 | [数据脱敏](masking.md) | 输出前脱敏密钥和个人敏感信息。 |
-| [输出事件 Schema](output-event-schema.md) | 查看规范化事件名称、字段、Provider 和结束原因。 |
+| [输出事件 Schema](output-event-schema.md) | 查看规范化事件名称、字段、多模态 uri part、Provider 和结束原因。 |
 
 ## 扩展 Pilot
 

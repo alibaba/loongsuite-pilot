@@ -407,6 +407,38 @@ describe('MetricsCollector', () => {
       expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
     });
 
+    it('never probes the updater pid when auto-update is disabled', () => {
+      // Auto-update resolves to disabled whenever no package source is configured: nothing
+      // registers a service for the updater, no updater process runs, and the updater
+      // binary exits on sight of that config. Probing anyway would report a permanent
+      // failure and alarm about a process that was never supposed to run.
+      const liveness = vi.fn<[], ProcessLiveness>(() => down('no matching updater command found'));
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        autoUpdateEnabled: false,
+        updaterLiveness: liveness,
+      });
+      for (let i = 0; i < 5; i++) col.collectL1(buildSnapshot());
+      expect(liveness).not.toHaveBeenCalled();
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
+      expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
+    });
+
+    it('probes the updater pid when the flag is omitted, since a host install has one', () => {
+      const liveness = vi.fn<[], ProcessLiveness>(() => down('no matching updater command found'));
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: liveness,
+      });
+      for (let i = 0; i < 3; i++) col.collectL1(buildSnapshot());
+      expect(liveness).toHaveBeenCalled();
+      expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(false);
+    });
+
     it('reports current_version_valid=true when current points to existing version dir', () => {
       fs.mkdirSync(path.join(tmpDir, 'versions', '1.0.0_abc'), { recursive: true });
       fs.writeFileSync(path.join(tmpDir, 'current'), '1.0.0_abc');

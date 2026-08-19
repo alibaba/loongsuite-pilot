@@ -40,7 +40,7 @@
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [临时异常下的 Checkpoint](docs/zh-CN/agent-onboarding.md#临时异常下的-checkpoint) |
 | 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [安装与服务管理](docs/zh-CN/installation.md) |
-| 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [本地运行目录](docs/zh-CN/overview.md#本地运行目录) |
+| 本地 Dashboard | `src/dashboard/` + `src/status-bar/metrics-summary-writer.ts` | 默认随主进程启停的本地页面；生成并展示 `metrics-summary.json` 汇总 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 
 ## Agent 采集矩阵
@@ -57,6 +57,7 @@
 | Cursor CLI | `cursor-cli` | 复用 Cursor Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor-cli.json` |
 | Claude Code | `claude-code` | Hook | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Hook | `BaseInput` | `inputs/codex-transcript/` | `agents.d/codex.json` |
+| DeepSeek Harness | `dsh` | DSH YAML Patch | `BaseSessionInput` | `inputs/dsh-log/` | `agents.d/dsh.json` |
 | Kiro CLI | `kiro-cli` | Hook | `BaseHookInput` / `BaseInput` | `inputs/kiro-cli-*/` | `agents.d/kiro-cli.json` |
 | OpenCode | `opencode` | Plugin-Inject | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
 | MiMo Code | `mimo-code` | Plugin-Inject | `BaseHookInput` | `inputs/mimo-code-log/` | `agents.d/mimo-code.json` |

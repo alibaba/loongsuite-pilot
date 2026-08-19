@@ -4,6 +4,7 @@ import type {
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
+  DashboardConfig,
   FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
@@ -11,6 +12,12 @@ import type {
   LogRetentionConfig,
   MaskConfig,
   MaskType,
+  AgentMultimodalConfig,
+  MultimodalOssConfig,
+  MultimodalRuntimeConfig,
+  MultimodalSlsConfig,
+  MultimodalUploadMode,
+  MultimodalUploaderKind,
   OtlpEndpoint,
   OtlpEndpointEntry,
   CmsEndpointEntry,
@@ -21,7 +28,11 @@ import type {
   StatusBarConfig,
   UpstreamLinkConfig,
 } from '../types/index.js';
-import { SUPPORTED_MASK_TYPES } from '../types/index.js';
+import {
+  MULTIMODAL_UPLOAD_MODES,
+  MULTIMODAL_UPLOADER_KINDS,
+  SUPPORTED_MASK_TYPES,
+} from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
@@ -54,6 +65,9 @@ export interface SlsSingleConfig {
   destinationOverride?: boolean;
   batchMaxSize?: number;
   flushIntervalMs?: number;
+  timeout?: import('../types/index.js').SlsTimeoutConfig;
+  retry?: import('../types/index.js').SlsRetryConfig;
+  flushConcurrency?: number;
 }
 
 export interface InnerDataConfig {
@@ -114,12 +128,32 @@ export interface ConfigFile {
 
   collectLog?: boolean;
   collectTrace?: boolean;
+  serviceName?: string;
   serviceNamePrefix?: string;
 
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
     ttlMs?: number;
+  };
+
+  multimodal?: {
+    uploader?: string;
+    storageBasePath?: string;
+    oss?: {
+      endpoint?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+      securityToken?: string;
+    };
+    sls?: {
+      endpoint?: string;
+      project?: string;
+      logstore?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+      securityToken?: string;
+    };
   };
 
   mask?: {
@@ -149,6 +183,9 @@ export interface ConfigFile {
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
+    multimodal?: {
+      uploadMode?: string;
+    };
   }>;
 
   autoUpdate?: {
@@ -170,6 +207,10 @@ export interface ConfigFile {
 
   enableStatusBarApp?: boolean | string;
 
+  dashboard?: {
+    port?: number;
+  };
+
   /** User-defined attributes injected into trace spans (merged with OTEL_SPAN_ATTRIBUTES env). */
   globalSpanAttributes?: Record<string, unknown>;
 
@@ -183,6 +224,11 @@ export interface ConfigFile {
 function env(key: string): string | undefined {
   const v = process.env[key];
   return v !== undefined ? (process.platform === 'win32' ? v.trim() : v) : undefined;
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }
 
 function envBool(key: string, fallback: boolean): boolean {
@@ -223,6 +269,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
+  const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
 
   return {
@@ -232,6 +279,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     userId,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
+    serviceName,
     serviceNamePrefix,
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
@@ -245,7 +293,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
+    flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
@@ -253,7 +301,9 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
+    multimodal: buildMultimodalConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
 }
@@ -269,6 +319,92 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
     // deleting all freshly-written correlation files and silently breaking linking.
     ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
+  };
+}
+
+const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
+const MULTIMODAL_UPLOADER_KIND_SET = new Set<string>(MULTIMODAL_UPLOADER_KINDS);
+
+/** Parse global multimodal storage config; invalid → undefined. */
+function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
+  const block = file?.multimodal;
+  if (!block || typeof block !== 'object') return undefined;
+
+  try {
+    const uploaderRaw = block.uploader ?? 'oss';
+    if (!MULTIMODAL_UPLOADER_KIND_SET.has(uploaderRaw)) {
+      throw new Error(`invalid multimodal.uploader: ${uploaderRaw}`);
+    }
+    const uploader = uploaderRaw as MultimodalUploaderKind;
+
+    if (uploader === 'oss') {
+      const storageBasePathRaw = (block.storageBasePath ?? '').trim();
+      if (!storageBasePathRaw) {
+        throw new Error('multimodal.storageBasePath is required when uploader=oss');
+      }
+      if (!storageBasePathRaw.startsWith('oss://')) {
+        throw new Error('multimodal.storageBasePath must start with oss:// when uploader=oss');
+      }
+      return {
+        uploader,
+        storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
+        oss: buildMultimodalOssConfig(block),
+      };
+    }
+
+    if (uploader === 'sls') {
+      const sls = buildMultimodalSlsConfig(block);
+      return {
+        uploader,
+        storageBasePath: `sls://${sls.project}/${sls.logstore}`,
+        sls,
+      };
+    }
+
+    throw new Error(`unsupported multimodal.uploader: ${uploaderRaw}`);
+  } catch (err) {
+    logger.error('multimodal config invalid; disabled for process', { error: String(err) });
+    return undefined;
+  }
+}
+
+function buildMultimodalOssConfig(
+  block: ConfigFile['multimodal'] | undefined,
+): MultimodalOssConfig {
+  const endpoint = block?.oss?.endpoint ?? '';
+  const accessKeyId = block?.oss?.accessKeyId ?? '';
+  const accessKeySecret = block?.oss?.accessKeySecret ?? '';
+  const securityToken = block?.oss?.securityToken ?? '';
+  if (!endpoint || !accessKeyId || !accessKeySecret) {
+    throw new Error('multimodal.oss requires endpoint, accessKeyId, accessKeySecret');
+  }
+  return {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
+  };
+}
+
+function buildMultimodalSlsConfig(
+  block: ConfigFile['multimodal'] | undefined,
+): MultimodalSlsConfig {
+  const endpoint = block?.sls?.endpoint ?? '';
+  const project = block?.sls?.project ?? '';
+  const logstore = block?.sls?.logstore ?? 'logstore-multimodal';
+  const accessKeyId = block?.sls?.accessKeyId ?? '';
+  const accessKeySecret = block?.sls?.accessKeySecret ?? '';
+  const securityToken = block?.sls?.securityToken ?? '';
+  if (!endpoint || !project || !accessKeyId || !accessKeySecret) {
+    throw new Error('multimodal.sls requires endpoint, project, accessKeyId, accessKeySecret');
+  }
+  return {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    project,
+    logstore,
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
   };
 }
 
@@ -318,13 +454,29 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 
   for (const [agentType, policy] of Object.entries(file.agents)) {
     if (!agentType || !policy || typeof policy !== 'object') continue;
+    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
+    const multimodal = buildAgentMultimodalConfig(policy.multimodal);
     result[agentType] = {
       enabled: policy.enabled,
-      captureMessageContent: parseOptionalBool(policy.captureMessageContent) ?? true,
+      captureMessageContent,
+      ...(multimodal ? { multimodal } : {}),
     };
   }
 
   return result;
+}
+
+function buildAgentMultimodalConfig(
+  block: { uploadMode?: string } | undefined,
+): AgentMultimodalConfig | undefined {
+  if (!block || typeof block !== 'object') return undefined;
+
+  const uploadModeRaw = block.uploadMode ?? 'none';
+  const uploadMode = MULTIMODAL_UPLOAD_MODE_SET.has(uploadModeRaw)
+    ? (uploadModeRaw as MultimodalUploadMode)
+    : 'none';
+
+  return { uploadMode };
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
@@ -487,14 +639,26 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
   };
 }
 
+const DEFAULT_DASHBOARD_PORT = 8_765;
+
+function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
+  const port = file?.dashboard?.port;
+  return {
+    port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
+      ? port
+      : DEFAULT_DASHBOARD_PORT,
+  };
+}
+
 function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
+  serviceName: string | undefined,
   serviceNamePrefix: string,
   innerDataConfig: InnerDataConfig | null,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file, serviceNamePrefix, innerDataConfig),
+    sls: buildSlsConfig(file, serviceName, serviceNamePrefix, innerDataConfig),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
@@ -518,12 +682,14 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   const endpoints: OtlpEndpoint[] = [];
   // Collected from any ARMS/CMS backend; merged into the shared resource.
   const armsResourceAttributes: Record<string, string> = {};
-  // User backends use the top-level (shared) serviceName. Managed backends may
-  // override it via inner serviceNamePrefix; only tag them when it actually
-  // differs, so the default case keeps user/inner backends dedup-identical and
-  // leaves the flusher on its single-conversion path.
-  const userServiceName = config.otlpTrace?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
-  const innerPrefix = config.innerTrace?.serviceNamePrefix;
+  // An exact top-level serviceName wins for every user/managed backend. Without
+  // it, user backends use the legacy base and managed backends may override that
+  // base via inner serviceNamePrefix. Only tag an override when it differs, so
+  // the default case stays on the flusher's single-conversion path.
+  const userServiceName = config.serviceName
+    ?? config.otlpTrace?.serviceName
+    ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  const innerPrefix = config.serviceName ? undefined : config.innerTrace?.serviceNamePrefix;
   const innerServiceName = innerPrefix && innerPrefix !== userServiceName ? innerPrefix : undefined;
 
   // 1. User generic OTLP (endpoint via env or config).
@@ -592,6 +758,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     endpoints: deduped,
     protocol: 'http/protobuf',
     serviceName,
+    appendAgentTypeToServiceName: config.serviceName ? false : undefined,
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
@@ -729,7 +896,12 @@ function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint
   return result;
 }
 
-function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, innerDataConfig: InnerDataConfig | null) {
+function buildSlsConfig(
+  file: ConfigFile | null,
+  serviceName: string | undefined,
+  serviceNamePrefix: string,
+  innerDataConfig: InnerDataConfig | null,
+) {
   const rawSls = file?.sls;
   const isArray = Array.isArray(rawSls);
   const single = isArray ? null : (rawSls as SlsSingleConfig | undefined) ?? null;
@@ -772,9 +944,9 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   }
 
   if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
-    // Managed endpoints get their own __service_name__; only tag them when the
-    // inner prefix differs, so the default case stays byte-identical to before.
-    const innerPrefix = innerDataConfig.serviceNamePrefix;
+    // An exact user serviceName wins globally. Otherwise managed endpoints get
+    // their own __service_name__ base only when the inner prefix differs.
+    const innerPrefix = serviceName ? undefined : innerDataConfig.serviceNamePrefix;
     const innerServiceName = innerPrefix && innerPrefix !== serviceNamePrefix ? innerPrefix : undefined;
     const innerEndpoints = innerDataConfig.sls
       .filter(ep => ep.endpoint && ep.logstore)
@@ -814,7 +986,11 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     endpoints,
     batchMaxSize: single?.batchMaxSize ?? 20,
     flushIntervalMs: single?.flushIntervalMs ?? 2_000,
+    serviceName,
     serviceNamePrefix,
+    timeout: single?.timeout,
+    retry: single?.retry,
+    flushConcurrency: single?.flushConcurrency,
   };
 }
 

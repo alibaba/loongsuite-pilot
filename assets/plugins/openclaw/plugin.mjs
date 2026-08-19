@@ -37,6 +37,7 @@ const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
+const MIN_OPENCLAW_VERSION = "2026.5.12";
 
 // ---------------------------------------------------------------------------
 // Caller-supplied span attributes (inlined mirror of resource-context.mjs)
@@ -552,13 +553,19 @@ function finiteTokenCount(value) {
 
 function normalizeUsage(rawUsage) {
   const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
-  const input = finiteTokenCount(usage.input);
+  const uncachedInput = finiteTokenCount(usage.input);
   const output = finiteTokenCount(usage.output);
   const cacheRead = finiteTokenCount(usage.cacheRead);
   const cacheWrite = finiteTokenCount(usage.cacheWrite);
   // Some newer runtimes expose this extra field even though it is not part of
   // the minimum-version hook contract. Keep it strictly best-effort.
   const reasoning = finiteTokenCount(usage.reasoningTokens);
+  // OpenClaw reports uncached, cache-read and cache-write input separately.
+  // GenAI input_tokens is inclusive: the cache fields remain as breakdowns,
+  // while both input_tokens and total_tokens include them.
+  const input = uncachedInput === undefined && cacheRead === undefined && cacheWrite === undefined
+    ? undefined
+    : (uncachedInput ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
   const missing = input === undefined && output === undefined;
   return {
     input,
@@ -1217,6 +1224,48 @@ function makeHandler(fn) {
   };
 }
 
+function parseOpenClawVersion(value) {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(
+    /^v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+  );
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    suffix: match[4],
+  };
+}
+
+function isSupportedOpenClawVersion(value) {
+  const parsed = parseOpenClawVersion(value);
+  const minimum = parseOpenClawVersion(MIN_OPENCLAW_VERSION);
+  if (!parsed || !minimum) return false;
+
+  for (let i = 0; i < minimum.core.length; i++) {
+    if (parsed.core[i] > minimum.core[i]) return true;
+    if (parsed.core[i] < minimum.core[i]) return false;
+  }
+
+  // OpenClaw numeric suffixes are release corrections (for example -1),
+  // while named prereleases at the minimum core remain below the floor.
+  return !parsed.suffix || /^\d+(?:\.\d+)*$/.test(parsed.suffix);
+}
+
+function reportUnsupportedHost(api, detail) {
+  const message =
+    `[${PLUGIN_ID}] incompatible OpenClaw plugin API: `
+    + `${detail}; OpenClaw >=${MIN_OPENCLAW_VERSION} is required`;
+  try {
+    if (typeof api?.logger?.error === "function") {
+      api.logger.error(message);
+    } else {
+      console.error(message);
+    }
+  } catch {
+    // Telemetry diagnostics must never affect the host process.
+  }
+}
+
 export default {
   id: PLUGIN_ID,
   name: "loongsuite-pilot-openclaw",
@@ -1224,6 +1273,27 @@ export default {
     "ARMS GenAI event_t producer: captures 16 OpenClaw plugin hooks and writes JSONL for loongsuite-pilot BaseHookInput.",
 
   register(api) {
+    // OpenClaw's CLI metadata discovery provides a stub runtime and noop hook
+    // registrar. This plugin has no CLI commands, so there is nothing to do
+    // until the host performs a full registration.
+    if (api?.registrationMode === "cli-metadata") {
+      return;
+    }
+
+    if (typeof api?.on !== "function") {
+      reportUnsupportedHost(api, "api.on is unavailable");
+      return;
+    }
+
+    const hostVersion = api?.runtime?.version;
+    if (!isSupportedOpenClawVersion(hostVersion)) {
+      const versionLabel = typeof hostVersion === "string" && hostVersion.length > 0
+        ? hostVersion
+        : "unavailable";
+      reportUnsupportedHost(api, `api.runtime.version=${versionLabel} is unsupported`);
+      return;
+    }
+
     agentCwd = process.cwd() || undefined;
     openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
       ? api.pluginConfig
@@ -1237,7 +1307,7 @@ export default {
     }
 
     const on = (name, fn) => {
-      if (typeof api?.on === "function") api.on(name, makeHandler(fn));
+      api.on(name, makeHandler(fn));
     };
 
     // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)

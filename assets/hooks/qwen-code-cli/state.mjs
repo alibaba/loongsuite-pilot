@@ -14,6 +14,7 @@
  *     transcript_path, transcript_offset?,
  *     turn_count,                  // turns already exported (incl. skipped historic)
  *     resource_attributes?,         // invocation context captured by the latest Stop hook
+ *     span_attributes?,             // per-invocation span attributes captured by Stop
  *     stop_time?,
  *     events: []                   // v2 subagent_start/stop accumulator (unused in v1)
  *   }

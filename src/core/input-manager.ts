@@ -15,6 +15,7 @@ import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
+import type { MultimodalProcessor } from '../multimodal/processor.js';
 
 const logger = createLogger('InputManager');
 
@@ -50,6 +51,7 @@ export class InputManager extends EventEmitter {
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
   private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
+  private multimodalProcessor: MultimodalProcessor | null = null;
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -78,6 +80,15 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  /** Process-scoped; reject replacing a different live instance. */
+  setMultimodalProcessor(processor: MultimodalProcessor): void {
+    if (this.multimodalProcessor && this.multimodalProcessor !== processor) {
+      logger.warn('multimodal processor already set; ignoring replacement');
+      return;
+    }
+    this.multimodalProcessor = processor;
   }
 
   registerInput(input: BaseInput): void {
@@ -137,6 +148,14 @@ export class InputManager extends EventEmitter {
       }
     }
     await this.drainAllEntryQueues();
+    if (this.multimodalProcessor) {
+      try {
+        await this.multimodalProcessor.shutdown();
+      } catch (err) {
+        logger.warn('multimodal processor shutdown failed', { error: String(err) });
+      }
+      this.multimodalProcessor = null;
+    }
   }
 
   private async drainInputQueue(id: string): Promise<void> {

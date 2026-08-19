@@ -9,7 +9,7 @@ LoongSuite Pilot is a local telemetry collector for AI coding agents. It discove
 <p align="center">
   <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot local dashboard" width="880">
   <br>
-  <em>Local dashboard — multi-agent collection status, token usage, and reporting health at a glance.</em>
+  <em>Built-in local dashboard — multi-agent token usage, sessions, requests, tools, models, providers, and repository activity at a glance.</em>
 </p>
 
 ## Why LoongSuite Pilot?
@@ -34,7 +34,7 @@ Pilot is designed to answer practical questions:
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
 | Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
-| Local operations         | Provides service status, restart, rollback, and optional local dashboard commands. |
+| Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
 ## Supported Agents
@@ -46,6 +46,7 @@ Pilot is designed to answer practical questions:
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
+| DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
@@ -63,6 +64,11 @@ Pilot is designed to answer practical questions:
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 
 OpenClaw integration requires OpenClaw 2026.5.12 or later.
+
+DeepSeek Harness (`dsh`) loads Pilot's observability plugin from its user-level
+`cordis.patch.yml`. The integration captures native LLM, reasoning, tool, token,
+and time-to-first-token events. See [Agent Configuration](docs/agents.md#deepseek-harness-collection-and-lifecycle)
+for activation, source-log, disable, and uninstall behavior.
 
 ### Documented Windows Agent Support
 
@@ -182,13 +188,9 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-Optional local dashboard:
-
-```bash
-loongsuite-pilot monitor start
-```
-
-Then open `http://127.0.0.1:8765/`.
+The local dashboard starts and stops with the collector. Open
+`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
+collector-owned `logs/metrics-summary.json` file directly.
 
 macOS menu bar app:
 
@@ -210,10 +212,12 @@ To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enabl
 
 [Output Schema](docs/output-event-schema.md) - Normalized event names, fields, provider values, and finish reasons
 
-[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agentBuild From Source
+[Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
+
+## Build From Source
 
 ```bash
-git clone https://github.com/loongsuite/loongsuite-pilot.git
+git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 npm install
 npm run build
