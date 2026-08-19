@@ -4,6 +4,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../assets/hooks/shared/resource-context.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
@@ -50,14 +54,14 @@ function lastPrompt(index) {
   return { type: 'last-prompt', sessionId: 'session-old', lastPrompt: `prompt ${index}` };
 }
 
-function runProcessor(sessionId = 'session-old') {
+function runProcessor(sessionId = 'session-old', extraEnv = {}) {
   return spawnSync('node', [PROCESSOR, '--agent-id', 'qoder', '--log-prefix', 'qoder'], {
     input: JSON.stringify({
       session_id: sessionId,
       transcript_path: transcriptPath,
       cwd: '/tmp/qoder-project',
     }),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
     encoding: 'utf-8',
     timeout: 30_000,
   });
@@ -135,6 +139,28 @@ function userBoundaryPrompts(records) {
 }
 
 describe('qoder-hook-processor cold-start recovery', () => {
+  it('accepts invocation-scoped GenAI identity from env', () => {
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'identity prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runProcessor('session-old', {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(result.status).toBe(0);
+    const records = readHistory();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).toBe('session-old');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
+  });
+
   it('does not replay old turns when each old session first appears after redeployment', () => {
     fs.writeFileSync(transcriptPath, [
       ...turnRows(1, 'historical prompt 1'),

@@ -6,6 +6,10 @@ import { EventEmitter } from 'node:events';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../src/normalization/invocation-identity.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -143,6 +147,25 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('installer-user');
+    });
+
+    it('invocation env identity overrides configured/native identity and is consumed', async () => {
+      const input = new StubInput('input-1');
+      manager.registerInput(input as any);
+      manager.setUserId('fallback-user');
+      manager.setConfiguredUserId('installer-user');
+
+      const entry = buildTestEntry({ userId: 'native-user', sessionId: 'native-session' });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'customer-session';
+      entry[INVOCATION_USER_ID_FIELD] = 'customer-user';
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['gen_ai.session.id']).toBe('customer-session');
+      expect(dispatched['user.id']).toBe('customer-user');
+      expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
     });
   });
 

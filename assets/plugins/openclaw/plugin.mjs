@@ -57,6 +57,10 @@ const SPAN_ATTR_RESERVED_PREFIXES = [
 const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
 const SPAN_ATTR_SENSITIVE_RE =
   /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+const INVOCATION_IDENTITY_FIELD_MAP = {
+  "gen_ai.session.id": "agent.pilot.invocation.session.id",
+  "gen_ai.user.id": "agent.pilot.invocation.user.id",
+};
 
 function parseSpanAttributesFromEnv(env = process.env) {
   const out = {};
@@ -68,6 +72,13 @@ function parseSpanAttributesFromEnv(env = process.env) {
     const key = pair.slice(0, idx).trim();
     const value = pair.slice(idx + 1).trim();
     if (!key || !value) continue;
+    const invocationIdentityField = INVOCATION_IDENTITY_FIELD_MAP[key];
+    if (invocationIdentityField) {
+      if (value.length <= SPAN_ATTR_MAX_VALUE_LENGTH) {
+        out[invocationIdentityField] = value;
+      }
+      continue;
+    }
     if (SPAN_ATTR_RESERVED_PREFIXES.some((p) => key === p || key.startsWith(p))) continue;
     if (SPAN_ATTR_SENSITIVE_RE.test(key)) continue;
     if (value.length > SPAN_ATTR_MAX_VALUE_LENGTH) continue;

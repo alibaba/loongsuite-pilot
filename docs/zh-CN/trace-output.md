@@ -303,6 +303,17 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
   { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
   ```
 
+**按次调用的标准身份属性。** `gen_ai.session.id` 和 `gen_ai.user.id` 是 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` 支持的两个精确保留 key 例外：
+
+  ```bash
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="gen_ai.session.id=session-123,gen_ai.user.id=user-456"
+  ```
+
+- 它们会转换为 event log 中的标准身份字段（`gen_ai.session.id` 和 `user.id`），并成为所有类型 trace span 上的标准属性（`gen_ai.session.id` 和 `gen_ai.user.id`）。无需配置 `spanAttributePassthroughPrefixes`。
+- 按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
+- 一期支持 OpenCode、Claude Code、Qoder/Qoder-CN 和 OpenClaw。Codex 和 Qwen Code CLI 仍会拒绝这两个保留 key。
+- 除这两个精确 key 之外，其他 `gen_ai.*` 和 `user.*` 字段仍为保留字段并会被丢弃。
+
 **OpenCode 内置属性（`opencode.message.id`）。** OpenCode 插件会在其 `llm.request`、`llm.response`、`tool.call`、`tool.result` 记录上自动打上 `opencode.message.id`（opencode 的 assistant 消息 id）——无需启动器 env 变量。要让它出现在 span 上，只需列出 `opencode.` 前缀；随后它会出现在 ENTRY / AGENT / STEP / LLM / TOOL span 上（LLM、TOOL 取各自记录的值，ENTRY / AGENT / STEP 取 turn 级值）：
 
   ```json
@@ -311,8 +322,8 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
-- 保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。目前支持 claude-code、codex、qoder、qwen-code-cli 和 opencode。
+- 除上述两个标准身份 key 外，保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
