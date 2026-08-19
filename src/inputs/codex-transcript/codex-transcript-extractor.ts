@@ -341,7 +341,18 @@ function extractCodexTurn(
           && cumulativeTokenTotal === lastCumulativeTokenTotal;
         const envelope = activeStep();
         if (envelope?.step.hasResponseEvidence) {
-          if (!repeatedSnapshot) envelope.step.tokenUsage = usage;
+          if (repeatedSnapshot) {
+            // A repeated cumulative total reports no new accounting for this wave, so it
+            // is not an authoritative close. Keep the wave open: closing here would
+            // strand the next fresh sample in unmatchedTokenUsages and emit 0 for a wave
+            // that really did consume tokens.
+            envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
+            touchStep(envelope, source);
+            lastUsage = usage;
+            markActivity(timestamp);
+            continue;
+          }
+          envelope.step.tokenUsage = usage;
           envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
           envelope.llmClosed = true;
           touchStep(envelope, source);

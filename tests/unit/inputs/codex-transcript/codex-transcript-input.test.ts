@@ -2576,6 +2576,95 @@ describe('CodexTranscriptInput', () => {
     }
   });
 
+  it('attributes a later fresh sample to the wave a repeated snapshot left open', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-stale-then-fresh-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const lines = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', {
+        type: 'agent_message', message: 'A', phase: 'commentary',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      record('2026-06-24T06:00:06.000Z', 'event_msg', {
+        type: 'agent_message', message: 'B', phase: 'final',
+      }),
+      // Stale repeat of the wave-1 accounting: it must not close wave 2.
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      // Fresh accounting for wave 2; it has to land on the still-open wave.
+      record('2026-06-24T06:00:08.000Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+      record('2026-06-24T06:00:09.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'B',
+      }),
+    ];
+    const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
+
+    await processTranscriptOnce(input, transcript);
+    await input.stop();
+
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.step.id'])).toEqual([
+      'session-1:turn-1:s1',
+      'session-1:turn-1:s2',
+    ]);
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([12, 22]);
+  });
+
+  it('keeps a wave opened by a repeated snapshot collectable across a restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-stale-then-fresh-restart-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const head = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', {
+        type: 'agent_message', message: 'A', phase: 'commentary',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      record('2026-06-24T06:00:06.000Z', 'event_msg', {
+        type: 'agent_message', message: 'B', phase: 'final',
+      }),
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+    ];
+    const transcript = await writeTranscript(first.sessionDir, head.join('\n') + '\n');
+
+    await processTranscriptOnce(first.input, transcript);
+    await first.stateStore.save();
+    // Wave 2 still awaits its own accounting, so only wave 1 may be emitted.
+    expect(first.entries.filter(entry => entry['event.name'] === 'llm.response'))
+      .toHaveLength(1);
+    expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({
+      activeTurn: { lastCumulativeTokenTotal: 1_000 },
+    });
+
+    const second = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:10.000Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+      record('2026-06-24T06:00:11.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'B',
+      }),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(second.input, transcript);
+    await second.input.stop();
+
+    const allEntries = [...first.entries, ...second.entries];
+    const responses = allEntries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.step.id'])).toEqual([
+      'session-1:turn-1:s1',
+      'session-1:turn-1:s2',
+    ]);
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([12, 22]);
+  });
+
   it('does not commit a tool wave until an output written after token_count is present', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-token-before-tool-output-'));
     tempDirs.push(root);
