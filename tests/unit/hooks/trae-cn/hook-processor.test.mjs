@@ -849,4 +849,159 @@ describe('trae-cn hook processor', () => {
         p.type === 'tool_call' && p.id === 'toolu_r7_first'));
     expect(contaminated).toBe(false);
   });
+
+  test('round 8 #1: OTLP span names follow ARMS GenAI semconv patterns', () => {
+    // ARMS arms_docs/trace/gen-ai.md prescribes:
+    //   ENTRY → 'enter_ai_application_system'
+    //   AGENT → '{operation.name} {agent.name}'    (e.g. 'invoke_agent trae-cn')
+    //   STEP   → 'react step'
+    //   LLM    → '{operation.name} {request.model}' (e.g. 'chat <model>')
+    //   TOOL   → '{operation.name} {tool.name}'      (e.g. 'execute_tool Read')
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    const byKind = new Map();
+    for (const s of spans) {
+      byKind.set(s.attributes['gen_ai.span.kind'], s);
+    }
+    // ENTRY: literal pattern
+    const entry = byKind.get('ENTRY');
+    expect(entry).toBeDefined();
+    expect(entry.name).toBe('enter_ai_application_system');
+    // AGENT: '{operation.name} {agent.name}'
+    const agent = byKind.get('AGENT');
+    expect(agent).toBeDefined();
+    expect(agent.name).toBe(
+      `${agent.attributes['gen_ai.operation.name']} ${agent.attributes['gen_ai.agent.name']}`);
+    // STEP: literal pattern
+    const step = byKind.get('STEP');
+    expect(step).toBeDefined();
+    expect(step.name).toBe('react step');
+    // LLM: '{operation.name} {request.model}'
+    const llm = byKind.get('LLM');
+    expect(llm).toBeDefined();
+    expect(llm.name).toBe(
+      `${llm.attributes['gen_ai.operation.name']} ${llm.attributes['gen_ai.request.model']}`);
+    // TOOL: '{operation.name} {tool.name}'
+    const tool = byKind.get('TOOL');
+    expect(tool).toBeDefined();
+    expect(tool.name).toBe(
+      `${tool.attributes['gen_ai.operation.name']} ${tool.attributes['gen_ai.tool.name']}`);
+  });
+
+  test('round 8 #2: toolResultRecord always emits gen_ai.tool.call.result (even when tool_response is empty)', () => {
+    // tester r8 t9 (Read nonexistent.txt) had a TOOL span missing
+    // gen_ai.tool.call.result because toJsonValue(null/undefined/{})
+    // returns undefined, dropping the key. Verify the field is now
+    // guaranteed present regardless of tool_response shape.
+    const sessionId = 'trae-cn-r8-empty-result';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:00.000Z',
+      prompt: 'read missing file',
+    });
+    // Case A: tool_response = null (empty/falsy)
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:01.000Z',
+      tool_use_id: 'toolu_r8_null',
+      tool_name: 'Read',
+      tool_input: { file_path: '/tmp/missing.txt' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:02.000Z',
+      tool_use_id: 'toolu_r8_null',
+      tool_name: 'Read',
+      tool_response: null,
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:05.000Z',
+      last_assistant_message: 'file not found',
+    });
+    const records = readEmittedJsonl();
+    const toolResultNull = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.result'
+      && r['gen_ai.tool.call.id'] === 'toolu_r8_null');
+    expect(toolResultNull).toBeDefined();
+    expect(toolResultNull['gen_ai.tool.call.result']).toBeDefined();
+  });
+
+  test('round 9: cmdStop rewrite preserves ENTRY/AGENT/STEP end across dual-record merge (t9 regression)', () => {
+    // tester r9 reported that dev r8 #2's toolResultRecord placeholder
+    // interacted with cmdStop rewrite + writeOtlpDebugRecords merge to drop
+    // the corrected ENTRY/AGENT/STEP endTimeUnixNano on t9 (Read nonexistent
+    // .txt with empty tool_response). Root cause: state.turn_started_at was
+    // set to wall-clock nowUnixNanos() in newTurnState while state.last_event_at
+    // was set to event-time (isoToUnixNanos(event.timestamp)). When event ts
+    // lags wall-clock (e.g., trae-cn assigns event ts slightly behind hook
+    // invocation), state.turn_started_at > state.last_event_at at cmdStop
+    // rewrite, and spanBounds ENTRY/AGENT/STEP clipped end=start+1n, dropping
+    // the corrected T_STOP end. Validate: ENTRY/AGENT/STEP end == LLM end.
+    const sessionId = 'trae-cn-r9-t9-merge';
+    // Use ISO timestamps in the past relative to wall-clock — this is what
+    // triggers state.turn_started_at (wall-clock) vs state.last_event_at
+    // (event-time) desync. Without the r9 fix, ENTRY dur would be 0ms.
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:00.000Z',
+      prompt: 'read missing file',
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:04.409Z',
+      tool_use_id: 'toolu_r9_t9',
+      tool_name: 'Read',
+      tool_input: { file_path: '/tmp/missing.txt' },
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:04.582Z',
+      tool_use_id: 'toolu_r9_t9',
+      tool_name: 'Read',
+      tool_response: {},
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:05.976Z',
+      last_assistant_message: 'file not found',
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const spans = readOtlpDebugSpans();
+    const byKind = new Map(spans.map((s) => [s.attributes['gen_ai.span.kind'], s]));
+    const entry = byKind.get('ENTRY');
+    const agent = byKind.get('AGENT');
+    const step = byKind.get('STEP');
+    const llm = byKind.get('LLM');
+    const tool = byKind.get('TOOL');
+    expect(entry).toBeDefined();
+    expect(agent).toBeDefined();
+    expect(step).toBeDefined();
+    expect(llm).toBeDefined();
+    expect(tool).toBeDefined();
+    // Round 9 core assertion: ENTRY/AGENT/STEP endTime == LLM endTime.
+    // Before fix: end == T_PROMPT (= 01:00:00.000Z), dur=0ms.
+    // After fix:  end == T_STOP    (= 01:00:05.976Z), dur≈5976ms.
+    const T_STOP = '1787101205976000000'; // 2026-08-19T01:00:05.976Z
+    expect(entry.endTimeUnixNano).toBe(T_STOP);
+    expect(agent.endTimeUnixNano).toBe(T_STOP);
+    expect(step.endTimeUnixNano).toBe(T_STOP);
+    expect(llm.endTimeUnixNano).toBe(T_STOP);
+    // Round 8 #1 preserved: ARMS span name patterns.
+    expect(entry.name).toBe('enter_ai_application_system');
+    expect(step.name).toBe('react step');
+    // Round 8 #2 preserved: TOOL span still has gen_ai.tool.call.result.
+    expect(tool.attributes['gen_ai.tool.call.result']).toBe('no_response_captured');
+  });
 });

@@ -732,6 +732,21 @@ function toolResultRecord(state, base, timestamp, toolUseId, toolName, toolRespo
   const argumentsValue = pending?.arguments !== undefined
     ? pending.arguments
     : toJsonValue({});
+  // Round 8 #2: ensure gen_ai.tool.call.result is ALWAYS present on the merged
+  // TOOL span — toJsonValue(null/undefined/{}) returns undefined which drops
+  // the key entirely; sanitizeObject also drops empty objects/strings.
+  // Resulting missing field triggered validate-trace `attr.TOOL.should.result`
+  // 1× WARN in tester r8 t9 (Read nonexistent.txt). When toolResponse is
+  // falsy/empty, emit a non-empty placeholder string so the field survives
+  // sanitizeObject + OTLP merge and validate-trace's empty-value check.
+  const resultRaw = toJsonValue(toolResponse ?? {});
+  let resultValue;
+  if (resultRaw === undefined || resultRaw === null || resultRaw === ''
+      || (typeof resultRaw === 'object' && Object.keys(resultRaw).length === 0)) {
+    resultValue = 'no_response_captured';
+  } else {
+    resultValue = resultRaw;
+  }
   const record = {
     time_unix_nano: timestamp,
     startTimeUnixNano: bounds.startTimeUnixNano,
@@ -747,7 +762,7 @@ function toolResultRecord(state, base, timestamp, toolUseId, toolName, toolRespo
     'gen_ai.tool.name': toolName || 'unknown',
     'gen_ai.tool.call.id': toolUseId,
     'gen_ai.tool.call.arguments': argumentsValue,
-    'gen_ai.tool.call.result': toJsonValue(toolResponse ?? {}),
+    'gen_ai.tool.call.result': resultValue,
     'tool.result.status': inferred.status,
     'agent.trae.status_source': inferred.source,
   };
@@ -849,7 +864,6 @@ function buildOtlpSpansFromRecords(records) {
     const attributes = {};
     let startMin = null;
     let endMax = null;
-    let name = 'span';
     let statusCode = 0;
     for (const r of group) {
       for (const [k, v] of Object.entries(r)) {
@@ -870,12 +884,34 @@ function buildOtlpSpansFromRecords(records) {
       const eBig = BigInt(e);
       if (startMin === null || sBig < startMin) startMin = sBig;
       if (endMax === null || eBig > endMax) endMax = eBig;
-      const opName = r['gen_ai.operation.name'];
-      if (opName && (name === 'span' || r['event.name'] === 'llm.response'
-                     || r['event.name'] === 'tool.result')) {
-        name = opName;
-      }
       if (r['error.type']) statusCode = 2;
+    }
+    // Round 8 #1: build span name per ARMS GenAI semconv expected pattern
+    // (arms_docs/trace/gen-ai.md). `gen_ai.operation.name` stays as the
+    // short form ('enter'/'invoke_agent'/'react'/'chat'/'execute_tool')
+    // because validate-trace `operation_kind_mapping` maps that to span.kind.
+    // The OTLP span `name` field follows the ARMS name template instead:
+    //   ENTRY  → 'enter_ai_application_system' (literal)
+    //   AGENT  → '{operation.name} {agent.name}'    e.g. 'invoke_agent trae-cn'
+    //   STEP   → 'react step' (literal)
+    //   LLM    → '{operation.name} {request.model}' e.g. 'chat Doubao-Seed-Code'
+    //   TOOL   → '{operation.name} {tool.name}'     e.g. 'execute_tool Read'
+    const opName = attributes['gen_ai.operation.name'];
+    const spanKind = attributes['gen_ai.span.kind'];
+    let name = opName || 'span';
+    if (spanKind === 'ENTRY') {
+      name = 'enter_ai_application_system';
+    } else if (spanKind === 'STEP') {
+      name = 'react step';
+    } else if (spanKind === 'AGENT') {
+      const agentName = attributes['gen_ai.agent.name'];
+      name = agentName ? `${opName} ${agentName}` : opName;
+    } else if (spanKind === 'LLM') {
+      const model = attributes['gen_ai.request.model'];
+      name = model ? `${opName} ${model}` : opName;
+    } else if (spanKind === 'TOOL') {
+      const toolName = attributes['gen_ai.tool.name'];
+      name = toolName ? `${opName} ${toolName}` : opName;
     }
     spans.push({
       traceId: first.trace_id,
@@ -1035,6 +1071,16 @@ function cmdUserPromptSubmit() {
   mergeUsageIntoState(state, event);
 
   const ts = event.timestamp ? isoToUnixNanos(event.timestamp) : nowUnixNanos();
+  // Round 9: keep state.turn_started_at in EVENT-TIME (not wall-clock) so
+  // spanBounds ENTRY/AGENT/STEP computes start/end consistently.
+  // newTurnState() initially sets turn_started_at=nowUnixNanos() (wall-clock)
+  // which desyncs from state.last_event_at (event-time parsed from
+  // event.timestamp) when the event ts is in the past (historical replay)
+  // or trae-cn assigns event ts slightly behind wall-clock. The desync made
+  // spanBounds clip end=start+1n at cmdStop rewrite time, dropping the
+  // corrected endTimeUnixNano on ENTRY/AGENT/STEP and leaving parent end
+  // earlier than child LLM end → parent_contains_children ERROR.
+  if (ts && ts !== '0') state.turn_started_at = ts;
   state.last_event_at = ts;
   const base = baseFields(state, runtimeConfig);
   const records = [];
@@ -1067,6 +1113,8 @@ function cmdPreToolUse() {
     state.display_model = resolveDisplayModel(event, state);
     const base = baseFields(state, runtimeConfig);
     const ts = event.timestamp ? isoToUnixNanos(event.timestamp) : nowUnixNanos();
+    // Round 9: keep state.turn_started_at in EVENT-TIME (see cmdUserPromptSubmit).
+    if (ts && ts !== '0') state.turn_started_at = ts;
     state.last_event_at = ts;
     const records = [];
     emitEntryIfMissing(state, runtimeConfig, records, ts);
@@ -1158,6 +1206,8 @@ function cmdStop() {
     state.display_model = resolveDisplayModel(event, state);
     const base = baseFields(state, runtimeConfig);
     const ts = event.timestamp ? isoToUnixNanos(event.timestamp) : nowUnixNanos();
+    // Round 9: keep state.turn_started_at in EVENT-TIME (see cmdUserPromptSubmit).
+    if (ts && ts !== '0') state.turn_started_at = ts;
     state.last_event_at = ts;
     const records = [];
     emitEntryIfMissing(state, runtimeConfig, records, ts);
