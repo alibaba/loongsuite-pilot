@@ -1,0 +1,5 @@
+# tests/unit/hooks/trae-cn/mask-rules.test.mjs - synthetic test fixtures for masker rule verification
+# not real secrets; flagged by gitleaks generic-api-key / curl-auth-header rules
+f29f63874e0db32ddce656b7dcdf7825eb9ec040:tests/unit/hooks/trae-cn/mask-rules.test.mjs:generic-api-key:33
+f29f63874e0db32ddce656b7dcdf7825eb9ec040:tests/unit/hooks/trae-cn/mask-rules.test.mjs:generic-api-key:40
+f29f63874e0db32ddce656b7dcdf7825eb9ec040:tests/unit/hooks/trae-cn/mask-rules.test.mjs:curl-auth-header:47
