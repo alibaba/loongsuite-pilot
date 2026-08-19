@@ -125,6 +125,19 @@ describe('injectSkillRecords', () => {
     expect(toolResult['agent.cursor.skill_detection_source']).toBe('transcript_post_assembly');
   });
 
+  it('should preserve the variant-specific cwd on synthesized skill records', () => {
+    const records = [makeLlmResponse({
+      'gen_ai.agent.type': 'cursor-cli',
+      'agent.cursor-cli.cwd': 'C:\\Users\\alice\\project',
+    })];
+
+    injectSkillRecords(records, [makeSkill()]);
+
+    expect(records.slice(1).every(record => (
+      record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project'
+    ))).toBe(true);
+  });
+
   it('should share the same toolCallId across output.messages, tool.call, and tool.result', () => {
     const records = [makeLlmResponse()];
     const skills = [makeSkill()];

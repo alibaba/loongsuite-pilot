@@ -5,7 +5,10 @@ vi.mock('../../../src/utils/git-context.js', () => ({
   inferGitContext: (...args: unknown[]) => inferGitContext(...args),
 }));
 
-import { enrichCanonicalEntryWithGit } from '../../../src/normalization/enrich-git-context.js';
+import {
+  enrichCanonicalEntriesWithGit,
+  enrichCanonicalEntryWithGit,
+} from '../../../src/normalization/enrich-git-context.js';
 
 describe('enrichCanonicalEntryWithGit', () => {
   beforeEach(() => {
@@ -102,5 +105,53 @@ describe('enrichCanonicalEntryWithGit', () => {
 
     expect(entry['workspace.path']).toBeUndefined();
     expect(inferGitContext).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['qoder-work', 'agent.qoderwork.cwd'],
+    ['qoder-work-cn', 'agent.qoderwork.cwd'],
+    ['qwen-work-cn', 'agent.qwenworkcn.cwd'],
+    ['qoder-cn', 'agent.qoder.cwd'],
+    ['cursor-cli', 'agent.cursor_cli.cwd'],
+  ])('resolves %s producer namespace aliases', async (namespace, cwdKey) => {
+    inferGitContext.mockResolvedValue({});
+    const entry: Record<string, unknown> = {};
+
+    await enrichCanonicalEntryWithGit(entry, { [cwdKey]: '/workspace/aliased' }, namespace);
+
+    expect(entry['workspace.path']).toBe('/workspace/aliased');
+    expect(inferGitContext).toHaveBeenCalledWith('/workspace/aliased');
+  });
+
+  it('last-mile enriches entries from agent type or an existing canonical workspace path', async () => {
+    inferGitContext.mockResolvedValueOnce({
+      repo: 'org/codex-project',
+      branch: 'feature/codex',
+      domain: 'github.com',
+      root: '/workspace/codex-project',
+    }).mockResolvedValueOnce({});
+    const entries: Record<string, unknown>[] = [
+      {
+        'gen_ai.agent.type': 'codex',
+        'agent.codex.cwd': '/workspace/codex-project/src',
+      },
+      {
+        'gen_ai.agent.type': 'cursor',
+        'agent.cursor.cwd': '/workspace/cursor-project',
+        'workspace.path': '/workspace/cursor-project',
+      },
+    ];
+
+    await enrichCanonicalEntriesWithGit(entries);
+
+    expect(entries[0]).toMatchObject({
+      'workspace.path': '/workspace/codex-project/src',
+      'workspace.current_root': '/workspace/codex-project',
+      'git.repo': 'org/codex-project',
+      'git.branch': 'feature/codex',
+      'git.domain': 'github.com',
+    });
+    expect(inferGitContext).toHaveBeenNthCalledWith(1, '/workspace/codex-project/src');
+    expect(inferGitContext).toHaveBeenNthCalledWith(2, '/workspace/cursor-project');
   });
 });

@@ -1,10 +1,22 @@
 import path from 'node:path';
 import { inferGitContext } from '../utils/git-context.js';
 
+const NAMESPACE_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  'cursor-cli': ['cursor-cli', 'cursor_cli'],
+  cursor_cli: ['cursor_cli', 'cursor-cli'],
+  'qoder-cli': ['qoder-cli', 'qoder'],
+  'qoder-idea': ['qoder-idea', 'qoder'],
+  'qoder-cn': ['qoder-cn', 'qodercn', 'qoder'],
+  qodercn: ['qodercn', 'qoder-cn', 'qoder'],
+  'qoder-work': ['qoder-work', 'qoderwork'],
+  'qoder-work-cn': ['qoder-work-cn', 'qoderwork'],
+  'qwen-work-cn': ['qwen-work-cn', 'qwenworkcn'],
+};
+
 export async function enrichCanonicalEntryWithGit(
   entry: Record<string, unknown>,
   record: Record<string, unknown>,
-  namespace: string,
+  namespace: string | readonly string[],
 ): Promise<void> {
   const probeDir = extractProbeDir(entry, record, namespace);
   if (probeDir && !entry['workspace.path']) entry['workspace.path'] = probeDir;
@@ -19,21 +31,58 @@ export async function enrichCanonicalEntryWithGit(
   if (!entry['workspace.current_root'] && inferred.root) entry['workspace.current_root'] = inferred.root;
 }
 
+/**
+ * Last-mile enrichment for inputs that emit canonical Agent records directly.
+ *
+ * Hook-based inputs normally enrich before reaching InputManager. Transcript
+ * inputs such as Codex can emit from several recovery/fusion paths, so doing a
+ * guarded pass at the shared dispatch boundary keeps those paths consistent.
+ * Enrichment only fills missing canonical values, while inferGitContext caches
+ * repeated probes (including non-repository directories), so this is safe for
+ * entries that were already enriched upstream.
+ */
+export async function enrichCanonicalEntriesWithGit(
+  entries: Record<string, unknown>[],
+): Promise<void> {
+  for (const entry of entries) {
+    const agentType = normalizeString(entry['gen_ai.agent.type']);
+    if (!agentType) continue;
+    await enrichCanonicalEntryWithGit(entry, entry, agentType);
+  }
+}
+
 function extractProbeDir(
   entry: Record<string, unknown>,
   record: Record<string, unknown>,
-  namespace: string,
+  namespace: string | readonly string[],
 ): string | undefined {
-  const cwd = normalizeString(entry[`agent.${namespace}.cwd`])
-    ?? normalizeString(record[`agent.${namespace}.cwd`]);
-  if (cwd && isAbsolutePath(cwd)) return cwd;
+  const workspacePath = normalizeString(entry['workspace.path'])
+    ?? normalizeString(record['workspace.path']);
+  if (workspacePath && isAbsolutePath(workspacePath)) return workspacePath;
 
-  const roots = entry[`agent.${namespace}.workspace_roots`]
-    ?? record[`agent.${namespace}.workspace_roots`];
-  const rootList = normalizeStringArray(roots);
-  if (rootList.length > 0 && isAbsolutePath(rootList[0])) return rootList[0];
+  for (const candidate of expandNamespaces(namespace)) {
+    const cwd = normalizeString(entry[`agent.${candidate}.cwd`])
+      ?? normalizeString(record[`agent.${candidate}.cwd`]);
+    if (cwd && isAbsolutePath(cwd)) return cwd;
+
+    const roots = entry[`agent.${candidate}.workspace_roots`]
+      ?? record[`agent.${candidate}.workspace_roots`];
+    const rootList = normalizeStringArray(roots);
+    if (rootList.length > 0 && isAbsolutePath(rootList[0])) return rootList[0];
+  }
 
   return undefined;
+}
+
+function expandNamespaces(namespace: string | readonly string[]): string[] {
+  const requested = typeof namespace === 'string' ? [namespace] : namespace;
+  const expanded: string[] = [];
+  for (const value of requested) {
+    for (const candidate of NAMESPACE_ALIASES[value] ?? [value]) {
+      if (!expanded.includes(candidate)) expanded.push(candidate);
+    }
+  }
+  return expanded;
 }
 
 function isAbsolutePath(value: string): boolean {

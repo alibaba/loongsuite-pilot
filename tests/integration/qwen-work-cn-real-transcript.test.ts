@@ -56,7 +56,10 @@ function findTranscript(root: string): string | undefined {
   visit(root);
   return candidates
     .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)
-    .find(file => readFileSync(file, 'utf-8').includes('"type":"user"'));
+    .find(file => {
+      const content = readFileSync(file, 'utf-8');
+      return content.includes('"type":"user"') && content.includes('"type":"assistant"');
+    });
 }
 
 function deployQwenHooks(hooksDir: string): void {

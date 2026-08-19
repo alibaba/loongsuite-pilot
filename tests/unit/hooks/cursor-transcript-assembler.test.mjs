@@ -177,6 +177,23 @@ describe('buildCursorRecordsFromTranscript', () => {
     expect(result).toBeNull();
   });
 
+  it('preserves Cursor CLI identity and cwd on the Windows transcript path', () => {
+    const transcriptPath = simpleTranscript('inspect', 'done');
+    const records = buildCursorRecordsFromTranscript(
+      transcriptPath,
+      [
+        makePromptEvent({ cwd: 'C:\\Users\\alice\\project' }),
+        makeResponseEvent({ text: 'done' }),
+        makeStopEvent(),
+      ],
+      { stopConversationId: 'conv-abc', variant: 'cursor-cli' },
+    );
+
+    expect(records).not.toBeNull();
+    expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli')).toBe(true);
+    expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project')).toBe(true);
+  });
+
   describe('simple turn (no tool calls)', () => {
     let records;
     let transcriptPath;

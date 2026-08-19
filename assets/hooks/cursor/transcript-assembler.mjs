@@ -31,6 +31,7 @@ import {
   parseMaybeJson,
   inferProviderName,
 } from '../agent-event-normalizer.mjs';
+import { cursorWorkspaceFields, resolveWorkspacePath } from './workspace-context.mjs';
 
 // ─── Public API ───
 
@@ -50,6 +51,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
 
   const runtimeConfig = options.runtimeConfig || {};
   const stopConversationId = options.stopConversationId;
+  const variant = options.variant || 'cursor';
 
   const promptEvent = stopConversationId
     ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
@@ -65,6 +67,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
+  const workspacePath = resolveWorkspacePath(parentEvents);
 
   // T5: Resolve model from journal events (afterAgentThought/Response carry real model)
   const model = parentEvents.find(e =>
@@ -76,9 +79,10 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     trace_id: traceId,
     'gen_ai.session.id': parentConvId,
     'gen_ai.turn.id': turnId,
-    'gen_ai.agent.type': 'cursor',
+    'gen_ai.agent.type': variant,
     'gen_ai.agent.id': parentConvId,
     'user.id': userId,
+    ...cursorWorkspaceFields(variant, workspacePath),
   };
 
   const records = [];

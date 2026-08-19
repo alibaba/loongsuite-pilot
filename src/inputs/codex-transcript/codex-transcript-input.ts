@@ -2673,6 +2673,9 @@ function codexTurnEndMarker(
     ...(source['agent.codex.transcript_turn_id']
       ? { 'agent.codex.transcript_turn_id': source['agent.codex.transcript_turn_id'] }
       : {}),
+    ...(source['agent.codex.cwd']
+      ? { 'agent.codex.cwd': source['agent.codex.cwd'] }
+      : {}),
     'agent.codex.turn_status': status,
   };
 }
