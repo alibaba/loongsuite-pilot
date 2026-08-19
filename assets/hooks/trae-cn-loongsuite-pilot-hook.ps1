@@ -101,7 +101,7 @@ if (-not [Console]::IsInputRedirected) {
 try {
     # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
     # reads it directly; PowerShell never touches the bytes. Keep this file
-    # ASCII-only — Windows PowerShell 5.1 parses a BOM-less script using the
+    # ASCII-only -- Windows PowerShell 5.1 parses a BOM-less script using the
     # system ANSI code page (GBK/936 on Chinese Windows); any non-ASCII byte
     # here corrupts parsing and aborts the whole script.
     $result = & $nodeBin $Processor $Subcommand 2>$null
