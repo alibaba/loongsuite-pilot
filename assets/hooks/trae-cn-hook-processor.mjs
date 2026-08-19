@@ -59,7 +59,10 @@ import {
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
-import { decodeProbeLine } from './trae-cn/transcript-parser.mjs';
+// Frida probe parser (./trae-cn/transcript-parser.mjs) is loaded lazily inside
+// cmdFridaEnrich — that path is intentionally uninvoked in this PR, and a
+// static top-level import would crash module load in CI's clean checkout
+// (the file ships with the Frida distribution, not this PR).
 
 const AGENT_ID = 'trae-cn';
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
@@ -1346,7 +1349,7 @@ function readFridaProbeLines() {
   }
 }
 
-function emitFridaEnrichmentSpans(probeLines) {
+async function emitFridaEnrichmentSpans(probeLines) {
   if (!probeLines || probeLines.length === 0) return;
   const ts = nowUnixNanos();
   const traceId = generateTraceId();
@@ -1405,6 +1408,14 @@ function emitFridaEnrichmentSpans(probeLines) {
   ];
   let reqText = '';
   let resText = '';
+  let decodeProbeLine = null;
+  try {
+    ({ decodeProbeLine } = await import('./trae-cn/transcript-parser.mjs'));
+  } catch {
+    // Frida parser ships with the Frida distribution, not this PR.
+    // Skip enrichment if the module is unavailable.
+    return;
+  }
   for (const line of probeLines) {
     const decoded = decodeProbeLine(line);
     if (!decoded || !decoded.parsed_ok) continue;
@@ -1461,7 +1472,7 @@ function emitFridaEnrichmentSpans(probeLines) {
   emitRecords({ trace_id: traceId }, records, loadHookRuntimeConfig(pilotDataDir()));
 }
 
-function cmdFridaEnrich() {
+async function cmdFridaEnrich() {
   // Reads the frida-probe.jsonl written by frida-trae-cn-probe.js and emits
   // supplementary LLM spans. Idempotent — re-running just appends more spans
   // (caller's responsibility to deduplicate via trace_id). Round 3 production
@@ -1475,7 +1486,7 @@ function cmdFridaEnrich() {
     });
     return;
   }
-  emitFridaEnrichmentSpans(probeLines);
+  await emitFridaEnrichmentSpans(probeLines);
 }
 
 // ─── dispatcher ───
