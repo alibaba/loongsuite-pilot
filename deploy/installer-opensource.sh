@@ -890,15 +890,18 @@ deploy_package() {
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
-    if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js || {
+    if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
+        "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" || {
             msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
             return 1
         }
+        msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+        msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
+            "    If using Codex desktop app, please manually trust hooks on first launch"
+    else
+        msg "    ⚠️ postinstall.js 未找到，跳过 Hook 部署" \
+            "    ⚠️ postinstall.js not found, skipping hook deployment"
     fi
-    msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-        "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 
     # Write current pointer only after all deploy steps succeed
