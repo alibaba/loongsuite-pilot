@@ -1,12 +1,6 @@
-import type { StateStore } from '../checkpoints/state-store.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 
-type TurnBoundaryStateStore = Pick<StateStore, 'get' | 'update'>;
-
-const STATE_ID = '__turn-boundary-processor__';
-const STATE_EXTRA_KEY = 'turnBoundaryProcessor';
-const STATE_VERSION = 1;
 const MAX_TRACKED_TURNS = 4_096;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
@@ -17,24 +11,16 @@ interface TrackedTurn {
   updatedAt: number;
 }
 
-interface StoredTurnBoundaryState {
-  version: number;
-  turns: Record<string, TrackedTurn>;
-}
-
 /**
  * Fill-only turn boundary enrichment shared by every canonical Agent input.
  *
  * The processor deliberately mutates only `gen_ai.turn.start/end`. Existing
  * markers stay authoritative, records are never reordered or synthesized, and
- * records without a reliable turn.id are left untouched.
+ * records without a reliable turn.id are left untouched. Tracking is bounded
+ * and process-local so enrichment never participates in input checkpoints.
  */
 export class TurnBoundaryProcessor {
   private readonly turns = new Map<string, TrackedTurn>();
-
-  constructor(private readonly stateStore?: TurnBoundaryStateStore) {
-    this.restore();
-  }
 
   enrich(entries: AgentActivityEntry[]): void {
     if (entries.length === 0) return;
@@ -86,33 +72,6 @@ export class TurnBoundaryProcessor {
     }
 
     this.compact(now);
-    this.persist();
-  }
-
-  private restore(): void {
-    const raw = this.stateStore?.get(STATE_ID).extra?.[STATE_EXTRA_KEY];
-    if (!isStoredState(raw) || raw.version !== STATE_VERSION) return;
-
-    const now = Date.now();
-    for (const [key, turn] of Object.entries(raw.turns)) {
-      if (!isTrackedTurn(turn) || now - turn.updatedAt > STATE_TTL_MS) continue;
-      this.turns.set(key, { ...turn });
-    }
-    this.compact(now);
-  }
-
-  private persist(): void {
-    if (!this.stateStore) return;
-    const turns: Record<string, TrackedTurn> = {};
-    for (const [key, turn] of this.turns) turns[key] = { ...turn };
-    this.stateStore.update(STATE_ID, {
-      extra: {
-        [STATE_EXTRA_KEY]: {
-          version: STATE_VERSION,
-          turns,
-        } satisfies StoredTurnBoundaryState,
-      },
-    });
   }
 
   private compact(now: number): void {
@@ -164,23 +123,4 @@ function hasOwnBoundary(
   field: 'gen_ai.turn.start' | 'gen_ai.turn.end',
 ): boolean {
   return Object.prototype.hasOwnProperty.call(entry, field);
-}
-
-function isStoredState(value: unknown): value is StoredTurnBoundaryState {
-  return Boolean(value)
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && typeof (value as StoredTurnBoundaryState).version === 'number'
-    && Boolean((value as StoredTurnBoundaryState).turns)
-    && typeof (value as StoredTurnBoundaryState).turns === 'object'
-    && !Array.isArray((value as StoredTurnBoundaryState).turns);
-}
-
-function isTrackedTurn(value: unknown): value is TrackedTurn {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const turn = value as TrackedTurn;
-  return typeof turn.started === 'boolean'
-    && typeof turn.ended === 'boolean'
-    && typeof turn.updatedAt === 'number'
-    && Number.isFinite(turn.updatedAt);
 }

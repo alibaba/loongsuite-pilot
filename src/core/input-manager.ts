@@ -16,7 +16,6 @@ import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
-import type { StateStore } from '../checkpoints/state-store.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 
 const logger = createLogger('InputManager');
@@ -55,12 +54,7 @@ export class InputManager extends EventEmitter {
   private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
-  private readonly turnBoundaryProcessor: TurnBoundaryProcessor;
-
-  constructor(stateStore?: StateStore) {
-    super();
-    this.turnBoundaryProcessor = new TurnBoundaryProcessor(stateStore);
-  }
+  private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;

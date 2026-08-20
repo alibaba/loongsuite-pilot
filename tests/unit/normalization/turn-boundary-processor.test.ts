@@ -1,15 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
   TurnBoundaryProcessor,
   isTerminalTurnEntry,
 } from '../../../src/normalization/turn-boundary-processor.js';
-import { StateStore } from '../../../src/checkpoints/state-store.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
-import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 function entry(
   eventId: string,
@@ -156,44 +151,41 @@ describe('TurnBoundaryProcessor', () => {
       .toEqual(['turn-1-response', 'turn-2-response']);
   });
 
-  it('restores tracked state and avoids a duplicate start after restart', () => {
-    const stateStore = new MockStateStore();
+  it('accepts a repeated start after a fresh process-local processor is created', () => {
     const first = [entry('request', 'llm.request')];
-    new TurnBoundaryProcessor(stateStore).enrich(first);
+    new TurnBoundaryProcessor().enrich(first);
 
     const last = [entry('response', 'llm.response', {
       'gen_ai.response.finish_reasons': ['stop'],
     })];
-    new TurnBoundaryProcessor(stateStore).enrich(last);
+    new TurnBoundaryProcessor().enrich(last);
 
     expect(first[0]['gen_ai.turn.start']).toBe(true);
-    expect(last[0]['gen_ai.turn.start']).toBeUndefined();
+    expect(last[0]['gen_ai.turn.start']).toBe(true);
     expect(last[0]['gen_ai.turn.end']).toBe(true);
   });
 
-  it('restores tracked state from the persisted input state file', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'turn-boundary-state-'));
-    try {
-      const statePath = path.join(root, 'input-state.json');
-      const firstStore = new StateStore(statePath);
-      await firstStore.load();
-      const first = [entry('request', 'llm.request')];
-      new TurnBoundaryProcessor(firstStore).enrich(first);
-      await firstStore.save();
+  it('bounds process-local tracking by evicting the oldest observed turn', () => {
+    const processor = new TurnBoundaryProcessor();
+    const initial = Array.from({ length: 4_097 }, (_, index) => entry(
+      `request-${index}`,
+      'llm.request',
+      { 'gen_ai.turn.id': `turn-${index}` },
+    ));
 
-      const restoredStore = new StateStore(statePath);
-      await restoredStore.load();
-      const terminal = [entry('response', 'llm.response', {
-        'gen_ai.response.finish_reasons': ['stop'],
-      })];
-      new TurnBoundaryProcessor(restoredStore).enrich(terminal);
+    processor.enrich(initial);
 
-      expect(first[0]['gen_ai.turn.start']).toBe(true);
-      expect(terminal[0]['gen_ai.turn.start']).toBeUndefined();
-      expect(terminal[0]['gen_ai.turn.end']).toBe(true);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
+    const evicted = [entry('request-evicted', 'llm.request', {
+      'gen_ai.turn.id': 'turn-0',
+    })];
+    const retained = [entry('request-retained', 'llm.request', {
+      'gen_ai.turn.id': 'turn-4096',
+    })];
+    processor.enrich(evicted);
+    processor.enrich(retained);
+
+    expect(evicted[0]['gen_ai.turn.start']).toBe(true);
+    expect(retained[0]['gen_ai.turn.start']).toBeUndefined();
   });
 
   it('uses llm_output rather than per-call stop as the OpenClaw end', () => {
