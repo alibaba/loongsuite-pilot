@@ -57,6 +57,7 @@ describe('DshRuntimeLocator', () => {
     home?: string;
     cwd?: string;
     dsh?: boolean;
+    args?: string[];
   }): Promise<void> {
     const processDir = path.join(procRoot, String(pid));
     await fs.mkdir(processDir);
@@ -65,7 +66,7 @@ describe('DshRuntimeLocator', () => {
       : '/code/node_modules/@deepseek-ai/dsh/lib/bin.js';
     await fs.writeFile(
       path.join(processDir, 'cmdline'),
-      Buffer.from(['node', script, 'web', '--port', '13080', ''].join('\0')),
+      Buffer.from([...(options.args ?? ['node', script, 'web', '--port', '13080']), ''].join('\0')),
     );
     await fs.writeFile(
       path.join(processDir, 'environ'),
@@ -104,6 +105,29 @@ describe('DshRuntimeLocator', () => {
       pid: 321,
     });
     expect(detectAgent).not.toHaveBeenCalled();
+  });
+
+  it('discovers Node-launched DSH even when Node flags precede the script', async () => {
+    const home = path.join(tmpDir, 'runtime-home');
+    await writeProcess(324, {
+      home,
+      args: [
+        'node',
+        '--enable-source-maps',
+        '--inspect=127.0.0.1:0',
+        '/code/node_modules/@deepseek-ai/dsh/lib/bin.js',
+        'web',
+      ],
+    });
+
+    const target = await locator().locate(makeDef());
+
+    expect(target).toEqual({
+      home,
+      patchPath: path.join(home, 'cordis.patch.yml'),
+      source: 'running-process',
+      pid: 324,
+    });
   });
 
   it('writes the managed patch to the home discovered from a running DSH process', async () => {

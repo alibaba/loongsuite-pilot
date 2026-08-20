@@ -159,9 +159,11 @@ export class DshRuntimeLocator {
     const executable = path.basename(args[0] ?? '').toLowerCase();
     if (executable === 'dsh' || executable === 'dsh.exe') return true;
     if (executable !== 'node' && executable !== 'node.exe' && executable !== 'nodejs') return false;
-    const script = args[1] ?? '';
-    return path.basename(script).toLowerCase() === 'dsh'
-      || script.replace(/\\/g, '/').endsWith('/@deepseek-ai/dsh/lib/bin.js');
+    return args.slice(1).some(arg => {
+      if (arg.startsWith('-')) return false;
+      return path.basename(arg).toLowerCase() === 'dsh'
+        || arg.replace(/\\/g, '/').endsWith('/@deepseek-ai/dsh/lib/bin.js');
+    });
   }
 
   private readEnvironmentValue(bytes: Buffer, name: string): string | undefined {

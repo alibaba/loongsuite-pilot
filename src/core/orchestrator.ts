@@ -631,6 +631,9 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
           }
+          if (result.skipped && result.reason !== 'up-to-date') {
+            throw new Error(`DSH YAML patch repair skipped for ${def.id}: ${result.reason ?? 'unknown'}`);
+          }
         },
         cleanup: async () => {
           const removed = await this.deploymentManager.undeployAgent(def);
