@@ -234,6 +234,23 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 > **注意：** Langfuse 使用 HTTP 接收 OTLP 数据，不支持 gRPC（端口 4317）。LLM 消息内容默认包含在 Trace 中（`captureMessageContent` 默认为 `true`）。如需关闭，请在配置中显式设置 `captureMessageContent` 为 `false`。
 
+## Token 用量聚合口径
+
+Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
+
+- 每个 `LLM` span 记录一次模型调用的用量。
+- 父级 `AGENT` span 记录整个 Agent turn 的汇总用量，其 Token 值等于所有 `LLM` 子 span 的用量之和，并不代表额外用量。
+
+这样既能保留单次调用明细，也能直接查看 turn 级总量。但是，如果后端通过汇总 Trace 中所有 span 的用量来计算总数，同一批 Token 就可能被计算两次。例如，Langfuse 的 Trace Header 可能会把 `AGENT` 汇总值和所有 `LLM` 子级值相加。
+
+查询 Token 用量时，应统一使用一个层级：
+
+- 查看单个 Agent turn 的总用量时，以 `AGENT` span（`gen_ai.span.kind = AGENT`）为准。
+- 分析单次模型调用时，只汇总 `LLM` span（`gen_ai.span.kind = LLM`）。
+- 不要将 `AGENT` span 的用量和其下级 `LLM` span 的用量再次相加。
+
+这个注意事项只影响会跨 Span 层级聚合的 OTLP Trace 后端。SLS、JSONL、HTTP 输出以及内置状态栏消费的是事件记录，不会同时汇总 Trace 父子两个层级。
+
 ## Trace 中的内容采集
 
 如果开启消息内容采集，Trace span 可能包含敏感内容。敏感或团队统一管理的环境建议：
