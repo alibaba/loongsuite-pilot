@@ -17,6 +17,7 @@ import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
+import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 
 const logger = createLogger('InputManager');
 
@@ -246,11 +247,7 @@ export class InputManager extends EventEmitter {
     }
 
     for (const entry of entries) {
-      if (this.configuredUserId) {
-        entry['user.id'] = this.configuredUserId;
-      } else if (!entry['user.id'] && this.userId) {
-        entry['user.id'] = this.userId;
-      }
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
     }
 
     // Upstream trace linking: stamp trace_id / parent_span_id from correlation

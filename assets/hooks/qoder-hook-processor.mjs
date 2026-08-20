@@ -43,7 +43,10 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   : {};
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
-const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: 'qoder' });
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
+  agentId: 'qoder',
+  allowInvocationIdentity: true,
+});
 
 // --- Per-transcript processing lock -----------------------------------------
 // Every Stop can create a detached retry. Serialize the complete read -> append
