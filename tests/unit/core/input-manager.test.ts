@@ -1,12 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
-import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import {
+  buildTestEntry,
+  cleanupTempDir,
+  createTempDir,
+  writeJsonlFile,
+} from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
+import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -225,6 +233,50 @@ describe('InputManager', () => {
       expect(dispatched['user.id']).toBe('customer-user');
       expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
       expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
+    });
+
+    it('links TRACEPARENT with the native session before applying invocation session identity', async () => {
+      const nativeSessionId = 'opencode-native-session';
+      const customerSessionId = 'customer-session';
+      const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const upstreamSpanId = '00f067aa0ba902b7';
+      const localTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const dataDir = await createTempDir('input-manager-upstream-identity-');
+
+      try {
+        const correlateDir = path.join(dataDir, 'acp-correlate');
+        await writeJsonlFile(path.join(correlateDir, `${nativeSessionId}.jsonl`), [{
+          type: 'session',
+          sessionId: nativeSessionId,
+          traceparent: `00-${upstreamTraceId}-${upstreamSpanId}-01`,
+        }]);
+        manager.setTraceLinker(new TraceLinker(
+          new CorrelationStore(correlateDir),
+          { retries: 0 },
+        ));
+
+        const input = new StubInput('opencode-log');
+        manager.registerInput(input as any);
+        const entry = buildTestEntry({
+          agentType: ClientType.OpenCode,
+          sessionId: nativeSessionId,
+          trace_id: localTraceId,
+          'gen_ai.turn.id': `${nativeSessionId}:t1`,
+        });
+        entry[INVOCATION_SESSION_ID_FIELD] = customerSessionId;
+
+        input.emit('entries', [entry]);
+        await manager.stopAll();
+
+        expect(flusher.batchCalls).toHaveLength(1);
+        const dispatched = flusher.batchCalls[0][0];
+        expect(dispatched['gen_ai.session.id']).toBe(customerSessionId);
+        expect(dispatched.trace_id).toBe(upstreamTraceId);
+        expect(dispatched.parent_span_id).toBe(upstreamSpanId);
+        expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      } finally {
+        await cleanupTempDir(dataDir);
+      }
     });
   });
 
