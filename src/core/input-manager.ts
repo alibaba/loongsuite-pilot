@@ -256,18 +256,20 @@ export class InputManager extends EventEmitter {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 
-    for (const entry of entries) {
-      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
-    }
-
     // Upstream trace linking: stamp trace_id / parent_span_id from correlation
-    // store so agent spans reparent under the upstream span. Fully fail-open.
+    // store while entries still carry their agent-native session id. Invocation
+    // identity is customer-facing and may replace gen_ai.session.id, but the
+    // correlation files are keyed by the native id. Fully fail-open.
     if (this.traceLinker) {
       try {
         await this.traceLinker.stamp(entries);
       } catch (err) {
         logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
       }
+    }
+
+    for (const entry of entries) {
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
     }
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
