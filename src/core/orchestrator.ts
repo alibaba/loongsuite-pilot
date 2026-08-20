@@ -624,7 +624,7 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () =>
           (await fileExists(pluginPath))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
