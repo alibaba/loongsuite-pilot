@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -21,6 +21,7 @@ describe('cleanStaleTmpFiles', () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'stale-tmp-test-'));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   });
 
@@ -41,6 +42,7 @@ describe('cleanStaleTmpFiles', () => {
     const freshSelf = await writeTmp(`state.json.${myPid}.${Date.now()}.tmp`, 5_000);     // 5s ago, self pid
     const staleOther = await writeTmp(`state.json.${otherPid}.${Date.now() - 200000}.tmp`, 120_000); // 120s ago
     const staleSelf = await writeTmp(`state.json.${myPid}.${Date.now() - 200000}.tmp`, 120_000);     // 120s ago, self
+    const staleUnique = await writeTmp(`state.json.${myPid}.${Date.now() - 200000}.unique-id.tmp`, 120_000);
     const notTmp = await writeTmp(`state.json`, 120_000); // not a tmp file
     const nonMatchingTmp = await writeTmp(`foo.tmp`, 120_000); // doesn't match the pid.ts.tmp pattern
 
@@ -50,6 +52,7 @@ describe('cleanStaleTmpFiles', () => {
     await expect(fs.stat(freshSelf)).resolves.toBeTruthy();    // fresh self-pid: KEEP
     await expect(fs.stat(staleOther)).rejects.toBeTruthy();    // stale other-pid: DELETE
     await expect(fs.stat(staleSelf)).rejects.toBeTruthy();     // stale self-pid: DELETE (pid reuse / crashed)
+    await expect(fs.stat(staleUnique)).rejects.toBeTruthy();   // new pid.ts.unique.tmp format: DELETE
     await expect(fs.stat(notTmp)).resolves.toBeTruthy();       // non-tmp: untouched
     await expect(fs.stat(nonMatchingTmp)).resolves.toBeTruthy(); // non-matching tmp: untouched
   });
@@ -69,6 +72,20 @@ describe('cleanStaleTmpFiles', () => {
     )).rejects.toThrow('file changed before write');
 
     await expect(fs.readFile(target, 'utf8')).resolves.toBe('{"model":"new"}\n');
+  });
+
+  it('uses unique temporary files for concurrent writes in the same millisecond', async () => {
+    const target = path.join(dir, 'state.json');
+    vi.spyOn(Date, 'now').mockReturnValue(1_786_000_000_000);
+
+    const contents = Array.from({ length: 20 }, (_, index) => `value-${index}\n`);
+    await expect(Promise.all(
+      contents.map(content => writeTextFileAtomic(target, content)),
+    )).resolves.toHaveLength(contents.length);
+
+    expect(contents).toContain(await fs.readFile(target, 'utf8'));
+    const leftovers = (await fs.readdir(dir)).filter(name => name.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
   });
 });
 
