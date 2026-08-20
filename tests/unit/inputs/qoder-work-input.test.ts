@@ -195,6 +195,7 @@ describe('QoderWorkInput', () => {
         'gen_ai.session.id': 'sess-work',
         'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello work' }] }],
         'agent.source': 'qoder-transcript-hook',
+        'agent.qoderwork.cwd': '/workspace/qoder-work',
       };
       await fs.writeFile(logFile, JSON.stringify(record) + '\n');
 
@@ -210,6 +211,7 @@ describe('QoderWorkInput', () => {
         'gen_ai.agent.type': ClientType.QoderWork,
         'gen_ai.session.id': 'sess-work',
         'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello work' }] }],
+        'workspace.path': '/workspace/qoder-work',
       });
       await input.stop();
     });

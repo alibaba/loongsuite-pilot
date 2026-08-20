@@ -533,6 +533,35 @@ describe('MetricsWriter', () => {
       expect(alarm!.alarm_level).toBe('3');
     });
 
+    it('UPDATER_NOT_RUNNING_ALARM never fires when auto-update is disabled', async () => {
+      // With auto-update disabled nothing registers an updater service and the updater
+      // exits on that config, so the pid is missing by design. Left ungated, every such
+      // install would report this level-3 alarm ~30min after start (L1 runs every 10min
+      // and the probe begins on cycle 3) about a process that is not supposed to exist.
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+        autoUpdateEnabled: false,
+        updaterLiveness: () => ({
+          running: false,
+          source: 'none',
+          reason: 'no matching updater command found',
+          pidFileState: 'missing',
+        }),
+      });
+
+      vi.useRealTimers();
+      // Same four cycles that make the enabled case alarm above.
+      for (let i = 0; i < 4; i++) await (writer as any).writeL1();
+
+      const entries = alarmManager.serialize();
+      expect(entries.find(e => e.alarm_type === 'UPDATER_NOT_RUNNING_ALARM')).toBeUndefined();
+    });
+
     it('BROKEN_VERSION_POINTER_ALARM fires when current points to missing dir', async () => {
       fs.writeFileSync(path.join(tmpDir, 'current'), 'nonexistent_version');
       const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });

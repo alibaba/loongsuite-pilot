@@ -43,6 +43,7 @@ Pilot 主要帮助回答这些问题：
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
+| DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
@@ -56,10 +57,16 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 
 OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+
+DeepSeek Harness（`dsh`）通过用户级 `cordis.patch.yml` 加载 Pilot
+可观测插件，采集原生 LLM、reasoning、工具、Token 和首 Token
+延迟数据。启用、原始日志、禁用和卸载行为见
+[《Agent 配置》](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)。
 
 ### Windows Agent 明确支持情况
 

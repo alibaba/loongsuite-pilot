@@ -29,6 +29,12 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const subagent = asRecord(source?.subagent);
   const threadSpawn = asRecord(subagent?.thread_spawn);
   const parentThreadId = stringValue(threadSpawn?.parent_thread_id);
+  // First-party fork/resume lineage marker written at the top-level of the
+  // session_meta payload. Present for both subagent spawns and Desktop
+  // resume/fork, and is the most reliable trigger for "this file begins with a
+  // copied ancestor-history prefix". Subagent copies also expose
+  // parent_thread_id via thread_spawn; user resume/fork exposes only this.
+  const forkedFromId = stringValue(payload.forked_from_id);
   const agentPath = stringValue(threadSpawn?.agent_path);
   const agentNickname = stringValue(threadSpawn?.agent_nickname);
   const agentRole = stringValue(threadSpawn?.agent_role);
@@ -52,6 +58,7 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
     rootSessionId: stringValue(payload.session_id) ?? threadId,
     threadSource,
     ...(parentThreadId ? { parentThreadId } : {}),
+    ...(forkedFromId ? { forkedFromId } : {}),
     depth,
     ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
     ...(agentPath ? { agentPath } : {}),
@@ -87,6 +94,8 @@ export function extractCodexPartialTurn(
   expectedTurnId: string,
   opts: {
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
@@ -97,6 +106,8 @@ export function extractCodexPartialTurn(
   return extractCodexTurn(toSourceRecords(records), meta, fallbackSessionId, expectedTurnId, {
     requireTerminal: false,
     startedAtMs: opts.startedAtMs,
+    nextStepStartedAtMs: opts.nextStepStartedAtMs,
+    lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
@@ -112,6 +123,8 @@ export function extractCodexPartialTurnWithBoundaries(
   expectedTurnId: string,
   opts: {
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
@@ -122,6 +135,8 @@ export function extractCodexPartialTurnWithBoundaries(
   return extractCodexTurn(records, meta, fallbackSessionId, expectedTurnId, {
     requireTerminal: false,
     startedAtMs: opts.startedAtMs,
+    nextStepStartedAtMs: opts.nextStepStartedAtMs,
+    lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
@@ -135,6 +150,7 @@ interface StepEnvelope {
   sourceRange: CodexTranscriptSourceRange;
   llmClosed: boolean;
   followedByAnotherWave: boolean;
+  lastCumulativeTokenTotal?: number;
 }
 
 function extractCodexTurn(
@@ -147,6 +163,8 @@ function extractCodexTurn(
     blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
@@ -175,7 +193,8 @@ function extractCodexTurn(
   const webSearchEnds = new Map<string, number>();
   let currentStep: StepEnvelope | null = null;
   let lastUsage: CodexTranscriptUsage | undefined;
-  let lastActivityAtMs = 0;
+  let lastActivityAtMs = opts.nextStepStartedAtMs ?? 0;
+  let lastCumulativeTokenTotal = opts.lastCumulativeTokenTotal;
 
   const beginStep = (timestamp: number, source: CodexTranscriptSourceRecord): StepEnvelope => {
     if (!currentStep) {
@@ -214,6 +233,7 @@ function extractCodexTurn(
     if (!currentStep) return;
     const step = currentStep.step;
     if (force || step.reasoning.length > 0 || step.tools.length > 0 || step.finalText) {
+      currentStep.lastCumulativeTokenTotal = lastCumulativeTokenTotal;
       stepEnvelopes.push(currentStep);
     }
     currentStep = null;
@@ -315,19 +335,39 @@ function extractCodexTurn(
       if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
         if (!usage) continue;
+        const cumulativeTokenTotal = extractCumulativeTokenTotal(payload.info);
+        const repeatedSnapshot = cumulativeTokenTotal !== undefined
+          && lastCumulativeTokenTotal !== undefined
+          && cumulativeTokenTotal === lastCumulativeTokenTotal;
         const envelope = activeStep();
         if (envelope?.step.hasResponseEvidence) {
+          if (repeatedSnapshot) {
+            // A repeated cumulative total reports no new accounting for this wave, so it
+            // is not an authoritative close. Keep the wave open: closing here would
+            // strand the next fresh sample in unmatchedTokenUsages and emit 0 for a wave
+            // that really did consume tokens.
+            envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
+            touchStep(envelope, source);
+            lastUsage = usage;
+            markActivity(timestamp);
+            continue;
+          }
           envelope.step.tokenUsage = usage;
           envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
           envelope.llmClosed = true;
           touchStep(envelope, source);
           lastUsage = usage;
+          if (cumulativeTokenTotal !== undefined) lastCumulativeTokenTotal = cumulativeTokenTotal;
           markActivity(timestamp);
           flushCurrentStep();
-        } else if (!sameUsage(lastUsage, usage)) {
-          // Do not shift an unanchored sample onto a later response wave.
-          unmatchedTokenUsages.push(usage);
+        } else {
+          if (!repeatedSnapshot && !sameUsage(lastUsage, usage)) {
+            // Do not shift an unanchored sample onto a later response wave.
+            unmatchedTokenUsages.push(usage);
+          }
           lastUsage = usage;
+          if (cumulativeTokenTotal !== undefined) lastCumulativeTokenTotal = cumulativeTokenTotal;
+          markActivity(timestamp);
         }
         continue;
       }
@@ -529,11 +569,16 @@ function extractCodexTurn(
   const committedEnvelopes = sawTerminal
     ? stepEnvelopes
     : leadingIncrementallyCommittableSteps(stepEnvelopes);
+  const committedTail = committedEnvelopes.at(-1);
   return {
     turn,
     committedStepCount: committedEnvelopes.length,
     committedStepRanges: committedEnvelopes.map(envelope => ({ ...envelope.sourceRange })),
-    consumedEndOffset: committedEnvelopes.at(-1)?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+    consumedEndOffset: committedTail?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+    ...(committedTail ? { nextStepStartedAtMs: committedTail.step.completedAtMs } : {}),
+    ...(committedTail?.lastCumulativeTokenTotal !== undefined
+      ? { lastCumulativeTokenTotal: committedTail.lastCumulativeTokenTotal }
+      : {}),
   };
 }
 
@@ -825,6 +870,12 @@ function extractLastTokenUsage(value: unknown): CodexTranscriptUsage | undefined
     totalTokens: totalTokens && totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
   };
+}
+
+function extractCumulativeTokenTotal(value: unknown): number | undefined {
+  const info = asRecord(value);
+  const totalUsage = asRecord(info?.total_token_usage);
+  return numberValue(totalUsage?.total_tokens);
 }
 
 function numberValue(value: unknown): number | undefined {

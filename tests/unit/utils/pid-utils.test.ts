@@ -6,6 +6,7 @@ import {
   COLLECTOR_PROCESS_PATTERNS,
   isCommandMatch,
   isProcessAlive,
+  readProcessStartToken,
   UPDATER_PROCESS_PATTERNS,
 } from '../../../src/utils/pid-utils.js';
 
@@ -37,6 +38,8 @@ describe('pid-utils identity-first liveness', () => {
 
   it('matches strict collector and updater command identities', () => {
     expect(isCommandMatch('/usr/bin/node /home/a/.loongsuite-pilot/bin/collector-daemon.js', COLLECTOR_PROCESS_PATTERNS)).toBe(true);
+    expect(isCommandMatch('/home/a/.local/bin/loongsuite-pilot run-service', COLLECTOR_PROCESS_PATTERNS)).toBe(true);
+    expect(isCommandMatch('/home/a/.local/bin/loongsuite-pilot run-service-helper', COLLECTOR_PROCESS_PATTERNS)).toBe(false);
     expect(isCommandMatch('/usr/bin/node /home/a/.loongsuite-pilot/bin/updater-daemon.js', UPDATER_PROCESS_PATTERNS)).toBe(true);
     expect(isCommandMatch('/usr/bin/node unrelated.js', COLLECTOR_PROCESS_PATTERNS)).toBe(false);
     expect(isCommandMatch('/usr/bin/node unrelated.js', UPDATER_PROCESS_PATTERNS)).toBe(false);
@@ -50,6 +53,19 @@ describe('pid-utils identity-first liveness', () => {
     });
 
     expect(isProcessAlive(123)).toBe(true);
+  });
+
+  it('reads a stable process-start token from the platform process identity', () => {
+    if (process.platform === 'linux') {
+      readFileSyncMock
+        .mockReturnValueOnce('123 (node worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 20 21')
+        .mockReturnValueOnce('boot-id-1\n');
+      expect(readProcessStartToken(123)).toBe('linux-proc-v1:boot-id-1:4242');
+      return;
+    }
+
+    execFileSyncMock.mockReturnValueOnce('Tue Aug 18 15:03:36 2026\n');
+    expect(readProcessStartToken(123)).toContain('-v1:Tue Aug 18 15:03:36 2026');
   });
 
   it('uses pid file as fast path when pid command matches identity', () => {

@@ -79,8 +79,20 @@ describe('EVENT_LOG_TO_TRACE_SPEC §11 self-check (real fixture)', () => {
     const events = readAllEventRecords();
     expect(events.length).toBeGreaterThan(0);
 
-    // Convert through util-genai
-    const result = await convertEventLogToReadableSpans(events);
+    // Convert through util-genai with message attributes enabled.
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    let result;
+    try {
+      result = await convertEventLogToReadableSpans(events);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
     const spans = result.spans || [];
     const warnings = result.warnings || [];
 
@@ -148,6 +160,25 @@ describe('EVENT_LOG_TO_TRACE_SPEC §11 self-check (real fixture)', () => {
       expect(llm.attributes['gen_ai.request.model']).toBe('qwen3.6-plus');
       expect(llm.attributes['gen_ai.provider.name']).toBe('qwen');
     }
+    const secondInput = JSON.parse(llmSpans[1].attributes['gen_ai.input.messages']);
+    expect(secondInput.map(message => message.role)).toEqual([
+      'user', 'assistant', 'tool', 'tool', 'tool',
+    ]);
+    const assistantMessages = secondInput.filter(message => message.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+    const assistantParts = assistantMessages[0].parts;
+    expect(assistantParts.filter(part => part.type === 'reasoning')).toHaveLength(1);
+    expect(assistantParts.filter(part => part.type === 'text')).toHaveLength(1);
+    const firstOutput = JSON.parse(llmSpans[0].attributes['gen_ai.output.messages']);
+    expect(assistantParts).toEqual(firstOutput[0].parts);
+    const assistantCallIds = assistantParts
+      .filter(part => part.type === 'tool_call')
+      .map(part => part.id);
+    const toolResponseIds = secondInput
+      .filter(message => message.role === 'tool')
+      .flatMap(message => message.parts)
+      .map(part => part.id);
+    expect(toolResponseIds).toEqual(assistantCallIds);
 
     // AGENT span aggregates tokens across all LLM calls (sum of step tokens)
     const agentSpan = spans.find((s) => s.attributes['gen_ai.span.kind'] === 'AGENT');

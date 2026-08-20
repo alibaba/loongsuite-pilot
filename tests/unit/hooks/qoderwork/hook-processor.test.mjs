@@ -237,16 +237,27 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     const records = readJsonlRecords();
     const requests = records.filter((record) => record['event.name'] === 'llm.request');
     const promptDelta = [{ role: 'user', parts: [{ type: 'text', content: 'solve it' }] }];
-    const toolDelta = [{
-      role: 'tool',
-      parts: [{ type: 'tool_call_response', id: 'tool-1', response: '/tmp/project' }],
-    }];
+    const toolHistoryDelta = [
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'tool-1',
+          name: 'shell',
+          arguments: { command: 'pwd' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'tool-1', response: '/tmp/project' }],
+      },
+    ];
 
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request['gen_ai.input.messages'])).toEqual([undefined, undefined]);
     expect(requests.map((request) => request['gen_ai.input.messages_delta'])).toEqual([
       promptDelta,
-      toolDelta,
+      toolHistoryDelta,
     ]);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
@@ -261,7 +272,7 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
       expect(convertedInputs).toEqual([
         promptDelta,
-        [...promptDelta, ...toolDelta],
+        [...promptDelta, ...toolHistoryDelta],
       ]);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;

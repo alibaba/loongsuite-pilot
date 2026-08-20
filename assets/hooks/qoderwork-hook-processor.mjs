@@ -233,7 +233,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   const userText = userRow ? extractText(userRow) : '';
   const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
-  let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+  let prevToolCalls = []; // tool calls from previous step, for building assistant + tool_result delta
   let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
 
   let stepCounter = 0;
@@ -243,7 +243,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
     // Build input.messages_delta for this step's llm.request:
     // - Step 1: user prompt
-    // - Step N>1: previous step's tool results
+    // - Step N>1: previous assistant tool calls + their tool results
     let inputDelta;
     if (stepCounter === 1 && userText) {
       inputDelta = [{ role: 'user', parts: [{ type: 'text', content: userText }] }];
@@ -258,7 +258,18 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         }
       }
       if (toolParts.length > 0) {
-        inputDelta = [{ role: 'tool', parts: toolParts }];
+        inputDelta = [
+          {
+            role: 'assistant',
+            parts: prevToolCalls.map(tc => ({
+              type: 'tool_call',
+              id: tc.id,
+              name: tc.name,
+              arguments: tc.input,
+            })),
+          },
+          { role: 'tool', parts: toolParts },
+        ];
       }
     }
 
@@ -279,7 +290,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
       const content = Array.isArray(msg.content) ? msg.content : [];
       for (const b of content) {
         if (b.type === 'tool_use') {
-          prevToolCalls.push({ id: b.id, name: b.name });
+          prevToolCalls.push({ id: b.id, name: b.name, input: b.input });
           // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
           const matchingResult = toolResultsByUseId.get(b.id);
           if (matchingResult?.row.timestamp) {
@@ -405,7 +416,7 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
   //
   // Each step's delta contains only the NEW content since the previous step:
   //   - Step 1: user prompt
-  //   - Step N>1: previous step's tool_results
+  //   - Step N>1: previous assistant tool_calls followed by tool_results
   // The converter (@loongsuite/otel-util-genai) accumulates deltas across
   // steps to reconstruct the full context window for each LLM span, which
   // is the correct behaviour.

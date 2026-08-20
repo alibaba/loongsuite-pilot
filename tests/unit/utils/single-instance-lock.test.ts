@@ -3,8 +3,10 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { acquireSingleInstanceLock } from '../../../src/utils/single-instance-lock.js';
-import { readProcessCommand } from '../../../src/utils/pid-utils.js';
+import { readProcessCommand, readProcessStartToken } from '../../../src/utils/pid-utils.js';
 
 describe('acquireSingleInstanceLock', () => {
   let dir: string;
@@ -27,6 +29,7 @@ describe('acquireSingleInstanceLock', () => {
     expect(payload.pid).toBe(process.pid);
     expect(typeof payload.startedAt).toBe('number');
     expect(typeof payload.ownerId).toBe('string');
+    expect(typeof payload.processStartToken).toBe('string');
   });
 
   it('refuses a second acquisition while a live holder exists', () => {
@@ -79,17 +82,96 @@ describe('acquireSingleInstanceLock', () => {
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid + 1);
   });
 
-  it('with patterns, takes over a lock whose live pid runs a non-matching command (pid reuse)', () => {
-    // Our own pid is alive, but its command line is the test runner — not a
-    // collector. This simulates a recycled pid after the real holder crashed: the
-    // pid-liveness check alone would wrongly block, but the command-identity check
-    // recognizes it as stale and lets us take over.
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  it('keeps a legacy lock without ownerId or start token when its external pid is alive', async () => {
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    await once(holder, 'spawn');
 
-    const { lock } = acquireSingleInstanceLock(lockPath, ['collector-daemon-never-matches-vitest']);
-    expect(lock).not.toBeNull();
-    expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
+    try {
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: holder.pid, startedAt: Date.now() }));
+
+      const { lock, holderPid, holderProcessStartState, holderCommandState } = acquireSingleInstanceLock(
+        lockPath,
+        ['collector-daemon-never-matches-node-child'],
+      );
+      expect(lock).toBeNull();
+      expect(holderPid).toBe(holder.pid);
+      expect(holderProcessStartState).toBe('lock-token-missing');
+      expect(holderCommandState).toBe('mismatched');
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(holder.pid);
+    } finally {
+      const exited = once(holder, 'exit');
+      holder.kill();
+      await exited;
+    }
+  });
+
+  it('refuses a live external holder when its start token matches even if its command does not', async () => {
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    await once(holder, 'spawn');
+
+    try {
+      const processStartToken = readProcessStartToken(holder.pid!);
+      expect(processStartToken).not.toBe('');
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(lockPath, JSON.stringify({
+        pid: holder.pid,
+        startedAt: Date.now(),
+        ownerId: 'external-holder',
+        processStartToken,
+      }));
+
+      const result = acquireSingleInstanceLock(
+        lockPath,
+        ['collector-daemon-never-matches-node-child'],
+      );
+
+      expect(result.lock).toBeNull();
+      expect(result.holderPid).toBe(holder.pid);
+      expect(result.holderProcessStartState).toBe('matched');
+      expect(result.holderCommandState).toBe('mismatched');
+    } finally {
+      const exited = once(holder, 'exit');
+      holder.kill();
+      await exited;
+    }
+  });
+
+  it('takes over only when the live pid process-start token proves pid reuse', async () => {
+    const recycled = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    await once(recycled, 'spawn');
+
+    try {
+      const currentToken = readProcessStartToken(recycled.pid!);
+      expect(currentToken).not.toBe('');
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(lockPath, JSON.stringify({
+        pid: recycled.pid,
+        startedAt: Date.now() - 60_000,
+        ownerId: 'crashed-holder',
+        processStartToken: `${currentToken}:previous-lifetime`,
+      }));
+
+      const result = acquireSingleInstanceLock(lockPath, ['collector-daemon-never-matches-node-child']);
+
+      expect(result.lock).not.toBeNull();
+      expect(result.recoveredStaleLock).toEqual({
+        previousPid: recycled.pid,
+        reason: 'pid-reused',
+      });
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
+      result.lock!.release();
+    } finally {
+      const exited = once(recycled, 'exit');
+      recycled.kill();
+      await exited;
+    }
   });
 
   it('takes over a stale lock from an older process instance that reused our pid', () => {
@@ -117,9 +199,16 @@ describe('acquireSingleInstanceLock', () => {
 
     // The process-local owner token must win even when the test command is a
     // valid holder pattern, preserving same-process mutual exclusion.
-    const { lock, holderPid } = acquireSingleInstanceLock(lockPath, [selfCmd]);
+    const {
+      lock,
+      holderPid,
+      holderProcessStartState,
+      holderCommandState,
+    } = acquireSingleInstanceLock(lockPath, [selfCmd]);
     expect(lock).toBeNull();
     expect(holderPid).toBe(process.pid);
+    expect(holderProcessStartState).toBe('same-process-owner');
+    expect(holderCommandState).toBe('matched');
     first.lock!.release();
   });
 

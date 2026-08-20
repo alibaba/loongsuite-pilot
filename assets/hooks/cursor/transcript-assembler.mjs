@@ -31,6 +31,7 @@ import {
   parseMaybeJson,
   inferProviderName,
 } from '../agent-event-normalizer.mjs';
+import { cursorWorkspaceFields, resolveWorkspacePath } from './workspace-context.mjs';
 
 // ─── Public API ───
 
@@ -50,6 +51,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
 
   const runtimeConfig = options.runtimeConfig || {};
   const stopConversationId = options.stopConversationId;
+  const variant = options.variant || 'cursor';
 
   const promptEvent = stopConversationId
     ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
@@ -65,6 +67,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
+  const workspacePath = resolveWorkspacePath(parentEvents);
 
   // T5: Resolve model from journal events (afterAgentThought/Response carry real model)
   const model = parentEvents.find(e =>
@@ -76,9 +79,10 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     trace_id: traceId,
     'gen_ai.session.id': parentConvId,
     'gen_ai.turn.id': turnId,
-    'gen_ai.agent.type': 'cursor',
+    'gen_ai.agent.type': variant,
     'gen_ai.agent.id': parentConvId,
     'user.id': userId,
+    ...cursorWorkspaceFields(variant, workspacePath),
   };
 
   const records = [];
@@ -104,6 +108,10 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   // Build per-step records
   const steps = alignSteps(turn.assistantEntries, parentEvents, turnId);
   const stopEvent = parentEvents.find(e => e.hook_event === 'stop');
+  const cumulativeInputMessages = userText
+    ? [{ role: 'user', parts: [{ type: 'text', content: userText }] }]
+    : [];
+  let previousAssistantToolMessage = null;
   let prevToolResults = [];
 
   for (let i = 0; i < steps.length; i++) {
@@ -136,13 +144,13 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     // llm.request.model from step events
     const stepModel = step.thoughtEvent?.model || step.responseEvent?.model || model;
 
-    const inputMessages = [];
-    if (i === 0 && userText) {
-      inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userText }] });
-    } else if (prevToolResults.length > 0) {
+    if (i > 0 && prevToolResults.length > 0) {
+      if (previousAssistantToolMessage) {
+        cumulativeInputMessages.push(cloneMessage(previousAssistantToolMessage));
+      }
       // NOTE: tool_output from journal postToolUse may contain GB18030-garbled text.
       // Omit response content to avoid garbled data in output; structure is preserved.
-      inputMessages.push({
+      cumulativeInputMessages.push({
         role: 'tool',
         parts: prevToolResults.map(tr => ({
           type: 'tool_call_response',
@@ -151,6 +159,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
         })),
       });
     }
+    const inputMessages = cumulativeInputMessages.map(cloneMessage);
 
     // ── llm.request ──
     const reqSource = step.thoughtEvent || step.responseEvent || promptEvent;
@@ -273,10 +282,18 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     }
 
     records.push(respRecord);
+    const assistantToolParts = outputParts.filter(part => part.type === 'tool_call');
+    previousAssistantToolMessage = assistantToolParts.length > 0
+      ? { role: 'assistant', parts: assistantToolParts.map(part => ({ ...part })) }
+      : null;
     prevToolResults = step.toolResults;
   }
 
   return records.length > 0 ? records : null;
+}
+
+function cloneMessage(message) {
+  return JSON.parse(JSON.stringify(message));
 }
 
 // ─── Transcript Parser ───

@@ -21,7 +21,7 @@ export const COLLECTOR_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
   'collector-daemon.js',
   '/bin/collector-daemon',
   '\\bin\\collector-daemon',
-  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+run(?:\s|$)/,
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+(?:run|run-service)(?:\s|$)/,
 ];
 
 export const UPDATER_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
@@ -172,6 +172,48 @@ export function readProcessCommand(pid: number): string {
       timeout: 5000,
       encoding: 'utf-8',
     }).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Return a stable, boot-scoped identity for one concrete process lifetime.
+ *
+ * Unlike a pid, this value changes when the OS recycles the pid. Callers must
+ * fail closed when it is unavailable: command lines are useful diagnostics but
+ * are not strong enough to prove that a pid was reused.
+ */
+export function readProcessStartToken(pid: number): string {
+  if (!Number.isInteger(pid) || pid <= 0) return '';
+  try {
+    if (process.platform === 'linux') {
+      // /proc/<pid>/stat field 22 is the process start time in clock ticks since
+      // boot. Include boot_id so a stale lock cannot accidentally match after a
+      // reboot. Locate the final ')' because comm may itself contain spaces or ')'.
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      const commEnd = stat.lastIndexOf(')');
+      if (commEnd < 0) return '';
+      const fieldsAfterComm = stat.slice(commEnd + 1).trim().split(/\s+/);
+      const startTicks = fieldsAfterComm[19];
+      const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim();
+      return startTicks && bootId ? `linux-proc-v1:${bootId}:${startTicks}` : '';
+    }
+    if (process.platform === 'win32') {
+      const creationDate = execFileSync('powershell.exe', [
+        '-NoProfile',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("O") }`,
+      ], { timeout: 5000, encoding: 'utf-8', windowsHide: true }).trim();
+      return creationDate ? `win32-cim-v1:${creationDate}` : '';
+    }
+    const startedAt = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      timeout: 5000,
+      encoding: 'utf-8',
+    }).trim().replace(/\s+/g, ' ');
+    return startedAt ? `${process.platform}-ps-lstart-v1:${startedAt}` : '';
   } catch {
     return '';
   }

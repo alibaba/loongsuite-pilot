@@ -5,6 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../../assets/hooks/shared/resource-context.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/claude-code-hook-processor.mjs');
@@ -195,6 +199,45 @@ function enableToolPropagation() {
 }
 
 describe('claude-code-hook-processor v2 端到端', () => {
+  test('accepts invocation-scoped GenAI identity from env', () => {
+    const transcriptPath = writeTranscript('native-session', [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:32.000Z',
+        message: { content: [{ type: 'text', text: 'hello' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:33.000Z',
+        message: {
+          id: 'msg_identity',
+          content: [{ type: 'text', text: 'hi' }],
+          usage: { input_tokens: 10, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    const result = runHook('stop', {
+      session_id: 'native-session',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(result.status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).toBe('native-session');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
+  });
+
   test('PreToolUse 注入 per-tool traceparent，Stop 复用其 span id', () => {
     enableToolPropagation();
     const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';

@@ -196,13 +196,17 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
     const { skill, toolCallId } = skillEntries[index];
     const callOffset = BigInt(index * 2 + 1);
     const resultOffset = callOffset + 1n;
+    const agentType = llmRecord['gen_ai.agent.type'];
+    const agentCwdKey = `agent.${agentType}.cwd`;
+    const agentCwd = llmRecord[agentCwdKey];
     const baseFields = {
       trace_id: llmRecord.trace_id,
       'gen_ai.session.id': llmRecord['gen_ai.session.id'],
       'gen_ai.turn.id': llmRecord['gen_ai.turn.id'],
       'gen_ai.step.id': llmRecord['gen_ai.step.id'] || 'step_1',
-      'gen_ai.agent.type': llmRecord['gen_ai.agent.type'],
+      'gen_ai.agent.type': agentType,
       'user.id': llmRecord['user.id'],
+      ...(agentCwd ? { [agentCwdKey]: agentCwd } : {}),
     };
 
     // tool.call
@@ -399,7 +403,7 @@ async function main() {
         const transcriptRecords = buildCursorRecordsFromTranscript(
           internalEvent.transcript_path,
           allEvents,
-          { runtimeConfig, stopConversationId: convId }
+          { runtimeConfig, stopConversationId: convId, variant }
         );
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;

@@ -177,6 +177,23 @@ describe('buildCursorRecordsFromTranscript', () => {
     expect(result).toBeNull();
   });
 
+  it('preserves Cursor CLI identity and cwd on the Windows transcript path', () => {
+    const transcriptPath = simpleTranscript('inspect', 'done');
+    const records = buildCursorRecordsFromTranscript(
+      transcriptPath,
+      [
+        makePromptEvent({ cwd: 'C:\\Users\\alice\\project' }),
+        makeResponseEvent({ text: 'done' }),
+        makeStopEvent(),
+      ],
+      { stopConversationId: 'conv-abc', variant: 'cursor-cli' },
+    );
+
+    expect(records).not.toBeNull();
+    expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli')).toBe(true);
+    expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project')).toBe(true);
+  });
+
   describe('simple turn (no tool calls)', () => {
     let records;
     let transcriptPath;
@@ -315,6 +332,22 @@ describe('buildCursorRecordsFromTranscript', () => {
       const s1Resp = records[4];
       expect(s1Resp['gen_ai.usage.input_tokens']).toBe(0);
       expect(s1Resp['gen_ai.usage.output_tokens']).toBe(0);
+    });
+
+    it('step 2 input preserves the assistant tool call before its matching result', () => {
+      const messages = records[5]['gen_ai.input.messages'];
+      expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+      expect(messages[1].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'tool-ws-001',
+        name: 'WebSearch',
+        arguments: { query: '上海天气' },
+      });
+      expect(messages[2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'tool-ws-001',
+        response: '',
+      });
     });
 
     it('step 2 llm.response has correct final text', () => {

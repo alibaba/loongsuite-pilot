@@ -157,6 +157,7 @@ export class MetricsCollector {
   private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
+  private readonly autoUpdateEnabled: boolean;
   private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
   private readonly startTime: string;
   private readonly startTimestamp: number;
@@ -175,7 +176,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -183,6 +184,9 @@ export class MetricsCollector {
     this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
+    // Omitted means "an updater is expected", the host default. Only a caller that knows
+    // otherwise — the orchestrator, reading the resolved config — passes false.
+    this.autoUpdateEnabled = opts.autoUpdateEnabled ?? true;
     this.updaterLiveness = opts.updaterLiveness
       ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
     this.startTimestamp = Math.floor(Date.now() / 1000);
@@ -364,8 +368,14 @@ export class MetricsCollector {
   private collectInfraHealth(): InfraHealthSnapshot {
     this.l1CycleCount++;
 
+    // `true` here means "nothing to report", which is also what the first two cycles
+    // report while the updater is still coming up. With auto-update disabled there is no
+    // updater to come up at all — nothing registers a service for it and the updater
+    // process exits immediately on a disabled config — so probing its pid would report a
+    // permanent failure and UPDATER_NOT_RUNNING_ALARM would fire ~30min into every such
+    // install's life, about a process nobody asked for.
     let updaterPidAlive = true;
-    if (this.l1CycleCount > 2) {
+    if (this.autoUpdateEnabled && this.l1CycleCount > 2) {
       updaterPidAlive = this.updaterLiveness(
         path.join(this.dataDir, 'loongsuite-pilot-updater.pid'),
       ).running;

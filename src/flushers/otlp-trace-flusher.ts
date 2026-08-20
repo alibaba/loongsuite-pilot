@@ -590,6 +590,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       } catch (err) {
         logger.error(`convertEventLogToTrace failed for ${agentType}`, { err: String(err) });
+        // Reset the shared in-memory exporter even on conversion failure: a
+        // partial run may have already pushed spans into it via the handler,
+        // and leaving them would pollute the next call's getFinishedSpans()
+        // snapshot — leaking spans across turns and ultimately producing
+        // duplicate span IDs that ARMS rejects, which looks like "OTLP trace
+        // not exported, pollutes subsequent sessions". Resetting here keeps
+        // each convert attempt's span set isolated.
+        inMem.reset();
         return;
       }
 

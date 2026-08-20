@@ -67,7 +67,7 @@ export class CursorHookInput extends BaseHookInput {
     if (hookEvent.toLowerCase() === 'stop') {
       stripTokenFields(canonicalEntry);
     }
-    const gitNamespace = variant === ClientType.CursorCli ? 'cursor_cli' : 'cursor';
+    const gitNamespace = variant === ClientType.CursorCli ? 'cursor-cli' : 'cursor';
     await enrichCanonicalEntryWithGit(canonicalEntry, record, gitNamespace);
     return canonicalEntry;
   }

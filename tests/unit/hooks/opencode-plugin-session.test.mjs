@@ -3,6 +3,10 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../assets/hooks/shared/resource-context.mjs';
 
 const PLUGIN_PATH = path.resolve(
   fileURLToPath(import.meta.url),
@@ -109,6 +113,7 @@ describe('opencode plugin session turnSeq persistence', () => {
   });
 
   afterEach(() => {
+    delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     vi.restoreAllMocks();
   });
 
@@ -194,5 +199,20 @@ describe('opencode plugin session turnSeq persistence', () => {
       .toEqual(requests[0]['gen_ai.input.messages']);
     expect(requests[1]['gen_ai.input.messages']).toBeUndefined();
     expect(requests[1]['gen_ai.input.messages_delta']).toBeTruthy();
+  });
+
+  it('accepts invocation-scoped GenAI identity from env', async () => {
+    process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES =
+      'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked';
+
+    const records = await replayPluginFixture();
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).not.toBe('env-session');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
   });
 });

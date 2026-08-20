@@ -22,7 +22,15 @@ export class DetectionOnlyStrategy implements DeployStrategy {
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
-    return { success: true, agentId: def.id, deployMode: 'detection-only', skipped: true };
+    // Unreachable through DeploymentManager (needsDeploy is always false), but the
+    // reason must still say "satisfied" rather than leaving it ambiguous.
+    return {
+      success: true,
+      agentId: def.id,
+      deployMode: 'detection-only',
+      skipped: true,
+      reason: 'up-to-date',
+    };
   }
 
   async undeploy(_def: AgentDefinition): Promise<boolean> {

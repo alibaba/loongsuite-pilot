@@ -92,6 +92,7 @@ describe('CursorHookInput', () => {
       'gen_ai.tool.call.id': 'tool-canonical',
       'gen_ai.tool.call.arguments': { command: 'pwd' },
       'agent.cursor.hook_event_name': 'preToolUse',
+      'agent.cursor.cwd': '/workspace/cursor-project',
     };
     await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
 
@@ -112,6 +113,33 @@ describe('CursorHookInput', () => {
       'gen_ai.tool.call.id': 'tool-canonical',
       'gen_ai.tool.call.arguments': { command: 'pwd' },
       'agent.cursor.hook_event_name': 'preToolUse',
+      'agent.cursor.cwd': '/workspace/cursor-project',
+      'workspace.path': '/workspace/cursor-project',
+    });
+  });
+
+  it('enriches Cursor CLI records from the hyphenated producer namespace', async () => {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    await fs.writeFile(logFile, `${JSON.stringify({
+      'event.id': 'cursor-cli-workspace',
+      'event.name': 'llm.response',
+      'gen_ai.agent.type': ClientType.CursorCli,
+      'gen_ai.session.id': 'cursor-cli-session',
+      'agent.cursor.cursor_version': '2026.08.19',
+      'agent.cursor-cli.cwd': 'C:\\Users\\alice\\project',
+    })}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'gen_ai.agent.type': ClientType.CursorCli,
+      'agent.cursor-cli.cwd': 'C:\\Users\\alice\\project',
+      'workspace.path': 'C:\\Users\\alice\\project',
     });
   });
 

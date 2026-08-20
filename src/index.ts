@@ -28,6 +28,21 @@ async function main(): Promise<void> {
     return;
   }
 
+  // One-shot deployment. The collector deploys hooks/plugins itself on startup,
+  // but only as a daemon side effect; image builds need it as a foreground step
+  // with an exit code (see runDeployCommand).
+  if (command === 'deploy') {
+    const { runDeployCommand } = await import('./deployment/deploy-command.js');
+    try {
+      process.exitCode = await runDeployCommand(args);
+    } catch (err) {
+      console.error(`loongsuite-pilot deploy: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+    flushLogsSync();
+    return;
+  }
+
   const config = await loadConfig();
 
   const dataDir = resolveHome(config.dataDir);
@@ -54,11 +69,19 @@ async function main(): Promise<void> {
   // Lock file is runtime state, not a log — keep it in the dataDir root alongside
   // the pid file, not under logs/.
   const lockPath = path.join(dataDir, 'collector.lock');
-  const { lock, holderPid } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
+  const {
+    lock,
+    holderPid,
+    holderProcessStartState,
+    holderCommandState,
+    recoveredStaleLock,
+  } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
   if (!lock) {
     logger.warn('another collector instance already holds the lock; exiting', {
       pid: process.pid,
       holderPid,
+      holderProcessStartState,
+      holderCommandState,
       lockPath,
     });
     // See the disabled-config branch above: the pino-roll rotation timer keeps the
@@ -66,6 +89,14 @@ async function main(): Promise<void> {
     // a peer already holds the lock. Exit explicitly.
     flushLogsSync();
     process.exit(0);
+  }
+  if (recoveredStaleLock) {
+    logger.warn('stale single-instance lock recovered', {
+      pid: process.pid,
+      previousHolderPid: recoveredStaleLock.previousPid,
+      recoveryReason: recoveredStaleLock.reason,
+      lockPath,
+    });
   }
   logger.info('single-instance lock acquired', { pid: process.pid, lockPath });
 

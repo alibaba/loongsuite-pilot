@@ -303,6 +303,17 @@ Notes:
   { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
   ```
 
+**Standard per-invocation identity.** `gen_ai.session.id` and `gen_ai.user.id` are the two exact reserved-key exceptions supported by `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`:
+
+  ```bash
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="gen_ai.session.id=session-123,gen_ai.user.id=user-456"
+  ```
+
+- The values become the canonical event-log identity fields (`gen_ai.session.id` and `user.id`) and the standard trace-span attributes (`gen_ai.session.id` and `gen_ai.user.id`) on every span kind. No `spanAttributePassthroughPrefixes` entry is required.
+- Invocation identity wins over the configured user id and agent-native identity. Native turn and step ids are not changed.
+- Phase-one support covers OpenCode, Claude Code, Qoder/Qoder-CN, and OpenClaw. Codex and Qwen Code CLI continue to reject these reserved keys.
+- All other `gen_ai.*` and `user.*` keys remain reserved and are dropped.
+
 **Built-in OpenCode attribute (`opencode.message.id`).** The OpenCode plugin always stamps `opencode.message.id` (the opencode assistant-message id) on its `llm.request`, `llm.response`, `tool.call` and `tool.result` records — no launcher env var required. To surface it on spans, just list the `opencode.` prefix; it then appears on ENTRY / AGENT / STEP / LLM / TOOL spans (LLM and TOOL take the value from their own records; ENTRY / AGENT / STEP take the turn-level value):
 
   ```json
@@ -311,10 +322,11 @@ Notes:
 
 Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
-- Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Except for the two standard identity keys documented above, reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
 - Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
-- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for claude-code, codex, qoder, and opencode.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
+- Qwen Code CLI captures them from the current `Stop` hook and clears any saved values when a resumed invocation does not provide the variable, preventing stale attributes from leaking into a later turn.
 
 ## Verify Trace Output
 

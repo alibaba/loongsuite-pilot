@@ -7,6 +7,10 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import {
+  isAgentGatedEnabled as isAgentGatedEnabledIn,
+  resolvePilotDir as resolvePilotDirIn,
+} from '../deployment/deploy-command.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
@@ -53,6 +57,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -129,6 +134,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'dsh-log': 'dsh',
   };
 
   private readonly config: AnalyticsConfig;
@@ -288,6 +294,7 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -329,6 +336,12 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      // Same condition as the updater watchdog above, deliberately: whether an updater is
+      // supposed to exist decides both whether we restart it and whether its absence is
+      // worth an alarm. Auto-update resolves to disabled whenever no package source is
+      // configured, and the updater exits immediately on that config — so a missing pid
+      // there is the expected state, not a fault.
+      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
     await this.metricsWriter.start();
 
@@ -591,6 +604,37 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /** Self-heal the DSH YAML patch and its collection-enabled marker. */
+  private buildDshYamlPatchInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'dsh-yaml-patch' || !def.dshYamlPatch) continue;
+      const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
+      targets.push({
+        id: `dsh-yaml-patch:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await fileExists(pluginPath))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
+          }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove DSH YAML patch for ${def.id}`);
         },
       });
     }
@@ -1417,6 +1461,28 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
+    const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
+    await ensureDshLogDir(dshLogDir);
+    const dshLogInput = new DshLogInput({
+      stateStore: this.stateStore,
+      sessionDir: dshLogDir,
+      pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(dshLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(dshLogInput, {
+        watchPaths: [dshLogDir],
+        isAvailable: async () => directoryExists(dshLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['dsh-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'dsh-log',
+            listenerCfg['dsh-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1483,9 +1549,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    const agents = this.config.agents;
-    if (!agents || Object.keys(agents).length === 0) return true;
-    return agents[agentId]?.enabled !== false;
+    return isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**
@@ -1521,49 +1585,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
-    try {
-      const currentFile = path.join(this.dataDir, 'current');
-      const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
-      if (versionName) {
-        const versionDir = path.join(this.dataDir, 'versions', versionName);
-        if (fsSync.existsSync(versionDir)) {
-          logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
-          return versionDir;
-        }
-      }
-    } catch {
-      // current file doesn't exist — legacy or dev layout
-    }
-
-    const legacyPackageDir = path.join(this.dataDir, 'package');
-    if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
-      return legacyPackageDir;
-    }
-
-    try {
-      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-      const candidates = [
-        path.resolve(moduleDir, '..'),
-        path.resolve(moduleDir, '..', '..'),
-      ];
-      for (const modulePackageDir of candidates) {
-        const packageJson = path.join(modulePackageDir, 'package.json');
-        const agentsDir = path.join(modulePackageDir, 'agents.d');
-        if (
-          fsSync.existsSync(packageJson)
-          && fsSync.existsSync(agentsDir)
-          && fsSync.statSync(packageJson).isFile()
-          && fsSync.statSync(agentsDir).isDirectory()
-        ) {
-          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
-          return modulePackageDir;
-        }
-      }
-    } catch {
-      // Module URL is invalid or the runtime package does not include required assets.
-    }
-
-    return this.dataDir;
+    return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {

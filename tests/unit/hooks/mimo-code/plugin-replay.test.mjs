@@ -83,6 +83,20 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     expect(capture.length).toBeGreaterThan(0);
   });
 
+  it('emits a stable namespaced cwd and adopts the per-session message path', async () => {
+    for (const e of events) {
+      await hooks.event({ event: e });
+    }
+    const records = capture.map((c) => parseRecord(c.data));
+    const llmRecords = records.filter((record) =>
+      record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response'
+    );
+
+    expect(records.every((record) => typeof record['agent.mimo-code.cwd'] === 'string')).toBe(true);
+    expect(llmRecords.length).toBeGreaterThan(0);
+    expect(llmRecords.every((record) => record['agent.mimo-code.cwd'] === '/home/admin/mimo-fixtures/proj2')).toBe(true);
+  });
+
   it('builds a 5-layer span tree: session > turn > step > {llm, tool}', async () => {
     for (const e of events) {
       await hooks.event({ event: e });

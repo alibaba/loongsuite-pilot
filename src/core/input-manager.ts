@@ -11,12 +11,14 @@ import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
+import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
+import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 
 const logger = createLogger('InputManager');
 
@@ -231,6 +233,15 @@ export class InputManager extends EventEmitter {
   ): Promise<void> {
     if (entries.length === 0) return;
 
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
+
     const counter = this.counters.get(inputId);
     let batchBytes = 0;
     if (counter) {
@@ -246,11 +257,7 @@ export class InputManager extends EventEmitter {
     }
 
     for (const entry of entries) {
-      if (this.configuredUserId) {
-        entry['user.id'] = this.configuredUserId;
-      } else if (!entry['user.id'] && this.userId) {
-        entry['user.id'] = this.userId;
-      }
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
     }
 
     // Upstream trace linking: stamp trace_id / parent_span_id from correlation

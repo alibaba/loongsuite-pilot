@@ -7,6 +7,10 @@ import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../src/normalization/invocation-identity.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -62,6 +66,64 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('last-mile enriches every Codex transcript path before dispatch', async () => {
+      const input = new StubInput('codex-transcript');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.CodexCliHook]: { captureMessageContent: false },
+      });
+      const cwd = '/tmp/codex-workspace-context-test';
+      const entries = [
+        buildTestEntry({
+          'event.id': 'codex-completed',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'agent.codex.cwd': cwd,
+        }),
+        buildTestEntry({
+          'event.id': 'codex-interrupted',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'agent.codex.cwd': cwd,
+          'agent.codex.turn_status': 'interrupted',
+        }),
+        buildTestEntry({
+          'event.id': 'codex-subagent',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'gen_ai.agent.scope': 'subagent',
+          'agent.codex.cwd': cwd,
+        }),
+      ];
+
+      input.emit('entries', entries);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(3);
+      expect(flusher.batchCalls[0].every(entry => entry['workspace.path'] === cwd)).toBe(true);
+    });
+
+    it('dispatches the batch when last-mile git enrichment fails unexpectedly', async () => {
+      const input = new StubInput('fail-open-input');
+      manager.registerInput(input as any);
+
+      const entries = [buildTestEntry({ 'event.id': 'fail-open' })];
+      const originalIterator = entries[Symbol.iterator].bind(entries);
+      let iteratorCalls = 0;
+      Object.defineProperty(entries, Symbol.iterator, {
+        value: () => {
+          iteratorCalls++;
+          if (iteratorCalls === 1) throw new Error('enrichment iterator failed');
+          return originalIterator();
+        },
+      });
+
+      input.emit('entries', entries);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.id']).toBe('fail-open');
     });
 
     it('serializes multiple entry batches from the same input', async () => {
@@ -144,6 +206,25 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('installer-user');
+    });
+
+    it('invocation env identity overrides configured/native identity and is consumed', async () => {
+      const input = new StubInput('input-1');
+      manager.registerInput(input as any);
+      manager.setUserId('fallback-user');
+      manager.setConfiguredUserId('installer-user');
+
+      const entry = buildTestEntry({ userId: 'native-user', sessionId: 'native-session' });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'customer-session';
+      entry[INVOCATION_USER_ID_FIELD] = 'customer-user';
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['gen_ai.session.id']).toBe('customer-session');
+      expect(dispatched['user.id']).toBe('customer-user');
+      expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
     });
   });
 

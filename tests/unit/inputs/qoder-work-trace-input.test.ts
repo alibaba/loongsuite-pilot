@@ -149,6 +149,7 @@ describe('QoderWorkTraceInput', () => {
     expect(entries.length).toBe(1);
     expect(entries[0].trace_id).toBeDefined();
     expect((entries[0].trace_id as string).length).toBe(32);
+    expect(entries[0]['workspace.path']).toBe(TEST_CWD);
   });
 
   it('resumes from offset on second poll', async () => {
