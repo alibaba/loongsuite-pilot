@@ -221,6 +221,68 @@ def _json_object(value: Any) -> Dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _tool_definition(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+
+    definition = value
+    nested = value.get("function")
+    if not isinstance(nested, dict):
+        nested = value.get("toolSpec")
+    if isinstance(nested, dict):
+        definition = nested
+
+    name = definition.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip()
+
+    tool_type = value.get("type")
+    if not isinstance(tool_type, str) or not tool_type:
+        tool_type = "function"
+    output: Dict[str, Any] = {
+        "type": _truncate(tool_type),
+        "name": _truncate(name),
+    }
+
+    description = definition.get("description")
+    if isinstance(description, str):
+        output["description"] = _truncate(description)
+
+    parameters: Any = None
+    for key in ("parameters", "input_schema", "inputSchema"):
+        if key in definition:
+            parameters = definition.get(key)
+            break
+    if isinstance(parameters, dict) and set(parameters) == {"json"}:
+        parameters = parameters.get("json")
+    if parameters is not None:
+        output["parameters"] = _bounded_value(parameters)
+    return output
+
+
+def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
+    if not isinstance(request, dict):
+        return []
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return []
+
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        tool_config = body.get("toolConfig") or body.get("tool_config")
+        tools = tool_config.get("tools") if isinstance(tool_config, dict) else None
+    if not isinstance(tools, list):
+        return []
+
+    output: List[Dict[str, Any]] = []
+    for value in tools[:MAX_COLLECTION_ITEMS]:
+        definition = _tool_definition(value)
+        if definition is not None:
+            output.append(definition)
+    return output
+
+
 def _skill_attributes(
     tool_name: Any,
     arguments: Any = None,
@@ -630,6 +692,7 @@ def _build_records(
         input_delta = _messages(delta_source, capture)
         output_message = _message(assistant_message, capture)
         pre = api.get("pre") or {}
+        tool_definitions = pre.get("tool_definitions")
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -651,6 +714,8 @@ def _build_records(
                 json.dumps(input_messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
         })
+        if isinstance(tool_definitions, list) and tool_definitions:
+            request["gen_ai.tool.definitions"] = tool_definitions
         records.append(request)
 
         finish_reason = str(post.get("finish_reason") or assistant_message.get("finish_reason") or "stop")
@@ -844,6 +909,11 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
+            "tool_definitions": (
+                _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
         },
         "post": {},
     })

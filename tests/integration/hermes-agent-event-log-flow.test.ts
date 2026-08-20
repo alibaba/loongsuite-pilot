@@ -13,6 +13,16 @@ import { MockStateStore } from '../helpers/mock-state-store.js';
 
 const PLUGIN_PATH = path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
 const FIXTURE_PATH = path.resolve('tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl');
+const EXPECTED_TOOL_DEFINITION = {
+  type: 'function',
+  name: 'terminal',
+  description: 'Run a command.',
+  parameters: {
+    type: 'object',
+    properties: { command: { type: 'string' } },
+    required: ['command'],
+  },
+};
 
 class TestHermesLogInput extends HermesLogInput {
   collectOnce(): Promise<AgentActivityEntry[]> {
@@ -36,6 +46,37 @@ describe('Hermes Agent plugin to trace flow', () => {
       userId: 'plugin-config-user',
       agents: { 'hermes-agent': { captureMessageContent: true } },
     }));
+    // The callback ordering/content fixture is a sanitized Hermes 0.9 capture.
+    // It predates the typed request field, so augment only that field with a
+    // Hermes 0.19 provider-builder shape while preserving the captured event
+    // sequence and correlation identifiers.
+    const observerFixturePath = path.join(root, 'observer-v1-tool-turn-hooks.jsonl');
+    const fixtureEvents = (await fs.readFile(FIXTURE_PATH, 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as { hook: string; payload: Record<string, unknown> });
+    for (const event of fixtureEvents) {
+      if (event.hook !== 'pre_api_request') continue;
+      event.payload.request = {
+        method: 'POST',
+        body: {
+          model: 'qwen3-coder-plus',
+          messages: [],
+          tools: [{
+            type: 'function',
+            function: {
+              name: EXPECTED_TOOL_DEFINITION.name,
+              description: EXPECTED_TOOL_DEFINITION.description,
+              parameters: EXPECTED_TOOL_DEFINITION.parameters,
+            },
+          }],
+        },
+      };
+    }
+    await fs.writeFile(
+      observerFixturePath,
+      fixtureEvents.map(event => JSON.stringify(event)).join('\n') + '\n',
+    );
 
     const driver = `
 import importlib.util
@@ -61,7 +102,7 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
     ctx.hooks[event["hook"]](**event["payload"])
 `;
-    const run = spawnSync('python3', ['-c', driver, PLUGIN_PATH, FIXTURE_PATH], {
+    const run = spawnSync('python3', ['-c', driver, PLUGIN_PATH, observerFixturePath], {
       env: {
         ...process.env,
         LOONGSUITE_PILOT_DATA_DIR: root,
@@ -102,6 +143,11 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     expect(records.every(record => record['user.id'] === 'fixture-user')).toBe(true);
     expect(records.every(record =>
       !('agent.pilot.invocation.user.id' in record))).toBe(true);
+    const requestRecords = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requestRecords).toHaveLength(2);
+    expect(requestRecords.every(record =>
+      JSON.stringify(record['gen_ai.tool.definitions']) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
+      .toBe(true);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
@@ -137,6 +183,17 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       expect(new Set(converted.spans.map(span => span.spanContext().traceId)).size).toBe(1);
       expect(converted.spans.every(span =>
         span.attributes['gen_ai.user.id'] === 'fixture-user')).toBe(true);
+      const toolDefinitions = (span: (typeof converted.spans)[number]): unknown =>
+        JSON.parse(String(span.attributes['gen_ai.tool.definitions']));
+      const agentSpan = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+      const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(agentSpan && toolDefinitions(agentSpan)).toEqual([EXPECTED_TOOL_DEFINITION]);
+      expect(llmSpans).toHaveLength(2);
+      // otel-util-genai currently models definitions as turn-level metadata;
+      // raw request-level attachment is asserted above for both API steps.
+      expect(llmSpans.every(span =>
+        JSON.stringify(toolDefinitions(span)) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
+        .toBe(true);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

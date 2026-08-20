@@ -51,6 +51,38 @@ function toolMessage(id, output) {
   return { role: 'tool', content: JSON.stringify({ output, exit_code: 0, error: null }), tool_call_id: id };
 }
 
+function toolDefinitionsTurn(requestBody) {
+  const prompt = 'Report the available tool surface.';
+  const finalText = 'The tool surface is available.';
+  const request = {
+    ...apiPayload(TURN_ONE, 1),
+    request: {
+      method: 'POST',
+      body: {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: prompt }],
+        ...requestBody,
+      },
+    },
+  };
+  return [
+    { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, user_message: prompt, conversation_history: [{ role: 'user', content: prompt }], model: 'qwen3-coder-plus', platform: 'cli' } },
+    { hook: 'pre_api_request', payload: request },
+    { hook: 'post_api_request', payload: { ...request, finish_reason: 'stop', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } },
+    { hook: 'post_llm_call', payload: {
+      session_id: SESSION_ID,
+      user_message: prompt,
+      assistant_response: finalText,
+      conversation_history: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: finalText, finish_reason: 'stop' },
+      ],
+      model: 'qwen3-coder-plus',
+      platform: 'cli',
+    } },
+  ];
+}
+
 function priorHistory() {
   const callId = 'call_fixture_001';
   return [
@@ -475,6 +507,131 @@ describe('Hermes Agent native plugin', () => {
     expect(response['error.type']).toBe('RateLimitError');
     expect(response['error.message']).toBe('Too many requests');
     expect(response['http.status_code']).toBe(429);
+  });
+
+  it.each([
+    [
+      'OpenAI chat completions',
+      {
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'terminal',
+            description: 'Run a command.',
+            parameters: { type: 'object', properties: { command: { type: 'string' } } },
+          },
+        }],
+      },
+      {
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object', properties: { command: { type: 'string' } } },
+      },
+    ],
+    [
+      'Anthropic messages',
+      {
+        tools: [{
+          name: 'web_search',
+          description: 'Search the web.',
+          input_schema: { type: 'object', properties: { query: { type: 'string' } } },
+        }],
+      },
+      {
+        type: 'function',
+        name: 'web_search',
+        description: 'Search the web.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ],
+    [
+      'Responses API',
+      {
+        tools: [{
+          type: 'function',
+          name: 'read_file',
+          description: 'Read a file.',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        }],
+      },
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ],
+    [
+      'Bedrock Converse',
+      {
+        toolConfig: {
+          tools: [{
+            toolSpec: {
+              name: 'lookup',
+              description: 'Look up a value.',
+              inputSchema: { json: { type: 'object', properties: { key: { type: 'string' } } } },
+            },
+          }],
+        },
+      },
+      {
+        type: 'function',
+        name: 'lookup',
+        description: 'Look up a value.',
+        parameters: { type: 'object', properties: { key: { type: 'string' } } },
+      },
+    ],
+  ])('normalizes %s tool definitions from the Hermes provider request body', (_name, requestBody, expected) => {
+    // Shapes are derived from Hermes 0.19's provider request builders. The
+    // native observer exposes the resulting body at pre_api_request.request.body.
+    const { records } = replay(toolDefinitionsTurn(requestBody));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request['gen_ai.tool.definitions']).toEqual([expected]);
+  });
+
+  it('does not fabricate tool definitions when the provider request has no valid tools', () => {
+    const { records } = replay(toolDefinitionsTurn({ tools: [null, {}, { function: {} }] }));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
+  });
+
+  it('skips Responses built-in tools while preserving function definitions', () => {
+    const { records } = replay(toolDefinitionsTurn({
+      tools: [
+        { type: 'web_search' },
+        {
+          type: 'function',
+          name: '  read_file  ',
+          description: 'Read a file.',
+          parameters: { type: 'object' },
+        },
+      ],
+    }));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request['gen_ai.tool.definitions']).toEqual([{
+      type: 'function',
+      name: 'read_file',
+      description: 'Read a file.',
+      parameters: { type: 'object' },
+    }]);
+  });
+
+  it('does not persist tool definitions when message content capture is disabled', () => {
+    const marker = 'private-tool-description-marker';
+    const { records, raw } = replay(toolDefinitionsTurn({
+      tools: [{
+        type: 'function',
+        function: { name: 'private_tool', description: marker, parameters: { type: 'object' } },
+      }],
+    }), { captureMessageContent: false });
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
+    expect(raw).not.toContain(marker);
   });
 
   it('redacts provider error messages when message content capture is disabled', () => {

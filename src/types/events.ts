@@ -105,9 +105,8 @@ export interface AgentActivityEntry {
    */
   'gen_ai.system_instructions'?: JsonValue;
   /**
-   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式），数据源为 codex transcript
-   * 的 `session_meta.payload.dynamic_tools[]`。仅 Codex 端有值；codex 的核心工具（shell/apply_patch
-   * 等）是嵌入 system prompt 的伪工具，不在此字段中，但在 `gen_ai.system_instructions` 中可见。
+   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式）。不同 Agent 从各自真实的
+   * 模型请求、Hook 或 transcript 工具快照中采集；未暴露完整定义时不应根据 tool.call 反推。
    */
   'gen_ai.tool.definitions'?: JsonValue;
   /** Canonical repository identity for source attribution, e.g. sls/loongsuite-pilot. */
