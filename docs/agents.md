@@ -46,10 +46,17 @@ best-effort wakeup and is not required for directory discovery.
 
 ## DeepSeek Harness Collection And Lifecycle
 
-Pilot detects DeepSeek Harness from `~/.dsh` or the `dsh` command. When `dsh`
-is enabled, Pilot appends one marked, Pilot-owned block to
-`$DSH_HOME/cordis.patch.yml` when `DSH_HOME` is set, otherwise
-`~/.dsh/cordis.patch.yml`. That block loads the packaged plugin
+Pilot resolves one exact Harness home for both detection and deployment. It
+keeps a previously deployed patch path for repair and cleanup, then checks an
+explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and — on
+Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
+`~/.dsh` and `dsh` command detection remain the fallback. Pilot does not scan
+temporary directories or assume a fixed non-default home; multiple distinct
+running homes found during initial discovery are reported as ambiguous instead
+of selecting one silently.
+
+When `dsh` is enabled, Pilot appends one marked, Pilot-owned block to the
+resolved `<DSH_HOME>/cordis.patch.yml`. That block loads the packaged plugin
 from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
 preserved. Start a new DSH process after first enabling or reinstalling the
 integration so the host loads the current patch.

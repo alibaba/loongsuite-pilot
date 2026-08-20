@@ -107,6 +107,22 @@ describe('HookWatchdog intercept targets', () => {
     expect(result.repaired).toBe(0);
   });
 
+  it('does not apply cooldown or daily budget after repair throws', async () => {
+    const repair = vi.fn().mockRejectedValue(new Error('transient target disappeared'));
+    const target = makeTarget({
+      check: vi.fn().mockResolvedValue(false),
+      repair,
+    });
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+
+    const first = await wd.runCheck();
+    const second = await wd.runCheck();
+
+    expect(first.repaired).toBe(0);
+    expect(second.repaired).toBe(0);
+    expect(repair).toHaveBeenCalledTimes(2);
+  });
+
   it('handles multiple intercept targets independently', async () => {
     const healthy = makeTarget({ id: 'ok', check: vi.fn().mockResolvedValue(true) });
     const broken = makeTarget({ id: 'broken', check: vi.fn().mockResolvedValue(false) });

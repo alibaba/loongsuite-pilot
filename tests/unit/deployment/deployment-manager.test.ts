@@ -265,6 +265,45 @@ describe('DeploymentManager', () => {
         .toBeUndefined();
     });
 
+    it('deploys DSH from a custom DSH_HOME when standard detection is false', async () => {
+      const originalDshHome = process.env.DSH_HOME;
+      const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
+      const customHome = path.join(tmpDir, 'fc-runtime-home');
+      const expectedPatch = path.join(customHome, 'cordis.patch.yml');
+      await fs.mkdir(path.dirname(pluginPath), { recursive: true });
+      await fs.writeFile(pluginPath, 'export default function apply() {}\n');
+      const def: AgentDefinition = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: {
+          paths: [path.join(tmpDir, 'missing-default-home')],
+          commands: ['missing-dsh-command'],
+        },
+        dshYamlPatch: {
+          pluginSource: pluginPath,
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(false);
+
+      try {
+        process.env.DSH_HOME = customHome;
+        const [result] = await makeManager().deployAll(() => true);
+
+        expect(result).toMatchObject({ success: true });
+        expect(result.skipped).toBeFalsy();
+        expect(await fs.readFile(expectedPatch, 'utf-8')).toContain('PILOT-OBSERVABILITY-MANAGED');
+        const deployed = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'));
+        expect(deployed.dsh.dshPatchPath).toBe(expectedPatch);
+      } finally {
+        if (originalDshHome === undefined) delete process.env.DSH_HOME;
+        else process.env.DSH_HOME = originalDshHome;
+      }
+    });
+
     it('persists the resolved DSH patch path and cleans it after DSH_HOME changes', async () => {
       const originalDshHome = process.env.DSH_HOME;
       const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');

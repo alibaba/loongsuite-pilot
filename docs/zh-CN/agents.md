@@ -44,9 +44,14 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 ## DeepSeek Harness 采集与生命周期
 
-Pilot 通过 `~/.dsh` 目录或 `dsh` 命令检测 DeepSeek Harness。启用
-`dsh` 后，Pilot 会在已设置 `DSH_HOME` 时修改 `$DSH_HOME/cordis.patch.yml`，
-否则修改 `~/.dsh/cordis.patch.yml`，并在其中追加一个
+Pilot 会为检测和部署解析同一个准确的 Harness home：已部署过的补丁路径
+用于后续修复和清理，其次依次检查本地 Agent 定义中显式设置的 `patchPath`、
+Pilot 服务进程的 `DSH_HOME`，以及 Linux 上唯一、同用户运行中 DSH 进程的
+`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。Pilot 不会扫描
+临时目录或假定某个固定的非默认 home；若初次发现时同时存在多个不同的运行中
+home，会报告歧义而不会静默选择其中一个。
+
+启用 `dsh` 后，Pilot 会在解析出的 `<DSH_HOME>/cordis.patch.yml` 中追加一个
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
