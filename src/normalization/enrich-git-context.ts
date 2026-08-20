@@ -1,5 +1,8 @@
 import path from 'node:path';
 import { inferGitContext } from '../utils/git-context.js';
+import { createLogger } from '../utils/logger.js';
+
+const logger = createLogger('GitContextEnrichment');
 
 const NAMESPACE_ALIASES: Readonly<Record<string, readonly string[]>> = {
   'cursor-cli': ['cursor-cli', 'cursor_cli'],
@@ -45,9 +48,15 @@ export async function enrichCanonicalEntriesWithGit(
   entries: Record<string, unknown>[],
 ): Promise<void> {
   for (const entry of entries) {
-    const agentType = normalizeString(entry['gen_ai.agent.type']);
-    if (!agentType) continue;
-    await enrichCanonicalEntryWithGit(entry, entry, agentType);
+    try {
+      const agentType = normalizeString(entry['gen_ai.agent.type']);
+      if (!agentType) continue;
+      await enrichCanonicalEntryWithGit(entry, entry, agentType);
+    } catch (err) {
+      logger.warn('git context enrichment failed for entry (skipped)', {
+        error: String(err),
+      });
+    }
   }
 }
 

@@ -230,7 +230,14 @@ export class InputManager extends EventEmitter {
   ): Promise<void> {
     if (entries.length === 0) return;
 
-    await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
 
     const counter = this.counters.get(inputId);
     let batchBytes = 0;

@@ -4,6 +4,9 @@ const inferGitContext = vi.fn();
 vi.mock('../../../src/utils/git-context.js', () => ({
   inferGitContext: (...args: unknown[]) => inferGitContext(...args),
 }));
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => ({ warn: vi.fn() }),
+}));
 
 import {
   enrichCanonicalEntriesWithGit,
@@ -153,5 +156,38 @@ describe('enrichCanonicalEntryWithGit', () => {
     });
     expect(inferGitContext).toHaveBeenNthCalledWith(1, '/workspace/codex-project/src');
     expect(inferGitContext).toHaveBeenNthCalledWith(2, '/workspace/cursor-project');
+  });
+
+  it('continues enriching later entries when one git probe fails', async () => {
+    inferGitContext
+      .mockRejectedValueOnce(new Error('git probe failed'))
+      .mockResolvedValueOnce({
+        repo: 'org/healthy-project',
+        branch: 'main',
+        domain: 'github.com',
+        root: '/workspace/healthy-project',
+      });
+    const entries: Record<string, unknown>[] = [
+      {
+        'gen_ai.agent.type': 'codex',
+        'agent.codex.cwd': '/workspace/failing-project',
+      },
+      {
+        'gen_ai.agent.type': 'codex',
+        'agent.codex.cwd': '/workspace/healthy-project',
+      },
+    ];
+
+    await expect(enrichCanonicalEntriesWithGit(entries)).resolves.toBeUndefined();
+
+    expect(entries[0]['workspace.path']).toBe('/workspace/failing-project');
+    expect(entries[0]['git.repo']).toBeUndefined();
+    expect(entries[1]).toMatchObject({
+      'workspace.path': '/workspace/healthy-project',
+      'workspace.current_root': '/workspace/healthy-project',
+      'git.repo': 'org/healthy-project',
+      'git.branch': 'main',
+      'git.domain': 'github.com',
+    });
   });
 });
