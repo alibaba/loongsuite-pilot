@@ -76,7 +76,10 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   : {};
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
-const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
+  agentId: AGENT_ID,
+  allowInvocationIdentity: true,
+});
 // Retain recent completion tombstones to ignore delayed duplicate SubagentStop
 // events while keeping the persisted session state bounded.
 const FINALIZED_SUBAGENT_LIMIT = 128;

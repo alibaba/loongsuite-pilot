@@ -5,6 +5,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  applyInvocationIdentity,
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../src/normalization/invocation-identity.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
@@ -88,14 +93,14 @@ function writeTranscript(rows) {
   fs.writeFileSync(transcriptPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
 }
 
-function runProcessor(agentId = 'qoder') {
+function runProcessor(agentId = 'qoder', extraEnv = {}) {
   return spawnSync('node', [PROCESSOR, '--agent-id', agentId, '--log-prefix', agentId], {
     input: JSON.stringify({
       session_id: 'session-ide',
       transcript_path: transcriptPath,
       cwd: '/tmp/qoder-project',
     }),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
     encoding: 'utf-8',
     timeout: 30_000,
   });
@@ -179,13 +184,18 @@ describe('qoder-hook-processor turn boundary markers', () => {
     }
   });
 
-  it('marks a qoder-cn turn the same way', () => {
+  it('applies invocation-scoped identity to every qoder-cn span', async () => {
     writeTranscript(ideTurnRows());
 
-    expect(runProcessor('qoder-cn').status).toBe(0);
+    expect(runProcessor('qoder-cn', {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'gen_ai.session.id=env-session,gen_ai.user.id=env-user',
+    }).status).toBe(0);
     const records = readHistory('qoder-cn');
     expect(records.length).toBeGreaterThan(0);
     expect(new Set(records.map(r => r['gen_ai.agent.type']))).toEqual(new Set(['qoder-cn']));
+    expect(records.every(r => r[INVOCATION_SESSION_ID_FIELD] === 'env-session')).toBe(true);
+    expect(records.every(r => r[INVOCATION_USER_ID_FIELD] === 'env-user')).toBe(true);
 
     const starts = records.filter(r => r['gen_ai.turn.start'] === true);
     const ends = records.filter(r => r['gen_ai.turn.end'] === true);
@@ -201,6 +211,27 @@ describe('qoder-hook-processor turn boundary markers', () => {
     for (const record of records.slice(1, -1)) {
       expect(record['gen_ai.turn.start']).toBeUndefined();
       expect(record['gen_ai.turn.end']).toBeUndefined();
+    }
+
+    for (const record of records) {
+      applyInvocationIdentity(record, 'configured-user', 'fallback-user');
+    }
+    expect(records.every(r => r['gen_ai.session.id'] === 'env-session')).toBe(true);
+    expect(records.every(r => r['user.id'] === 'env-user')).toBe(true);
+    expect(records.every(r => !(INVOCATION_SESSION_ID_FIELD in r))).toBe(true);
+    expect(records.every(r => !(INVOCATION_USER_ID_FIELD in r))).toBe(true);
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      expect(conversion.spans.length).toBeGreaterThan(0);
+      expect(conversion.spans.every(span =>
+        span.attributes['gen_ai.session.id'] === 'env-session'
+        && span.attributes['gen_ai.user.id'] === 'env-user')).toBe(true);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
     }
   });
 
