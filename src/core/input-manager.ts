@@ -17,6 +17,7 @@ import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
+import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 
 const logger = createLogger('InputManager');
@@ -39,7 +40,8 @@ export interface InputCounter {
  *   1. Register / start / stop inputs
  *   2. Listen for 'entries' events from each input
  *   3. Enrich entries with user.id
- *   4. Forward to flusher(s) for output
+ *   4. Fill missing root-turn lifecycle boundaries
+ *   5. Forward to flusher(s) for output
  */
 export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
@@ -54,6 +56,7 @@ export class InputManager extends EventEmitter {
   private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
+  private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -265,6 +268,17 @@ export class InputManager extends EventEmitter {
       } catch (err) {
         logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
       }
+    }
+
+    // Fill-only lifecycle enrichment. It never changes record order/count or
+    // existing boundary markers, and must not block the normal output path.
+    try {
+      this.turnBoundaryProcessor.enrich(entries);
+    } catch (err) {
+      logger.warn('turn boundary enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
     }
 
     const policyAppliedEntries = entries.map(entry =>

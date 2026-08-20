@@ -241,6 +241,14 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
       mutate: entries => { delete entries[7]['gen_ai.turn.end']; },
       category: 'turn_boundary_error=1',
     },
+    {
+      name: 'both turn boundaries missing',
+      mutate: entries => {
+        delete entries[0]['gen_ai.turn.start'];
+        delete entries[7]['gen_ai.turn.end'];
+      },
+      category: 'turn_boundary_error=1',
+    },
   ])('strictly rejects $name', ({ mutate, category }) => {
     const entries = validMultiToolGraph();
     mutate(entries);
@@ -248,6 +256,21 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     const r = runWorkBuddyValidator();
     expect(r.code).toBe(1);
     expect(r.out).toContain(category);
+  });
+
+  it('accepts an incomplete turn with exactly one start and no end', () => {
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      graphEntry('evt-incomplete', 'other', {
+        'gen_ai.turn.start': true,
+        'gen_ai.input.messages_delta': [
+          { role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] },
+        ],
+      }),
+    ]);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('turn_boundary_error=0');
   });
 
   it('never prints prompt, tool payload, result, or user path values in validation errors', () => {
