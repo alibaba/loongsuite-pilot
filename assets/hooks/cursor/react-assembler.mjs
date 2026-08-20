@@ -19,6 +19,7 @@ import {
   toJsonValue,
   parseMaybeJson,
 } from '../agent-event-normalizer.mjs';
+import { cursorWorkspaceFields, resolveWorkspacePath } from './workspace-context.mjs';
 
 // ─── Public API ───
 
@@ -80,6 +81,7 @@ export function assembleTurn(journalEvents, options = {}) {
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
+  const workspacePath = resolveWorkspacePath(parentEvents);
 
   const baseFields = {
     trace_id: traceId,
@@ -87,6 +89,7 @@ export function assembleTurn(journalEvents, options = {}) {
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': variant,
     'user.id': userId,
+    ...cursorWorkspaceFields(variant, workspacePath),
   };
 
   const records = [];
@@ -191,8 +194,10 @@ export function assembleTurn(journalEvents, options = {}) {
   for (const link of childLinks) {
     const { childConvId, childEvents, parentToolCallId } = link;
     const childConvShort = childConvId.slice(0, 8);
+    const childWorkspacePath = resolveWorkspacePath(childEvents) || workspacePath;
     const childBaseFields = {
       ...baseFields,
+      ...cursorWorkspaceFields(variant, childWorkspacePath),
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.depth': 1,
       'gen_ai.agent.id': childConvId,

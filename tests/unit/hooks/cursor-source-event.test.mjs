@@ -27,4 +27,17 @@ describe('Cursor source event', () => {
 
     expect(event.duration_ms).toBe(0);
   });
+
+  it('preserves cwd and workspace roots on non-tool events', () => {
+    const event = toInternalEvent({
+      hook_event_name: 'beforeSubmitPrompt',
+      conversation_id: 'conv-workspace',
+      prompt: 'inspect this project',
+      cwd: 'C:\\Users\\alice\\project',
+      workspace_roots: ['C:\\Users\\alice\\project'],
+    });
+
+    expect(event.cwd).toBe('C:\\Users\\alice\\project');
+    expect(event.workspace_roots).toEqual(['C:\\Users\\alice\\project']);
+  });
 });

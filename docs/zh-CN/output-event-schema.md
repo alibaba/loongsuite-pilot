@@ -97,6 +97,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
+工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
+
 ## 多模态消息 Parts
 
 当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：

@@ -1,6 +1,7 @@
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 
 export interface QwenWorkCNInputOptions extends Partial<HookInputOptions> {
@@ -42,9 +43,15 @@ export class QwenWorkCNInput extends BaseHookInput {
     const version = record.version;
     if (typeof version === 'string' && version) this.lastAgentVersion = version;
 
-    return {
+    const entry = {
       ...record,
       'gen_ai.agent.type': ClientType.QwenWorkCN,
     } as AgentActivityEntry;
+    await enrichCanonicalEntryWithGit(
+      entry as Record<string, unknown>,
+      record,
+      'qwen-work-cn',
+    );
+    return entry;
   }
 }

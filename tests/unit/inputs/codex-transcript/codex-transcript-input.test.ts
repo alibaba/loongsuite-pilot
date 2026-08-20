@@ -2600,6 +2600,10 @@ describe('CodexTranscriptInput', () => {
     });
     expect(secondResponse?.['gen_ai.system_instructions']).toBeUndefined();
     expect(secondResponse?.['gen_ai.tool.definitions']).toBeUndefined();
+    expect(restarted.entries.find(entry => entry['gen_ai.turn.end'] === true)).toMatchObject({
+      'agent.codex.cwd': '/tmp/project',
+      'agent.codex.turn_status': 'completed',
+    });
   });
 
   it('rebuilds an oversized persisted delta from transcript offsets', async () => {
@@ -4144,4 +4148,3 @@ describe('Codex transcript multimodal extraction', () => {
     expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
   });
 });
-

@@ -60,6 +60,7 @@ Pilot is designed to answer practical questions:
 | Qoder Work    | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 

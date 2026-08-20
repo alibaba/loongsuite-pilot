@@ -14,6 +14,38 @@ function ns(ms: number): string {
 }
 
 describe('Cursor react assembler', () => {
+  it('propagates Cursor CLI workspace roots to every parent record', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+        model: 'composer-cli',
+        prompt: 'inspect the workspace',
+        workspace_roots: ['C:\\Users\\alice\\project'],
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+        model: 'composer-cli',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'stop',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+      },
+    ], { stopConversationId: 'conv-cli-workspace', variant: 'cursor-cli' });
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli')).toBe(true);
+    expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project')).toBe(true);
+  });
+
   it('derives LLM and tool span timing from hook captured time and duration', () => {
     const { records } = assembleTurn([
       {

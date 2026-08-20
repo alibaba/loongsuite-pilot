@@ -11,6 +11,7 @@ import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
+import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
@@ -228,6 +229,15 @@ export class InputManager extends EventEmitter {
     entries: AgentActivityEntry[],
   ): Promise<void> {
     if (entries.length === 0) return;
+
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
 
     const counter = this.counters.get(inputId);
     let batchBytes = 0;

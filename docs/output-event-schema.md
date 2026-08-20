@@ -99,6 +99,8 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
+Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+
 ## Multimodal Message Parts
 
 When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Multimodal Collection](multimodal.md)), media in message `parts` uses object-storage references instead of inline base64:
