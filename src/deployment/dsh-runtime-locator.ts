@@ -159,9 +159,15 @@ export class DshRuntimeLocator {
     const executable = path.basename(args[0] ?? '').toLowerCase();
     if (executable === 'dsh' || executable === 'dsh.exe') return true;
     if (executable !== 'node' && executable !== 'node.exe' && executable !== 'nodejs') return false;
-    const script = args[1] ?? '';
-    return path.basename(script).toLowerCase() === 'dsh'
-      || script.replace(/\\/g, '/').endsWith('/@deepseek-ai/dsh/lib/bin.js');
+    // Node/V8 flags may precede the entry script (for example --inspect or
+    // --require <preload>). Match the exact DSH entry token without assuming
+    // it is argv[1]. The same-user and DSH_HOME gates still apply before a
+    // process becomes a runtime-home candidate.
+    return args.slice(1).some(arg => {
+      const normalized = arg.replace(/\\/g, '/');
+      return path.posix.basename(normalized).toLowerCase() === 'dsh'
+        || normalized.endsWith('/@deepseek-ai/dsh/lib/bin.js');
+    });
   }
 
   private readEnvironmentValue(bytes: Buffer, name: string): string | undefined {

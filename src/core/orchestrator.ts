@@ -628,6 +628,14 @@ export class Orchestrator extends EventEmitter {
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          // Process discovery is intentionally best-effort. If DSH exits
+          // between precondition() and repair(), deploySingle reports a
+          // successful not-detected skip for deployAll compatibility. Surface
+          // that transient miss here so the watchdog does not consume its
+          // cooldown or daily repair budget without writing the patch.
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`DSH disappeared before YAML patch repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
           }

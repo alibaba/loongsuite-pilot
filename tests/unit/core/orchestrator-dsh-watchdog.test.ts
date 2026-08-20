@@ -135,4 +135,19 @@ describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
     await expect(target.repair()).rejects.toThrow('repair failed');
     await expect(target.cleanup?.()).rejects.toThrow('failed to remove DSH YAML patch');
   });
+
+  it('treats a transient not-detected skip as a failed repair', async () => {
+    deploySingle.mockResolvedValue({
+      success: true,
+      agentId: 'dsh',
+      deployMode: 'dsh-yaml-patch',
+      skipped: true,
+      reason: 'not-detected',
+    });
+    const [target] = buildTargets(makeOrchestrator({
+      getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent,
+    }));
+
+    await expect(target.repair()).rejects.toThrow('DSH disappeared before YAML patch repair');
+  });
 });

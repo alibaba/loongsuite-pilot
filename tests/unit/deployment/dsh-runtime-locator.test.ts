@@ -57,6 +57,7 @@ describe('DshRuntimeLocator', () => {
     home?: string;
     cwd?: string;
     dsh?: boolean;
+    nodeArgs?: string[];
   }): Promise<void> {
     const processDir = path.join(procRoot, String(pid));
     await fs.mkdir(processDir);
@@ -65,7 +66,7 @@ describe('DshRuntimeLocator', () => {
       : '/code/node_modules/@deepseek-ai/dsh/lib/bin.js';
     await fs.writeFile(
       path.join(processDir, 'cmdline'),
-      Buffer.from(['node', script, 'web', '--port', '13080', ''].join('\0')),
+      Buffer.from(['node', ...(options.nodeArgs ?? []), script, 'web', '--port', '13080', ''].join('\0')),
     );
     await fs.writeFile(
       path.join(processDir, 'environ'),
@@ -103,6 +104,22 @@ describe('DshRuntimeLocator', () => {
       source: 'running-process',
       pid: 321,
     });
+    expect(detectAgent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a V8 heap limit', ['--max-old-space-size=4096']],
+    ['source maps', ['--enable-source-maps']],
+    ['the inspector', ['--inspect']],
+    ['a short require preload', ['-r', '/code/preload.cjs']],
+    ['a long require preload', ['--require', '/code/preload.cjs']],
+  ])('discovers DSH when Node starts with %s before the entry script', async (_label, nodeArgs) => {
+    const home = path.join(tmpDir, 'runtime-home');
+    await writeProcess(322, { home, nodeArgs });
+
+    const target = await locator().locate(makeDef());
+
+    expect(target).toMatchObject({ home, source: 'running-process', pid: 322 });
     expect(detectAgent).not.toHaveBeenCalled();
   });
 
