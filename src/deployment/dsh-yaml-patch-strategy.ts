@@ -212,6 +212,12 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       return false;
     }
     const patchPath = target.patchPath;
+    // A stale deployment record may outlive a user-removed DSH home. Check the
+    // target before acquiring the in-directory lock so disable/undeploy remains
+    // a true no-op instead of recreating that home as an empty directory.
+    const initialBytes = await this.readBytes(patchPath);
+    if (initialBytes.length === 0 && !(await fileExists(patchPath))) return true;
+
     const lockToken = await this.acquirePatchLock(patchPath);
     if (!lockToken) return false;
 
