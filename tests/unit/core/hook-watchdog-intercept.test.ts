@@ -305,16 +305,21 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     }
   });
 
-  it('keeps the Windows runtime target scoped to QwenWorkCN', () => {
+  it('keeps independent Windows runtime targets for QwenWorkCN and QoderWork', () => {
     const defs = HookWatchdog.winRuntimeInterceptDefs();
-    expect(defs).toHaveLength(1);
-    expect(defs[0]).toMatchObject({
-      id: 'qwenworkcn-win-env',
-      envName: 'QW_QODER_WORKER_RUNTIME_PATH',
-      agentIds: ['qwen-work-cn'],
-    });
-    expect(defs.flatMap(def => def.agentIds)).not.toContain('qoder-work');
-    expect(defs.flatMap(def => def.agentIds)).not.toContain('qoder-work-cn');
+    expect(defs).toHaveLength(2);
+    expect(defs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qwen-work-cn'],
+      }),
+      expect.objectContaining({
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+      }),
+    ]));
   });
 
   it('parses a Windows User environment value from reg.exe output', () => {

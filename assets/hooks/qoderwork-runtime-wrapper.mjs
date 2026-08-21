@@ -1,9 +1,10 @@
 // QoderWork-family worker runtime wrapper — transparent, app-agnostic shim.
 //
-// Loaded via the SHARED env var QODER_WORKER_RUNTIME_PATH. The ENTIRE
-// @qoder-ai/qoder-agent-sdk family honours this variable (QoderWork,
-// QwenWorkCN, QoderWork CN, ...), and on macOS we set it with `launchctl
-// setenv`, which is GLOBAL to the launchd user domain. Consequences:
+// Loaded through QODER_WORKER_RUNTIME_PATH (QoderWork family) or the dedicated
+// QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN). These User-level variables can
+// coexist and are inherited globally, so the variable that happened to load us
+// is never valid host identity. On macOS the overrides are also global to the
+// launchd user domain. Consequences:
 //   • Every GUI app inherits the variable, but only apps that actually run the
 //     @qoder-ai SDK ever load this file as their worker entry.
 //   • Therefore this wrapper CAN be the worker entry of ANY sibling app, not
@@ -47,11 +48,13 @@ const HOSTS = [
   {
     id: 'qoder-work-cn',
     appNames: ['QoderWork CN.app', 'QoderWorkCN.app'],
+    windowsAppNames: ['QoderWork CN', 'QoderWorkCN'],
     interceptFile: 'qoderworkcn-intercept.jsonl',
   },
   {
     id: 'qoder-work',
     appNames: ['QoderWork.app'],
+    windowsAppNames: ['QoderWork'],
     interceptFile: 'qoderwork-intercept.jsonl',
   },
 ];
@@ -155,12 +158,24 @@ function classifyHost(resourceRoots) {
         return host;
       }
       if (host.windowsAppNames?.some(appName =>
-        normalizedLower.includes(`/${appName.toLowerCase()}/resources`))) {
+        matchesWindowsResourcePath(normalizedLower, appName))) {
         return host;
       }
     }
   }
   return null;
+}
+
+function matchesWindowsResourcePath(normalizedLower, appName) {
+  const parts = normalizedLower.split('/').filter(Boolean);
+  const appIndex = parts.lastIndexOf(appName.toLowerCase());
+  const resourcesIndex = parts.lastIndexOf('resources');
+  return appIndex >= 0
+    && resourcesIndex === parts.length - 1
+    && resourcesIndex > appIndex
+    // Support both <App>/resources and <App>/<version>/resources. Do not
+    // accept an arbitrary descendant: that could classify a nested sibling.
+    && resourcesIndex - appIndex <= 2;
 }
 
 // Locate the host app's OWN worker runtime. Returns an absolute path or null.

@@ -63,7 +63,7 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     });
   });
 
-  it('recognizes QwenWorkCN from a Windows resources path', async () => {
+  it('recognizes QwenWorkCN from a direct Windows resources path', async () => {
     const marker = path.join(root, 'windows-qwen-runtime-loaded');
     const resources = await createWindowsHostRuntime('QwenWorkCN', marker);
 
@@ -80,15 +80,43 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     });
   });
 
-  it('does not classify a Windows sibling from the global Qwen env var', async () => {
-    const marker = path.join(root, 'windows-qoder-runtime-loaded');
-    const resources = await createWindowsHostRuntime('QoderWork', marker);
+  it.each([
+    ['QwenWorkCN', '0.1.8-26081406', 'qwenworkcn-intercept.jsonl'],
+    ['QoderWork', '0.1.8-26081406', 'qoderwork-intercept.jsonl'],
+    ['QoderWorkCN', '0.1.8-26081406', 'qoderworkcn-intercept.jsonl'],
+    ['QoderWork CN', '0.1.8-26081406', 'qoderworkcn-intercept.jsonl'],
+  ])('classifies versioned Windows %s resources without cross-agent writes', async (
+    appName,
+    version,
+    expectedIntercept,
+  ) => {
+    const marker = path.join(root, `windows-${appName}-runtime-loaded`);
+    const resources = await createWindowsHostRuntime(appName, marker, version);
+
+    runWrapper(resources, marker, {
+      QW_QODER_WORKER_RUNTIME_PATH: wrapper,
+      QODER_WORKER_RUNTIME_PATH: wrapper,
+    });
+
+    expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
+    for (const intercept of [
+      'qwenworkcn-intercept.jsonl',
+      'qoderwork-intercept.jsonl',
+      'qoderworkcn-intercept.jsonl',
+    ]) {
+      expect(existsSync(path.join(dataDir, 'logs', intercept))).toBe(intercept === expectedIntercept);
+    }
+  });
+
+  it('does not classify a deeper unrelated Windows descendant as an app host', async () => {
+    const marker = path.join(root, 'windows-nested-runtime-loaded');
+    const resources = path.join(root, 'Programs', 'QwenWorkCN', 'version', 'nested', 'resources');
+    await createRuntimeAt(resources, marker);
 
     runWrapper(resources, marker, { QW_QODER_WORKER_RUNTIME_PATH: wrapper });
 
     expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
     expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
-    expect(existsSync(path.join(dataDir, 'logs', 'qoderwork-intercept.jsonl'))).toBe(false);
   });
 
   async function createHostRuntime(appName, marker) {
@@ -97,8 +125,8 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     return resources;
   }
 
-  async function createWindowsHostRuntime(appName, marker) {
-    const resources = path.join(root, 'Programs', appName, 'resources');
+  async function createWindowsHostRuntime(appName, marker, version) {
+    const resources = path.join(root, 'Programs', appName, ...(version ? [version] : []), 'resources');
     await createRuntimeAt(resources, marker);
     return resources;
   }

@@ -106,6 +106,67 @@ function windowsPathsEqual(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
 
+async function readWindowsUserEnv(envName: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('reg.exe', [
+      'query', 'HKCU\\Environment', '/v', envName,
+    ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    return parseWindowsUserEnv(stdout, envName);
+  } catch {
+    return '';
+  }
+}
+
+async function broadcastWindowsUserEnv(envName: string, value: string | null): Promise<boolean> {
+  const valueExpr = value === null ? '$null' : '$env:LOONGSUITE_PILOT_RUNTIME_ENV_VALUE';
+  const command = [
+    "$ErrorActionPreference = 'Stop'",
+    `try { [Environment]::SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, ${valueExpr}, 'User'); exit 0 } catch { exit 1 }`,
+  ].join('; ');
+  try {
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      timeout: 10_000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        LOONGSUITE_PILOT_RUNTIME_ENV_NAME: envName,
+        ...(value === null ? {} : { LOONGSUITE_PILOT_RUNTIME_ENV_VALUE: value }),
+      },
+    });
+    return true;
+  } catch {
+    logger.warn('windows runtime environment persisted but broadcast failed', {
+      envName,
+      action: 'sign out and back in to refresh Explorer',
+    });
+    return false;
+  }
+}
+
+async function setWindowsUserEnv(envName: string, value: string): Promise<void> {
+  await execFileAsync('reg.exe', [
+    'add', 'HKCU\\Environment', '/v', envName,
+    '/t', 'REG_SZ', '/d', value, '/f',
+  ], { timeout: 10_000, windowsHide: true });
+  await broadcastWindowsUserEnv(envName, value);
+}
+
+async function removeWindowsUserEnv(envName: string): Promise<void> {
+  await execFileAsync('reg.exe', [
+    'delete', 'HKCU\\Environment', '/v', envName, '/f',
+  ], { timeout: 10_000, windowsHide: true });
+  await broadcastWindowsUserEnv(envName, null);
+}
+
+async function cleanupOwnedWindowsUserEnv(envName: string, wrapperPath: string): Promise<boolean> {
+  const current = await readWindowsUserEnv(envName);
+  if (current && windowsPathsEqual(current, wrapperPath)) {
+    await removeWindowsUserEnv(envName);
+    return true;
+  }
+  return false;
+}
+
 export interface CheckResult {
   checked: number;
   repaired: number;
@@ -660,7 +721,7 @@ export class HookWatchdog {
       }
     }
 
-    // ── QwenWorkCN Windows User env var ──
+    // ── QoderWork-family Windows User env vars ──
     // HKCU\Environment is permanent across reboots and inherited by every new
     // GUI process. Native reg.exe keeps this path compatible with CLM/WDAC.
     if (process.platform === 'win32') {
@@ -670,43 +731,31 @@ export class HookWatchdog {
           id: def.id,
           enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
           precondition: async () => {
-            if (!await fileExists(wrapperPath)) return false;
+            if (!await fileExists(wrapperPath)) {
+              const removed = await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => false);
+              if (removed) {
+                logger.warn('windows runtime wrapper missing; removed owned override', {
+                  envName: def.envName,
+                  wrapperPath,
+                });
+              }
+              return false;
+            }
             for (const appPath of def.appInstallPaths) {
               if (await directoryExists(appPath)) return true;
             }
+            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => {});
             return false;
           },
           check: async () => {
-            try {
-              const { stdout } = await execFileAsync('reg.exe', [
-                'query', 'HKCU\\Environment', '/v', def.envName,
-              ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
-              const current = parseWindowsUserEnv(stdout, def.envName);
-              return windowsPathsEqual(current, wrapperPath);
-            } catch {
-              return false;
-            }
+            const current = await readWindowsUserEnv(def.envName);
+            return windowsPathsEqual(current, wrapperPath);
           },
           repair: async () => {
-            await execFileAsync('reg.exe', [
-              'add', 'HKCU\\Environment', '/v', def.envName,
-              '/t', 'REG_SZ', '/d', wrapperPath, '/f',
-            ], { timeout: 10_000, windowsHide: true });
+            await setWindowsUserEnv(def.envName, wrapperPath);
           },
           cleanup: async () => {
-            try {
-              const { stdout } = await execFileAsync('reg.exe', [
-                'query', 'HKCU\\Environment', '/v', def.envName,
-              ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
-              const current = parseWindowsUserEnv(stdout, def.envName);
-              if (windowsPathsEqual(current, wrapperPath)) {
-                await execFileAsync('reg.exe', [
-                  'delete', 'HKCU\\Environment', '/v', def.envName, '/f',
-                ], { timeout: 10_000, windowsHide: true });
-              }
-            } catch {
-              // Best-effort cleanup.
-            }
+            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => {});
           },
         });
       }
@@ -807,7 +856,7 @@ export class HookWatchdog {
     ];
   }
 
-  /** Windows QwenWorkCN User-level runtime override. */
+  /** Windows product-specific User-level runtime overrides. */
   static winRuntimeInterceptDefs(): WinRuntimeInterceptDefinition[] {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     return [
@@ -816,6 +865,16 @@ export class HookWatchdog {
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
         agentIds: ['qwen-work-cn'],
         appInstallPaths: [path.join(localAppData, 'Programs', 'QwenWorkCN')],
+      },
+      {
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+        appInstallPaths: [
+          path.join(localAppData, 'Programs', 'QoderWork'),
+          path.join(localAppData, 'Programs', 'QoderWorkCN'),
+          path.join(localAppData, 'Programs', 'QoderWork CN'),
+        ],
       },
     ];
   }

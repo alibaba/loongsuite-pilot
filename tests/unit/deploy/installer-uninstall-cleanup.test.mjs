@@ -515,35 +515,53 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
   });
 });
 
-describe('Windows QwenWorkCN runtime override lifecycle', () => {
-  const qwenRuntimeSection = ps1.slice(
-    ps1.indexOf('function Get-QwenWorkCNRuntimeOverride'),
+describe('Windows QoderWork-family runtime override lifecycle', () => {
+  const runtimeSection = ps1.slice(
+    ps1.indexOf('function Get-PilotRuntimeOverride'),
     ps1.indexOf('function Install-Command'),
   );
   const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
 
-  it('uses the final agent config and the dedicated Qwen environment variable', () => {
-    expect(qwenRuntimeSection).toContain("config?.agents?.['qwen-work-cn']?.enabled === false");
-    expect(qwenRuntimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
-    expect(qwenRuntimeSection).not.toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
-    expect(ps1.match(/Inject-QwenWorkCNRuntimeWrapper/g)).toHaveLength(3);
+  it('uses the final agent config and independently maintains both environment variables', () => {
+    expect(runtimeSection).toContain('config?.agents?.[agentId]?.enabled === false');
+    expect(runtimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
+    expect(runtimeSection).toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qwen-work-cn'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'");
+    expect(ps1.match(/Inject-QoderworkRuntimeWrapper/g)).toHaveLength(3);
   });
 
-  it('uses CLM-safe registry commands instead of Environment static methods', () => {
-    expect(qwenRuntimeSection).toContain('reg query "HKCU\\Environment"');
-    expect(qwenRuntimeSection).toContain('reg add "HKCU\\Environment"');
-    expect(qwenRuntimeSection).toContain('reg delete "HKCU\\Environment"');
-    expect(qwenRuntimeSection).not.toContain('[Environment]::');
+  it('uses CLM-safe registry persistence with a guarded Explorer broadcast', () => {
+    expect(runtimeSection).toContain('reg.exe query "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe add "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe delete "HKCU\\Environment"');
+    expect(runtimeSection).toContain('[Environment]::SetEnvironmentVariable');
+    expect(runtimeSection).toContain('catch {');
+    expect(runtimeSection).toContain('sign out and back in');
   });
 
-  it('does not add Windows QoderWork runtime lifecycle management', () => {
-    expect(ps1).not.toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
-    expect(ps1).not.toContain('QoderWork\\QoderWork.exe');
-    expect(ps1).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
+  it('detects app roots without assuming executables are outside version directories', () => {
+    expect(runtimeSection).toContain('Programs\\QwenWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork');
+    expect(runtimeSection).toContain('Programs\\QoderWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork CN');
+    expect(runtimeSection).not.toContain('QoderWork\\QoderWork.exe');
+    expect(runtimeSection).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
   });
 
-  it('uninstalls only the override owned by the current dataDir', () => {
-    expect(uninstall).toContain('$currentQwenRuntime -ieq $wrapperPath');
+  it('cleans an owned override before returning when the wrapper is missing', () => {
+    const sync = runtimeSection.slice(runtimeSection.indexOf('function Sync-PilotRuntimeOverride'));
+    expect(sync.indexOf('Get-PilotRuntimeOverride')).toBeLessThan(sync.indexOf('Test-Path $WrapperPath'));
+    expect(sync).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(sync).toContain('Wrapper missing; cleaned $Name');
+    expect(sync).toContain('Wrapper missing; did not set $Name');
+    expect(sync).toContain('$script:RUNTIME_WRAPPER_MISSING = $true');
+  });
+
+  it('uninstalls both overrides only when owned by the current dataDir', () => {
+    expect(uninstall).toContain("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')");
+    expect(uninstall).toContain('$currentRuntime -ieq $wrapperPath');
     expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
   });
 });
