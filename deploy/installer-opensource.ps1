@@ -2071,8 +2071,26 @@ function Write-FileUtf8NoBom {
     }
     $tmp = Join-Path $env:TEMP ("lp-write-" + (Get-Random) + ".tmp")
     Set-Content -LiteralPath $tmp -Value $Content -Encoding UTF8 -NoNewline
-    & $script:NODE_BIN -e 'const fs=require("fs");let s=fs.readFileSync(process.argv[1],"utf-8");if(s.charCodeAt(0)===0xFEFF)s=s.slice(1);fs.writeFileSync(process.argv[2],s);' $tmp $Path
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    # Windows PowerShell 5.1 strips nested double quotes while marshalling a
+    # single-quoted -e argument to a native executable. Keep the JavaScript in a
+    # here-string and use JS single-quoted literals so node receives the quotes.
+    $rewriteScript = @'
+const fs = require('fs');
+let content = fs.readFileSync(process.argv[1], 'utf-8');
+if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+fs.writeFileSync(process.argv[2], content);
+'@
+    $rewriteExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e $rewriteScript $tmp $Path
+        $rewriteExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
 function Remove-CodexTrustState {
@@ -2491,26 +2509,20 @@ function Cmd-Uninstall {
     Remove-OpenClawPlugin
     Write-Host ""
 
-    Msg "==> 删除安装目录..." "==> Removing installation..."
-    Remove-PilotInstallationFiles
-    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
-
-    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
-    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
-    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
-    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
-    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
-    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
-    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    Write-Host ""
-
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
-    Remove-CodexHookConfig
-    Remove-CodexTrustState
+    try {
+        Remove-CodexHookConfig
+    } catch {
+        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    try {
+        Remove-CodexTrustState
+    } catch {
+        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
     Write-Host ""
 
     Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
@@ -2544,6 +2556,25 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
     Remove-MimoCodePlugin
+    Write-Host ""
+
+    # Keep the pinned node runtime and deployed helper assets available until
+    # every external config and runtime override has been cleaned. In
+    # particular, never leave a User env var pointing at a deleted wrapper.
+    Msg "==> 删除安装目录..." "==> Removing installation..."
+    Remove-PilotInstallationFiles
+    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
+
+    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
+    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
+    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
+    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
+    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
 
     if ($Purge) {

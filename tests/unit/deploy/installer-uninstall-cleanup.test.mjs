@@ -331,6 +331,38 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall.indexOf('Remove-CodexHookConfig'))
       .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
   });
+
+  it('passes a valid fs module literal to node when rewriting Codex files', () => {
+    const writer = ps1.slice(
+      ps1.indexOf('function Write-FileUtf8NoBom'),
+      ps1.indexOf('function Remove-CodexTrustState'),
+    );
+    expect(writer).toContain("$rewriteScript = @'");
+    expect(writer).toContain("const fs = require('fs');");
+    expect(writer).not.toContain("-e 'const fs=require(\"fs\")");
+    expect(writer).toContain('if ($rewriteExit -ne 0)');
+
+    const script = writer.match(/\$rewriteScript = @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+    expect(script).toBeDefined();
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-rewrite-'));
+    try {
+      const input = join(root, 'input.txt');
+      const output = join(root, 'output.txt');
+      writeFileSync(input, '\uFEFFcodex-hook-config', 'utf8');
+      const run = spawnSync(process.execPath, ['-e', script, input, output], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(readFileSync(output, 'utf8')).toBe('codex-hook-config');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('continues uninstall when dedicated Codex cleanup fails', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
+    expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+  });
 });
 
 describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
@@ -576,5 +608,14 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
     expect(uninstall).toContain("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')");
     expect(uninstall).toContain('$currentRuntime -ieq $wrapperPath');
     expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
+  });
+
+  it('cleans hook configs and runtime overrides before deleting their files and pinned node', () => {
+    expect(uninstall.indexOf('Remove-HookConfigs'))
+      .toBeLessThan(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"));
+    expect(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
   });
 });
