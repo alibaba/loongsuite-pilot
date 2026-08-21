@@ -57,6 +57,8 @@ export interface AgentActivityEntry {
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
   'gen_ai.agent.name'?: string;
+  'gen_ai.agent.description'?: string;
+  'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
   'gen_ai.request.model'?: string;
@@ -87,6 +89,10 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.duration'?: number;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
+  /** Grok execution evidence used to associate a tool declaration with its result. */
+  'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';
+  /** Grok clock selected for the event after transcript/updates/unified fusion. */
+  'loongsuite.grok.timing.source'?: 'unified' | 'updates' | 'hook';
   'gen_ai.skill.name'?: string;
   'gen_ai.skill.id'?: string;
   'gen_ai.skill.description'?: string;

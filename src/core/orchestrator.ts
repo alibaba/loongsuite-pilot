@@ -8,6 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import {
+  areGrokBuildHookAssetsHealthy,
+  restoreGrokBuildHookAssets,
+} from '../deployment/grok-build-assets.js';
+import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
@@ -49,6 +53,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
@@ -123,6 +128,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
@@ -292,6 +298,7 @@ export class Orchestrator extends EventEmitter {
     const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
@@ -512,6 +519,9 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      // Grok Build uses snake_case event keys and a multi-file hook runtime.
+      // Its exact config and asset checks run through a dedicated intercept target.
+      if (def.id === 'grok-build') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -529,6 +539,39 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /** Grok Build-specific config and hook-runtime integrity checks. */
+  private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
+    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
+    if (!def?.hook) return [];
+    const pilotDir = this.resolvePilotDir();
+
+    return [{
+      id: 'hook:grok-build',
+      enabled: () => this.isAgentGatedEnabled(def.id),
+      precondition: () => this.deploymentManager.isAgentDetected(def),
+      check: async () =>
+        !(await this.deploymentManager.needsRedeploy(def))
+        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
+      repair: async () => {
+        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
+        const result = await this.deploymentManager.deploySingle(def);
+        if (!result.success) {
+          throw new Error(result.error ?? 'failed to restore Grok Build hook');
+        }
+        if (
+          await this.deploymentManager.needsRedeploy(def)
+          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
+        ) {
+          throw new Error('Grok Build hook remains unhealthy after repair');
+        }
+      },
+      cleanup: async () => {
+        const removed = await this.deploymentManager.undeployAgent(def);
+        if (!removed) throw new Error('failed to remove Grok Build hook');
+      },
+    }];
   }
 
   /**
@@ -1246,6 +1289,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['claude-code-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- Grok Build Log (three-source transcript fusion via Hook JSONL) ---
+    const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
+    const grokBuildLogInput = new GrokBuildLogInput({
+      stateStore: this.stateStore,
+      logDir: grokBuildLogDir,
+    });
+    this.inputManager.registerInput(grokBuildLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(grokBuildLogInput, {
+        watchPaths: [grokBuildLogDir],
+        isAvailable: async () => directoryExists(grokBuildLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['grok-build-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'grok-build-log',
+            listenerCfg['grok-build-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
       }),
     );
 

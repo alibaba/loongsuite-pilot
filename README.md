@@ -47,6 +47,7 @@ Pilot is designed to answer practical questions:
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
+| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |

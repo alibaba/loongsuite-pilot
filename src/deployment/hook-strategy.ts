@@ -56,7 +56,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || agentId !== 'codex') {
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -95,13 +95,13 @@ function formatHookCommand(
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
 }
 
-function legacyCodexHookCommands(
+function legacyQuotedPs1HookCommands(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' || agentId !== 'codex') return [];
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -457,7 +457,7 @@ export class HookStrategy implements DeployStrategy {
       shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
-        ...legacyCodexHookCommands(
+        ...legacyQuotedPs1HookCommands(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
       ],
@@ -482,7 +482,7 @@ export class HookStrategy implements DeployStrategy {
         useNestedFormat: hookConfig.format === 'nested',
         replaceHookCommands: [
           ...(hookConfig.replaceHookCommands ?? []),
-          ...legacyCodexHookCommands(
+          ...legacyQuotedPs1HookCommands(
             hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
           ),
         ],
