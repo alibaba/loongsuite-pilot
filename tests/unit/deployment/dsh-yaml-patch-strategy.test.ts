@@ -399,6 +399,19 @@ describe('DshYamlPatchStrategy', () => {
     expect(ok).toBe(true);
   });
 
+  it('undeploy does not recreate a missing persisted DSH home', async () => {
+    const missingHome = path.join(tmpDir, 'missing-persisted-home');
+    const missingPatch = path.join(missingHome, 'cordis.patch.yml');
+    const record = {
+      deployMode: 'dsh-yaml-patch' as const,
+      deployedAt: new Date().toISOString(),
+      dshPatchPath: missingPatch,
+    };
+
+    expect(await strategy.undeploy(makeDef(), record)).toBe(true);
+    await expect(fs.stat(missingHome)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('returns false from needsDeploy when dshYamlPatch is missing', async () => {
     const def = makeDef({ dshYamlPatch: undefined } as Partial<AgentDefinition>);
     expect(await strategy.needsDeploy(def)).toBe(false);

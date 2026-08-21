@@ -220,6 +220,17 @@ export async function cleanupDshIntegration(options = {}) {
     if (error?.code !== 'ENOENT') return { success: false, error: String(error) };
   }
 
+  // A cleanup-only path must not create the DSH home merely to coordinate a
+  // no-op. This is especially visible on Windows, where the uninstaller always
+  // invokes this helper with %USERPROFILE%\.dsh\cordis.patch.yml even when DSH
+  // has never been installed. There is no Pilot-owned block to race when the
+  // target is absent, so return before acquireLock() creates the parent.
+  try {
+    if (!(await exists(patchPath))) return { success: true, changed: false };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
+
   const token = await acquireLock(patchPath);
   if (!token) return { success: false, error: 'timed out waiting for DSH patch lock' };
   try {
