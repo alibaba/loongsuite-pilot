@@ -21,7 +21,7 @@ $AllowedSubcommands = @(
 )
 
 function Write-EmptyResult {
-    [Console]::Out.WriteLine($EMPTY_RESULT)
+    Write-Output $EMPTY_RESULT
 }
 
 if ($AllowedSubcommands -notcontains $Subcommand) {
@@ -50,16 +50,14 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
-        $record = [ordered]@{
+        $record = @{
             time = (Get-Date).ToUniversalTime().ToString("o")
             "gen_ai.agent.type" = "grok-build"
             stage = $Stage
             "error.type" = "ps1_$Stage"
             "error.message" = $Message
         }
-        $line = ($record | ConvertTo-Json -Compress) + [Environment]::NewLine
-        $utf8 = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::AppendAllText($file, $line, $utf8)
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
     } catch {}
 }
 
@@ -71,7 +69,7 @@ function Convert-NodePath {
     if ($candidate -match '^/([A-Za-z])/(.*)$') {
         $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
     }
-    if (-not [System.IO.Path]::HasExtension($candidate) -and (Test-Path -LiteralPath "$candidate.exe")) {
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
         $candidate = "$candidate.exe"
     }
     return $candidate
@@ -156,56 +154,18 @@ try {
         exit 0
     }
 
-    # PowerShell 5.1 text pipelines use a legacy code page. Forward the exact
-    # UTF-8 bytes written by Grok and remove an optional UTF-8 BOM.
-    $stdinStream = [Console]::OpenStandardInput()
-    $memory = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($memory)
-    [byte[]]$rawBytes = $memory.ToArray()
-    $memory.Dispose()
-
-    if (
-        $rawBytes.Length -ge 3 -and
-        $rawBytes[0] -eq 0xEF -and
-        $rawBytes[1] -eq 0xBB -and
-        $rawBytes[2] -eq 0xBF
-    ) {
-        if ($rawBytes.Length -eq 3) {
-            $rawBytes = [byte[]]@()
-        } else {
-            $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-        }
+    # CLM/WDAC-safe passthrough: node inherits stdin and decodes the original
+    # bytes itself. This avoids PowerShell 5.1 code-page conversion as well as
+    # non-core .NET APIs that fail in Constrained Language Mode. BOM removal and
+    # UTF-8/GBK recovery are handled by shared/decode-payload.mjs in node.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "processor exited with code $LASTEXITCODE"
     }
+    $result = ($result | Out-String).Trim()
 
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor $Subcommand 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            throw "processor exited with code $LASTEXITCODE"
-        }
-        $result = $result -join [Environment]::NewLine
-    } else {
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $nodeBin
-        $startInfo.Arguments = "`"$Processor`" `"$Subcommand`""
-        $startInfo.UseShellExecute = $false
-        $startInfo.RedirectStandardInput = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $startInfo.CreateNoWindow = $true
-
-        $process = [System.Diagnostics.Process]::Start($startInfo)
-        $process.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $process.StandardInput.Close()
-        $result = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) {
-            throw "processor exited with code $($process.ExitCode): $stderr"
-        }
-    }
-
-    if ($result -and $result.Trim()) {
-        [Console]::Out.WriteLine($result.Trim())
+    if ($result) {
+        Write-Output $result
     } else {
         Write-EmptyResult
     }
