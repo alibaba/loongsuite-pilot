@@ -120,6 +120,13 @@ export interface AgentHookConfig {
     name: string;
     tools: string[];
   };
+  /**
+   * Optional per-hook timeout in seconds, written into each hook entry.
+   * Cursor kills hooks at its default timeout when this is absent; setting
+   * it (e.g. 30) gives the hook enough time to survive a PowerShell cold
+   * start + node probe on Windows. Harmless on Linux/macOS.
+   */
+  timeout?: number;
 }
 
 export interface PluginSourceConfig {

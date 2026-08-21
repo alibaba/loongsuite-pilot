@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import * as fsSync from 'node:fs';
 import {
   writeJsonFile,
   writeTextFileAtomic,
@@ -21,6 +22,52 @@ function wrapHookCommand(scriptPath: string, args?: string): string {
   if (!isWin) return args ? `${scriptPath} ${args}` : scriptPath;
   const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`;
   return args ? `${cmd} ${args}` : cmd;
+}
+
+/**
+ * Resolve the node binary path for Windows Cursor hooks.
+ *
+ * Reads the `~/.loongsuite-pilot/node-bin` pin file first (written by the
+ * .ps1 fallback's Resolve-NodeBin cache). Falls back to `process.execPath`
+ * (the node running pilot itself, always available at deploy time).
+ * Returns null only if neither exists — caller should fall back to the
+ * PowerShell path in that case.
+ */
+export function resolveWindowsNodeBin(dataDir?: string): string | null {
+  const baseDir = dataDir ?? resolveHome('~/.loongsuite-pilot');
+  const pinFile = path.join(baseDir, 'node-bin');
+  try {
+    if (fsSync.existsSync(pinFile)) {
+      const pinned = fsSync.readFileSync(pinFile, 'utf8').trim();
+      if (pinned && fsSync.existsSync(pinned)) return pinned;
+    }
+  } catch { /* ignore pin read failures */ }
+  return process.execPath || null;
+}
+
+/**
+ * Build a Windows command that invokes the cursor hook processor via node
+ * directly, bypassing the PowerShell cold start (1-5s+) that causes Cursor
+ * to kill the hook before the processor runs.
+ *
+ * Emits:  cmd.exe /d /s /c ""<node>" "<processor>""
+ *
+ * The double-double-quote pattern is required by cmd.exe /s: the outer pair
+ * is stripped, leaving the inner quoted paths intact for the shell to parse.
+ *
+ * If no valid node binary can be resolved, falls back to the PowerShell
+ * invocation (same as the pre-fix behavior) so the hook still works.
+ */
+export function wrapCursorWin32Command(hookScriptPath: string, dataDir?: string): string {
+  const nodeBin = resolveWindowsNodeBin(dataDir);
+  if (!nodeBin) {
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${hookScriptPath}"`;
+  }
+  const processorPath = path.join(
+    path.dirname(hookScriptPath),
+    'cursor-hook-processor.mjs',
+  );
+  return `cmd.exe /d /s /c ""${nodeBin}" "${processorPath}""`;
 }
 
 export interface HookDefinition {
@@ -54,6 +101,12 @@ export interface HookDefinition {
    * Only emitted when set, so agents that omit it (e.g. codex) are unaffected.
    */
   shell?: string;
+  /**
+   * Optional per-hook timeout in seconds, written into the hook entry.
+   * Cursor kills hooks at its default timeout when absent; setting it
+   * (e.g. 30) gives the hook time to survive a Windows cold start.
+   */
+  timeout?: number;
 }
 
 /**
@@ -118,11 +171,13 @@ export class HookManager {
       const updatedArr = target[lastKey] as any[];
 
       if (this.isCommandPresent(updatedArr, def.hookCommand)) {
-        // Entry already present. It may predate a newly-added `shell` field
-        // (e.g. Qoder gained winShell after the hook was first installed) —
-        // repair the stale entry in place instead of leaving it untouched.
+        // Entry already present. It may predate a newly-added `shell` or
+        // `timeout` field (e.g. Cursor gained timeout after the hook was
+        // first installed) — repair the stale entry in place instead of
+        // leaving it untouched.
         const shellRepaired = this.applyShellToEntries(updatedArr, def.hookCommand, def.shell);
-        if (updatedArr !== arr || shellRepaired) {
+        const timeoutRepaired = this.applyTimeoutToEntries(updatedArr, def.hookCommand, def.timeout);
+        if (updatedArr !== arr || shellRepaired || timeoutRepaired) {
           await writeJsonFile(def.settingsPath, settings);
         }
         logger.debug('hook already installed', { agentId: def.agentId });
@@ -136,12 +191,14 @@ export class HookManager {
               command: def.hookCommand,
               type: 'command',
               ...(def.shell ? { shell: def.shell } : {}),
+              ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
             }],
           }
         : {
             type: 'command',
             command: def.hookCommand,
             ...(def.matcher ? { matcher: def.matcher } : {}),
+            ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
           };
 
       updatedArr.push(hookEntry);
@@ -236,7 +293,9 @@ export class HookManager {
       // A matching command whose nested entry lacks the required `shell` counts
       // as not fully installed, so an upgrade that adds winShell (Qoder family
       // on Windows) redeploys and repairs the entry rather than skipping it.
-      return this.hasRequiredShell(hooks, def.hookCommand, def.shell);
+      // Same logic for `timeout` (Cursor safety net).
+      return this.hasRequiredShell(hooks, def.hookCommand, def.shell)
+        && this.hasRequiredTimeout(hooks, def.hookCommand, def.timeout);
     } catch {
       return false;
     }
@@ -387,12 +446,14 @@ export class HookManager {
             command: def.hookCommand,
             type: 'command',
             ...(def.shell ? { shell: def.shell } : {}),
+            ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
           }],
         }
       : {
           type: 'command',
           command: def.hookCommand,
           ...(def.matcher ? { matcher: def.matcher } : {}),
+          ...(def.timeout !== undefined ? { timeout: def.timeout } : {}),
         };
   }
 
@@ -417,11 +478,28 @@ export class HookManager {
   /**
    * Build hook definitions for Cursor.
    * Registers cursor-loongsuite-pilot-hook.sh into ~/.cursor/hooks.json for key events.
+   *
+   * On Windows the command bypasses PowerShell and invokes node directly on
+   * the processor (.mjs), eliminating the 1-5s+ cold start that causes Cursor
+   * to kill the hook before data collection runs. A `timeout: 30` safety net
+   * is written into every entry so Cursor doesn't terminate the chain early.
    */
   static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = wrapHookCommand(`${baseDir}/hooks/cursor-loongsuite-pilot-hook${hookExt}`);
+    const scriptPath = `${baseDir}/hooks/cursor-loongsuite-pilot-hook${hookExt}`;
     const settingsPath = resolveHome('~/.cursor/hooks.json');
+
+    let command: string;
+    let replaceHookCommands: string[] | undefined;
+    if (isWin) {
+      command = wrapCursorWin32Command(scriptPath, baseDir);
+      const legacyCommand = wrapHookCommand(scriptPath);
+      if (command !== legacyCommand) {
+        replaceHookCommands = [legacyCommand];
+      }
+    } else {
+      command = scriptPath;
+    }
 
     const events = [
       'stop',
@@ -443,6 +521,8 @@ export class HookManager {
       settingsPath,
       hookJsonPath: ['hooks', event],
       hookCommand: command,
+      ...(replaceHookCommands ? { replaceHookCommands } : {}),
+      timeout: 30,
       historyDir: path.join(baseDir, 'logs', 'cursor', 'history'),
     }));
   }
@@ -612,6 +692,49 @@ export class HookManager {
         if (h.command === command && h.shell !== shell) {
           h.shell = shell;
           changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Whether the hook entry matching `command` declares the required
+   * `timeout`. Unlike `shell`, `timeout` can appear on both flat entries
+   * (`{ command, timeout }`) and nested inner entries. Returns true when
+   * `timeout` is unset (agents that don't declare it).
+   */
+  private hasRequiredTimeout(arr: any[], command: string, timeout?: number): boolean {
+    if (timeout === undefined) return true;
+    return arr.some((entry: any) => {
+      if (entry.command === command) return entry.timeout === timeout;
+      if (Array.isArray(entry.hooks)) {
+        return entry.hooks.some((h: any) => h.command === command && h.timeout === timeout);
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Set `timeout` on every hook entry matching `command` when it is missing
+   * or stale. Handles both flat and nested formats. Returns true if any
+   * entry was mutated. No-op when `timeout` is unset. Used to repair entries
+   * installed before the timeout field was introduced.
+   */
+  private applyTimeoutToEntries(arr: any[], command: string, timeout?: number): boolean {
+    if (timeout === undefined) return false;
+    let changed = false;
+    for (const entry of arr) {
+      if (entry.command === command && entry.timeout !== timeout) {
+        entry.timeout = timeout;
+        changed = true;
+      }
+      if (Array.isArray(entry.hooks)) {
+        for (const h of entry.hooks) {
+          if (h.command === command && h.timeout !== timeout) {
+            h.timeout = timeout;
+            changed = true;
+          }
         }
       }
     }

@@ -7,7 +7,7 @@ import type {
   DeployStrategy,
   DeployedAgentRecord,
 } from '../types/index.js';
-import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
+import { HookManager, type HookDefinition, wrapCursorWin32Command } from '../hooks/hook-manager.js';
 import {
   fileExists,
   readJsonFile,
@@ -56,16 +56,19 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || agentId !== 'codex') {
-    return wrapLegacyPs1Command(cmd);
+  if (process.platform !== 'win32') return cmd;
+  if (agentId === 'cursor') {
+    return wrapCursorWin32Command(cmd);
   }
-
-  const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
-  if (!match) return cmd;
-  const script = match[1];
-  const args = match[2] ?? '';
-  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
-  return args ? `${wrapped} ${args}` : wrapped;
+  if (agentId === 'codex') {
+    const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
+    if (!match) return cmd;
+    const script = match[1];
+    const args = match[2] ?? '';
+    const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+    return args ? `${wrapped} ${args}` : wrapped;
+  }
+  return wrapLegacyPs1Command(cmd);
 }
 
 function appendEventSubcommand(
@@ -102,6 +105,21 @@ function legacyCodexHookCommands(
   agentId: string,
 ): string[] {
   if (process.platform !== 'win32' || agentId !== 'codex') return [];
+
+  const current = formatHookCommand(hookCommand, event, style, agentId);
+  return [...new Set([
+    appendEventSubcommand(hookCommand, event, style),
+    appendEventSubcommand(wrapLegacyPs1Command(hookCommand), event, style),
+  ])].filter(command => command !== current);
+}
+
+function legacyCursorHookCommands(
+  hookCommand: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
+): string[] {
+  if (process.platform !== 'win32' || agentId !== 'cursor') return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -455,9 +473,13 @@ export class HookStrategy implements DeployStrategy {
       matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
       shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      timeout: hookConfig.timeout,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
         ...legacyCodexHookCommands(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        ),
+        ...legacyCursorHookCommands(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
       ],
@@ -483,6 +505,9 @@ export class HookStrategy implements DeployStrategy {
         replaceHookCommands: [
           ...(hookConfig.replaceHookCommands ?? []),
           ...legacyCodexHookCommands(
+            hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+          ),
+          ...legacyCursorHookCommands(
             hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
           ),
         ],
