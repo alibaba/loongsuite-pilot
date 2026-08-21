@@ -541,6 +541,19 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
     expect(runtimeSection).toContain('sign out and back in');
   });
 
+  it('treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop', () => {
+    const getter = runtimeSection.slice(
+      runtimeSection.indexOf('function Get-PilotRuntimeOverride'),
+      runtimeSection.indexOf('function Test-AgentCollectionEnabled'),
+    );
+    expect(getter).toContain('$prevEAP = $ErrorActionPreference');
+    expect(getter).toContain('$ErrorActionPreference = "Continue"');
+    expect(getter).toContain('$regExitCode = $LASTEXITCODE');
+    expect(getter).toContain('$ErrorActionPreference = $prevEAP');
+    expect(getter.indexOf('$ErrorActionPreference = $prevEAP'))
+      .toBeLessThan(getter.indexOf('if ($regExitCode -ne 0)'));
+  });
+
   it('detects app roots without assuming executables are outside version directories', () => {
     expect(runtimeSection).toContain('Programs\\QwenWorkCN');
     expect(runtimeSection).toContain('Programs\\QoderWork');

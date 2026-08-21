@@ -1046,8 +1046,15 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 # ============================================================
 function Get-PilotRuntimeOverride {
     param([string]$Name)
-    $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
-    if ($LASTEXITCODE -ne 0) { return "" }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
+        $regExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($regExitCode -ne 0) { return "" }
     foreach ($line in $regOut) {
         if (($line -match '^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$') -and $Matches[1] -ieq $Name) {
             return $Matches[2].Trim()
