@@ -514,3 +514,36 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
       .toContain('Remove-HermesPluginForRollback');
   });
 });
+
+describe('Windows QwenWorkCN runtime override lifecycle', () => {
+  const qwenRuntimeSection = ps1.slice(
+    ps1.indexOf('function Get-QwenWorkCNRuntimeOverride'),
+    ps1.indexOf('function Install-Command'),
+  );
+  const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+
+  it('uses the final agent config and the dedicated Qwen environment variable', () => {
+    expect(qwenRuntimeSection).toContain("config?.agents?.['qwen-work-cn']?.enabled === false");
+    expect(qwenRuntimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
+    expect(qwenRuntimeSection).not.toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
+    expect(ps1.match(/Inject-QwenWorkCNRuntimeWrapper/g)).toHaveLength(3);
+  });
+
+  it('uses CLM-safe registry commands instead of Environment static methods', () => {
+    expect(qwenRuntimeSection).toContain('reg query "HKCU\\Environment"');
+    expect(qwenRuntimeSection).toContain('reg add "HKCU\\Environment"');
+    expect(qwenRuntimeSection).toContain('reg delete "HKCU\\Environment"');
+    expect(qwenRuntimeSection).not.toContain('[Environment]::');
+  });
+
+  it('does not add Windows QoderWork runtime lifecycle management', () => {
+    expect(ps1).not.toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
+    expect(ps1).not.toContain('QoderWork\\QoderWork.exe');
+    expect(ps1).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
+  });
+
+  it('uninstalls only the override owned by the current dataDir', () => {
+    expect(uninstall).toContain('$currentQwenRuntime -ieq $wrapperPath');
+    expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
+  });
+});

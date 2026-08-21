@@ -41,6 +41,7 @@ const HOSTS = [
   {
     id: 'qwen-work-cn',
     appNames: ['QwenWorkCN.app'],
+    windowsAppNames: ['QwenWorkCN'],
     interceptFile: 'qwenworkcn-intercept.jsonl',
   },
   {
@@ -148,24 +149,16 @@ function candidateResourceRoots() {
 function classifyHost(resourceRoots) {
   for (const root of resourceRoots) {
     const normalized = root.replace(/\\/g, '/');
+    const normalizedLower = normalized.toLowerCase();
     for (const host of HOSTS) {
       if (host.appNames.some(appName => normalized.includes(`/${appName}/Contents/Resources`))) {
         return host;
       }
-    }
-  }
-  // Windows fallback: when QW_QODER_WORKER_RUNTIME_PATH points at this wrapper,
-  // the host is QwenWorkCN. The env var is set per-process by the launcher
-  // script, so it only affects QwenWorkCN workers — never QoderWork.
-  const qwEnv = process.env.QW_QODER_WORKER_RUNTIME_PATH;
-  if (qwEnv) {
-    try {
-      const realEnv = fs.realpathSync(qwEnv);
-      const realSelf = fs.realpathSync(WRAPPER_PATH);
-      if (realEnv === realSelf) {
-        return HOSTS.find(h => h.id === 'qwen-work-cn') || null;
+      if (host.windowsAppNames?.some(appName =>
+        normalizedLower.includes(`/${appName.toLowerCase()}/resources`))) {
+        return host;
       }
-    } catch {}
+    }
   }
   return null;
 }

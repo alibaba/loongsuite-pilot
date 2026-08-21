@@ -1043,65 +1043,72 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
 # ============================================================
-# QoderWork-family runtime wrapper: set persistent User-level
-# env vars so QwenWorkCN / QoderWork workers load our shim.
-# On Windows [Environment]::SetEnvironmentVariable(…, 'User')
-# writes to HKCU\Environment — permanent across reboots and
-# inherited by every new GUI process (same role as macOS
-# launchctl setenv + LaunchAgent plist).
-#
-# Detection is APP-BASED (check if the .exe exists on disk),
-# NOT agent-based ($SELECTED_AGENTS). The probe may not detect
-# QwenWorkCN if ~/.qwenworkcn doesn't exist yet, but the app is
-# still installed and should get interception.
+# QwenWorkCN runtime wrapper: persist the dedicated User-level
+# QW_QODER_WORKER_RUNTIME_PATH in HKCU\Environment. Use reg.exe
+# instead of .NET static methods so installation still works in
+# WDAC/AppLocker Constrained Language Mode.
 # ============================================================
-function Inject-QoderworkRuntimeWrapper {
+function Get-QwenWorkCNRuntimeOverride {
+    $regOut = reg query "HKCU\Environment" /v QW_QODER_WORKER_RUNTIME_PATH 2>$null
+    if ($LASTEXITCODE -ne 0) { return "" }
+    foreach ($line in $regOut) {
+        if ($line -match '^\s*QW_QODER_WORKER_RUNTIME_PATH\s+REG_(?:EXPAND_)?SZ\s+(.*)$') {
+            return $Matches[1].Trim()
+        }
+    }
+    return ""
+}
+
+function Test-QwenWorkCNCollectionEnabled {
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path $configFile)) { return $false }
+
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $enabled = & $script:NODE_BIN -e @'
+try {
+  const config = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
+  process.stdout.write(config?.agents?.['qwen-work-cn']?.enabled === false ? 'false' : 'true');
+} catch {
+  process.stdout.write('false');
+}
+'@ $configFile 2>$null
+    $ErrorActionPreference = $prevEAP
+    return "$enabled".Trim() -eq "true"
+}
+
+function Set-QwenWorkCNRuntimeOverride {
+    param([string]$Value)
+    reg add "HKCU\Environment" /v QW_QODER_WORKER_RUNTIME_PATH /t REG_SZ /d "$Value" /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set QW_QODER_WORKER_RUNTIME_PATH" }
+}
+
+function Remove-QwenWorkCNRuntimeOverride {
+    reg delete "HKCU\Environment" /v QW_QODER_WORKER_RUNTIME_PATH /f 2>$null | Out-Null
+}
+
+function Inject-QwenWorkCNRuntimeWrapper {
     $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
     if (-not (Test-Path $wrapperPath)) { return }
 
     $localAppData = $env:LOCALAPPDATA
     if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
 
-    # ── QwenWorkCN: QW_QODER_WORKER_RUNTIME_PATH ──
     $qwenInstalled = Test-Path (Join-Path $localAppData "Programs\QwenWorkCN")
-    if ($qwenInstalled) {
-        $current = [Environment]::GetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', 'User')
-        if ($current -ne $wrapperPath) {
-            [Environment]::SetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', $wrapperPath, 'User')
+    $qwenEnabled = Test-QwenWorkCNCollectionEnabled
+    $current = Get-QwenWorkCNRuntimeOverride
+    if ($qwenInstalled -and $qwenEnabled) {
+        if ($current -ine $wrapperPath) {
+            Set-QwenWorkCNRuntimeOverride -Value $wrapperPath
             Msg "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN)" `
                 "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN)"
         }
-    } else {
-        $current = [Environment]::GetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', 'User')
-        if ($current -and $current -like '*\hooks\qoderwork-runtime-wrapper.mjs') {
-            [Environment]::SetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', $null, 'User')
-            Msg "    ✅ 已清理 QW_QODER_WORKER_RUNTIME_PATH" "    ✅ Cleaned QW_QODER_WORKER_RUNTIME_PATH"
-        }
+    } elseif ($current -and $current -ieq $wrapperPath) {
+        Remove-QwenWorkCNRuntimeOverride
+        Msg "    ✅ 已清理 QW_QODER_WORKER_RUNTIME_PATH" "    ✅ Cleaned QW_QODER_WORKER_RUNTIME_PATH"
     }
 
-    # ── QoderWork / QoderWorkCN: QODER_WORKER_RUNTIME_PATH ──
-    # Only set when QoderWork is actually installed AND QwenWorkCN is NOT
-    # installed (to avoid both env vars pointing at the same wrapper, which
-    # could cause intercept data to land in the wrong file).
-    $qoderInstalled = (Test-Path (Join-Path $localAppData "Programs\QoderWork\QoderWork.exe")) -or `
-                      (Test-Path (Join-Path $localAppData "Programs\QoderWorkCN\QoderWorkCN.exe"))
-    if ($qoderInstalled -and -not $qwenInstalled) {
-        $current = [Environment]::GetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', 'User')
-        if ($current -ne $wrapperPath) {
-            [Environment]::SetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', $wrapperPath, 'User')
-            Msg "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork)" `
-                "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork)"
-        }
-    } else {
-        $current = [Environment]::GetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', 'User')
-        if ($current -and $current -like '*\hooks\qoderwork-runtime-wrapper.mjs') {
-            [Environment]::SetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', $null, 'User')
-            Msg "    ✅ 已清理 QODER_WORKER_RUNTIME_PATH" "    ✅ Cleaned QODER_WORKER_RUNTIME_PATH"
-        }
-    }
-
-    Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
-        "    ⚠️  Fully quit and restart the corresponding app for changes to take effect"
+    Msg "    ⚠️  请完全退出并重新打开 QwenWorkCN 以生效" `
+        "    ⚠️  Fully quit and restart QwenWorkCN for changes to take effect"
     Write-Host ""
 }
 
@@ -1884,7 +1891,7 @@ function Cmd-Install {
         Deploy-Package $script:INSTALL_SRC
         Write-Config
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Inject-QwenWorkCNRuntimeWrapper
 
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -1953,7 +1960,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Inject-QwenWorkCNRuntimeWrapper
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2443,13 +2450,13 @@ function Cmd-Uninstall {
     Remove-CodexTrustState
     Write-Host ""
 
-    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork env vars..."
-    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
-        $val = [Environment]::GetEnvironmentVariable($envName, 'User')
-        if ($val -and $val -like '*\hooks\qoderwork-runtime-wrapper.mjs') {
-            [Environment]::SetEnvironmentVariable($envName, $null, 'User')
-            Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
-        }
+    Msg "==> 清理 QwenWorkCN 环境变量..." "==> Cleaning up QwenWorkCN env var..."
+    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
+    $currentQwenRuntime = Get-QwenWorkCNRuntimeOverride
+    if ($currentQwenRuntime -and $currentQwenRuntime -ieq $wrapperPath) {
+        Remove-QwenWorkCNRuntimeOverride
+        Msg "    ✅ 已移除 QW_QODER_WORKER_RUNTIME_PATH" `
+            "    ✅ Removed QW_QODER_WORKER_RUNTIME_PATH"
     }
     Write-Host ""
 

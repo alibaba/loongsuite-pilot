@@ -94,6 +94,18 @@ export function stripMarkerBlock(content: string, begin: string, end: string): s
   return out.join('\n');
 }
 
+export function parseWindowsUserEnv(output: string, envName: string): string {
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$/);
+    if (match?.[1]?.toLowerCase() === envName.toLowerCase()) return match[2]?.trim() ?? '';
+  }
+  return '';
+}
+
+function windowsPathsEqual(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 export interface CheckResult {
   checked: number;
   repaired: number;
@@ -648,10 +660,9 @@ export class HookWatchdog {
       }
     }
 
-    // ── QoderWork-family Windows User env vars ──
-    // On Windows, [Environment]::SetEnvironmentVariable(…, 'User') writes to
-    // HKCU\Environment — permanent across reboots, inherited by every new GUI
-    // process. Mirrors the macOS launchctl setenv + LaunchAgent plist pattern.
+    // ── QwenWorkCN Windows User env var ──
+    // HKCU\Environment is permanent across reboots and inherited by every new
+    // GUI process. Native reg.exe keeps this path compatible with CLM/WDAC.
     if (process.platform === 'win32') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
       for (const def of HookWatchdog.winRuntimeInterceptDefs()) {
@@ -667,35 +678,31 @@ export class HookWatchdog {
           },
           check: async () => {
             try {
-              const { execFileSync } = await import('child_process');
-              const current = execFileSync('powershell.exe', [
-                '-NoProfile', '-NonInteractive', '-Command',
-                `[Environment]::GetEnvironmentVariable('${def.envName}', 'User')`,
-              ], { encoding: 'utf8', timeout: 10_000 }).trim();
-              return current === wrapperPath;
+              const { stdout } = await execFileAsync('reg.exe', [
+                'query', 'HKCU\\Environment', '/v', def.envName,
+              ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+              const current = parseWindowsUserEnv(stdout, def.envName);
+              return windowsPathsEqual(current, wrapperPath);
             } catch {
               return false;
             }
           },
           repair: async () => {
-            const { execFileSync } = await import('child_process');
-            execFileSync('powershell.exe', [
-              '-NoProfile', '-NonInteractive', '-Command',
-              `[Environment]::SetEnvironmentVariable('${def.envName}', '${wrapperPath}', 'User')`,
-            ], { timeout: 10_000 });
+            await execFileAsync('reg.exe', [
+              'add', 'HKCU\\Environment', '/v', def.envName,
+              '/t', 'REG_SZ', '/d', wrapperPath, '/f',
+            ], { timeout: 10_000, windowsHide: true });
           },
           cleanup: async () => {
             try {
-              const { execFileSync } = await import('child_process');
-              const current = execFileSync('powershell.exe', [
-                '-NoProfile', '-NonInteractive', '-Command',
-                `[Environment]::GetEnvironmentVariable('${def.envName}', 'User')`,
-              ], { encoding: 'utf8', timeout: 10_000 }).trim();
-              if (current === wrapperPath) {
-                execFileSync('powershell.exe', [
-                  '-NoProfile', '-NonInteractive', '-Command',
-                  `[Environment]::SetEnvironmentVariable('${def.envName}', $null, 'User')`,
-                ], { timeout: 10_000 });
+              const { stdout } = await execFileAsync('reg.exe', [
+                'query', 'HKCU\\Environment', '/v', def.envName,
+              ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+              const current = parseWindowsUserEnv(stdout, def.envName);
+              if (windowsPathsEqual(current, wrapperPath)) {
+                await execFileAsync('reg.exe', [
+                  'delete', 'HKCU\\Environment', '/v', def.envName, '/f',
+                ], { timeout: 10_000, windowsHide: true });
               }
             } catch {
               // Best-effort cleanup.
@@ -800,7 +807,7 @@ export class HookWatchdog {
     ];
   }
 
-  /** Windows equivalent of macRuntimeInterceptDefs — User-level env vars. */
+  /** Windows QwenWorkCN User-level runtime override. */
   static winRuntimeInterceptDefs(): WinRuntimeInterceptDefinition[] {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     return [
@@ -809,15 +816,6 @@ export class HookWatchdog {
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
         agentIds: ['qwen-work-cn'],
         appInstallPaths: [path.join(localAppData, 'Programs', 'QwenWorkCN')],
-      },
-      {
-        id: 'qoderwork-win-env',
-        envName: 'QODER_WORKER_RUNTIME_PATH',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-        appInstallPaths: [
-          path.join(localAppData, 'Programs', 'QoderWork'),
-          path.join(localAppData, 'Programs', 'QoderWorkCN'),
-        ],
       },
     ];
   }

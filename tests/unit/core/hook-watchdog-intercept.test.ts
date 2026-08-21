@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   HookWatchdog,
+  parseWindowsUserEnv,
   stripMarkerBlock,
   type InterceptCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
@@ -302,6 +303,30 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
       expect(installer).toContain(def.plistLabel);
       for (const appName of def.appNames) expect(installer).toContain(appName);
     }
+  });
+
+  it('keeps the Windows runtime target scoped to QwenWorkCN', () => {
+    const defs = HookWatchdog.winRuntimeInterceptDefs();
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({
+      id: 'qwenworkcn-win-env',
+      envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+      agentIds: ['qwen-work-cn'],
+    });
+    expect(defs.flatMap(def => def.agentIds)).not.toContain('qoder-work');
+    expect(defs.flatMap(def => def.agentIds)).not.toContain('qoder-work-cn');
+  });
+
+  it('parses a Windows User environment value from reg.exe output', () => {
+    const output = [
+      '',
+      'HKEY_CURRENT_USER\\Environment',
+      '    QW_QODER_WORKER_RUNTIME_PATH    REG_SZ    C:\\Pilot Data\\hooks\\qoderwork-runtime-wrapper.mjs',
+      '',
+    ].join('\r\n');
+    expect(parseWindowsUserEnv(output, 'QW_QODER_WORKER_RUNTIME_PATH')).toBe(
+      'C:\\Pilot Data\\hooks\\qoderwork-runtime-wrapper.mjs',
+    );
   });
 
   it('defaults every target to enabled when no gate is passed', () => {

@@ -63,8 +63,47 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     });
   });
 
+  it('recognizes QwenWorkCN from a Windows resources path', async () => {
+    const marker = path.join(root, 'windows-qwen-runtime-loaded');
+    const resources = await createWindowsHostRuntime('QwenWorkCN', marker);
+
+    runWrapper(resources, marker);
+
+    expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
+    const intercept = await fs.readFile(
+      path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'),
+      'utf-8',
+    );
+    expect(JSON.parse(intercept.trim())).toMatchObject({
+      id: 'chatcmpl-wrapper-test',
+      total_tokens: 3,
+    });
+  });
+
+  it('does not classify a Windows sibling from the global Qwen env var', async () => {
+    const marker = path.join(root, 'windows-qoder-runtime-loaded');
+    const resources = await createWindowsHostRuntime('QoderWork', marker);
+
+    runWrapper(resources, marker, { QW_QODER_WORKER_RUNTIME_PATH: wrapper });
+
+    expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
+    expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
+    expect(existsSync(path.join(dataDir, 'logs', 'qoderwork-intercept.jsonl'))).toBe(false);
+  });
+
   async function createHostRuntime(appName, marker) {
     const resources = path.join(root, appName, 'Contents', 'Resources');
+    await createRuntimeAt(resources, marker);
+    return resources;
+  }
+
+  async function createWindowsHostRuntime(appName, marker) {
+    const resources = path.join(root, 'Programs', appName, 'resources');
+    await createRuntimeAt(resources, marker);
+    return resources;
+  }
+
+  async function createRuntimeAt(resources, marker) {
     const runtimeDir = path.join(resources, sdkWorkerRelative);
     await fs.mkdir(runtimeDir, { recursive: true });
     await fs.writeFile(
@@ -79,10 +118,9 @@ JSON.parse(JSON.stringify({
 }));
 `,
     );
-    return resources;
   }
 
-  function runWrapper(resources, marker) {
+  function runWrapper(resources, marker, extraEnv = {}) {
     const launcher = `
 process.resourcesPath = process.env.PILOT_TEST_RESOURCES;
 import(process.env.PILOT_TEST_WRAPPER).catch(error => {
@@ -97,6 +135,7 @@ import(process.env.PILOT_TEST_WRAPPER).catch(error => {
         PILOT_TEST_RESOURCES: resources,
         PILOT_TEST_WRAPPER: wrapper,
         PILOT_WRAPPER_MARKER: marker,
+        ...extraEnv,
       },
     });
     expect(result.status, result.stderr).toBe(0);
