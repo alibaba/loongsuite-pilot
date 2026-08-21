@@ -71,6 +71,13 @@ export interface MacRuntimeInterceptDefinition {
   appNames: string[];
 }
 
+export interface WinRuntimeInterceptDefinition {
+  id: string;
+  envName: string;
+  agentIds: string[];
+  appInstallPaths: string[];
+}
+
 /**
  * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
  * from rc-file content. Any line containing `begin` starts the cut and any
@@ -641,6 +648,63 @@ export class HookWatchdog {
       }
     }
 
+    // ── QoderWork-family Windows User env vars ──
+    // On Windows, [Environment]::SetEnvironmentVariable(…, 'User') writes to
+    // HKCU\Environment — permanent across reboots, inherited by every new GUI
+    // process. Mirrors the macOS launchctl setenv + LaunchAgent plist pattern.
+    if (process.platform === 'win32') {
+      const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+      for (const def of HookWatchdog.winRuntimeInterceptDefs()) {
+        targets.push({
+          id: def.id,
+          enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
+          precondition: async () => {
+            if (!await fileExists(wrapperPath)) return false;
+            for (const appPath of def.appInstallPaths) {
+              if (await directoryExists(appPath)) return true;
+            }
+            return false;
+          },
+          check: async () => {
+            try {
+              const { execFileSync } = await import('child_process');
+              const current = execFileSync('powershell.exe', [
+                '-NoProfile', '-NonInteractive', '-Command',
+                `[Environment]::GetEnvironmentVariable('${def.envName}', 'User')`,
+              ], { encoding: 'utf8', timeout: 10_000 }).trim();
+              return current === wrapperPath;
+            } catch {
+              return false;
+            }
+          },
+          repair: async () => {
+            const { execFileSync } = await import('child_process');
+            execFileSync('powershell.exe', [
+              '-NoProfile', '-NonInteractive', '-Command',
+              `[Environment]::SetEnvironmentVariable('${def.envName}', '${wrapperPath}', 'User')`,
+            ], { timeout: 10_000 });
+          },
+          cleanup: async () => {
+            try {
+              const { execFileSync } = await import('child_process');
+              const current = execFileSync('powershell.exe', [
+                '-NoProfile', '-NonInteractive', '-Command',
+                `[Environment]::GetEnvironmentVariable('${def.envName}', 'User')`,
+              ], { encoding: 'utf8', timeout: 10_000 }).trim();
+              if (current === wrapperPath) {
+                execFileSync('powershell.exe', [
+                  '-NoProfile', '-NonInteractive', '-Command',
+                  `[Environment]::SetEnvironmentVariable('${def.envName}', $null, 'User')`,
+                ], { timeout: 10_000 });
+              }
+            } catch {
+              // Best-effort cleanup.
+            }
+          },
+        });
+      }
+    }
+
     // ── Shell rc intercept targets (qodercli + claude-code) ──
     // Check BOTH .zshrc and .bashrc regardless of daemon's $SHELL — the
     // daemon is launchd-started and its $SHELL may not match the user's
@@ -732,6 +796,28 @@ export class HookWatchdog {
         plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
         agentIds: ['qwen-work-cn'],
         appNames: ['QwenWorkCN.app'],
+      },
+    ];
+  }
+
+  /** Windows equivalent of macRuntimeInterceptDefs — User-level env vars. */
+  static winRuntimeInterceptDefs(): WinRuntimeInterceptDefinition[] {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return [
+      {
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qwen-work-cn'],
+        appInstallPaths: [path.join(localAppData, 'Programs', 'QwenWorkCN')],
+      },
+      {
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+        appInstallPaths: [
+          path.join(localAppData, 'Programs', 'QoderWork'),
+          path.join(localAppData, 'Programs', 'QoderWorkCN'),
+        ],
       },
     ];
   }

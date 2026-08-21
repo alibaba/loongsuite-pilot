@@ -23,7 +23,7 @@
 // process lifecycles belong to different products.
 
 import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 const require = createRequire(import.meta.url);
 const fs = require('node:fs');
 const path = require('node:path');
@@ -154,6 +154,19 @@ function classifyHost(resourceRoots) {
       }
     }
   }
+  // Windows fallback: when QW_QODER_WORKER_RUNTIME_PATH points at this wrapper,
+  // the host is QwenWorkCN. The env var is set per-process by the launcher
+  // script, so it only affects QwenWorkCN workers — never QoderWork.
+  const qwEnv = process.env.QW_QODER_WORKER_RUNTIME_PATH;
+  if (qwEnv) {
+    try {
+      const realEnv = fs.realpathSync(qwEnv);
+      const realSelf = fs.realpathSync(WRAPPER_PATH);
+      if (realEnv === realSelf) {
+        return HOSTS.find(h => h.id === 'qwen-work-cn') || null;
+      }
+    } catch {}
+  }
   return null;
 }
 
@@ -194,7 +207,8 @@ if (hostRuntime) {
     installInterceptHooks(interceptFile);
   }
   try {
-    await import(hostRuntime);
+    // Use file:// URL so Windows absolute paths (C:\...) work with ESM import.
+    await import(pathToFileURL(hostRuntime).href);
   } catch (e) {
     // The app's own runtime failed to load — the app would have hit this even
     // without us. Do not throw (module-level throw crashes the worker_thread and

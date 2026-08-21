@@ -1042,6 +1042,70 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 # ============================================================
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
+# ============================================================
+# QoderWork-family runtime wrapper: set persistent User-level
+# env vars so QwenWorkCN / QoderWork workers load our shim.
+# On Windows [Environment]::SetEnvironmentVariable(…, 'User')
+# writes to HKCU\Environment — permanent across reboots and
+# inherited by every new GUI process (same role as macOS
+# launchctl setenv + LaunchAgent plist).
+# ============================================================
+function Inject-QoderworkRuntimeWrapper {
+    $wrapperPath = Join-Path $script:DATA_DIR "hooks\qoderwork-runtime-wrapper.mjs"
+    if (-not (Test-Path $wrapperPath)) { return }
+
+    $localAppData = $env:LOCALAPPDATA
+    if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
+
+    # ── QwenWorkCN: QW_QODER_WORKER_RUNTIME_PATH ──
+    if ($script:SELECTED_AGENTS -contains 'qwen-work-cn') {
+        $qwInstallDir = Join-Path $localAppData "Programs\QwenWorkCN"
+        if (Test-Path $qwInstallDir) {
+            $current = [Environment]::GetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', 'User')
+            if ($current -ne $wrapperPath) {
+                [Environment]::SetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', $wrapperPath, 'User')
+                Msg "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN)" `
+                    "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN)"
+            }
+        }
+    } else {
+        $current = [Environment]::GetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', 'User')
+        if ($current -and $current -like '*loongsuite-pilot*') {
+            [Environment]::SetEnvironmentVariable('QW_QODER_WORKER_RUNTIME_PATH', $null, 'User')
+            Msg "    ✅ 已清理 QW_QODER_WORKER_RUNTIME_PATH" "    ✅ Cleaned QW_QODER_WORKER_RUNTIME_PATH"
+        }
+    }
+
+    # ── QoderWork / QoderWorkCN: QODER_WORKER_RUNTIME_PATH ──
+    $wantsQoderWork = ($script:SELECTED_AGENTS -contains 'qoder-work') -or `
+                      ($script:SELECTED_AGENTS -contains 'qoder-work-cn')
+    if ($wantsQoderWork) {
+        $qoderPaths = @(
+            (Join-Path $localAppData "Programs\QoderWork\QoderWork.exe"),
+            (Join-Path $localAppData "Programs\QoderWorkCN\QoderWorkCN.exe")
+        )
+        $installed = $qoderPaths | Where-Object { Test-Path $_ }
+        if ($installed) {
+            $current = [Environment]::GetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', 'User')
+            if ($current -ne $wrapperPath) {
+                [Environment]::SetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', $wrapperPath, 'User')
+                Msg "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork)" `
+                    "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork)"
+            }
+        }
+    } else {
+        $current = [Environment]::GetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', 'User')
+        if ($current -and $current -like '*loongsuite-pilot*') {
+            [Environment]::SetEnvironmentVariable('QODER_WORKER_RUNTIME_PATH', $null, 'User')
+            Msg "    ✅ 已清理 QODER_WORKER_RUNTIME_PATH" "    ✅ Cleaned QODER_WORKER_RUNTIME_PATH"
+        }
+    }
+
+    Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
+        "    ⚠️  Fully quit and restart the corresponding app for changes to take effect"
+    Write-Host ""
+}
+
 function Install-Command {
     Msg "==> 安装服务管理脚本..." "==> Installing service management script..."
     $binDir = Join-Path $env:USERPROFILE ".local\bin"
@@ -1821,6 +1885,7 @@ function Cmd-Install {
         Deploy-Package $script:INSTALL_SRC
         Write-Config
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -1889,6 +1954,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2376,6 +2442,16 @@ function Cmd-Uninstall {
     Remove-HookConfigs
     Remove-CodexHookConfig
     Remove-CodexTrustState
+    Write-Host ""
+
+    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork env vars..."
+    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
+        $val = [Environment]::GetEnvironmentVariable($envName, 'User')
+        if ($val -and $val -like '*loongsuite-pilot*') {
+            [Environment]::SetEnvironmentVariable($envName, $null, 'User')
+            Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
+        }
+    }
     Write-Host ""
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
