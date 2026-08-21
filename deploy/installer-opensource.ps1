@@ -183,12 +183,21 @@ function Resolve-Node {
     $candidates = @()
 
     # Existing installations pin the exact Node binary used for deployment.
+    #
+    # The pin file holds one absolute path to node.exe, and for a managed runtime that
+    # path sits under the data dir -- i.e. under %USERPROFILE%, which can be non-ASCII.
+    # 5.1 defaults both Get-Content and Set-Content to the ANSI codepage, so an
+    # unqualified write stored "C:\Users\??.HOST\..." and every reader then failed
+    # Test-NodeSuitable and silently fell back to whatever node.exe the candidate search
+    # found first -- on a shared machine that was another account's nvm install.
+    # -Encoding UTF8 always emits a BOM on 5.1 (there is no utf8NoBOM), and U+FEFF is not
+    # whitespace, so .Trim() alone leaves it in the path: strip it explicitly first.
     foreach ($pinFile in @(
         (Join-Path $DataDir "node-bin"),
         (Join-Path $CACHE_DIR "node-bin")
     )) {
         if (-not (Test-Path -LiteralPath $pinFile)) { continue }
-        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue)).Trim()
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinned) { $candidates += $pinned }
     }
 
@@ -250,6 +259,179 @@ function Get-ManagedNodePlatform {
             return $null
         }
     }
+}
+
+# >>> pilot-ascii-temp >>>
+# Temp root guaranteed to be ASCII, for the two tar.exe staging dirs only.
+#
+# PowerShell hands native command arguments to CreateProcessW as UTF-16, but bsdtar
+# (%SystemRoot%\System32\tar.exe) enters through the ANSI CRT and converts them back
+# through the machine's ANSI codepage, so on an en-US box every character that page
+# cannot represent reaches tar as a literal "?": with $env:TEMP under a non-ASCII
+# %USERPROFILE% (e.g. C:\Users\<CJK name>\AppData\Local\Temp) both -f and -C pointed at
+# paths that do not exist and extraction failed with "Failed to open ...", which is what
+# stalled the install right after the download. Measured on that box: neither
+# [Console]::OutputEncoding = UTF8 nor `chcp 65001` changes it (they affect stdio
+# decoding, not argv conversion), and the 8.3 short name works but only where 8dot3
+# creation is still enabled, so it cannot be relied on.
+#
+# Callers keep the archive and the extraction dir inside this root and only then
+# Move-Item the result into the real (possibly non-ASCII) destination -- Move-Item is
+# pure Win32 and Unicode-safe. This root can be machine-wide (%SystemRoot%\Temp), so it
+# is for downloaded archives only: never stage credentials or config here, use $DataDir.
+#
+# The base resolution repeats Get-PilotTempRoot's fallback chain instead of calling it,
+# so this block stays byte-identical across the installers -- installer-opensource.ps1
+# has no Get-PilotTempRoot. Keep the two chains in sync. Environment variables only:
+# [System.IO.Path]::GetTempPath() is a static call on an off-list type and throws under
+# ConstrainedLanguage (WDAC / Device Guard).
+$script:PILOT_ASCII_TEMP_ROOT = ""
+function Get-PilotAsciiTempRoot {
+    if ($script:PILOT_ASCII_TEMP_ROOT) { return $script:PILOT_ASCII_TEMP_ROOT }
+    $root = "C:\Windows\Temp"
+    if ($env:TEMP) { $root = $env:TEMP }
+    elseif ($env:TMP) { $root = $env:TMP }
+    elseif ($env:SystemRoot) { $root = (Join-Path $env:SystemRoot "Temp") }
+    if ($root -notmatch '[^\x20-\x7E]') {
+        $script:PILOT_ASCII_TEMP_ROOT = $root
+        return $root
+    }
+    $candidates = @()
+    if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot "Temp") }
+    if ($env:SystemDrive) { $candidates += ($env:SystemDrive + "\loongsuite-pilot-tmp") }
+    $candidates += "C:\Windows\Temp"
+    foreach ($candidate in $candidates) {
+        if ($candidate -match '[^\x20-\x7E]') { continue }
+        # Probe by writing: %SystemRoot%\Temp grants Users write by default, but a
+        # hardened host may not, and Test-Path cannot tell us that.
+        try {
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                New-Item -ItemType Directory -Path $candidate -Force -ErrorAction Stop | Out-Null
+            }
+            $probe = Join-Path $candidate ("pilot-w-" + $PID + ".tmp")
+            Set-Content -LiteralPath $probe -Value "1" -ErrorAction Stop
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            $script:PILOT_ASCII_TEMP_ROOT = $candidate
+            return $candidate
+        } catch {}
+    }
+    # Nothing writable: keep the old behaviour rather than failing outright.
+    $script:PILOT_ASCII_TEMP_ROOT = $root
+    return $root
+}
+
+# Re-inherit the destination's ACL on a tree that was Move-Item'd out of the ASCII root.
+#
+# Move-Item is a rename, and a rename carries the source's ACEs along unchanged --
+# they keep their "inherited" flag but now describe a parent that no longer supplies
+# them, so the tree does not pick up the ACL of its new parent. Everything staged in
+# %SystemRoot%\Temp therefore lands in the profile with %SystemRoot%\Temp's permissions:
+# Users get (S,WD,AD,X), which is write and traverse but *not read*, and the read grant
+# comes from CREATOR OWNER. Run elevated -- an admin account, or "Run as administrator"
+# -- the owner of a new file is BUILTIN\Administrators, so CREATOR OWNER resolves to
+# Administrators and the moved tree ends up with no ACE for the user at all (measured:
+# node_modules\pino\package.json had exactly Administrators:(I)(F) and SYSTEM:(I)(F)).
+# The install then looks fine and the collector still cannot start, because the
+# scheduled task runs with a filtered token where Administrators is deny-only: node
+# cannot read the package.json it found and reports the confusing
+#   ERR_MODULE_NOT_FOUND: Cannot find package 'pino' imported from ...\dist\index.js
+# in logs\last-startup-crash.json, while the same tree reads fine from an elevated
+# shell -- which is where anyone reproducing it by hand would look first.
+#
+# Copy-Item is not affected: a copy creates new files, which do inherit normally. Only
+# the Move-Item paths out of Get-PilotAsciiTempRoot need this.
+#
+# icacls, unlike tar.exe, handles a non-ASCII path correctly (verified against a CJK
+# profile: "Successfully processed 31950 files"), so the destination goes straight
+# through. Get-Acl / Set-Acl cannot express this: re-enabling inheritance needs
+# $acl.SetAccessRuleProtection(), a method call on an off-list type that CLM blocks.
+function Reset-PilotInheritedAcl {
+    param([string]$Path)
+    $script:PILOT_LAST_ACL_ERR = ""
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        $script:PILOT_LAST_ACL_ERR = "path not found: $Path"
+        return $false
+    }
+    # /T all descendants, /C keep going past a single failure, /Q stay quiet. Native
+    # commands do not throw on a nonzero exit, so $LASTEXITCODE is the signal; the try
+    # only covers icacls failing to launch, which $ErrorActionPreference = "Stop" would
+    # otherwise turn into a terminating error.
+    try {
+        $aclOut = & icacls $Path /reset /T /C /Q 2>&1
+        if ($LASTEXITCODE -eq 0) { return $true }
+        $script:PILOT_LAST_ACL_ERR = "icacls (exit $LASTEXITCODE): $(($aclOut | Out-String).Trim())"
+        return $false
+    } catch {
+        $script:PILOT_LAST_ACL_ERR = "icacls failed to run: $($_.Exception.Message)"
+        return $false
+    }
+}
+# <<< pilot-ascii-temp <<<
+
+# Extract a .tar.gz into $DestDir. Returns $true on success; on failure the last
+# error text is left in $script:PILOT_LAST_TAR_ERR for the caller to surface.
+#
+# Never invoke a bare `tar` on Windows. On a machine with Git for Windows
+# installed, PATH normally resolves `tar` to Git's bundled GNU tar (MSYS), and GNU
+# tar reads the colon in `-f C:\...\archive.tar.gz` as rsh host:path syntax: it
+# treats "C" as a remote host and dies with "Cannot connect to C: resolve failed"
+# (older builds hang instead). Windows' own bsdtar
+# (%SystemRoot%\System32\tar.exe, Win10 1803+ / Server 2019+) parses drive-letter
+# paths correctly, so try it first and only then fall back to PATH's tar with
+# --force-local, which is what makes GNU tar read the colon as part of a local
+# filename. Do not pass --force-local to bsdtar: it rejects the unknown flag and
+# exits immediately, which is why it is attached to the PATH candidate only.
+function Expand-PilotTarGz {
+    param([string]$ArchivePath, [string]$DestDir)
+
+    $script:PILOT_LAST_TAR_ERR = ""
+    $exes = @()
+    if ($env:SystemRoot) {
+        # Inside a 32-bit PowerShell on 64-bit Windows, System32 is redirected to
+        # SysWOW64, which ships no tar.exe; Sysnative reaches the real System32.
+        foreach ($dir in @("System32", "Sysnative")) {
+            $candidate = Join-Path $env:SystemRoot "$dir\tar.exe"
+            if (Test-Path $candidate) { $exes += $candidate }
+        }
+    }
+    # Everything from this index on is an unknown tar and needs --force-local.
+    $nativeCount = $exes.Count
+    # Require .Source: a `tar` that resolves to an alias or function has none, and
+    # only an external binary can be invoked with an argument array. -notcontains
+    # compares strings case-insensitively, so a PATH hit that is already the
+    # System32 binary under different casing is not retried.
+    $pathTar = Get-Command tar -ErrorAction SilentlyContinue
+    if ($pathTar -and $pathTar.Source -and ($exes -notcontains $pathTar.Source)) {
+        $exes += $pathTar.Source
+    }
+
+    if ($exes.Count -eq 0) {
+        $script:PILOT_LAST_TAR_ERR = "tar not found (looked in %SystemRoot%\System32, Sysnative and PATH)"
+        return $false
+    }
+
+    for ($i = 0; $i -lt $exes.Count; $i++) {
+        $exe = $exes[$i]
+        $tarArgs = @('-xzf', $ArchivePath, '-C', $DestDir)
+        if ($i -ge $nativeCount) { $tarArgs = @('--force-local') + $tarArgs }
+        # Naming the binary is the whole diagnostic: "Cannot connect to C: resolve
+        # failed" only makes sense once you can see it came from Git's tar. Msg wraps
+        # Write-Host, so this never lands in the return value.
+        Msg "    tar: $exe" "    tar: $exe"
+        # Native commands do not throw on a nonzero exit, so $LASTEXITCODE is the
+        # only signal; the try only covers a binary that fails to launch at all,
+        # which $ErrorActionPreference = "Stop" would otherwise make terminating.
+        try {
+            $tarOut = & $exe @tarArgs 2>&1
+            if ($LASTEXITCODE -eq 0) { return $true }
+            $script:PILOT_LAST_TAR_ERR = "$exe (exit $LASTEXITCODE): $(($tarOut | Out-String).Trim())"
+        } catch {
+            $script:PILOT_LAST_TAR_ERR = "$exe : $_"
+        }
+        Msg "    ⚠️  tar 解包失败: $($script:PILOT_LAST_TAR_ERR)" `
+            "    ⚠️  tar failed: $($script:PILOT_LAST_TAR_ERR)"
+    }
+    return $false
 }
 
 function Invoke-ManagedNodeDownload {
@@ -359,7 +541,10 @@ function Ensure-NodeModules {
 
     $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
     $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
+    # ASCII temp root: the archive is unpacked with tar.exe, which cannot see a
+    # non-ASCII path (see Get-PilotAsciiTempRoot). Move-Item below lands it in the
+    # real, possibly non-ASCII, install dir.
+    $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     try {
         Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
@@ -369,18 +554,38 @@ function Ensure-NodeModules {
         if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $false }
         if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $false }
 
-        $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
-        if (-not $tarCmd) { return $false }
         $stage = Join-Path $tmp "stage"
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        & tar -xzf $archivePath -C $stage
-        if ($LASTEXITCODE -ne 0) { return $false }
+        # Expand-PilotTarGz already logged which tar ran and how it failed; name what
+        # that cost so the "prebuilt node_modules unavailable, falling back to npm
+        # install" notice below is not misread as "OSS has no artifact for this
+        # version". A local tar conflict and a missing archive used to look identical.
+        if (-not (Expand-PilotTarGz $archivePath $stage)) {
+            Msg "    ⚠️  预编译 node_modules 解压失败" `
+                "    ⚠️  Failed to extract prebuilt node_modules"
+            return $false
+        }
         $stagedModules = Join-Path $stage "node_modules"
-        if (-not (Test-Path $stagedModules)) { return $false }
+        if (-not (Test-Path $stagedModules)) {
+            Msg "    ⚠️  预编译包中缺少 node_modules 目录" `
+                "    ⚠️  Extracted archive contains no node_modules directory"
+            return $false
+        }
 
         Set-Content -Path (Join-Path $stagedModules ".pilot-modules-version") -Value $stamp
         if (Test-Path $modulesDir) { Remove-Item $modulesDir -Recurse -Force }
         Move-Item $stagedModules $modulesDir
+        # The move brought the ASCII root's ACL with it, which can leave the tree
+        # unreadable to the non-elevated scheduled task -- see Reset-PilotInheritedAcl.
+        # If that cannot be repaired, throw the prebuilt tree away rather than deploy
+        # dependencies the collector will not be able to read: returning $false falls
+        # back to npm install, which creates node_modules in place and inherits normally.
+        if (-not (Reset-PilotInheritedAcl $modulesDir)) {
+            Msg "    ⚠️  预编译 node_modules 权限修复失败: $script:PILOT_LAST_ACL_ERR" `
+                "    ⚠️  Could not reset permissions on prebuilt node_modules: $script:PILOT_LAST_ACL_ERR"
+            Remove-Item $modulesDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
         return $true
     } catch {
         return $false
@@ -425,13 +630,15 @@ function Check-Deps {
         exit 1
     }
 
-    # Pin node binary path
+    # Pin node binary path. -Encoding UTF8 is required, not cosmetic: the path can sit
+    # under a non-ASCII %USERPROFILE% and the 5.1 default (ANSI) would store "??" there,
+    # see the note on Resolve-Node.
     if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
-    Set-Content -Path (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN
+    Set-Content -LiteralPath (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN -Encoding UTF8
     # Hook entrypoints can always derive DataDir from their deployed location,
     # while GUI agents do not necessarily inherit the installer's CacheDir.
     if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-    Set-Content -Path (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN
+    Set-Content -LiteralPath (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN -Encoding UTF8
 
     # Derive npm
     $npmPath = Join-Path (Split-Path $script:NODE_BIN) "npm.cmd"
@@ -863,14 +1070,48 @@ function Deploy-Package {
     }
     Write-Host ""
 
+    # >>> pilot-postinstall-exit-check >>>
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
+    $postinstallExit = 0
     if (Test-Path $postinstallScript) {
+        # postinstall.js resolves its target as LOONGSUITE_PILOT_DATA_DIR, falling back to
+        # $env:USERPROFILE\.loongsuite-pilot. Unset, an install started with -DataDir would
+        # put hooks/skills/plugins in the default tree while its config lives elsewhere, and
+        # the collector would then find no hooks at all. Set for this child only and
+        # restored afterwards: the rest of the installer must keep seeing what it had.
+        $hadPostinstallDataDir = Test-Path Env:LOONGSUITE_PILOT_DATA_DIR
+        $priorPostinstallDataDir = if ($hadPostinstallDataDir) {
+            (Get-Item Env:LOONGSUITE_PILOT_DATA_DIR).Value
+        } else { $null }
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & $script:NODE_BIN $postinstallScript
-        $ErrorActionPreference = $prevEAP
+        try {
+            $env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
+            & $script:NODE_BIN $postinstallScript
+            $postinstallExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEAP
+            if ($hadPostinstallDataDir) {
+                Set-Item Env:LOONGSUITE_PILOT_DATA_DIR -Value $priorPostinstallDataDir
+            } else {
+                Remove-Item Env:LOONGSUITE_PILOT_DATA_DIR -ErrorAction SilentlyContinue
+            }
+        }
     }
-    Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+    # Never print the check mark for a postinstall that did not finish. postinstall.js
+    # reports its own per-tree failures and still exits 0 on purpose (a non-zero exit
+    # would abort the npm install fallback above), so a non-zero code here means the
+    # process died outright. That is exactly how the hooks/skills/plugins trees went
+    # missing on every Windows install without a word: fs.cpSync fail-fasts with
+    # 0xC0000409 on the bundled Node, killing the script before it copied anything,
+    # and this line printed "Hook scripts deployed" regardless.
+    if ($postinstallExit -ne 0) {
+        Msg "    ❌ Hook 脚本部署失败 (exit=$postinstallExit)，hooks/plugins 可能缺失" `
+            "    ❌ Hook script deployment failed (exit=$postinstallExit); hooks/plugins may be missing"
+    } else {
+        Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+    }
+    # <<< pilot-postinstall-exit-check <<<
     Write-Host ""
 }
 
@@ -1220,6 +1461,46 @@ function Print-Summary {
         "Tip: open a NEW terminal before using the loongsuite-pilot command (a WDAC/locked-down environment may require signing out and back in)."
     Write-Host "============================================================"
 }
+
+# >>> pilot-restart-stale-collector >>>
+# Displace a collector that outlived Stop-PilotService and therefore still serves the
+# PREVIOUS version dir. `start` is deliberately a no-op when a collector is already
+# running, and on a re-install one usually is: Stop-PilotService only ends the current
+# task instance, and Task Scheduler (or the updater's own collector watchdog) relaunches
+# it within seconds -- while `current` still names the old version dir, because
+# Deploy-Package writes the new one only after Ensure-NodeModules. collector-daemon.js
+# resolves `current` exactly once at startup, so that survivor keeps running the old
+# dist forever, while `status` reads `current` and confidently reports the NEW version.
+# Nothing crashes and nothing logs: the install says "Service started" and the bytes the
+# user just installed are simply never loaded. Measured on a re-install where the
+# survivor started 30s before the new version dir even existed.
+#
+# This became silent only once re-installs stopped overwriting the live version dir (pinned
+# by tests/unit/deploy/installer-version-dir-not-overwritten.test.mjs): while Deploy-Package still
+# did Remove-Item on it, the same survivor died with ERR_MODULE_NOT_FOUND and got restarted
+# onto the new version, so the bug announced itself. Keeping the old dir is right; this is
+# the other half of it.
+#
+# restart-collector (not restart) is what the updater uses after deploying a version: it
+# stops the collector unconditionally, kills orphans, then re-registers and starts it, and
+# it leaves the updater alone. Skipped when $priorVersion is empty -- a fresh install has
+# no survivor to displace, and `start` just launched the collector from the new `current`.
+#
+# $serviceEntry is whichever entry point the caller already resolved: the .ps1 needs
+# powershell.exe -File, the .cmd wrapper is invoked directly. Branching here rather than at
+# the call sites keeps this block byte-identical across the three installers.
+function Restart-StaleCollector {
+    param([string]$serviceEntry, [string]$priorVersion)
+    if (-not $priorVersion) { return }
+    if (-not $serviceEntry) { return }
+    if (-not (Test-Path $serviceEntry)) { return }
+    if ($serviceEntry -match '\.ps1$') {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $serviceEntry restart-collector 2>$null | Out-Null
+    } else {
+        & $serviceEntry restart-collector 2>$null | Out-Null
+    }
+}
+# <<< pilot-restart-stale-collector <<<
 
 # ============================================================
 # Stop service by PID file
@@ -1766,6 +2047,7 @@ function Start-PilotAndWait {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ScriptPath,
+        [string]$PriorVersion = "",
         [int]$TimeoutSeconds = 30
     )
 
@@ -1776,6 +2058,7 @@ function Start-PilotAndWait {
     $startOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath start 2>&1
     $startExit = $LASTEXITCODE
     $startOutput | ForEach-Object { Write-Host $_ }
+    Restart-StaleCollector $ScriptPath $PriorVersion
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
@@ -1824,7 +2107,7 @@ function Cmd-Install {
 
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-        $started = Start-PilotAndWait -ScriptPath $ps1Path
+        $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $curVer
         if (-not $started) {
             if ($curVer -and (Test-Path (Join-Path $CACHE_DIR "previous"))) {
                 Msg "⚠️  新安装未产生运行心跳，正在恢复 previous 版本..." `
@@ -1892,7 +2175,7 @@ function Cmd-Upgrade {
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-        $started = Start-PilotAndWait -ScriptPath $ps1Path
+        $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $oldVer
         if ($started) {
             Msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             Write-Host ""
@@ -2139,11 +2422,65 @@ function Remove-OnePilotScheduledTask {
     }
 }
 
+# >>> pilot-account-identity >>>
+# Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
+# stdout is decoded with [Console]::OutputEncoding -- the console codepage, 437 on an
+# en-US box -- so `whoami` returns "host\??" for a non-ASCII account name: every
+# character the codepage cannot represent arrives as a literal U+003F, measured on a
+# C:\Users\<CJK name> profile. That corrupted string used to reach
+# New-ScheduledTaskPrincipal -UserId, where Task Scheduler rejected the registration
+# with "No mapping between account names and security IDs was done" (HRESULT
+# 0x80131500), so such a user never got an autostart task at all; it also collapsed
+# every non-ASCII account to the same "___" task-name tag.
+#
+# The environment variables carry the real UTF-16 string and are CLM-safe, unlike
+# [Security.Principal.WindowsIdentity]::GetCurrent() (CLM: "Method invocation is
+# supported only on core types") and unlike [Environment]::UserName. USERDOMAIN is not
+# always an account domain: under some logon providers (OpenSSH sshd among them) it is
+# the literal "WORKGROUP", which maps to no SID either, so fall back to the machine
+# name -- which is also what whoami prints for a local account, keeping the tag below
+# byte-identical for ASCII users who upgrade in place.
+function Get-PilotAccountName {
+    $user = [string]$env:USERNAME
+    if (-not $user) { return "" }
+    $domain = [string]$env:USERDOMAIN
+    if ((-not $domain) -or ($domain -eq "WORKGROUP")) { $domain = [string]$env:COMPUTERNAME }
+    if ($domain) { return ($domain + "\" + $user) }
+    return $user
+}
+
+# Task names are per-user: multiple users can run on one machine, each with their
+# own data dir under %USERPROFILE%. A global task name would collide -- the second
+# user cannot delete or overwrite the first user's task (Access is denied), so it
+# would fail with "already exists" and drop to the background fallback. The shared
+# \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
+# Tag from the full DOMAIN\user identity, not $env:USERNAME alone (bare SAM name):
+# two same-named accounts from different domains (CORP\alice vs DEV\alice) would
+# otherwise share one task name and re-introduce the cross-user "already exists"
+# collision this scoping is meant to prevent. Task names live in the file system, so
+# everything outside [A-Za-z0-9._-] becomes "_" -- which turns a non-ASCII account
+# name into a row of underscores that two such users on one machine would fight over,
+# hence the short deterministic digest appended in that case only. ASCII installs keep
+# the exact tag they already have, so their registered tasks stay upgradeable in place.
+function Get-PilotUserTag {
+    $name = (Get-PilotAccountName).ToLower()
+    $tag = $name -replace '[^A-Za-z0-9._-]', '_'
+    if ($name -match '[^\x20-\x7E]') {
+        $hash = 0
+        foreach ($ch in $name.ToCharArray()) { $hash = ($hash * 31 + [int]$ch) % 1000000007 }
+        $tag = $tag + "-" + $hash
+    }
+    return $tag
+}
+# <<< pilot-account-identity <<<
+
 function Remove-PilotScheduledTasks {
     $taskFolder = "\LoongsuitePilot"
-    $currentIdentity = (whoami).Trim()
+    # Reconstruct the task names with the same helpers that registered them -- the tag
+    # must match byte for byte or uninstall silently leaves the tasks behind.
+    $currentIdentity = Get-PilotAccountName
     $currentUser = $env:USERNAME
-    $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
+    $userTag = Get-PilotUserTag
     $currentUserTasks = @(
         "LoongsuitePilot-$userTag",
         "LoongsuitePilotUpdater-$userTag"

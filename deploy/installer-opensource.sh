@@ -891,7 +891,11 @@ deploy_package() {
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
-        "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" || {
+        # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
+        # --data-dir would otherwise put hooks/skills/plugins in the default tree while
+        # the config lives elsewhere.
+        LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+            "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" || {
             msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
             return 1
         }

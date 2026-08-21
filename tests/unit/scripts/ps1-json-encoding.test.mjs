@@ -81,6 +81,38 @@ const interchangeSites = (text) => {
 const jsonParseReads = (text) => codeLines(text)
   .filter(([, line]) => /\bJSON\.parse\b/.test(line) && /\breadFileSync\b/.test(line));
 
+// The third direction of the same boundary: JSON handed to an embedded node payload
+// through a *pipe* instead of a file. PowerShell 5.1 encodes a string piped to a native
+// command with $OutputEncoding, whose default is ASCII, so `$cfgJson | & node -e ...`
+// replaced every non-ASCII character with a literal "?" before node could parse it. With
+// a Chinese username that turned dataDir into C:\Users\???\.loongsuite-pilot and the
+// install died in writeFileSync with ENOENT. Set-Content -Encoding UTF8 staging is the
+// fix; unlike an $OutputEncoding assignment it keeps working under CLM/WDAC, where a
+// .NET static assignment throws and the try/catch degrades to a no-op.
+const convertToJsonVars = (lines) => {
+  const vars = new Set();
+  for (const [, line] of lines) {
+    const m = line.match(/\$(?:script:)?([A-Za-z_]\w*)\s*=.*\|\s*ConvertTo-Json\b/);
+    if (m) vars.add(m[1]);
+  }
+  return vars;
+};
+
+const pipedJsonToNode = (text) => {
+  const lines = codeLines(text);
+  const vars = [...convertToJsonVars(lines)];
+  if (vars.length === 0) return [];
+  return lines.filter(([, line]) => (
+    /\|\s*&\s*\$(?:script:)?NODE_BIN\b/.test(line)
+    && vars.some(v => new RegExp(`\\$(?:script:)?${v}\\s*\\|`).test(line))
+  ));
+};
+
+// Both internal installers; the open-source variant already stages its config payload but
+// deliberately does NOT bump $OutputEncoding, because its PROBE_RESULT pipes do not strip
+// a BOM and would break if one appeared.
+const STAGED_VARIANTS = ['deploy/installer.ps1', 'deploy/installer-inner.ps1'];
+
 describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
   it('finds interchange sites to check', () => {
     // Guards against the regex silently matching nothing (renamed cmdlet, reflow).
@@ -143,6 +175,52 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
     expect(toml[0][1]).toContain("split('\\n')");
     expect(toml[0][1]).not.toContain('uFEFF');
   });
+
+  it('no tracked .ps1 pipes a ConvertTo-Json payload into node', () => {
+    const offenders = [];
+    for (const file of tracked) {
+      for (const [n, line] of pipedJsonToNode(readFileSync(file, 'utf-8'))) {
+        offenders.push(`${file}:${n}: ${line.trim()}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the pipe matcher still recognises the shape it bans', () => {
+    // Pins the rule rather than the current state: once every site is staged the
+    // assertion above passes vacuously, so a regressed matcher would look clean.
+    const sample = [
+      '    $cfgJson = $cfgArgs | ConvertTo-Json -Compress',
+      "    $cfgJson | & $script:NODE_BIN -e @'",
+    ].join('\n');
+    expect(pipedJsonToNode(sample)).toHaveLength(1);
+    // A pipe of something that never came from ConvertTo-Json is out of scope.
+    expect(pipedJsonToNode("    $other | & $script:NODE_BIN -e @'")).toEqual([]);
+  });
+
+  for (const file of STAGED_VARIANTS) {
+    it.skipIf(!existsSync(file))(`${file} stages every config payload as a UTF-8 file`, () => {
+      const text = readFileSync(file, 'utf-8');
+      const staged = text.match(
+        /Set-Content -LiteralPath \$cfgTmp -Value \$cfgJson -Encoding UTF8 -NoNewline/g) || [];
+      // Each staged payload must be handed to node as argv[1] and then deleted: it
+      // carries the SLS AccessKeySecret and the CMS license key.
+      const consumed = text.match(/^'@ \$cfgTmp$/gm) || [];
+      const removed = text.match(
+        /Remove-Item -LiteralPath \$cfgTmp -Force -ErrorAction SilentlyContinue/g) || [];
+      expect(staged.length).toBeGreaterThanOrEqual(2);
+      expect(consumed.length).toBe(staged.length);
+      expect(removed.length).toBe(staged.length);
+    });
+
+    it.skipIf(!existsSync(file))(`${file} bumps $OutputEncoding to UTF-8 in a try/catch`, () => {
+      // Belt to the staging braces: it also covers the ad-hoc PROBE_RESULT pipes, which
+      // stay on stdin. CLM makes both assignments throw, so the catch must be present
+      // and must not rethrow.
+      expect(readFileSync(file, 'utf-8')).toMatch(
+        /try \{\n\s*\[Console\]::OutputEncoding = \[System\.Text\.Encoding\]::UTF8\n\s*\$OutputEncoding = \[System\.Text\.Encoding\]::UTF8\n\} catch \{\}/);
+    });
+  }
 
   it('the hermes rollback path reads and writes deployed-agents.json as UTF-8', () => {
     // Named explicitly because this is the site the CR flagged: the write alone was
