@@ -27,6 +27,10 @@ const PS1_INSTALLERS = [
   'deploy/installer-opensource.ps1',
 ];
 
+// The script the installers deploy as loongsuite-pilot-service.ps1, and whose `start`
+// output the gate below matches against.
+const SERVICE_SCRIPT = 'scripts/loongsuite-pilot.ps1';
+
 const read = (f) => readFileSync(f, 'utf-8');
 
 const blockOf = (text, tag) => {
@@ -91,7 +95,29 @@ describe('installers displace a stale collector after re-installing', () => {
     expect(code).not.toMatch(/restart-collector[^\n]*Out-Null/);
   });
 
-  it('every installer calls it with the prior version, after start', () => {
+  it('only bounces the collector when start found one already running', () => {
+    // Displacing on every deploy costs more than it buys. Task Scheduler grants a task's own
+    // principal Read, Synchronize -- every write ACE sits on BUILTIN\Administrators, which
+    // UAC filters out of a -RunLevel Limited token -- so re-registering a task that already
+    // exists is denied outright on the machines this runs on. Callers treat a failed
+    // displacement as a failed deploy, so bouncing a collector `start` had just launched
+    // correctly turns a good upgrade into a rollback.
+    //
+    // `already running` is the one line that says a survivor was there: Cmd-Start prints it
+    // off Get-CollectorRuntime or the pid file and returns without starting anything. Any
+    // other output means `start` did the launching, from the new `current`.
+    const code = codeOf(blockOf(read(present[0]), 'pilot-restart-stale-collector'));
+    expect(code).toMatch(/if \(\(\$startOutput \| Out-String\) -notmatch "already running"\) \{ return \$true \}/);
+  });
+
+  it('the line that gate reads is still the line start prints', () => {
+    // The gate above is a string match against another script's output, so that string is
+    // load-bearing in both directions: reword Cmd-Start and every installer silently stops
+    // displacing anything, which is the original bug with no symptom.
+    expect(read(SERVICE_SCRIPT)).toMatch(/Write-Host "loongsuite-pilot is already running \(PID /);
+  });
+
+  it('every installer calls it with the prior version and the start output, after start', () => {
     for (const file of present) {
       const text = read(file);
       const lines = text.split('\n');
@@ -101,16 +127,31 @@ describe('installers displace a stale collector after re-installing', () => {
       expect(calls.length, `${file}: never called`).toBeGreaterThanOrEqual(1);
 
       for (const [lineNo, line] of calls) {
-        // Two arguments, both variables: the resolved service entry and the version that
-        // was current before this deploy. A literal or a missing second argument means the
-        // guard above turns the whole thing into a no-op. And the verdict has to be
-        // captured -- see the next test for what has to happen to it.
-        expect(line.trim(), `${file}:${lineNo}`).toMatch(/^\$\w+ = Restart-StaleCollector \$\S+ \$\S+$/);
+        // Three arguments, all variables: the resolved service entry, the version that was
+        // current before this deploy, and what `start` printed. A literal or a missing
+        // argument means one of the guards turns the whole thing into a no-op. And the
+        // verdict has to be captured -- see below for what has to happen to it.
+        const args = line.trim().match(/^\$\w+ = Restart-StaleCollector \$(\w+) \$(\w+) \$(\w+)$/);
+        expect(args, `${file}:${lineNo}: expected three variable arguments`).toBeTruthy();
 
         // It has to run after the start attempt -- displacing a survivor before `start`
         // just lets the watchdog put the old one back.
         const before = lines.slice(0, lineNo - 1).join('\n');
         expect(/-File \$\S+ start\b|& \$\S+ start\b/.test(before), `${file}:${lineNo}: no preceding start`).toBe(true);
+
+        // And the third argument has to be that attempt's own output. An unset variable
+        // never matches "already running", so a call site that forgets to capture disables
+        // the displacement everywhere without failing anything.
+        const startVar = args[3];
+        expect(
+          new RegExp(`\\$${startVar} = & [^\\n]*\\bstart\\b`).test(before),
+          `${file}:${lineNo}: $${startVar} is not filled from start`,
+        ).toBe(true);
+        // Capturing it must not hide it: the start diagnostics still go to the user.
+        expect(
+          new RegExp(`\\$${startVar} \\| ForEach-Object \\{ Write-Host \\$_ \\}`).test(text),
+          `${file}:${lineNo}: $${startVar} is captured and never shown`,
+        ).toBe(true);
       }
     }
   });

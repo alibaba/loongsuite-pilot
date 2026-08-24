@@ -1509,6 +1509,17 @@ function Print-Summary {
 # it leaves the updater alone. Skipped when $priorVersion is empty -- a fresh install has
 # no survivor to displace, and `start` just launched the collector from the new `current`.
 #
+# Skipped again when `start` did not say "already running". That line (Cmd-Start, off
+# Get-CollectorRuntime or the pid file) is the only evidence a survivor was there; without
+# it `start` launched the collector itself, from the new `current`, and there is nothing
+# stale to displace. The bounce is not free either: replacing a task the running principal
+# cannot write to is denied, and because callers treat a failed displacement as a failed
+# deploy, an unnecessary one can roll back an upgrade whose collector had come up correctly.
+# Callers pass the captured start output, hence Out-String -- it arrives as lines. Passing
+# nothing would silently turn this whole block back into a no-op, so every call site has to
+# pass a variable it filled from `start`, pinned by
+# tests/unit/deploy/installer-restart-stale-collector.test.mjs.
+#
 # $serviceEntry is whichever entry point the caller already resolved: the .ps1 needs
 # powershell.exe -File, the .cmd wrapper is invoked directly. Branching here rather than at
 # the call sites keeps this block byte-identical across the three installers.
@@ -1523,11 +1534,12 @@ function Print-Summary {
 # resolves `current`, which the survivor answers to exactly as well as the new collector
 # would, so "is running" cannot tell the two apart. That is the entire bug.
 function Restart-StaleCollector {
-    param([string]$serviceEntry, [string]$priorVersion)
+    param([string]$serviceEntry, [string]$priorVersion, $startOutput = "")
     $script:PILOT_LAST_RESTART_ERR = ""
     if (-not $priorVersion) { return $true }
     if (-not $serviceEntry) { return $true }
     if (-not (Test-Path $serviceEntry)) { return $true }
+    if (($startOutput | Out-String) -notmatch "already running") { return $true }
     # Locally forced to Continue: with 2>&1 in effect a caller left on Stop turns the first
     # stderr line into a NativeCommandError, which would report a successful restart as a
     # failure. restart-collector writes progress to stderr on purpose.
@@ -2107,7 +2119,7 @@ function Start-PilotAndWait {
     $startOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath start 2>&1
     $startExit = $LASTEXITCODE
     $startOutput | ForEach-Object { Write-Host $_ }
-    $staleOk = Restart-StaleCollector $ScriptPath $PriorVersion
+    $staleOk = Restart-StaleCollector $ScriptPath $PriorVersion $startOutput
     if (-not $staleOk) {
         Write-Host "   $script:PILOT_LAST_RESTART_ERR" -ForegroundColor Yellow
     }
