@@ -23,6 +23,7 @@ const EXPECTED_TOOL_DEFINITION = {
     required: ['command'],
   },
 };
+const EXPECTED_SYSTEM_PROMPT = 'You are Hermes, a meticulous personal assistant.';
 
 class TestHermesLogInput extends HermesLogInput {
   collectOnce(): Promise<AgentActivityEntry[]> {
@@ -61,7 +62,7 @@ describe('Hermes Agent plugin to trace flow', () => {
         method: 'POST',
         body: {
           model: 'qwen3-coder-plus',
-          messages: [],
+          messages: [{ role: 'system', content: EXPECTED_SYSTEM_PROMPT }],
           tools: [{
             type: 'function',
             function: {
@@ -145,6 +146,12 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       !('agent.pilot.invocation.user.id' in record))).toBe(true);
     const requestRecords = records.filter(record => record['event.name'] === 'llm.request');
     expect(requestRecords).toHaveLength(2);
+    // The system prompt only ever reaches the plugin through the request body:
+    // conversation_history never replays it.
+    expect(requestRecords.every(record =>
+      JSON.stringify(record['gen_ai.system_instructions'])
+        === JSON.stringify([{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }])))
+      .toBe(true);
     expect(requestRecords.every(record =>
       JSON.stringify(record['gen_ai.tool.definitions']) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
       .toBe(true);
@@ -193,6 +200,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       // raw request-level attachment is asserted above for both API steps.
       expect(llmSpans.every(span =>
         JSON.stringify(toolDefinitions(span)) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
+        .toBe(true);
+      expect(llmSpans.every(span =>
+        String(span.attributes['gen_ai.system_instructions']).includes(EXPECTED_SYSTEM_PROMPT)))
         .toBe(true);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;

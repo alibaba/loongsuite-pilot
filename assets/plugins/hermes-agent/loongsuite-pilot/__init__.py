@@ -283,6 +283,72 @@ def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
     return output
 
 
+def _text_parts(value: Any) -> List[Dict[str, str]]:
+    """Normalize a provider text payload (str / block list / nested parts) into text parts."""
+    if isinstance(value, str):
+        blocks: List[Any] = [value]
+    elif isinstance(value, dict):
+        # Gemini nests the prompt under systemInstruction.parts[].text.
+        nested = value.get("parts")
+        blocks = nested if isinstance(nested, list) else [value]
+    elif isinstance(value, list):
+        blocks = value
+    else:
+        return []
+
+    parts: List[Dict[str, str]] = []
+    for block in blocks[:MAX_PARTS]:
+        if isinstance(block, str):
+            text: Any = block
+        elif isinstance(block, dict):
+            # Anthropic/Bedrock blocks use "text"; OpenAI-style ones use "content".
+            text = block.get("text")
+            if not isinstance(text, str):
+                text = block.get("content")
+        else:
+            text = None
+        if isinstance(text, str) and text.strip():
+            parts.append({"type": "text", "content": _truncate(text)})
+    return parts
+
+
+def _system_instructions(request: Any) -> List[Dict[str, str]]:
+    """Extract the system prompt from a provider request body.
+
+    Hermes never replays system messages through conversation_history, so the
+    request body built for the provider is the only place the prompt is
+    observable. Shapes differ per provider: Anthropic/Bedrock keep it in a
+    top-level "system" field, Gemini nests it under systemInstruction.parts,
+    and OpenAI-compatible providers carry it as leading system/developer
+    messages.
+    """
+    if not isinstance(request, dict):
+        return []
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return []
+
+    for key in ("system", "systemInstruction", "system_instruction"):
+        if key in body:
+            parts = _text_parts(body.get(key))
+            if parts:
+                return parts
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return []
+    parts = []
+    for message in messages[:MAX_TURN_MESSAGES]:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("system", "developer"):
+            continue
+        parts.extend(_text_parts(message.get("content")))
+        if len(parts) >= MAX_PARTS:
+            break
+    return parts[:MAX_PARTS]
+
+
 def _skill_attributes(
     tool_name: Any,
     arguments: Any = None,
@@ -693,6 +759,7 @@ def _build_records(
         output_message = _message(assistant_message, capture)
         pre = api.get("pre") or {}
         tool_definitions = pre.get("tool_definitions")
+        system_instructions = pre.get("system_instructions")
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -716,6 +783,8 @@ def _build_records(
         })
         if isinstance(tool_definitions, list) and tool_definitions:
             request["gen_ai.tool.definitions"] = tool_definitions
+        if isinstance(system_instructions, list) and system_instructions:
+            request["gen_ai.system_instructions"] = system_instructions
         records.append(request)
 
         finish_reason = str(post.get("finish_reason") or assistant_message.get("finish_reason") or "stop")
@@ -911,6 +980,11 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
             "model": payload.get("model"),
             "tool_definitions": (
                 _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "system_instructions": (
+                _system_instructions(payload.get("request"))
                 if turn["capture_content"]
                 else []
             ),

@@ -91,6 +91,7 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
 | `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on this entry; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the message contains media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
@@ -112,6 +113,12 @@ Required levels follow OpenTelemetry wording:
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+
+## System Instructions
+
+`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It rides the existing message-content controls (Opt-In requirement level, per-agent `captureMessageContent`, and the masking pipeline), so it is omitted entirely when content capture is disabled.
+
+For `hermes` the prompt is read from the provider request body observed at `pre_api_request`, because `conversation_history` never replays system messages. Provider shapes are normalized to the same parts array: OpenAI-compatible `messages[]` entries with role `system` / `developer`, Anthropic and Bedrock top-level `system` (string or block list), and Gemini `systemInstruction.parts[].text`. A blank or absent prompt yields no field.
 
 ## Multimodal Message Parts
 

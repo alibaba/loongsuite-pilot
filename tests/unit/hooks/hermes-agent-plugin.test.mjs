@@ -602,6 +602,49 @@ describe('Hermes Agent native plugin', () => {
     expect(raw).not.toContain(marker);
   });
 
+  it('normalizes each Hermes provider system prompt shape and ignores blank prompts', () => {
+    // Shapes mirror Hermes 0.19's provider request builders: OpenAI-compatible
+    // system/developer messages, Anthropic/Bedrock top-level "system", and
+    // Gemini's nested systemInstruction. conversation_history never replays the
+    // system prompt, so the request body is the only source.
+    const { records } = replay(toolDefinitionsTurn(
+      {
+        messages: [
+          { role: 'system', content: 'You are a careful assistant.' },
+          { role: 'user', content: 'hi' },
+        ],
+      },
+      { system: 'Follow the house rules.' },
+      { system: [{ text: 'Bedrock block prompt.' }] },
+      { systemInstruction: { parts: [{ text: 'Gemini instruction.' }] } },
+      { messages: [{ role: 'developer', content: [{ type: 'text', text: 'Developer rule.' }] }] },
+      { system: '   ' },
+    ));
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(6);
+    expect(requests.map(request => request['gen_ai.system_instructions'])).toEqual([
+      [{ type: 'text', content: 'You are a careful assistant.' }],
+      [{ type: 'text', content: 'Follow the house rules.' }],
+      [{ type: 'text', content: 'Bedrock block prompt.' }],
+      [{ type: 'text', content: 'Gemini instruction.' }],
+      [{ type: 'text', content: 'Developer rule.' }],
+      undefined,
+    ]);
+  });
+
+  it('does not persist the system prompt when message content capture is disabled', () => {
+    const marker = 'private-system-prompt-marker';
+    const { records, raw } = replay(
+      toolDefinitionsTurn({ system: marker }),
+      { captureMessageContent: false },
+    );
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.system_instructions');
+    expect(raw).not.toContain(marker);
+  });
+
   it('redacts provider error messages when message content capture is disabled', () => {
     const { records, raw } = replay(failedApiTurn(), {
       captureMessageContent: false,
