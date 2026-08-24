@@ -255,19 +255,71 @@ describe('installers report what postinstall actually did', () => {
     // abort the npm install fallback. Keying the check mark off the exit code alone printed
     // "Hook scripts deployed" over an install that had just said it lost a tree -- the same
     // silent-success shape this whole file exists to prevent, one notch smaller.
+    //
+    // "Post-install failed" is the third mode and the one that hid behind both checks: a
+    // throw out of main() is caught at the bottom of postinstall.js, printed, and the process
+    // still exits 0 -- no non-zero code and no "failed asset tree" line to grep for.
     for (const file of PS1_INSTALLERS.filter(existsSync)) {
       const block = blockOf(read(file), 'pilot-postinstall-exit-check');
       const code = codeLines(block).map(([, l]) => l).join('\n');
       // Streaming the output straight to the console would leave nothing to match against;
       // 2>&1 because postinstall.js reports the count on stderr.
       expect(code, file).toMatch(/\$postinstallOut = & \$script:NODE_BIN \$postinstallScript 2>&1/);
-      expect(code, file).toMatch(/-match "failed asset tree"/);
+      expect(code, file).toMatch(/-match "failed asset tree\|Post-install failed"/);
       // The user still sees everything postinstall printed.
       expect(code, file).toMatch(/\$postinstallOut \| ForEach-Object \{ Write-Host \$_ \}/);
       // And the check mark sits behind the partial-failure branch, not in front of it.
       const partialAt = code.indexOf('elseif ($postinstallPartial)');
       expect(partialAt, `${file}: no partial-failure branch`).toBeGreaterThan(-1);
       expect(code.indexOf('Hook scripts deployed'), file).toBeGreaterThan(partialAt);
+    }
+  });
+
+  it('postinstall.js still prints the two lines the installers grep for', () => {
+    // The installers cannot see a per-tree failure or a thrown main() any other way -- both
+    // exit 0 by design. Reword either line and the abort below silently stops firing.
+    const text = read(POSTINSTALL);
+    expect(text).toMatch(/failed asset tree/);
+    expect(text).toMatch(/Post-install failed/);
+  });
+
+  it('no .ps1 installer keeps going after a failed postinstall', () => {
+    // Reporting the failure was only half of it: the install used to print the ❌ and then
+    // carry on to "Installation complete", leaving a collector with an empty
+    // $DataDir\hooks -- it loads no hook at all and every collection cycle fails on a plugin
+    // that was never written. Nothing downstream repairs that, so install aborts and upgrade
+    // rolls back.
+    //
+    // The block itself only records the reason ($script:PILOT_POSTINSTALL_ERR, empty when
+    // fine); the policy is at the call sites, which is what keeps the block byte-identical
+    // across three installers with three different failure paths. Same split as
+    // $script:PILOT_LAST_RESTART_ERR.
+    for (const file of PS1_INSTALLERS.filter(existsSync)) {
+      const text = read(file);
+      const block = blockOf(text, 'pilot-postinstall-exit-check');
+      const code = codeLines(block).map(([, l]) => l).join('\n');
+      expect(code, `${file}: the block records no reason`)
+        .toMatch(/\$script:PILOT_POSTINSTALL_ERR = "postinstall\.js/);
+      // Set in both failure branches, and left empty in the ✅ one.
+      expect(code.match(/\$script:PILOT_POSTINSTALL_ERR = "postinstall\.js/g).length, file).toBe(2);
+
+      const lines = text.split('\n');
+      const calls = lines
+        .map((line, i) => [i + 1, line])
+        .filter(([, line]) => /^\s*Deploy-Package \$script:INSTALL_SRC\s*$/.test(line));
+      // install and upgrade. A third caller that ignores the verdict is the bug coming back.
+      expect(calls.length, `${file}: expected two Deploy-Package call sites`).toBe(2);
+      for (const [lineNo] of calls) {
+        const after = lines.slice(lineNo, lineNo + 20).join('\n');
+        expect(after, `${file}:${lineNo}: the postinstall verdict is never read`)
+          .toMatch(/\$script:PILOT_POSTINSTALL_ERR/);
+      }
+      // The install path stops outright; the upgrade path falls into its existing
+      // `if (-not $started)` rollback, so it must not start the new version either.
+      expect(text, `${file}: install does not abort`)
+        .toMatch(/if \(\$script:PILOT_POSTINSTALL_ERR\) \{[\s\S]{0,400}?exit 1/);
+      expect(text, `${file}: upgrade starts the collector anyway`)
+        .toMatch(/-not \$script:PILOT_POSTINSTALL_ERR|\} else \{\n\s*\$started = Start-PilotAndWait/);
     }
   });
 
@@ -288,6 +340,26 @@ describe('installers report what postinstall actually did', () => {
       expect(run, `${file}: postinstall invocation not found`).toBeTruthy();
       // Either `|| postinstall_exit=$?` or the older `|| { ...; return 1; }` shape.
       expect(run[1], file).toMatch(/\|\|/);
+    }
+  });
+
+  it('no .sh installer keeps going after a failed postinstall either', () => {
+    for (const file of SH_INSTALLERS.filter(existsSync)) {
+      const text = read(file);
+      // Captured, not streamed: two of the three failure modes are only in the output.
+      expect(text, `${file}: postinstall output is not captured`).toMatch(/postinstall_out="\$\(/);
+      expect(text, file).toMatch(/grep -qE "failed asset tree\|Post-install failed"/);
+      // The user still sees it. `if`, not `&&`: under set -e a false `[ -n ... ]` would end
+      // deploy_package right there, turning an empty (successful) run into a failure.
+      expect(text, file).toMatch(/if \[ -n "\$postinstall_out" \]; then\n\s*printf '%s\\n' "\$postinstall_out"/);
+      // Two failure branches, each leaving deploy_package.
+      const branches = text.match(/hooks\/plugins are missing"\n\s*return 1/g) ?? [];
+      expect(branches.length, `${file}: deploy_package does not give up`).toBe(2);
+      // And both callers act on it: the install says why before exiting, the upgrade rolls the
+      // version pointer back. A bare `deploy_package "$INSTALL_SRC"` would abort under set -e
+      // without either.
+      expect(text.match(/if ! deploy_package "\$INSTALL_SRC"; then/g)?.length, `${file}: an unguarded call site`).toBe(2);
+      expect(text, `${file}: the upgrade path does not roll back`).toMatch(/rollback 2>\/dev\/null \|\| _rollback_ok=0/);
     }
   });
 

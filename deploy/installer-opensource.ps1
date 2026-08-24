@@ -1075,6 +1075,10 @@ function Deploy-Package {
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
     $postinstallExit = 0
     $postinstallPartial = $false
+    # Empty means "nothing went wrong". The caller aborts on a non-empty value -- the policy
+    # lives at the call sites so this block stays byte-identical across the installers, same
+    # split as $script:PILOT_LAST_RESTART_ERR.
+    $script:PILOT_POSTINSTALL_ERR = ""
     if (Test-Path $postinstallScript) {
         # postinstall.js resolves its target as LOONGSUITE_PILOT_DATA_DIR, falling back to
         # $env:USERPROFILE\.loongsuite-pilot. Unset, an install started with -DataDir would
@@ -1093,7 +1097,7 @@ function Deploy-Package {
             $postinstallOut = & $script:NODE_BIN $postinstallScript 2>&1
             $postinstallExit = $LASTEXITCODE
             $postinstallOut | ForEach-Object { Write-Host $_ }
-            if (($postinstallOut | Out-String) -match "failed asset tree") { $postinstallPartial = $true }
+            if (($postinstallOut | Out-String) -match "failed asset tree|Post-install failed") { $postinstallPartial = $true }
         } finally {
             $ErrorActionPreference = $prevEAP
             if ($hadPostinstallDataDir) {
@@ -1108,18 +1112,25 @@ function Deploy-Package {
     # fs.cpSync fail-fasts with 0xC0000409 on the bundled Node, killing the script before it
     # copied anything, and this line printed "Hook scripts deployed" regardless.
     #
-    # Two distinct outcomes, and the exit code only covers the first. postinstall.js
+    # Three distinct outcomes, and the exit code only covers the first. postinstall.js
     # deliberately exits 0 after a per-tree failure -- a non-zero exit would abort the npm
-    # install fallback above -- and announces it as "N failed asset tree(s)" instead. So a
-    # non-zero code means the process died outright, while a partial failure is legible only
-    # in the output. Keying the check mark off the exit code alone printed it over an install
-    # that had just reported a tree it could not copy.
+    # install fallback above -- and announces it as "N failed asset tree(s)" instead; its
+    # top-level catch is the same story, printing "Post-install failed: <reason>" and still
+    # exiting 0. So a non-zero code means the process died outright, while the other two are
+    # legible only in the output. Keying the check mark off the exit code alone printed it over
+    # an install that had just reported a tree it could not copy.
+    #
+    # An install with no hooks/plugins is not an install: the collector finds nothing to load
+    # and every collection cycle fails on a plugin that was never written. The caller aborts
+    # (install) or rolls back (upgrade) on $script:PILOT_POSTINSTALL_ERR.
     if ($postinstallExit -ne 0) {
-        Msg "    ❌ Hook 脚本部署失败 (exit=$postinstallExit)，hooks/plugins 可能缺失" `
-            "    ❌ Hook script deployment failed (exit=$postinstallExit); hooks/plugins may be missing"
+        $script:PILOT_POSTINSTALL_ERR = "postinstall.js (exit $postinstallExit)"
+        Msg "    ❌ Hook 脚本部署失败 (exit=$postinstallExit)，hooks/plugins 缺失" `
+            "    ❌ Hook script deployment failed (exit=$postinstallExit); hooks/plugins are missing"
     } elseif ($postinstallPartial) {
-        Msg "    ❌ Hook 脚本部分部署失败（见上方 failed asset tree），hooks/plugins 可能缺失" `
-            "    ❌ Some hook asset trees failed to deploy (see 'failed asset tree' above); hooks/plugins may be missing"
+        $script:PILOT_POSTINSTALL_ERR = "postinstall.js reported a failed asset tree"
+        Msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" `
+            "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
     } else {
         Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     }
@@ -2145,6 +2156,15 @@ function Cmd-Install {
         Prompt-UserId
         Confirm-ConfigOverwrite
         Deploy-Package $script:INSTALL_SRC
+        # Nothing downstream can repair this: postinstall.js is the only thing that fills
+        # $DataDir\{hooks,skills,plugins}, and a collector with no hooks collects nothing.
+        # Better to stop with the reason on screen than to finish and report success.
+        if ($script:PILOT_POSTINSTALL_ERR) {
+            Msg "❌ 安装中止：$script:PILOT_POSTINSTALL_ERR" `
+                "❌ Install aborted: $script:PILOT_POSTINSTALL_ERR"
+            Msg "   请检查上方输出后重试安装" "   Check the output above and re-run the install"
+            exit 1
+        }
         Write-Config
         Install-Command
 
@@ -2218,7 +2238,15 @@ function Cmd-Upgrade {
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-        $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $oldVer
+        # A failed postinstall is a failed upgrade: no point starting the new version, and the
+        # rollback below is what keeps `current` on a version whose assets are known complete.
+        $started = $false
+        if ($script:PILOT_POSTINSTALL_ERR) {
+            Msg "    ❌ Hook 脚本部署失败: $script:PILOT_POSTINSTALL_ERR" `
+                "    ❌ Hook script deployment failed: $script:PILOT_POSTINSTALL_ERR"
+        } else {
+            $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $oldVer
+        }
         if ($started) {
             Msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             Write-Host ""
