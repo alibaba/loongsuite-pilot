@@ -27,6 +27,13 @@ export interface QoderTraceInputOptions extends InputOptions {
   };
 }
 
+function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const agentType = e['gen_ai.agent.type'] as string;
+    return agentType === ClientType.QoderIdea || agentType === 'qoder-idea';
+  });
+}
+
 /**
  * Multi-source merge input for qoder/qoder-cli.
  * Reads hook JSONL (content+structure), session segments (CLI tokens),
@@ -141,6 +148,8 @@ export class QoderTraceInput extends BaseInput {
       const pathToUri = (filePath: string, timeUnixMs?: number) =>
         this.multimodalProcessor!.pathToUri(filePath, timeUnixMs);
       for (const sessionEntries of ideSessionGroups.values()) {
+        // JetBrains shares this input but has no multimodal extractor yet.
+        if (isQoderIdeaSession(sessionEntries)) continue;
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,

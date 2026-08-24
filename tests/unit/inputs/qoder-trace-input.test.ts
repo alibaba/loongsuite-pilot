@@ -1413,6 +1413,77 @@ describe('QoderTraceInput multimodal', () => {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it('skips JetBrains qoder-idea sessions and still converts desktop IDE', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-idea-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const ideaTool = {
+          'event.id': 'idea-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-idea',
+          'gen_ai.session.id': 'idea-sess',
+          'gen_ai.turn.id': 'idea-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        const ideTool = {
+          'event.id': 'ide-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(
+          logFile,
+          [ideaTool, ideTool].map(e => JSON.stringify(e)).join('\n') + '\n',
+        );
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: async (filePath: string) => {
+                const stated = await statImagePath(filePath);
+                if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
+                const loaded = await readImagePathBytes(stated);
+                if (!loaded) return null;
+                return {
+                  uri: `oss://mm/${loaded.mime_type}`,
+                  mime_type: loaded.mime_type,
+                  modality: 'image',
+                  size: loaded.size,
+                  sha256: 'x',
+                };
+              },
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        const idea = entries.find(e => e['event.id'] === 'idea-tool')!;
+        const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
+        expect(idea['gen_ai.tool.call.result']).toBe(`Image file: ${imgPath}`);
+        expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 });
 

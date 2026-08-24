@@ -103,7 +103,7 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 
 ### Qoder IDE
 
-Qoder IDE（`qoder` / `qoder-idea`）在 `qoder-trace` 采集路径上，于 IDE token 富化之后做写时转换：检测到图像本地路径后走 `MultimodalProcessor.pathToUri`（读盘 bytes → uri）→ 事件中的 `uri` part。配置键为 `agents.qoder.multimodal`。失败 fail-open，不影响原有文本/token 采集。
+Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化之后做写时转换：检测到图像本地路径后走 `MultimodalProcessor.pathToUri`（读盘 bytes → uri）→ 事件中的 `uri` part。配置键为 `agents.qoder.multimodal`。同管道的 JetBrains 会话（`qoder-idea`）会跳过。失败 fail-open，不影响原有文本/token 采集。
 
 | `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|

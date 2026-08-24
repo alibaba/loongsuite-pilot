@@ -103,7 +103,7 @@ Notes:
 
 ### Qoder IDE
 
-Qoder IDE (`qoder` / `qoder-idea`) converts on the `qoder-trace` path after IDE token enrichment: detect a local image path → `MultimodalProcessor.pathToUri` (read bytes → uri) → `uri` part on the event. Policy is `agents.qoder.multimodal`. Failures are fail-open and do not interrupt text/token collection.
+Qoder IDE (`qoder`) converts on the `qoder-trace` path after IDE token enrichment: detect a local image path → `MultimodalProcessor.pathToUri` (read bytes → uri) → `uri` part on the event. Policy is `agents.qoder.multimodal`. JetBrains sessions (`qoder-idea`) share this input but are skipped. Failures are fail-open and do not interrupt text/token collection.
 
 | `uploadMode` | Qoder IDE surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
