@@ -346,19 +346,53 @@ function Stop-PidFile {
     }
     # Force kill if still running
     try { Stop-Process -Id $pidVal -Force -ErrorAction SilentlyContinue } catch {}
-    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+
+    # Delete the file only while it still names the process we just killed. Up to ten
+    # seconds elapse in the wait loop above, and the collector task carries a five-minute
+    # repeating trigger, so a successor may already have started and written its own pid
+    # here -- unconditional removal then deleted a live daemon's pid file, after which
+    # status reported it as not running and the next start raced a second instance against
+    # it. Same rule the daemons themselves follow on shutdown (removeOwnPidFileSync in
+    # src/utils/pid-utils.ts). Re-read rather than trusting $pidVal: the point is what is
+    # on disk now, not what was there before Stop-Process.
+    $currentPid = ""
+    if (Test-Path -LiteralPath $pidFile) {
+        $currentPid = ([string](Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue)).Trim()
+    }
+    if ($currentPid -eq $pidVal) {
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Stop-OrphanProcesses {
     # $Match limits which daemons are terminated; the default kills both. Callers that
     # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
     # narrow pattern so they only reap the daemon they are about to re-launch.
+    #
+    # Both conditions below are required, and the second one is the point. The daemon
+    # names are shared by every installation on the machine: on a multi-account box each
+    # user runs their own collector and updater out of their own %USERPROFILE%, and
+    # matching on the name alone made any install / restart / stop kill all of them.
+    # Get-Process only enumerates other users' processes when the caller is elevated, so
+    # the blast radius was exactly the elevated sessions -- their victims' pid files were
+    # left pointing at dead pids, which is where the "stale single-instance lock" reports
+    # came from. $BOOTSTRAP_DIR is the directory the entry script is loaded from
+    # (New-HiddenTaskAction writes "<node>" "<$BOOTSTRAP_DIR\<name>-daemon.js>", and
+    # Cmd-Start builds the same pair), so it appears verbatim in the command line and
+    # identifies this installation and no other. It is non-empty by construction:
+    # $CACHE_DIR falls back to $DEFAULT_PILOT_DIR.
+    #
+    # .ToLower().Contains() rather than -match: the scope is a literal Windows path full
+    # of \ and possibly regex metacharacters (a user profile can contain "["), and
+    # escaping it for a regex buys nothing here. It is also a method call on [string], a
+    # core type, so it stays CLM-safe.
     param([string]$Match = "collector-daemon|updater-daemon")
+    $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
     Get-Process -Name "node" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match $Match
+                $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                ($cmdLine -match $Match) -and $cmdLine.ToLower().Contains($ownRoot)
             } catch { $false }
         } | ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -834,16 +868,11 @@ function Cmd-RestartCollector {
     }
     Stop-PidFile $PID_FILE
 
-    # Kill orphan collector processes
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "collector-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Kill orphan collector processes. Was an inline copy of Stop-OrphanProcesses that
+    # predated the -Match parameter; it also missed the installation scope the shared
+    # helper now applies, and restart-collector is the command the updater runs on every
+    # deploy -- i.e. the one that reached other accounts most often.
+    Stop-OrphanProcesses -Match "collector-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
@@ -955,15 +984,9 @@ function Cmd-RestartUpdater {
     }
     Stop-PidFile $UPDATER_PID_FILE
 
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "updater-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Second inline copy, same history and same missing scope as the one in
+    # Cmd-RestartCollector.
+    Stop-OrphanProcesses -Match "updater-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
