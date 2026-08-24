@@ -610,6 +610,20 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
     expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
   });
 
+  it('continues external cleanup but preserves retry assets when runtime env cleanup fails', () => {
+    const envCleanup = uninstall.slice(
+      uninstall.indexOf("foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH'))"),
+      uninstall.indexOf('if ($script:RUNTIME_ENV_BROADCAST_FAILED)'),
+    );
+    expect(envCleanup).toMatch(/foreach[\s\S]*try\s*\{[\s\S]*Remove-PilotRuntimeOverride[\s\S]*\}\s*catch\s*\{/);
+    expect(envCleanup).toContain('$runtimeEnvCleanupFailed = $true');
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'));
+    expect(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall).toContain('installation files were preserved for retry');
+  });
+
   it('cleans hook configs and runtime overrides before deleting their files and pinned node', () => {
     expect(uninstall.indexOf('Remove-HookConfigs'))
       .toBeLessThan(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"));

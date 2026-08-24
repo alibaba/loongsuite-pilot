@@ -2528,12 +2528,19 @@ function Cmd-Uninstall {
     Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
     $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
     $script:RUNTIME_ENV_BROADCAST_FAILED = $false
+    $runtimeEnvCleanupFailed = $false
     foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
-        $currentRuntime = Get-PilotRuntimeOverride -Name $envName
-        if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
-            $broadcasted = Remove-PilotRuntimeOverride -Name $envName
-            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-            Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
+        try {
+            $currentRuntime = Get-PilotRuntimeOverride -Name $envName
+            if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
+                $broadcasted = Remove-PilotRuntimeOverride -Name $envName
+                if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+                Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
+            }
+        } catch {
+            $runtimeEnvCleanupFailed = $true
+            Msg "    ⚠️  清理 $envName 失败，已保留安装文件以便重试: $($_.Exception.Message)" `
+                "    ⚠️  Failed to clean $envName; installation files will be preserved for retry: $($_.Exception.Message)"
         }
     }
     if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
@@ -2557,6 +2564,10 @@ function Cmd-Uninstall {
     Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
     Remove-MimoCodePlugin
     Write-Host ""
+
+    if ($runtimeEnvCleanupFailed) {
+        throw "Runtime environment cleanup failed; installation files were preserved for retry"
+    }
 
     # Keep the pinned node runtime and deployed helper assets available until
     # every external config and runtime override has been cleaned. In

@@ -732,7 +732,16 @@ export class HookWatchdog {
           enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
           precondition: async () => {
             if (!await fileExists(wrapperPath)) {
-              const removed = await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => false);
+              let removed = false;
+              try {
+                removed = await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
+              } catch (err) {
+                logger.debug('windows runtime override cleanup failed', {
+                  envName: def.envName,
+                  reason: 'wrapper-missing',
+                  error: String(err),
+                });
+              }
               if (removed) {
                 logger.warn('windows runtime wrapper missing; removed owned override', {
                   envName: def.envName,
@@ -744,7 +753,15 @@ export class HookWatchdog {
             for (const appPath of def.appInstallPaths) {
               if (await directoryExists(appPath)) return true;
             }
-            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => {});
+            try {
+              await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
+            } catch (err) {
+              logger.debug('windows runtime override cleanup failed', {
+                envName: def.envName,
+                reason: 'app-missing',
+                error: String(err),
+              });
+            }
             return false;
           },
           check: async () => {
@@ -755,7 +772,7 @@ export class HookWatchdog {
             await setWindowsUserEnv(def.envName, wrapperPath);
           },
           cleanup: async () => {
-            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch(() => {});
+            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
           },
         });
       }
