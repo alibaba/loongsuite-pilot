@@ -102,6 +102,13 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一配置块。`storageBasePath` 由 `project` / `logstore` 推导为 `sls://{project}/{logstore}`，无需手写。
 
+配置 `uploader: sls` 后，Pilot 会对该 logstore 开启多模态采集并写入对象。
+
+写入方式由 `sls.writeVia` 决定（缺省 `putObject`）：
+
+- `putObject`：用 AK 或 ApiKey 调 SLS PutObject。事件 URI 为 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
+- `http`：用 AK 或 ApiKey 换预签名 URL，再裸 HTTP PUT。用 ApiKey 时只需 presign，不必有 PutObject 权限。事件 URI 仍是本地的 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`；上传在后台进行。
+
 ```json
 {
   "multimodal": {
@@ -110,8 +117,50 @@ SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一�
       "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
       "project": "your-project",
       "logstore": "logstore-multimodal",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
+    }
+  }
+}
+```
+
+ApiKey 走 PutObject（由 `auth.mode` 选择用哪套凭证；AK 与 ApiKey 可以同时存在）：
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+HTTP 预签名上传（`writeVia=http`）。可用 ApiKey 或 AK（由 `auth.mode` 选择）：
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "writeVia": "http",
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
     }
   }
 }
@@ -122,7 +171,10 @@ SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一�
 | `multimodal.sls.endpoint` | SLS Endpoint。 |
 | `multimodal.sls.project` | SLS Project。 |
 | `multimodal.sls.logstore` | 用于存放多模态对象的 Logstore；缺省为 `logstore-multimodal`。 |
-| `multimodal.sls.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+| `multimodal.sls.writeVia` | 缺省 `putObject`。`http` 表示换预签名后裸 PUT；AK 或 ApiKey 均可。 |
+| `multimodal.sls.auth.mode` | 用户配置可省略，加载后必有。`ak` 或 `apiKey`。未填时：有 `apiKey` 就用 `apiKey`（即使也配了 AK）；否则 `accessKeyId` 与 `accessKeySecret` 都有才用 `ak`。 |
+| `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；可选 `securityToken`（STS）。 |
+| `multimodal.sls.auth.apiKey` | `mode=apiKey` 时必填。可与 AK 同时存在，仅在 `mode=apiKey` 时使用。 |
 
 全局多模态配置缺失或非法时，Pilot 会 fail-open：进程继续采集文本，但不做 blob→uri 转换。
 

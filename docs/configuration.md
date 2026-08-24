@@ -102,6 +102,13 @@ When Pilot should convert inline images in agent messages from base64 into objec
 
 SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flusher block. `storageBasePath` is derived as `sls://{project}/{logstore}` and does not need to be set by hand.
 
+Configuring `uploader: sls` enables SLS multimodal collection on that logstore and writes objects there.
+
+`sls.writeVia` selects the write path (default `putObject`):
+
+- `putObject`: AK or ApiKey calls SLS PutObject. Event URI is `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
+- `http`: AK or ApiKey fetches a presigned URL for the local key `{YYYYMMDD}/{sha256}.ext`, then raw HTTP PUT. With ApiKey, only presign is required (not PutObject). Event URI is the local `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`; upload happens in the background.
+
 ```json
 {
   "multimodal": {
@@ -110,8 +117,50 @@ SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flus
       "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
       "project": "your-project",
       "logstore": "logstore-multimodal",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
+    }
+  }
+}
+```
+
+ApiKey PutObject path (`auth.mode` selects which credentials are used; AK and ApiKey may both be present):
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+HTTP presign upload (`writeVia=http`). Use ApiKey or AK (`auth.mode` selects which credentials are used):
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "writeVia": "http",
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
     }
   }
 }
@@ -122,7 +171,10 @@ SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flus
 | `multimodal.sls.endpoint` | SLS endpoint. |
 | `multimodal.sls.project` | SLS project. |
 | `multimodal.sls.logstore` | Logstore used for multimodal objects; defaults to `logstore-multimodal`. |
-| `multimodal.sls.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
+| `multimodal.sls.writeVia` | Default `putObject`. `http` means presign then raw PUT; AK or ApiKey. |
+| `multimodal.sls.auth.mode` | Optional in user config; always set after load. `ak` or `apiKey`. If omitted: use `apiKey` when `apiKey` is present (even if AK is also set), otherwise use `ak` when both `accessKeyId` and `accessKeySecret` are present. |
+| `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`; optional `securityToken` for STS. |
+| `multimodal.sls.auth.apiKey` | Required when `mode=apiKey`. May coexist with AK; unused unless `mode=apiKey`. |
 
 If global multimodal config is missing or invalid, Pilot fails open: text collection continues, and blob→uri conversion is skipped.
 

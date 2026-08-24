@@ -25,8 +25,11 @@ describe('createUploader', () => {
         endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
         project: 'proj',
         logstore: 'logstore',
-        accessKeyId: 'ak',
-        accessKeySecret: 'sk',
+        auth: {
+          mode: 'ak',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
       },
     });
     expect(uploader).toBeInstanceOf(SlsUploader);
@@ -37,6 +40,23 @@ describe('createUploader', () => {
       uploader: 'oss',
       storageBasePath: 'oss://bucket/mm',
     })).toThrow(/multimodal\.oss config is required/);
+  });
+
+  it('creates SlsUploader for apiKey mode', () => {
+    const uploader = createUploader({
+      uploader: 'sls',
+      storageBasePath: 'sls://proj/logstore',
+      sls: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+        auth: {
+          mode: 'apiKey',
+          apiKey: 'edge-key',
+        },
+      },
+    });
+    expect(uploader).toBeInstanceOf(SlsUploader);
   });
 
   it('throws when sls credentials block is missing', () => {
@@ -78,8 +98,11 @@ describe('createUploader', () => {
         endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
         project: '',
         logstore: '',
-        accessKeyId: 'ak',
-        accessKeySecret: 'sk',
+        auth: {
+          mode: 'ak',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
       },
     })).toThrow(/requires project and logstore/);
   });

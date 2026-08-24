@@ -1,7 +1,10 @@
 export type {
   MultimodalOssConfig,
   MultimodalRuntimeConfig,
+  MultimodalSlsAuthConfig,
+  MultimodalSlsAuthMode,
   MultimodalSlsConfig,
+  MultimodalSlsWriteVia,
   MultimodalUploadMode as UploadMode,
   MultimodalUploaderKind as UploaderKind,
 } from '../types/index.js';

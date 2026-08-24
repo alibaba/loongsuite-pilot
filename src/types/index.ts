@@ -178,14 +178,37 @@ export interface MultimodalOssConfig {
   securityToken?: string;
 }
 
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
+
+export const MULTIMODAL_SLS_WRITE_VIAS = ['putObject', 'http'] as const;
+export type MultimodalSlsWriteVia = (typeof MULTIMODAL_SLS_WRITE_VIAS)[number];
+
 export interface MultimodalSlsConfig {
   endpoint: string;
   project: string;
   logstore: string;
-  accessKeyId: string;
-  accessKeySecret: string;
-  securityToken?: string;
+  /** 'putObject' (default) writes via SLS API; 'http' uses ApiKey presign then raw PUT. */
+  writeVia?: MultimodalSlsWriteVia;
+  /** SLS auth options */
+  auth: MultimodalSlsAuthConfig;
+  // Hosted-user OSS is deferred until ak/apiKey + putObject/http are settled.
+  // hostedOss?: MultimodalSlsHostedOssConfig;
 }
+
+export interface MultimodalSlsAuthConfig {
+  /** 'ak' uses LOG V1 signature; 'apiKey' uses Bearer token. */
+  mode: MultimodalSlsAuthMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  securityToken?: string;
+  apiKey?: string;
+}
+
+// export interface MultimodalSlsHostedOssConfig {
+//   ossBucket: string;
+//   roleArn: string;
+// }
 
 /** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
 export interface MultimodalRuntimeConfig {

@@ -6,11 +6,15 @@ import {
   MULTIMODAL_UPLOAD_TIMEOUT_MS,
   withRetries,
 } from './retry.js';
-import { slsPutObject, tryParseSlsStorageBasePath } from './sls-client.js';
+import {
+  slsPutObject,
+  slsPutViaPresignedHttp,
+  tryParseSlsStorageBasePath,
+} from './sls-client.js';
 
 const logger = createLogger('SlsUploader');
 
-/** SLS PutObject uploader (fail-open). */
+/** SLS uploader (fail-open). putObject: AK/ApiKey API write. http: ApiKey presign then raw PUT. */
 export class SlsUploader implements Uploader {
   private readonly project: string;
   private readonly logstore: string;
@@ -55,19 +59,7 @@ export class SlsUploader implements Uploader {
         if (this.closed) {
           return { ok: false as const, retryable: false, error: 'uploader closed' };
         }
-        const put = await slsPutObject({
-          endpoint: this.sls.endpoint,
-          project: this.project,
-          logstore: this.logstore,
-          objectKey,
-          accessKeyId: this.sls.accessKeyId,
-          accessKeySecret: this.sls.accessKeySecret,
-          securityToken: this.sls.securityToken,
-          body: item.data!,
-          contentType: item.contentType,
-          timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,
-          meta: item.meta,
-        });
+        const put = await this.writeObject(objectKey, item);
         if (put.ok) return { ok: true as const, value: put.requestId };
         return {
           ok: false as const,
@@ -115,5 +107,26 @@ export class SlsUploader implements Uploader {
     }
     this.closed = true;
     this.successKeys.clear();
+  }
+
+  private writeObject(objectKey: string, item: UploadItem) {
+    const params = {
+      endpoint: this.sls.endpoint,
+      project: this.project,
+      logstore: this.logstore,
+      objectKey,
+      mode: this.sls.auth.mode,
+      accessKeyId: this.sls.auth.accessKeyId,
+      accessKeySecret: this.sls.auth.accessKeySecret,
+      securityToken: this.sls.auth.securityToken,
+      apiKey: this.sls.auth.apiKey,
+      body: item.data!,
+      contentType: item.contentType,
+      timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,
+      meta: item.meta,
+    };
+    return this.sls.writeVia === 'http'
+      ? slsPutViaPresignedHttp(params)
+      : slsPutObject(params);
   }
 }
