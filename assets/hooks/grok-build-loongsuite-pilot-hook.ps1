@@ -99,8 +99,11 @@ function Resolve-NodeBin {
     }
     $pinFile = Join-Path $dataDir "node-bin"
     if (Test-Path -LiteralPath $pinFile) {
-        $pinContent = Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue
-        $pinned = Convert-NodePath ([string]$pinContent)
+        # PowerShell 5.1 defaults Get-Content to the active ANSI code page and
+        # Set-Content -Encoding UTF8 writes a BOM. Preserve non-ASCII install
+        # paths while stripping the BOM before resolving the executable.
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath (([string]$pinContent).Trim([char]0xFEFF))
         if (Test-NodeSuitable $pinned) { return $pinned }
     }
 
