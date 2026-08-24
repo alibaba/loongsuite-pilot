@@ -160,16 +160,25 @@ function Resolve-Node {
     # 2. Fallback search
     $candidates = @()
 
-    # nvm-windows
-    if ($env:NVM_HOME -and (Test-Path $env:NVM_HOME)) {
+    # nvm-windows. Both probes below must be non-fatal. NVM_HOME is often a *machine*
+    # level variable pointing into another account's profile
+    # (C:\Users\Administrator\AppData\Local\nvm was measured), and that directory's DACL
+    # grants nothing to the current user: a bare Test-Path raises a PermissionDenied
+    # UnauthorizedAccessException record, which this file's $ErrorActionPreference = "Stop"
+    # promotes to a terminating error. Resolve-Node runs on the way into start / stop /
+    # status / restart-collector, so one unreadable third-party node manager took down
+    # every service command -- including the restart-collector the updater issues after
+    # deploying a version. The Get-ChildItem calls were already guarded; these two were
+    # not. -LiteralPath as well, because a version manager path may contain [ or ].
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME -ErrorAction SilentlyContinue)) {
         Get-ChildItem $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "node.exe" }
     }
 
-    # fnm
+    # fnm -- same unreadable-directory hazard as the nvm branch above.
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
+    if (Test-Path -LiteralPath $fnmDir -ErrorAction SilentlyContinue) {
         Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "installation\node.exe" }
