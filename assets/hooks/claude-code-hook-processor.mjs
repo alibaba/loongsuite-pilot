@@ -52,6 +52,7 @@ import {
   buildBashUpdatedInput,
   consumeToolContext,
   markToolPropagationConsumed,
+  readTurnContext,
   reserveToolContext,
 } from './claude-code/tool-context.mjs';
 import {
@@ -312,11 +313,16 @@ function cmdPreToolUse() {
   const context = reserveToolContext({
     dataDir: pilotDataDir(),
     sessionId,
+    promptId: typeof event.prompt_id === 'string' ? event.prompt_id : '',
     toolUseId,
     traceparent: process.env.TRACEPARENT,
     tracestate: process.env.TRACESTATE,
+    generateTraceWhenMissing: runtimeConfig.upstreamLink.generateTraceWhenMissing === true,
   });
-  const updatedInput = buildBashUpdatedInput(event.tool_input, context);
+  const updatedInput = buildBashUpdatedInput(event.tool_input, {
+    ...(context || {}),
+    resourceAttributes: process.env.LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES,
+  });
   if (!updatedInput) return;
 
   emittedHookResponse = true;
@@ -839,7 +845,8 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // intercept files after JSONL is flushed.
   const mergedResponseIds = new Set();
 
-  const traceId = generateTraceId();
+  const turnContext = readTurnContext(pilotDataDir(), sessionId, turn.promptId);
+  const traceId = turnContext?.traceId || generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
 

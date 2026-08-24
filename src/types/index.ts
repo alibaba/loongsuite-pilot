@@ -140,6 +140,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Generate a per-turn trace context for tools when no upstream context is available. */
+  generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
   ttlMs: number;
 }

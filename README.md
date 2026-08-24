@@ -151,7 +151,8 @@ Link collected agent spans to an **upstream** trace so each turn's span tree rep
 | Setting | Values | Default |
 | ------- | ------ | ------- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate the first-turn upstream context to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
 
 When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
@@ -159,7 +160,7 @@ When enabled, the upstream `traceparent` reaches Pilot via one of two schemes an
 - **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
 - **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
 
-For Claude Code, enabling both upstream linking and `propagateToTools` also passes the first turn's context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. The downstream CLI must read these environment variables and configure its own trace exporter. This initial scope is fail-open and does not cover subagents, PowerShell, MCP tools, later turns, or resumed sessions with a newly supplied context.
+For Claude Code, enabling both `upstreamLink.enabled` and `propagateToTools` passes context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. Optionally enable `generateTraceWhenMissing` so turns without upstream context generate and propagate a local trace. Set `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` on the Claude Code process to have Pilot map it to standard `OTEL_RESOURCE_ATTRIBUTES` for the downstream CLI. The downstream CLI must extract Trace Context and configure its own exporter. This capability is fail-open and currently does not cover subagents, PowerShell, MCP tools, or non-Bash tools.
 
 
 ## Output Data

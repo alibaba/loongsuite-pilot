@@ -22,6 +22,7 @@ const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
 const ZERO_TRACE = '0'.repeat(32);
 const ZERO_SPAN = '0'.repeat(16);
 const TRACESTATE_MAX_LENGTH = 512;
+const RESOURCE_ATTRIBUTES_MAX_LENGTH = 8 * 1024;
 
 function safeName(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
@@ -35,6 +36,13 @@ function contextPath(dataDir, sessionId, toolUseId) {
   return path.join(
     correlateDir(dataDir),
     `${safeName(sessionId)}.${safeName(toolUseId)}.tool-context.json`,
+  );
+}
+
+function turnContextPath(dataDir, sessionId, promptId) {
+  return path.join(
+    correlateDir(dataDir),
+    `${safeName(sessionId)}.${safeName(promptId)}.turn-context.json`,
   );
 }
 
@@ -61,6 +69,48 @@ function sanitizeTracestate(value) {
   // printable punctuation (including single quotes) below.
   if (/[\x00-\x1f\x7f]/.test(trimmed)) return undefined;
   return trimmed;
+}
+
+function sanitizeResourceAttributes(value) {
+  if (typeof value !== 'string') return undefined;
+  if (!value.trim() || Buffer.byteLength(value, 'utf8') > RESOURCE_ATTRIBUTES_MAX_LENGTH) {
+    return undefined;
+  }
+  if (/[\x00-\x1f\x7f]/.test(value)) return undefined;
+  // This is an opaque carrier. Leave parsing and semantic validation to the
+  // downstream OpenTelemetry SDK and preserve the caller's exact value.
+  return value;
+}
+
+function readTurnRecord(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && typeof parsed.traceId === 'string'
+      && /^[0-9a-f]{32}$/i.test(parsed.traceId)
+      && parsed.traceId.toLowerCase() !== ZERO_TRACE
+      && typeof parsed.flags === 'string'
+      && /^[0-9a-f]{2}$/i.test(parsed.flags)
+      && (parsed.source === 'upstream-env' || parsed.source === 'local')
+    ) {
+      return {
+        ...parsed,
+        traceId: parsed.traceId.toLowerCase(),
+        flags: parsed.flags.toLowerCase(),
+        parentSpanId: typeof parsed.parentSpanId === 'string'
+          && /^[0-9a-f]{16}$/i.test(parsed.parentSpanId)
+          && parsed.parentSpanId.toLowerCase() !== ZERO_SPAN
+          ? parsed.parentSpanId.toLowerCase()
+          : undefined,
+        tracestate: sanitizeTracestate(parsed.tracestate),
+      };
+    }
+  } catch {
+    // Missing, partial, or corrupt state is a fail-open miss.
+  }
+  return null;
 }
 
 function readRecord(file) {
@@ -100,20 +150,118 @@ export function isToolPropagationConsumed(dataDir, sessionId) {
 }
 
 /**
+ * Read the trace context selected before Bash execution for one Claude turn.
+ */
+export function readTurnContext(dataDir, sessionId, promptId) {
+  if (!dataDir || !sessionId || !promptId) return null;
+  return readTurnRecord(turnContextPath(dataDir, sessionId, promptId));
+}
+
+function reserveTurnContext({
+  dataDir,
+  sessionId,
+  promptId,
+  traceparent,
+  tracestate,
+  generateTraceWhenMissing,
+}) {
+  if (!dataDir || !sessionId || !promptId) return null;
+
+  const dir = correlateDir(dataDir);
+  const file = turnContextPath(dataDir, sessionId, promptId);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const existing = readTurnRecord(file);
+    if (existing) {
+      // Environment upstream context is first-turn-only. Do not let a delayed
+      // duplicate hook resurrect it after Stop marked the session consumed.
+      if (existing.source === 'upstream-env' && isToolPropagationConsumed(dataDir, sessionId)) {
+        return null;
+      }
+      return existing;
+    }
+
+    const upstream = isToolPropagationConsumed(dataDir, sessionId)
+      ? null
+      : parseTraceparent(traceparent);
+    if (!upstream && !generateTraceWhenMissing) return null;
+
+    const record = upstream
+      ? {
+          type: 'turn',
+          source: 'upstream-env',
+          sessionId,
+          promptId,
+          traceId: upstream.traceId,
+          parentSpanId: upstream.parentSpanId,
+          flags: upstream.flags,
+          tracestate: sanitizeTracestate(tracestate),
+          ts: new Date().toISOString(),
+        }
+      : {
+          type: 'turn',
+          source: 'local',
+          sessionId,
+          promptId,
+          traceId: crypto.randomBytes(16).toString('hex'),
+          flags: '01',
+          ts: new Date().toISOString(),
+        };
+
+    try {
+      fs.writeFileSync(file, JSON.stringify(record), { encoding: 'utf-8', flag: 'wx' });
+      return record;
+    } catch (err) {
+      if (err?.code === 'EEXIST') return readTurnRecord(file);
+      throw err;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reserve (or idempotently reload) the TOOL span context for one tool_use_id.
  */
 export function reserveToolContext({
   dataDir,
   sessionId,
+  promptId,
   toolUseId,
   traceparent,
   tracestate,
+  generateTraceWhenMissing = false,
 }) {
   if (!dataDir || !sessionId || !toolUseId) return null;
-  if (isToolPropagationConsumed(dataDir, sessionId)) return null;
 
-  const parsed = parseTraceparent(traceparent);
-  if (!parsed) return null;
+  let turnContext = null;
+  if (promptId) {
+    turnContext = reserveTurnContext({
+      dataDir,
+      sessionId,
+      promptId,
+      traceparent,
+      tracestate,
+      generateTraceWhenMissing,
+    });
+  } else if (!isToolPropagationConsumed(dataDir, sessionId)) {
+    // Backward compatibility for Claude Code versions whose hooks do not
+    // expose prompt_id: upstream propagation still works, but local trace
+    // generation requires a stable turn identifier and therefore fails open.
+    const parsed = parseTraceparent(traceparent);
+    if (parsed) {
+      turnContext = {
+        type: 'turn',
+        source: 'upstream-env',
+        sessionId,
+        traceId: parsed.traceId,
+        parentSpanId: parsed.parentSpanId,
+        flags: parsed.flags,
+        tracestate: sanitizeTracestate(tracestate),
+      };
+    }
+  }
+  if (!turnContext) return null;
 
   const dir = correlateDir(dataDir);
   const file = contextPath(dataDir, sessionId, toolUseId);
@@ -123,15 +271,17 @@ export function reserveToolContext({
     if (existing) return existing;
 
     const spanId = crypto.randomBytes(8).toString('hex');
-    const downstreamTraceparent = `00-${parsed.traceId}-${spanId}-${parsed.flags}`;
+    const downstreamTraceparent = `00-${turnContext.traceId}-${spanId}-${turnContext.flags}`;
     const record = {
       type: 'tool',
+      source: turnContext.source,
       sessionId,
+      ...(promptId ? { promptId } : {}),
       toolUseId,
-      traceId: parsed.traceId,
+      traceId: turnContext.traceId,
       spanId,
       traceparent: downstreamTraceparent,
-      tracestate: sanitizeTracestate(tracestate),
+      tracestate: turnContext.tracestate,
       ts: new Date().toISOString(),
     };
 
@@ -196,11 +346,17 @@ export function markToolPropagationConsumed(dataDir, sessionId) {
 export function buildBashUpdatedInput(toolInput, context) {
   if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) return null;
   if (typeof toolInput.command !== 'string' || toolInput.command.length === 0) return null;
-  if (!context || typeof context.traceparent !== 'string') return null;
+  const traceparent = typeof context?.traceparent === 'string' ? context.traceparent : undefined;
+  const resourceAttributes = sanitizeResourceAttributes(context?.resourceAttributes);
+  if (!traceparent && !resourceAttributes) return null;
 
-  const exports = [`export TRACEPARENT=${shellSingleQuote(context.traceparent)}`];
-  if (context.tracestate) {
+  const exports = [];
+  if (traceparent) exports.push(`export TRACEPARENT=${shellSingleQuote(traceparent)}`);
+  if (traceparent && context.tracestate) {
     exports.push(`export TRACESTATE=${shellSingleQuote(context.tracestate)}`);
+  }
+  if (resourceAttributes) {
+    exports.push(`export OTEL_RESOURCE_ATTRIBUTES=${shellSingleQuote(resourceAttributes)}`);
   }
   return {
     ...toolInput,
