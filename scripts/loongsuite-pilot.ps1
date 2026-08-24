@@ -456,7 +456,18 @@ function Register-PilotTask {
     foreach ($logonType in @("Interactive", "S4U")) {
         # Clear any task a previous attempt left behind. A failed registration can
         # still create the task entry before erroring on the principal.
+        #
+        # The delete output stays suppressed: on a fresh install there is nothing to
+        # delete and schtasks exits non-zero, so its stderr is noise (and a bare stderr
+        # line can turn terminating under $ErrorActionPreference = "Stop"). A task that
+        # SURVIVES the delete is a different story and worth a line -- it means this
+        # process has no write access to the task and the registration below is about to
+        # fail with "Access is denied" or a name collision. Without this, the only
+        # symptom was the registration error, which reads like a bug in the principal.
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
+        if (Get-TaskExists $taskName) {
+            Write-Host "   '$taskName' survived the delete; re-registration will likely be denied" -ForegroundColor Yellow
+        }
         try {
             # On-disk location of the task definition (absolute filesystem path).
             $diskPath = "$env:SystemRoot\System32\Tasks$TASK_FOLDER\$taskName"
@@ -838,9 +849,33 @@ function Cmd-RestartCollector {
     # Restart via Task Scheduler if registered
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_COLLECTOR) {
+        # Re-register with potentially updated paths -- best-effort, and deliberately
+        # in its OWN try so a failure here can no longer skip the start below.
+        #
+        # A scheduled task grants its own principal only Read: every write ACE sits on
+        # BUILTIN\Administrators, and UAC filters that group out of the token of a
+        # -RunLevel Limited task, which is what our two daemons run as. So the updater
+        # that invokes restart-collector cannot touch its own task definition. Measured
+        # on a Medium-integrity Limited task against a task registered earlier:
+        # schtasks /Delete, Register-ScheduledTask and Register-ScheduledTask -Force all
+        # fail with "Access is denied" -- -Force is not a fix -- while
+        # Start-ScheduledTask succeeds, because starting needs no write access.
+        #
+        # Nothing is lost by skipping the re-registration: Install-CollectorTask rewrites
+        # collector-launch.vbs and reaps orphaned daemons before it reaches the
+        # registration, and the task action invokes that .vbs by a path that does not
+        # change across versions -- so the surviving registration already launches the
+        # new version. Sharing one try was the whole defect: a cosmetic re-register
+        # failure aborted before Start-ScheduledTask, and with init_type=taskscheduler
+        # the self-heal branch below is skipped, so the update ended in "Service manager
+        # failed to restart collector" + exit 1 while the collector stayed down until the
+        # task's own 5-minute watchdog trigger happened to relaunch it.
         try {
-            # Re-register with potentially updated paths
             Install-CollectorTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Write-Host "collector restarted (Task Scheduler)"
             $restarted = $true
@@ -934,8 +969,15 @@ function Cmd-RestartUpdater {
     # Restart via Task Scheduler
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_UPDATER) {
+        # Best-effort re-registration in its own try, for the same reason as in
+        # Cmd-RestartCollector above (a -RunLevel Limited task cannot rewrite its own
+        # definition; only starting it works). See the comment there.
         try {
             Install-UpdaterTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Start-Sleep -Seconds 1
             if (Get-TaskRunning $TASK_NAME_UPDATER) {
