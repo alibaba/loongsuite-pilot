@@ -100,6 +100,62 @@ function extractOpenClawCleanupScripts() {
   ];
 }
 
+function extractGrokCleanupNodeScript(source, style) {
+  const functionMarker = style === 'sh'
+    ? 'remove_grok_build_hook_config()'
+    : 'function Remove-GrokBuildHookConfig';
+  const functionStart = source.indexOf(functionMarker);
+  const functionEnd = source.indexOf('# ====', functionStart);
+  const body = source.slice(functionStart, functionEnd);
+  const scriptStartMarker = style === 'sh' ? 'result="$(node -e \'\n' : "$result = & $script:NODE_BIN -e @'\n";
+  const scriptEndMarker = style === 'sh' ? '\n\' "$cfg"' : "\n'@ $cfg";
+  const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
+  const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
+  if (scriptStart < scriptStartMarker.length || scriptEnd < scriptStart) {
+    throw new Error(`failed to extract ${style} Grok cleanup script`);
+  }
+  return body.slice(scriptStart, scriptEnd);
+}
+
+function verifyGrokCleanupScript(script) {
+  const root = mkdtempSync(join(tmpdir(), 'pilot-grok-cleanup-script-'));
+  try {
+    const configPath = join(root, 'loongsuite-pilot.json');
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        stop: [
+          { command: '/custom/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop' },
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [
+              { command: 'powershell.exe -File "C:\\pilot data\\hooks\\grok-build-loongsuite-pilot-hook.ps1" stop' },
+              { command: '/opt/third-party/nested-hook.sh' },
+            ],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const run = spawnSync(process.execPath, ['-e', script, configPath], { encoding: 'utf8' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toBe('cleaned');
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+      hooks: {
+        stop: [
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [{ command: '/opt/third-party/nested-hook.sh' }],
+          },
+        ],
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // Derive lifecycle coverage from the deployment manifests. New hook agents
 // must not require a second hand-maintained list in this test.
 const HOOK_CONFIG_FILES = [...new Set(
@@ -521,6 +577,13 @@ describe('Grok Build uninstall smoke', () => {
     expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
       .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
     expect(uninstall.match(/Remove-GrokBuildHookConfig/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ['POSIX', extractGrokCleanupNodeScript(sh, 'sh')],
+    ['PowerShell', extractGrokCleanupNodeScript(ps1, 'ps1')],
+  ])('%s cleanup removes direct/nested Pilot hooks and preserves third-party hooks', (_platform, script) => {
+    verifyGrokCleanupScript(script);
   });
 
   it('removes Pilot direct and nested hooks from an isolated HOME and preserves third-party hooks', () => {
