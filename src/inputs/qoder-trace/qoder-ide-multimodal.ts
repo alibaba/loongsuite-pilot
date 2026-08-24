@@ -19,7 +19,7 @@ const logger = createLogger('QoderIdeMultimodal');
 // Path patterns found in current Qoder IDE surfaces; extend when new scenes appear.
 const IMAGE_FILE_RE = /Image file:\s*([^\n\r]+)/gi;
 const IMAGE_GEN_PATH_RE = /The absolute path of the image is:\s*([^\n\r]+)/gi;
-const MARKDOWN_IMAGE_RE = /!\[[^\]]*]\(([^)\s]+)\)/g;
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*]\((?:<([^>]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
 
 /**
  * request_id → attached paths. Process-local LRU.
@@ -344,7 +344,7 @@ export function extractMarkdownImagePaths(text: string): string[] {
   MARKDOWN_IMAGE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = MARKDOWN_IMAGE_RE.exec(text)) !== null) {
-    const p = match[1]?.trim();
+    const p = (match[1] ?? match[2])?.trim();
     if (p) paths.push(p);
   }
   return [...new Set(paths)];

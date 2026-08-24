@@ -844,6 +844,12 @@ describe('QoderTraceInput multimodal', () => {
         '/tmp/b.jpg',
       ]);
     });
+
+    it('parses angle-bracket destinations and optional titles', () => {
+      expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)')).toEqual(['/tmp/My Image.png']);
+      expect(extractMarkdownImagePaths('![x](/tmp/a.png "preview")')).toEqual(['/tmp/a.png']);
+      expect(extractMarkdownImagePaths("![x](/tmp/b.jpg 'preview')")).toEqual(['/tmp/b.jpg']);
+    });
   });
 
   describe('enrichIdeMultimodal', () => {
