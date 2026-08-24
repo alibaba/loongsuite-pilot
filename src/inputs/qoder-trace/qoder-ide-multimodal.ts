@@ -311,7 +311,17 @@ async function convertPathsToUriParts(
     const trimmed = filePath.trim();
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
-    const result = await pathToUri(trimmed, timeMs);
+    let result: Awaited<ReturnType<PathToUriFn>>;
+    try {
+      result = await pathToUri(trimmed, timeMs);
+    } catch (err) {
+      stats.skipped += 1;
+      logger.warn('qoder ide multimodal pathToUri threw; skipping image', {
+        error: String(err),
+        path: trimmed,
+      });
+      continue;
+    }
     if (!result) {
       stats.skipped += 1;
       continue;

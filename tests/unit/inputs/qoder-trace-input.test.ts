@@ -1346,6 +1346,34 @@ describe('QoderTraceInput multimodal', () => {
       expect(tool['event.name']).toBe('tool.result');
       expect(tool['gen_ai.tool.call.result']).toBeDefined();
     });
+
+    it('skips a throwing path and still converts later images with metadata', async () => {
+      const dir = makeMmTempDir();
+      const boom = writePng(dir, 'boom.png', 'boom');
+      const ok = writePng(dir, 'ok.png', 'ok');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${boom}\nImage file: ${ok}`,
+      });
+      await enrichIdeMultimodal([tool], {
+        uploadMode: 'tool',
+        pathToUri: async (filePath: string) => {
+          if (filePath === boom) throw new Error('processor boom');
+          return {
+            uri: 'oss://test/ok',
+            mime_type: 'image/png',
+            modality: 'image',
+            size: 2,
+            sha256: 'ok',
+          };
+        },
+      });
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
+      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
+      ]);
+    });
   });
 
   describe('IDE gate via collect', () => {
