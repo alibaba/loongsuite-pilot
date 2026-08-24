@@ -1313,6 +1313,139 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 }
 
 # ============================================================
+# QoderWork-family runtime wrapper: persist the dedicated User-level overrides
+# in HKCU\Environment. reg.exe is the CLM-safe source of truth; the guarded
+# .NET call broadcasts WM_SETTINGCHANGE so Explorer-spawned apps see updates.
+# ============================================================
+function Get-PilotRuntimeOverride {
+    param([string]$Name)
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
+        $regExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($regExitCode -ne 0) { return "" }
+    foreach ($line in $regOut) {
+        if (($line -match '^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$') -and $Matches[1] -ieq $Name) {
+            return $Matches[2].Trim()
+        }
+    }
+    return ""
+}
+
+function Test-AgentCollectionEnabled {
+    param([string]$AgentId)
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path $configFile)) { return $false }
+
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $enabled = & $script:NODE_BIN -e @'
+try {
+  const config = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
+  const agentId = process.argv[2];
+  process.stdout.write(config?.agents?.[agentId]?.enabled === false ? 'false' : 'true');
+} catch {
+  process.stdout.write('false');
+}
+'@ $configFile $AgentId 2>$null
+    $ErrorActionPreference = $prevEAP
+    return "$enabled".Trim() -eq "true"
+}
+
+function Set-PilotRuntimeOverride {
+    param([string]$Name, [string]$Value)
+    reg.exe add "HKCU\Environment" /v $Name /t REG_SZ /d "$Value" /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set $Name" }
+    try {
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Remove-PilotRuntimeOverride {
+    param([string]$Name)
+    reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }
+    try {
+        [Environment]::SetEnvironmentVariable($Name, $null, 'User')
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Sync-PilotRuntimeOverride {
+    param(
+        [string]$Name,
+        [bool]$ShouldEnable,
+        [string]$WrapperPath,
+        [string]$ProductName
+    )
+    $current = Get-PilotRuntimeOverride -Name $Name
+    if (-not (Test-Path $WrapperPath)) {
+        $script:RUNTIME_WRAPPER_MISSING = $true
+        if ($current -and $current -ieq $WrapperPath) {
+            $broadcasted = Remove-PilotRuntimeOverride -Name $Name
+            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+            Msg "    ⚠️  wrapper 缺失，已清理 $Name" "    ⚠️  Wrapper missing; cleaned $Name"
+        } else {
+            Msg "    ⚠️  wrapper 缺失，未设置 $Name" "    ⚠️  Wrapper missing; did not set $Name"
+        }
+        return
+    }
+
+    if ($ShouldEnable) {
+        if ($current -ine $WrapperPath) {
+            $broadcasted = Set-PilotRuntimeOverride -Name $Name -Value $WrapperPath
+            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+            Msg "    ✅ $Name ($ProductName)" "    ✅ $Name ($ProductName)"
+        }
+    } elseif ($current -and $current -ieq $WrapperPath) {
+        $broadcasted = Remove-PilotRuntimeOverride -Name $Name
+        if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+        Msg "    ✅ 已清理 $Name" "    ✅ Cleaned $Name"
+    }
+}
+
+function Inject-QoderworkRuntimeWrapper {
+    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
+    $localAppData = $env:LOCALAPPDATA
+    if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
+
+    $qwenInstalled = Test-Path (Join-Path $localAppData "Programs\QwenWorkCN")
+    $qoderInstalled = Test-Path (Join-Path $localAppData "Programs\QoderWork")
+    $qoderCNInstalled = (Test-Path (Join-Path $localAppData "Programs\QoderWorkCN")) -or `
+                        (Test-Path (Join-Path $localAppData "Programs\QoderWork CN"))
+    $qwenShouldEnable = $qwenInstalled -and (Test-AgentCollectionEnabled -AgentId 'qwen-work-cn')
+    $qoderShouldEnable = ($qoderInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work')) -or `
+                         ($qoderCNInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'))
+
+    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
+    $script:RUNTIME_WRAPPER_MISSING = $false
+    Sync-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' `
+        -ShouldEnable $qwenShouldEnable -WrapperPath $wrapperPath -ProductName 'QwenWorkCN'
+    Sync-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' `
+        -ShouldEnable $qoderShouldEnable -WrapperPath $wrapperPath -ProductName 'QoderWork'
+
+    if ($script:RUNTIME_WRAPPER_MISSING) {
+        Msg "    ⚠️  runtime wrapper 未完整部署，已跳过 token 拦截以避免影响应用" `
+            "    ⚠️  Runtime wrapper is missing; token interception was skipped to protect the apps"
+    } elseif ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    ⚠️  环境变量已持久化，但无法通知 Explorer；请注销并重新登录 Windows" `
+            "    ⚠️  Environment persisted but Explorer could not be notified; sign out and back in"
+    } else {
+        Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
+            "    ⚠️  Fully quit and restart the corresponding apps for changes to take effect"
+    }
+    Write-Host ""
+}
+
+# ============================================================
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
 function Install-Command {
@@ -2204,6 +2337,7 @@ function Cmd-Install {
         }
         Write-Config
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2272,6 +2406,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2327,8 +2462,26 @@ function Write-FileUtf8NoBom {
     }
     $tmp = Join-Path $env:TEMP ("lp-write-" + (Get-Random) + ".tmp")
     Set-Content -LiteralPath $tmp -Value $Content -Encoding UTF8 -NoNewline
-    & $script:NODE_BIN -e 'const fs=require("fs");let s=fs.readFileSync(process.argv[1],"utf-8");if(s.charCodeAt(0)===0xFEFF)s=s.slice(1);fs.writeFileSync(process.argv[2],s);' $tmp $Path
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    # Windows PowerShell 5.1 strips nested double quotes while marshalling a
+    # single-quoted -e argument to a native executable. Keep the JavaScript in a
+    # here-string and use JS single-quoted literals so node receives the quotes.
+    $rewriteScript = @'
+const fs = require('fs');
+let content = fs.readFileSync(process.argv[1], 'utf-8');
+if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+fs.writeFileSync(process.argv[2], content);
+'@
+    $rewriteExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e $rewriteScript $tmp $Path
+        $rewriteExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
 function Remove-CodexTrustState {
@@ -2925,26 +3078,44 @@ function Cmd-Uninstall {
     Remove-OpenClawPlugin
     Write-Host ""
 
-    Msg "==> 删除安装目录..." "==> Removing installation..."
-    Remove-PilotInstallationFiles
-    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
-
-    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
-    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
-    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
-    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
-    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
-    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
-    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    Write-Host ""
-
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
-    Remove-CodexHookConfig
-    Remove-CodexTrustState
+    try {
+        Remove-CodexHookConfig
+    } catch {
+        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    try {
+        Remove-CodexTrustState
+    } catch {
+        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    Write-Host ""
+
+    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
+    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
+    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
+    $runtimeEnvCleanupFailed = $false
+    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
+        try {
+            $currentRuntime = Get-PilotRuntimeOverride -Name $envName
+            if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
+                $broadcasted = Remove-PilotRuntimeOverride -Name $envName
+                if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+                Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
+            }
+        } catch {
+            $runtimeEnvCleanupFailed = $true
+            Msg "    ⚠️  清理 $envName 失败，已保留安装文件以便重试: $($_.Exception.Message)" `
+                "    ⚠️  Failed to clean $envName; installation files will be preserved for retry: $($_.Exception.Message)"
+        }
+    }
+    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    ⚠️  请注销并重新登录 Windows 以刷新 Explorer 环境" `
+            "    ⚠️  Sign out and back in to refresh the Explorer environment"
+    }
     Write-Host ""
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
@@ -2961,6 +3132,29 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
     Remove-MimoCodePlugin
+    Write-Host ""
+
+    if ($runtimeEnvCleanupFailed) {
+        throw "Runtime environment cleanup failed; installation files were preserved for retry"
+    }
+
+    # Keep the pinned node runtime and deployed helper assets available until
+    # every external config and runtime override has been cleaned. In
+    # particular, never leave a User env var pointing at a deleted wrapper.
+    Msg "==> 删除安装目录..." "==> Removing installation..."
+    Remove-PilotInstallationFiles
+    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
+
+    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
+    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
+    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
+    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
+    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
 
     if ($Purge) {
