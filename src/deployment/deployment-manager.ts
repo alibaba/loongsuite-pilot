@@ -318,6 +318,18 @@ export class DeploymentManager {
       }
 
       this.state[def.id] = newRecord;
+    } else if (!result.skipped) {
+      // A strategy that RETURNS {success:false, error} used to vanish here: only a
+      // thrown error was logged, and deployAll just added it to the `failed` tally.
+      // So "deployAll complete {failed:1}" was the entire record of dsh failing every
+      // cycle with "plugin file not found or unreadable" -- the reason never reached
+      // the log, which is why a missing plugins/ tree took a live filesystem probe to
+      // find rather than a grep.
+      logger.error('deployment failed', {
+        agentId: def.id,
+        deployMode: def.deployMode,
+        error: result.error ?? 'strategy reported failure without an error',
+      });
     }
 
     return result;

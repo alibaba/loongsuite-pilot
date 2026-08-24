@@ -58,16 +58,59 @@ $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 
+# >>> pilot-account-identity >>>
+# Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
+# stdout is decoded with [Console]::OutputEncoding -- the console codepage, 437 on an
+# en-US box -- so `whoami` returns "host\??" for a non-ASCII account name: every
+# character the codepage cannot represent arrives as a literal U+003F, measured on a
+# C:\Users\<CJK name> profile. That corrupted string used to reach
+# New-ScheduledTaskPrincipal -UserId, where Task Scheduler rejected the registration
+# with "No mapping between account names and security IDs was done" (HRESULT
+# 0x80131500), so such a user never got an autostart task at all; it also collapsed
+# every non-ASCII account to the same "___" task-name tag.
+#
+# The environment variables carry the real UTF-16 string and are CLM-safe, unlike
+# [Security.Principal.WindowsIdentity]::GetCurrent() (CLM: "Method invocation is
+# supported only on core types") and unlike [Environment]::UserName. USERDOMAIN is not
+# always an account domain: under some logon providers (OpenSSH sshd among them) it is
+# the literal "WORKGROUP", which maps to no SID either, so fall back to the machine
+# name -- which is also what whoami prints for a local account, keeping the tag below
+# byte-identical for ASCII users who upgrade in place.
+function Get-PilotAccountName {
+    $user = [string]$env:USERNAME
+    if (-not $user) { return "" }
+    $domain = [string]$env:USERDOMAIN
+    if ((-not $domain) -or ($domain -eq "WORKGROUP")) { $domain = [string]$env:COMPUTERNAME }
+    if ($domain) { return ($domain + "\" + $user) }
+    return $user
+}
+
 # Task names are per-user: multiple users can run on one machine, each with their
 # own data dir under %USERPROFILE%. A global task name would collide -- the second
 # user cannot delete or overwrite the first user's task (Access is denied), so it
 # would fail with "already exists" and drop to the background fallback. The shared
 # \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
-# Tag from whoami (DOMAIN\user) -- the same identity used for the task principal --
-# not $env:USERNAME (bare SAM name): two same-named accounts from different domains
-# (CORP\alice vs DEV\alice) would otherwise share one task name and re-introduce the
-# cross-user "already exists" collision this scoping is meant to prevent.
-$USER_TAG = ((whoami) -replace '[^A-Za-z0-9._-]', '_')
+# Tag from the full DOMAIN\user identity, not $env:USERNAME alone (bare SAM name):
+# two same-named accounts from different domains (CORP\alice vs DEV\alice) would
+# otherwise share one task name and re-introduce the cross-user "already exists"
+# collision this scoping is meant to prevent. Task names live in the file system, so
+# everything outside [A-Za-z0-9._-] becomes "_" -- which turns a non-ASCII account
+# name into a row of underscores that two such users on one machine would fight over,
+# hence the short deterministic digest appended in that case only. ASCII installs keep
+# the exact tag they already have, so their registered tasks stay upgradeable in place.
+function Get-PilotUserTag {
+    $name = (Get-PilotAccountName).ToLower()
+    $tag = $name -replace '[^A-Za-z0-9._-]', '_'
+    if ($name -match '[^\x20-\x7E]') {
+        $hash = 0
+        foreach ($ch in $name.ToCharArray()) { $hash = ($hash * 31 + [int]$ch) % 1000000007 }
+        $tag = $tag + "-" + $hash
+    }
+    return $tag
+}
+# <<< pilot-account-identity <<<
+
+$USER_TAG = Get-PilotUserTag
 $TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
 $TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
@@ -97,10 +140,18 @@ function Test-NodeSuitable {
     } catch { return $false }
 }
 
+# The pin file holds one absolute path to node.exe, and for a managed runtime that path
+# sits under the data dir -- i.e. under %USERPROFILE%, which can be non-ASCII. 5.1
+# defaults both Get-Content and Set-Content to the ANSI codepage, so an unqualified
+# write stored "C:\Users\??.HOST\..." and every reader then failed Test-NodeSuitable and
+# silently fell back to whatever node.exe the fallback search found first -- on a shared
+# machine that was another account's nvm install. -Encoding UTF8 always emits a BOM on
+# 5.1 (there is no utf8NoBOM), and U+FEFF is not whitespace, so .Trim() alone leaves it
+# in the path: strip it explicitly before trimming.
 function Resolve-Node {
     # 1. Pinned file
     if (Test-Path $NODE_PIN_FILE) {
-        $pinned = (Get-Content $NODE_PIN_FILE -ErrorAction SilentlyContinue).Trim()
+        $pinned = ([string](Get-Content -LiteralPath $NODE_PIN_FILE -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) {
             return $pinned
         }
@@ -138,7 +189,7 @@ function Resolve-Node {
             # Auto-heal: update pin file
             $parentDir = Split-Path $NODE_PIN_FILE
             if (-not (Test-Path $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
-            Set-Content -Path $NODE_PIN_FILE -Value $c
+            Set-Content -LiteralPath $NODE_PIN_FILE -Value $c -Encoding UTF8
             return $c
         }
     }
@@ -400,12 +451,23 @@ function Register-PilotTask {
         $settings,
         [string]$description
     )
-    $userId = whoami
+    $userId = Get-PilotAccountName
     $lastErr = $null
     foreach ($logonType in @("Interactive", "S4U")) {
         # Clear any task a previous attempt left behind. A failed registration can
         # still create the task entry before erroring on the principal.
+        #
+        # The delete output stays suppressed: on a fresh install there is nothing to
+        # delete and schtasks exits non-zero, so its stderr is noise (and a bare stderr
+        # line can turn terminating under $ErrorActionPreference = "Stop"). A task that
+        # SURVIVES the delete is a different story and worth a line -- it means this
+        # process has no write access to the task and the registration below is about to
+        # fail with "Access is denied" or a name collision. Without this, the only
+        # symptom was the registration error, which reads like a bug in the principal.
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
+        if (Get-TaskExists $taskName) {
+            Write-Host "   '$taskName' survived the delete; re-registration will likely be denied" -ForegroundColor Yellow
+        }
         try {
             # On-disk location of the task definition (absolute filesystem path).
             $diskPath = "$env:SystemRoot\System32\Tasks$TASK_FOLDER\$taskName"
@@ -489,7 +551,7 @@ function Install-CollectorTask {
     # -User scopes the logon trigger to the current user; without it the trigger
     # fires for ALL users, which requires admin rights and fails registration with
     # "Access is denied" (0x80070005) for standard users.
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (Get-PilotAccountName)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -530,7 +592,7 @@ function Install-UpdaterTask {
     $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "updater-launch.vbs") $nodeBin $entry
 
     # -User scopes the trigger to the current user (all-users trigger needs admin).
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (Get-PilotAccountName)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -787,9 +849,33 @@ function Cmd-RestartCollector {
     # Restart via Task Scheduler if registered
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_COLLECTOR) {
+        # Re-register with potentially updated paths -- best-effort, and deliberately
+        # in its OWN try so a failure here can no longer skip the start below.
+        #
+        # A scheduled task grants its own principal only Read: every write ACE sits on
+        # BUILTIN\Administrators, and UAC filters that group out of the token of a
+        # -RunLevel Limited task, which is what our two daemons run as. So the updater
+        # that invokes restart-collector cannot touch its own task definition. Measured
+        # on a Medium-integrity Limited task against a task registered earlier:
+        # schtasks /Delete, Register-ScheduledTask and Register-ScheduledTask -Force all
+        # fail with "Access is denied" -- -Force is not a fix -- while
+        # Start-ScheduledTask succeeds, because starting needs no write access.
+        #
+        # Nothing is lost by skipping the re-registration: Install-CollectorTask rewrites
+        # collector-launch.vbs and reaps orphaned daemons before it reaches the
+        # registration, and the task action invokes that .vbs by a path that does not
+        # change across versions -- so the surviving registration already launches the
+        # new version. Sharing one try was the whole defect: a cosmetic re-register
+        # failure aborted before Start-ScheduledTask, and with init_type=taskscheduler
+        # the self-heal branch below is skipped, so the update ended in "Service manager
+        # failed to restart collector" + exit 1 while the collector stayed down until the
+        # task's own 5-minute watchdog trigger happened to relaunch it.
         try {
-            # Re-register with potentially updated paths
             Install-CollectorTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Write-Host "collector restarted (Task Scheduler)"
             $restarted = $true
@@ -883,8 +969,15 @@ function Cmd-RestartUpdater {
     # Restart via Task Scheduler
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_UPDATER) {
+        # Best-effort re-registration in its own try, for the same reason as in
+        # Cmd-RestartCollector above (a -RunLevel Limited task cannot rewrite its own
+        # definition; only starting it works). See the comment there.
         try {
             Install-UpdaterTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Start-Sleep -Seconds 1
             if (Get-TaskRunning $TASK_NAME_UPDATER) {
@@ -1094,7 +1187,7 @@ function Cmd-Info {
     Write-Host "versions_dir=$VERSIONS_DIR"
 
     if (Test-Path $NODE_PIN_FILE) {
-        $pinnedNode = (Get-Content $NODE_PIN_FILE -ErrorAction SilentlyContinue).Trim()
+        $pinnedNode = ([string](Get-Content -LiteralPath $NODE_PIN_FILE -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinnedNode -and (Test-Path $pinnedNode)) {
             $nodeVer = & $pinnedNode --version 2>$null
             Write-Host "node_bin=$pinnedNode"
