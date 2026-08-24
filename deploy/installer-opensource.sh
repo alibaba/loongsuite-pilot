@@ -891,10 +891,31 @@ deploy_package() {
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
-        "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" || {
-            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+        # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
+        # --data-dir would otherwise put hooks/skills/plugins in the default tree while
+        # the config lives elsewhere.
+        # Captured because two of the three failure modes are only in the output: a per-tree
+        # failure and a thrown main() both exit 0 on purpose (a non-zero exit would abort the
+        # npm install fallback above), announcing themselves as "N failed asset tree(s)" and
+        # "Post-install failed: <reason>" instead. 2>&1 because both go to stderr.
+        postinstall_exit=0
+        postinstall_out="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+            "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" 2>&1)" || postinstall_exit=$?
+        # `if`, not `[ -n ... ] && printf`: under set -e the latter aborts the function when
+        # the output is empty.
+        if [ -n "$postinstall_out" ]; then
+            printf '%s\n' "$postinstall_out"
+        fi
+        if [ "$postinstall_exit" -ne 0 ]; then
+            msg "    ❌ Hook 脚本部署失败 (exit=$postinstall_exit)，hooks/plugins 缺失" \
+                "    ❌ Hook script deployment failed (exit=$postinstall_exit); hooks/plugins are missing"
             return 1
-        }
+        fi
+        if printf '%s' "$postinstall_out" | grep -qE "failed asset tree|Post-install failed"; then
+            msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" \
+                "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
+            return 1
+        fi
         msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
         msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
             "    If using Codex desktop app, please manually trust hooks on first launch"
@@ -1852,7 +1873,13 @@ cmd_install() {
     select_agents
     prompt_user_id
     confirm_config_overwrite
-    deploy_package "$INSTALL_SRC"
+    # set -e would end the install here anyway; saying why beats an exit code on its own.
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
+            "❌ Install aborted: hook script deployment failed; check the output above and retry"
+        exit 1
+    fi
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept

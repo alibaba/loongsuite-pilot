@@ -54,6 +54,12 @@ const ALLOWED_STATIC_ACCESS = new Set([
   '[Environment]::SetEnvironmentVariable',        // (c) PATH broadcast on install
   '[datetime]::MinValue',                         // (b) core type; scripts/loongsuite-pilot.ps1
   '[TimeSpan]::Zero',                             // (b) core type; scripts/loongsuite-pilot.ps1
+  // (c) UTF-8 bump for both console directions at script load, in try/catch. The catch
+  // is a no-op on purpose: the fallback is 5.1's ASCII $OutputEncoding / ANSI stdout
+  // decoding, which is why the config payloads are staged through a UTF-8 file rather
+  // than piped -- see tests/unit/scripts/ps1-json-encoding.test.mjs.
+  '[Console]::OutputEncoding',
+  '[System.Text.Encoding]::UTF8',
 ]);
 
 // Shapes that are never acceptable, whatever the file. `.PSObject` is included

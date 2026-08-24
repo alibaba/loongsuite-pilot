@@ -330,6 +330,39 @@ describe('Updater', () => {
       );
     });
 
+    it('runs the staged package postinstall, pointed at this install data dir', async () => {
+      // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
+      // plugins}, so this call is also how an install broken by the Windows fs.cpSync
+      // fail-fast heals itself -- the trees get rebuilt on the next auto-upgrade with no
+      // reinstall. Nothing else covered it: the other deploy tests stub it absent, so
+      // deleting the call left every test green.
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      const call = mockExecFile.mock.calls.find((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(call, 'postinstall.js was never executed').toBeTruthy();
+      // The NEW package's copy, run out of the staging dir: the point is to install the
+      // assets that shipped with the version being activated.
+      expect(String((call![1] as string[])[0])).toContain('.candidate');
+      // And told which tree to fill. Unset, postinstall falls back to
+      // $HOME/.loongsuite-pilot, which is the wrong one for a custom data dir.
+      const env = (call![2] as { env?: Record<string, string> }).env ?? {};
+      expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
+    });
+
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
       const expOs = process.platform === 'win32' ? 'win' : process.platform;
       const expArch = process.arch;

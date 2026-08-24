@@ -10,6 +10,11 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import {
+  extractTarGz,
+  makeTarStagingDir,
+  replaceDirWith,
+} from '../utils/win-archive.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -485,11 +490,16 @@ export class Updater {
     manifest: VersionManifest,
   ): Promise<void> {
     const { cacheDir, versionsDir } = this.paths;
-    const tmpDir = path.join(cacheDir, 'download-tmp');
+    // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
+    // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging
+    // moves to an ASCII root. The extracted tree is copied into stagingDir below
+    // with fs.cp, which is Unicode-safe.
+    const tmpDir = await makeTarStagingDir(path.join(cacheDir, 'download-tmp'));
     const tarball = path.join(tmpDir, 'package.tar.gz');
-    const dirName = `${manifest.version}_${manifest.git_commit}`;
-    const targetDir = path.join(versionsDir, dirName);
-    const stagingDir = path.join(versionsDir, `${dirName}.candidate`);
+    const baseDirName = `${manifest.version}_${manifest.git_commit}`;
+    let dirName = baseDirName;
+    let targetDir = path.join(versionsDir, dirName);
+    const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
     let oldCurrent: string | null = null;
     let oldPrevious: string | null = null;
@@ -529,7 +539,7 @@ export class Updater {
       }
 
       logger.info('extracting update');
-      await execFileAsync('tar', ['-xzf', tarball, '-C', tmpDir]);
+      await extractTarGz(tarball, tmpDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
 
       const extractedDir = await this.findExtractedPackage(tmpDir);
       if (!extractedDir) {
@@ -576,14 +586,36 @@ export class Updater {
         timeout: 30_000,
       });
 
+      // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
+      // It is also how an install broken by the fs.cpSync fail-fast heals itself: the
+      // trees get rebuilt and the stale AppleDouble sidecars pruned on the next upgrade,
+      // with no reinstall. Do not drop this call -- a missing plugins tree fails every
+      // dsh deployment with "plugin file not found or unreadable", once per cycle.
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
-          await execFileAsync(nodeBin, [postinstallScript], {
+          const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
             cwd: stagingDir,
-            env: childEnv,
+            env: {
+              ...childEnv,
+              // Pin the target explicitly instead of trusting what we inherited: the
+              // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
+              // wrong tree for any install using a custom data dir.
+              LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
+            },
             timeout: 30_000,
           });
+          // postinstall exits 0 even when a tree failed (it is package.json's
+          // `postinstall`, and a non-zero exit there aborts the whole install), so the
+          // only signal for a partial result is its own output. Unlogged, this path
+          // reproduces the failure mode it exists to heal: hooks or plugins absent while
+          // every step reports success.
+          const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+          if (/failed asset tree/.test(output)) {
+            logger.warn('postinstall reported failed asset trees', { output });
+          } else if (output) {
+            logger.info('postinstall completed', { output });
+          }
         } catch (err) {
           logger.warn('postinstall failed, continuing', { error: String(err) });
         }
@@ -594,7 +626,18 @@ export class Updater {
       oldPrevious = await this.readPointerFile(previousFile);
 
       try {
-        await fs.rm(targetDir, { recursive: true, force: true });
+        // Never overwrite an existing version directory in place: `current` may still
+        // point at it and a collector relaunched mid-deploy would die with
+        // ERR_MODULE_NOT_FOUND (last-startup-crash.json phase=module_load), and a live
+        // collector may still hold native modules loaded out of it. Redeploying the
+        // same version/commit therefore lands in a suffixed sibling, which is what
+        // deploy/installer*.ps1 does too. Version and commit are read from VERSION, not
+        // from the directory name, so the suffix is inert.
+        if (await fs.access(targetDir).then(() => true).catch(() => false)) {
+          const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
+          dirName = `${baseDirName}_${suffix}`;
+          targetDir = path.join(versionsDir, dirName);
+        }
         await fs.rename(stagingDir, targetDir);
 
         if (oldCurrent && oldCurrent !== dirName) {
@@ -769,9 +812,11 @@ export class Updater {
     let tmp = '';
 
     try {
-      // Stage inside versionsDir (same filesystem as versionDir) so the final
-      // rename can't hit EXDEV across a separate tmpfs.
-      tmp = await fs.mkdtemp(path.join(this.paths.versionsDir, '.pilot-nm-'));
+      // Stage inside versionsDir (same filesystem as versionDir) so the final rename
+      // can't hit EXDEV across a separate tmpfs. Exception: a non-ASCII versionsDir
+      // (C:\Users\<CJK name>\...) is invisible to tar.exe, so staging then moves to an
+      // ASCII root and replaceDirWith below handles the possible cross-volume move.
+      tmp = await makeTarStagingDir(path.join(this.paths.versionsDir, `.pilot-nm-${process.pid}`));
 
       logger.info('downloading prebuilt node_modules', { appVersion, os: osName, arch });
       await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
@@ -782,17 +827,14 @@ export class Updater {
 
       const stage = path.join(tmp, 'stage');
       await fs.mkdir(stage, { recursive: true });
-      await execFileAsync('tar', ['-xzf', path.join(tmp, archive), '-C', stage], {
-        timeout: ARCHIVE_EXTRACT_TIMEOUT_MS,
-      });
+      await extractTarGz(path.join(tmp, archive), stage, ARCHIVE_EXTRACT_TIMEOUT_MS);
       const stagedModules = path.join(stage, 'node_modules');
       if (!await fs.access(stagedModules).then(() => true).catch(() => false)) {
         logger.warn('prebuilt node_modules archive has no node_modules/, falling back to npm install');
         return false;
       }
       await fs.writeFile(path.join(stagedModules, '.pilot-modules-version'), stamp + '\n');
-      await fs.rm(modulesDir, { recursive: true, force: true });
-      await fs.rename(stagedModules, modulesDir);
+      await replaceDirWith(stagedModules, modulesDir);
       logger.info('prebuilt node_modules installed', { appVersion });
       return true;
     } catch (err) {
@@ -875,7 +917,11 @@ export class Updater {
         `Expand-Archive -LiteralPath '${q(archive)}' -DestinationPath '${q(destDir)}' -Force`,
       ], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
     } else {
-      await execFileAsync('tar', ['-xzf', archive, '-C', destDir], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
+      // Windows only ever takes the zip branch above, which is why a non-ASCII
+      // destDir (<dataDir>/runtime under a CJK profile) is safe here: Expand-Archive
+      // is Unicode-safe, tar.exe would not be. extractTarGz still routes through
+      // System32\tar.exe so a Git-for-Windows GNU tar on PATH cannot capture it.
+      await extractTarGz(archive, destDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
     }
   }
 
