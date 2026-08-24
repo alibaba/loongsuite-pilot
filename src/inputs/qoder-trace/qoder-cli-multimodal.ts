@@ -240,8 +240,7 @@ function stripSizeSuffix(raw: string): string {
 }
 
 function stripImageSourcePath(raw: string): string {
-  const comma = raw.indexOf(',');
-  return (comma === -1 ? raw : raw.slice(0, comma)).trim();
+  return raw.replace(/,\s*original\b.*$/i, '').trim();
 }
 
 function resolveUniqueImagePaths(rawPaths: string[], cwd?: string): string[] {

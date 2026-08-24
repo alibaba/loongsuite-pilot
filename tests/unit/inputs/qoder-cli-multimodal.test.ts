@@ -79,6 +79,12 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
         '[Image: source: docs/_assets/img/dashboard.png, original 2556x1656, displayed at 2000x1296]',
         cwd,
       )).toEqual([path.win32.resolve(cwd, 'docs/_assets/img/dashboard.png')]);
+      expect(extractInputImagePaths(
+        '[Image: source: C:\\tmp\\chart,final.png]',
+      )).toEqual([path.win32.normalize('C:\\tmp\\chart,final.png')]);
+      expect(extractInputImagePaths(
+        '[Image: source: C:\\tmp\\chart,final.png, original 100x80, displayed at 50x40]',
+      )).toEqual([path.win32.normalize('C:\\tmp\\chart,final.png')]);
       return;
     }
 
@@ -97,6 +103,12 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       '[Image: source: docs/_assets/img/dashboard.png, original 2556x1656, displayed at 2000x1296]',
       cwd,
     )).toEqual([path.join(cwd, 'docs/_assets/img/dashboard.png')]);
+    expect(extractInputImagePaths(
+      '[Image: source: /tmp/chart,final.png]',
+    )).toEqual(['/tmp/chart,final.png']);
+    expect(extractInputImagePaths(
+      '[Image: source: /tmp/chart,final.png, original 100x80, displayed at 50x40]',
+    )).toEqual(['/tmp/chart,final.png']);
   });
 
   it('parses Read image / Image file / ImageGen tool texts', () => {
