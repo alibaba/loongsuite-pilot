@@ -2216,8 +2216,17 @@ function Remove-OtelPlugin {
     if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
         $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
         if ($content -match "otel-claude-hook|hook-entry") {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NODE_BIN -e @'
+            # Restored in finally, not on the line after the call: this function is
+            # called bare from Cmd-Uninstall, ahead of the install-directory removal and
+            # -Purge, so anything that terminates in here costs the user the credentials
+            # in config.json. The relax itself is what keeps a single stderr line from
+            # node from terminating at all (NativeCommandError under 2>, promoted by the
+            # header's EAP = Stop), and the finally keeps the rest of the uninstall from
+            # silently running at "Continue" if it ever does.
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
 const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
@@ -2238,7 +2247,9 @@ try {
   }
 } catch {}
 '@ $claudeSettings 2>$null
-            $ErrorActionPreference = $prevEAP
+            } finally {
+                $ErrorActionPreference = $prevEAP
+            }
             Msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
         }
     }
@@ -2381,6 +2392,11 @@ function Cmd-Upgrade {
 
     Msg "   当前版本: $oldVer" "   Current version: $oldVer"
     Write-Host ""
+
+    # After the "is anything installed" check, so the advice to re-run non-elevated is
+    # only given when there is really an upgrade to re-run; still before Check-Deps,
+    # Download-AndExtract and the start that re-registers the tasks, so Ctrl+C is cheap.
+    Warn-ElevatedInstall -Action "upgrade"
 
     Check-Deps
 
@@ -2798,11 +2814,25 @@ function Test-PilotElevated {
 }
 
 function Warn-ElevatedInstall {
+    # -Action "install" | "upgrade". Upgrade does the same damage: it starts the new
+    # version through the service script, whose start path deletes and re-registers both
+    # tasks unconditionally, so an elevated upgrade rewrites the ownership of tasks an
+    # ordinary session had installed and the next ordinary uninstall is denied again.
+    # It gets one extra line, because nothing about "upgrade" suggests the scheduled
+    # tasks are re-created from scratch.
+    param([string]$Action = "install")
     if (-not (Test-PilotElevated)) { return }
     Msg "⚠️  当前是提权(管理员)会话" "⚠️  This is an elevated (administrator) session"
-    Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
-    Msg "    继续安装的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
-    Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
+    if ($Action -eq "upgrade") {
+        Msg "    升级会删除并重新注册计划任务" "    An upgrade deletes and re-registers the scheduled tasks"
+        Msg "    在这里重新注册出来的任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Re-registered from this session they are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
+        Msg "    继续升级的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
+        Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新升级" "    To keep uninstall working without elevation: press Ctrl+C and re-run the upgrade from a non-elevated PowerShell"
+    } else {
+        Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
+        Msg "    继续安装的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
+        Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
+    }
     Write-Host ""
 }
 # <<< pilot-elevation-warning <<<
