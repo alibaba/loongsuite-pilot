@@ -183,5 +183,17 @@ export async function replaceDirWith(staged: string, dest: string): Promise<void
     await fs.rm(staged, { recursive: true, force: true }).catch(() => {});
   }
   // Only the rename needs this — fs.cp creates new files, which inherit normally.
-  if (renamed) await resetInheritedAcl(dest);
+  //
+  // An unrepairable ACL is fatal on purpose. The tree is in place and looks perfectly
+  // installed, but the account that has to read it may hold no usable ACE — which is the
+  // whole reason this function exists, and what surfaces later as
+  // `ERR_MODULE_NOT_FOUND: Cannot find package 'pino'` on a directory that is plainly
+  // there. Throwing hands the caller its existing failure path: ensureNodeModules
+  // catches and returns false, which falls back to npm install, and npm creates
+  // node_modules in place so it inherits normally. Same choice as Ensure-NodeModules in
+  // deploy/installer-opensource.ps1, which drops the prebuilt tree and returns $false.
+  if (renamed && !(await resetInheritedAcl(dest))) {
+    await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`could not reset inherited ACL on ${dest}, discarded it`);
+  }
 }

@@ -249,6 +249,28 @@ describe('installers report what postinstall actually did', () => {
     }
   });
 
+  it('every .ps1 installer also catches a partial failure', () => {
+    // The exit code covers a crash, not a tree postinstall.js could not copy: it exits 0
+    // after reporting "N failed asset tree(s)" on purpose, because a non-zero exit would
+    // abort the npm install fallback. Keying the check mark off the exit code alone printed
+    // "Hook scripts deployed" over an install that had just said it lost a tree -- the same
+    // silent-success shape this whole file exists to prevent, one notch smaller.
+    for (const file of PS1_INSTALLERS.filter(existsSync)) {
+      const block = blockOf(read(file), 'pilot-postinstall-exit-check');
+      const code = codeLines(block).map(([, l]) => l).join('\n');
+      // Streaming the output straight to the console would leave nothing to match against;
+      // 2>&1 because postinstall.js reports the count on stderr.
+      expect(code, file).toMatch(/\$postinstallOut = & \$script:NODE_BIN \$postinstallScript 2>&1/);
+      expect(code, file).toMatch(/-match "failed asset tree"/);
+      // The user still sees everything postinstall printed.
+      expect(code, file).toMatch(/\$postinstallOut \| ForEach-Object \{ Write-Host \$_ \}/);
+      // And the check mark sits behind the partial-failure branch, not in front of it.
+      const partialAt = code.indexOf('elseif ($postinstallPartial)');
+      expect(partialAt, `${file}: no partial-failure branch`).toBeGreaterThan(-1);
+      expect(code.indexOf('Hook scripts deployed'), file).toBeGreaterThan(partialAt);
+    }
+  });
+
   it('the exit check is byte-identical across the .ps1 installers', () => {
     // Same reason as the other shared blocks: a copy that drifts is a variant that goes
     // back to claiming success.

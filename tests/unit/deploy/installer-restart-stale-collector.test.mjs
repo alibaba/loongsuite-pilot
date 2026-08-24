@@ -72,8 +72,23 @@ describe('installers displace a stale collector after re-installing', () => {
   it('does nothing on a fresh install', () => {
     // No prior version means no survivor to displace, and `start` already launched the
     // collector from the new `current`. Bouncing it again would only slow the install.
+    // $true, not a bare return: nothing to do is not a failure to displace.
     const code = codeOf(blockOf(read(present[0]), 'pilot-restart-stale-collector'));
-    expect(code).toMatch(/if \(-not \$priorVersion\) \{ return \}/);
+    expect(code).toMatch(/if \(-not \$priorVersion\) \{ return \$true \}/);
+  });
+
+  it('reports a failed displacement instead of swallowing it', () => {
+    // Native commands do not throw on a nonzero exit, so $LASTEXITCODE is the only signal
+    // there is. Cmd-RestartCollector exits 1 when it cannot resolve node, when the
+    // bootstrap entry is gone, and when the service manager refuses -- in all three the
+    // survivor keeps serving the OLD version dir, and `2>$null | Out-Null` made that
+    // indistinguishable from success.
+    const code = codeOf(blockOf(read(present[0]), 'pilot-restart-stale-collector'));
+    expect(code).toMatch(/if \(\$LASTEXITCODE -eq 0\) \{ return \$true \}/);
+    expect(code).toMatch(/\$script:PILOT_LAST_RESTART_ERR = "restart-collector \(exit \$LASTEXITCODE\)/);
+    expect(code).toMatch(/return \$false/);
+    // Nothing may be discarded: no `| Out-Null` on the restart itself.
+    expect(code).not.toMatch(/restart-collector[^\n]*Out-Null/);
   });
 
   it('every installer calls it with the prior version, after start', () => {
@@ -82,19 +97,41 @@ describe('installers displace a stale collector after re-installing', () => {
       const lines = text.split('\n');
       const calls = lines
         .map((line, i) => [i + 1, line])
-        .filter(([, line]) => /^\s*Restart-StaleCollector /.test(line));
+        .filter(([, line]) => /Restart-StaleCollector \$/.test(line));
       expect(calls.length, `${file}: never called`).toBeGreaterThanOrEqual(1);
 
       for (const [lineNo, line] of calls) {
         // Two arguments, both variables: the resolved service entry and the version that
         // was current before this deploy. A literal or a missing second argument means the
-        // guard above turns the whole thing into a no-op.
-        expect(line.trim(), `${file}:${lineNo}`).toMatch(/^Restart-StaleCollector \$\S+ \$\S+$/);
+        // guard above turns the whole thing into a no-op. And the verdict has to be
+        // captured -- see the next test for what has to happen to it.
+        expect(line.trim(), `${file}:${lineNo}`).toMatch(/^\$\w+ = Restart-StaleCollector \$\S+ \$\S+$/);
 
         // It has to run after the start attempt -- displacing a survivor before `start`
         // just lets the watchdog put the old one back.
         const before = lines.slice(0, lineNo - 1).join('\n');
         expect(/-File \$\S+ start\b|& \$\S+ start\b/.test(before), `${file}:${lineNo}: no preceding start`).toBe(true);
+      }
+    }
+  });
+
+  it('no installer reports success when the displacement failed', () => {
+    // `status` resolves `current`, and the survivor answers to it exactly as well as the new
+    // collector would, so "is running" cannot tell them apart. An installer that captures
+    // the verdict and then prints its check mark anyway is back to the original bug with
+    // extra steps, so the captured variable has to reach the decision that prints it.
+    for (const file of present) {
+      const lines = read(file).split('\n');
+      const calls = lines
+        .map((line, i) => [i + 1, line])
+        .filter(([, line]) => /Restart-StaleCollector \$/.test(line));
+
+      for (const [lineNo, line] of calls) {
+        const captured = line.trim().match(/^\$(\w+) = Restart-StaleCollector /);
+        expect(captured, `${file}:${lineNo}: verdict discarded`).toBeTruthy();
+        const after = lines.slice(lineNo).join('\n');
+        const used = new RegExp(`(-and \\$${captured[1]}\\b|-not \\$${captured[1]}\\b|return \\$${captured[1]}\\b)`);
+        expect(used.test(after), `${file}:${lineNo}: $${captured[1]} never gates anything`).toBe(true);
       }
     }
   });

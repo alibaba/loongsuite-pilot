@@ -108,10 +108,20 @@ const pipedJsonToNode = (text) => {
   ));
 };
 
-// Both internal installers; the open-source variant already stages its config payload but
-// deliberately does NOT bump $OutputEncoding, because its PROBE_RESULT pipes do not strip
-// a BOM and would break if one appeared.
-const STAGED_VARIANTS = ['deploy/installer.ps1', 'deploy/installer-inner.ps1'];
+// Every installer variant stages its config payload instead of piping it, so all three are
+// checked -- the open-source one included, and it is the only one of them present in the
+// open-source tree, where the two internal entries skip and the rule would otherwise go
+// unchecked entirely. The floor differs because the internal variants run this shape twice
+// (install and reconfigure), the open-source one once.
+const STAGED_VARIANTS = [
+  ['deploy/installer.ps1', 2],
+  ['deploy/installer-inner.ps1', 2],
+  ['deploy/installer-opensource.ps1', 1],
+];
+
+// $OutputEncoding is bumped only by the internal variants. The open-source one deliberately
+// does NOT: its ad-hoc PROBE_RESULT pipes do not strip a BOM and would break if one appeared.
+const OUTPUT_ENCODING_VARIANTS = ['deploy/installer.ps1', 'deploy/installer-inner.ps1'];
 
 describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
   it('finds interchange sites to check', () => {
@@ -198,7 +208,7 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
     expect(pipedJsonToNode("    $other | & $script:NODE_BIN -e @'")).toEqual([]);
   });
 
-  for (const file of STAGED_VARIANTS) {
+  for (const [file, floor] of STAGED_VARIANTS) {
     it.skipIf(!existsSync(file))(`${file} stages every config payload as a UTF-8 file`, () => {
       const text = readFileSync(file, 'utf-8');
       const staged = text.match(
@@ -208,11 +218,13 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
       const consumed = text.match(/^'@ \$cfgTmp$/gm) || [];
       const removed = text.match(
         /Remove-Item -LiteralPath \$cfgTmp -Force -ErrorAction SilentlyContinue/g) || [];
-      expect(staged.length).toBeGreaterThanOrEqual(2);
+      expect(staged.length).toBeGreaterThanOrEqual(floor);
       expect(consumed.length).toBe(staged.length);
       expect(removed.length).toBe(staged.length);
     });
+  }
 
+  for (const file of OUTPUT_ENCODING_VARIANTS) {
     it.skipIf(!existsSync(file))(`${file} bumps $OutputEncoding to UTF-8 in a try/catch`, () => {
       // Belt to the staging braces: it also covers the ad-hoc PROBE_RESULT pipes, which
       // stay on stdin. CLM makes both assignments throw, so the catch must be present

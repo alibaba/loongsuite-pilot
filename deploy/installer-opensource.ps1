@@ -1074,6 +1074,7 @@ function Deploy-Package {
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
     $postinstallExit = 0
+    $postinstallPartial = $false
     if (Test-Path $postinstallScript) {
         # postinstall.js resolves its target as LOONGSUITE_PILOT_DATA_DIR, falling back to
         # $env:USERPROFILE\.loongsuite-pilot. Unset, an install started with -DataDir would
@@ -1087,8 +1088,12 @@ function Deploy-Package {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         try {
             $env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
-            & $script:NODE_BIN $postinstallScript
+            # Captured rather than streamed because the per-tree verdict is in the output and
+            # nowhere else (see below). 2>&1 because postinstall.js reports it on stderr.
+            $postinstallOut = & $script:NODE_BIN $postinstallScript 2>&1
             $postinstallExit = $LASTEXITCODE
+            $postinstallOut | ForEach-Object { Write-Host $_ }
+            if (($postinstallOut | Out-String) -match "failed asset tree") { $postinstallPartial = $true }
         } finally {
             $ErrorActionPreference = $prevEAP
             if ($hadPostinstallDataDir) {
@@ -1098,16 +1103,23 @@ function Deploy-Package {
             }
         }
     }
-    # Never print the check mark for a postinstall that did not finish. postinstall.js
-    # reports its own per-tree failures and still exits 0 on purpose (a non-zero exit
-    # would abort the npm install fallback above), so a non-zero code here means the
-    # process died outright. That is exactly how the hooks/skills/plugins trees went
-    # missing on every Windows install without a word: fs.cpSync fail-fasts with
-    # 0xC0000409 on the bundled Node, killing the script before it copied anything,
-    # and this line printed "Hook scripts deployed" regardless.
+    # Never print the check mark for a postinstall that did not finish. That is exactly how
+    # the hooks/skills/plugins trees went missing on every Windows install without a word:
+    # fs.cpSync fail-fasts with 0xC0000409 on the bundled Node, killing the script before it
+    # copied anything, and this line printed "Hook scripts deployed" regardless.
+    #
+    # Two distinct outcomes, and the exit code only covers the first. postinstall.js
+    # deliberately exits 0 after a per-tree failure -- a non-zero exit would abort the npm
+    # install fallback above -- and announces it as "N failed asset tree(s)" instead. So a
+    # non-zero code means the process died outright, while a partial failure is legible only
+    # in the output. Keying the check mark off the exit code alone printed it over an install
+    # that had just reported a tree it could not copy.
     if ($postinstallExit -ne 0) {
         Msg "    ❌ Hook 脚本部署失败 (exit=$postinstallExit)，hooks/plugins 可能缺失" `
             "    ❌ Hook script deployment failed (exit=$postinstallExit); hooks/plugins may be missing"
+    } elseif ($postinstallPartial) {
+        Msg "    ❌ Hook 脚本部分部署失败（见上方 failed asset tree），hooks/plugins 可能缺失" `
+            "    ❌ Some hook asset trees failed to deploy (see 'failed asset tree' above); hooks/plugins may be missing"
     } else {
         Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     }
@@ -1489,15 +1501,41 @@ function Print-Summary {
 # $serviceEntry is whichever entry point the caller already resolved: the .ps1 needs
 # powershell.exe -File, the .cmd wrapper is invoked directly. Branching here rather than at
 # the call sites keeps this block byte-identical across the three installers.
+#
+# Returns $true when there is nothing to displace or the displacement succeeded, $false with
+# the reason in $script:PILOT_LAST_RESTART_ERR otherwise. Native commands do not throw on a
+# nonzero exit, so $LASTEXITCODE is the only signal there is -- and discarding it put the
+# failure right back where this block came from. Cmd-RestartCollector exits 1 when the node
+# runtime cannot be resolved, when the bootstrap entry is missing, and when the service
+# manager refuses to restart a non-degraded install; in every one of those the survivor is
+# still running the OLD version dir. Callers must not print success on a $false: `status`
+# resolves `current`, which the survivor answers to exactly as well as the new collector
+# would, so "is running" cannot tell the two apart. That is the entire bug.
 function Restart-StaleCollector {
     param([string]$serviceEntry, [string]$priorVersion)
-    if (-not $priorVersion) { return }
-    if (-not $serviceEntry) { return }
-    if (-not (Test-Path $serviceEntry)) { return }
-    if ($serviceEntry -match '\.ps1$') {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $serviceEntry restart-collector 2>$null | Out-Null
-    } else {
-        & $serviceEntry restart-collector 2>$null | Out-Null
+    $script:PILOT_LAST_RESTART_ERR = ""
+    if (-not $priorVersion) { return $true }
+    if (-not $serviceEntry) { return $true }
+    if (-not (Test-Path $serviceEntry)) { return $true }
+    # Locally forced to Continue: with 2>&1 in effect a caller left on Stop turns the first
+    # stderr line into a NativeCommandError, which would report a successful restart as a
+    # failure. restart-collector writes progress to stderr on purpose.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($serviceEntry -match '\.ps1$') {
+            $restartOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $serviceEntry restart-collector 2>&1
+        } else {
+            $restartOut = & $serviceEntry restart-collector 2>&1
+        }
+        if ($LASTEXITCODE -eq 0) { return $true }
+        $script:PILOT_LAST_RESTART_ERR = "restart-collector (exit $LASTEXITCODE): $(($restartOut | Out-String).Trim())"
+        return $false
+    } catch {
+        $script:PILOT_LAST_RESTART_ERR = "restart-collector failed to run: $($_.Exception.Message)"
+        return $false
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
 }
 # <<< pilot-restart-stale-collector <<<
@@ -2058,14 +2096,19 @@ function Start-PilotAndWait {
     $startOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath start 2>&1
     $startExit = $LASTEXITCODE
     $startOutput | ForEach-Object { Write-Host $_ }
-    Restart-StaleCollector $ScriptPath $PriorVersion
+    $staleOk = Restart-StaleCollector $ScriptPath $PriorVersion
+    if (-not $staleOk) {
+        Write-Host "   $script:PILOT_LAST_RESTART_ERR" -ForegroundColor Yellow
+    }
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         $statusOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath status 2>$null
         if ($statusOutput -match "is running") {
             $ErrorActionPreference = $prevEAP
-            return $true
+            # Deliberately $staleOk, not $true: a collector that outlived the deploy answers
+            # "is running" from the old version dir just as convincingly as the new one.
+            return $staleOk
         }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)

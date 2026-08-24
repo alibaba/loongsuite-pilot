@@ -79,6 +79,34 @@ describe('replaceDirWith', () => {
   });
 });
 
+describe('replaceDirWith ACL handling', () => {
+  it('discards the tree and throws when the inherited ACL cannot be repaired', async () => {
+    // resetInheritedAcl is a no-op off Windows, so this path is unreachable from a test
+    // host — pin the shape instead. Publishing a tree the reading account holds no usable
+    // ACE on is worse than not publishing it: it looks installed, node reports
+    // `Cannot find package 'pino'` on a directory that is plainly there, and the version
+    // stays broken because nothing downstream retries. Ensure-NodeModules in
+    // deploy/installer-opensource.ps1 makes the same call (drop it, return $false).
+    const src = await fs.readFile(path.join(repoRoot, 'src/utils/win-archive.ts'), 'utf8');
+    const guarded = src.match(/if \(renamed && !\(await resetInheritedAcl\(dest\)\)\) \{[\s\S]*?\n  \}/);
+    expect(guarded, 'replaceDirWith must act on resetInheritedAcl\'s result').toBeTruthy();
+    expect(guarded[0]).toMatch(/fs\.rm\(dest, \{ recursive: true, force: true \}\)/);
+    expect(guarded[0]).toMatch(/throw new Error\(/);
+
+    // No fire-and-forget call: the return value is the whole point of the helper.
+    expect(src).not.toMatch(/^\s*await resetInheritedAcl\(/m);
+  });
+
+  it('the only caller turns that throw into an npm install fallback', async () => {
+    const src = await fs.readFile(path.join(repoRoot, 'src/updater/updater.ts'), 'utf8');
+    const from = src.indexOf('private async ensureNodeModules');
+    expect(from).toBeGreaterThan(0);
+    const body = src.slice(from, src.indexOf('\n  private ', from + 1));
+    expect(body).toMatch(/await replaceDirWith\(/);
+    expect(body).toMatch(/catch \(err\) \{[\s\S]*?falling back to npm install[\s\S]*?return false;/);
+  });
+});
+
 describe('updater tar ratchet', () => {
   it('routes every tar call through extractTarGz', async () => {
     const src = await fs.readFile(path.join(repoRoot, 'src/updater/updater.ts'), 'utf8');
