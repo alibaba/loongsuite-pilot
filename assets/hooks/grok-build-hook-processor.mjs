@@ -104,13 +104,81 @@ function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
 }
 
+function grokHomeDir() {
+  return process.env.GROK_HOME
+    ? path.resolve(process.env.GROK_HOME)
+    : path.join(os.homedir(), '.grok');
+}
+
+function isPathInside(rootPath, candidatePath) {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`)
+    && relative !== '..'
+    && !path.isAbsolute(relative));
+}
+
+function isSafeSessionPathSegment(sessionId) {
+  return typeof sessionId === 'string'
+    && sessionId.length > 0
+    && sessionId !== '.'
+    && sessionId !== '..'
+    && !sessionId.includes('\0')
+    && !sessionId.includes('/')
+    && !sessionId.includes('\\')
+    && !path.isAbsolute(sessionId);
+}
+
+function resolveThroughExistingAncestor(candidatePath) {
+  let current = path.resolve(candidatePath);
+  const suffix = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(candidatePath);
+    suffix.unshift(path.basename(current));
+    current = parent;
+  }
+  const realAncestor = fs.realpathSync.native(current);
+  return path.join(realAncestor, ...suffix);
+}
+
+/**
+ * Accept only Grok's native session layout:
+ *   $GROK_HOME/sessions/<encoded-cwd>/<session-id>/updates.jsonl
+ *
+ * The lexical check protects not-yet-created paths. When the root/parent/file
+ * already exists, realpath checks additionally reject symlink escapes.
+ */
+function validateUpdatesPath(candidate, sessionId) {
+  if (typeof candidate !== 'string' || !candidate || !isSafeSessionPathSegment(sessionId)) {
+    return null;
+  }
+  const resolved = path.resolve(candidate);
+  const sessionsRoot = path.resolve(grokHomeDir(), 'sessions');
+  if (
+    path.basename(resolved) !== 'updates.jsonl'
+    || path.basename(path.dirname(resolved)) !== sessionId
+    || !isPathInside(sessionsRoot, resolved)
+  ) {
+    return null;
+  }
+
+  try {
+    const realRoot = resolveThroughExistingAncestor(sessionsRoot);
+    const realFile = resolveThroughExistingAncestor(resolved);
+    if (!isPathInside(realRoot, realFile)) return null;
+  } catch {
+    return null;
+  }
+  return resolved;
+}
+
 function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
 }
 
 function resolveUnifiedLogPath() {
   return process.env.GROK_UNIFIED_LOG_PATH
-    || path.join(os.homedir(), '.grok', 'logs', 'unified.jsonl');
+    || path.join(grokHomeDir(), 'logs', 'unified.jsonl');
 }
 
 function normalizeEnvelope(event) {
@@ -187,15 +255,14 @@ function resolveChatHistoryPath(updatesPath) {
 }
 
 function deriveUpdatesPath(cwd, sessionId) {
-  if (!cwd || !sessionId) return null;
-  return path.join(
-    os.homedir(),
-    '.grok',
+  if (!cwd || !isSafeSessionPathSegment(sessionId)) return null;
+  return validateUpdatesPath(path.join(
+    grokHomeDir(),
     'sessions',
     encodeURIComponent(cwd),
     sessionId,
     'updates.jsonl',
-  );
+  ), sessionId);
 }
 
 function checkpointFor(filePath, offset) {
@@ -332,7 +399,7 @@ function currentUpdateTurn(turns, promptId) {
   return turns.at(-1) ?? null;
 }
 
-function takeMatchingChatTurn(chatTurns, updateTurn, used, preferLatest = false) {
+function takeMatchingChatTurn(chatTurns, updateTurn, used, allowLatestFallback = false) {
   let index = -1;
   if (updateTurn?.promptIndex != null) {
     index = chatTurns.findIndex((turn, idx) =>
@@ -365,20 +432,11 @@ function takeMatchingChatTurn(chatTurns, updateTurn, used, preferLatest = false)
       index = candidates[0]?.idx ?? -1;
     }
   }
-  if (index < 0) {
-    if (preferLatest) {
-      for (let idx = chatTurns.length - 1; idx >= 0; idx -= 1) {
-        if (!used.has(idx)) {
-          index = idx;
-          break;
-        }
-      }
-    } else {
-      for (let idx = 0; idx < chatTurns.length; idx += 1) {
-        if (!used.has(idx)) {
-          index = idx;
-          break;
-        }
+  if (index < 0 && allowLatestFallback) {
+    for (let idx = chatTurns.length - 1; idx >= 0; idx -= 1) {
+      if (!used.has(idx)) {
+        index = idx;
+        break;
       }
     }
   }
@@ -408,8 +466,12 @@ function terminalTargets(trigger, event, state, updateTurns) {
   let eligible = updateTurns
     .filter((turn) => turn.completed)
     .filter((turn) => !!turn.promptId)
-    .filter((turn) => !event.prompt_id || turn.promptId !== event.prompt_id)
     .filter((turn) => !hasExportedPrompt(state, turn.promptId));
+  if (trigger === 'user_prompt_submit' && event.prompt_id) {
+    // UPS runs after Grok has persisted the new prompt. It may repair older
+    // completed turns, but must never consume the still-active prompt.
+    eligible = eligible.filter((turn) => turn.promptId !== event.prompt_id);
+  }
   const pendingColdStart = (state.turn_count || 0) === 0
     && (state.chat_checkpoint?.offset || 0) === 0
     && (state.updates_checkpoint?.offset || 0) === 0
@@ -670,15 +732,31 @@ async function processHook(trigger) {
 
 async function processHookLocked(trigger, event, sessionId) {
   // SessionEnd is the final authority for a session. Keep a content-free,
-  // expiring tombstone after deleting state so a concurrently delayed Stop
+  // expiring tombstone before deleting state so a concurrently delayed Stop
   // cannot recreate fresh state and export the same prompt again.
   if (isSessionClosed(sessionId)) return;
 
   const state = loadState(sessionId);
-  if (event.transcript_path) state.transcript_path = event.transcript_path;
+  if (event.transcript_path) {
+    const eventTranscriptPath = validateUpdatesPath(event.transcript_path, sessionId);
+    if (!eventTranscriptPath) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: trigger,
+        errorType: 'invalid_transcript_path',
+        errorMessage: 'Grok transcript path is outside the native session directory',
+      });
+      return;
+    }
+    state.transcript_path = eventTranscriptPath;
+  }
   if (event.cwd && typeof event.cwd === 'string') state.cwd = event.cwd;
   if (!state.transcript_path) {
     state.transcript_path = deriveUpdatesPath(state.cwd, sessionId);
+  } else {
+    // Revalidate persisted paths so a legacy/corrupted state file cannot widen
+    // the filesystem read boundary on a later hook invocation.
+    state.transcript_path = validateUpdatesPath(state.transcript_path, sessionId);
   }
 
   const updatesPath = state.transcript_path;
@@ -706,8 +784,8 @@ async function processHookLocked(trigger, event, sessionId) {
     state.initialized = true;
     state.transcript_path = updatesPath;
     if (trigger === 'session_end') {
-      clearState(sessionId);
       markSessionClosed(sessionId);
+      clearState(sessionId);
     } else {
       saveState(sessionId, state);
     }
@@ -753,8 +831,8 @@ async function processHookLocked(trigger, event, sessionId) {
     }
     state.updates_checkpoint = updatesResult.checkpoint;
     if (trigger === 'session_end') {
-      clearState(sessionId);
       markSessionClosed(sessionId);
+      clearState(sessionId);
     } else saveState(sessionId, state);
     return;
   }
@@ -779,8 +857,8 @@ async function processHookLocked(trigger, event, sessionId) {
       };
     }
     if (trigger === 'session_end') {
-      clearState(sessionId);
       markSessionClosed(sessionId);
+      clearState(sessionId);
     } else saveState(sessionId, state);
     return;
   }
@@ -840,8 +918,11 @@ async function processHookLocked(trigger, event, sessionId) {
     };
   }
   if (trigger === 'session_end') {
-    clearState(sessionId);
+    // Persist exported prompt IDs before closing. If the closed marker write is
+    // interrupted, a later hook can still deduplicate against the saved state.
+    saveState(sessionId, state);
     markSessionClosed(sessionId);
+    clearState(sessionId);
   } else saveState(sessionId, state);
 }
 
@@ -862,7 +943,9 @@ if (!handler) {
       logHookError({
         agentId: AGENT_ID,
         stage: `dispatch_${subcommand}`,
-        errorType: 'unhandled',
+        errorType: err?.code === 'STATE_LOCK_TIMEOUT'
+          ? 'state_lock_timeout'
+          : 'unhandled',
         errorMessage: err?.message || String(err),
       });
     })

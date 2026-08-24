@@ -183,14 +183,6 @@ export function fuseGrokTurn({
         );
         completionIndex = completionMatch?.index ?? -1;
       }
-      if (
-        completionIndex < 0
-        && unifiedMatch
-        && unifiedMatch.index < groupUpdateCompletions.length
-        && !localCompletionUsed.has(unifiedMatch.index)
-      ) {
-        completionIndex = unifiedMatch.index;
-      }
       if (completionIndex >= 0) localCompletionUsed.add(completionIndex);
 
       const updateStart = startMatch?.item ?? null;

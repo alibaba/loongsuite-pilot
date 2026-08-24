@@ -11,22 +11,30 @@ const FIXTURES = path.join(ROOT, 'tests/unit/hooks/grok-build/fixtures');
 
 let tempRoot;
 let dataDir;
+let grokHome;
 let sessionDir;
 let chatPath;
 let updatesPath;
 let unifiedPath;
 
-beforeEach(() => {
-  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-processor-'));
-  dataDir = path.join(tempRoot, 'pilot data');
-  sessionDir = path.join(tempRoot, 'session');
-  fs.mkdirSync(dataDir, { recursive: true });
+function useSession(sessionId, copyFixtures = true) {
+  sessionDir = path.join(grokHome, 'sessions', encodeURIComponent('/workspace'), sessionId);
   fs.mkdirSync(sessionDir, { recursive: true });
   chatPath = path.join(sessionDir, 'chat_history.jsonl');
   updatesPath = path.join(sessionDir, 'updates.jsonl');
+  if (copyFixtures) {
+    fs.copyFileSync(path.join(FIXTURES, 'chat_history.redacted-real.jsonl'), chatPath);
+    fs.copyFileSync(path.join(FIXTURES, 'updates.redacted-real.jsonl'), updatesPath);
+  }
+}
+
+beforeEach(() => {
+  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-processor-'));
+  dataDir = path.join(tempRoot, 'pilot data');
+  grokHome = path.join(tempRoot, 'grok-home');
+  fs.mkdirSync(dataDir, { recursive: true });
+  useSession('session-redacted');
   unifiedPath = path.join(tempRoot, 'unified.jsonl');
-  fs.copyFileSync(path.join(FIXTURES, 'chat_history.redacted-real.jsonl'), chatPath);
-  fs.copyFileSync(path.join(FIXTURES, 'updates.redacted-real.jsonl'), updatesPath);
   fs.copyFileSync(path.join(FIXTURES, 'unified.redacted-real.jsonl'), unifiedPath);
 });
 
@@ -38,6 +46,7 @@ function runHook(subcommand, payload, extraEnv = {}) {
   const env = {
     ...process.env,
     HOME: tempRoot,
+    GROK_HOME: grokHome,
     LOONGSUITE_PILOT_DATA_DIR: dataDir,
     GROK_UNIFIED_LOG_PATH: unifiedPath,
     ...extraEnv,
@@ -57,6 +66,7 @@ function runHookAsync(subcommand, payload) {
       env: {
         ...process.env,
         HOME: tempRoot,
+        GROK_HOME: grokHome,
         LOONGSUITE_PILOT_DATA_DIR: dataDir,
         GROK_UNIFIED_LOG_PATH: unifiedPath,
       },
@@ -149,8 +159,59 @@ describe('Grok Build hook lifecycle', () => {
     expect(fs.existsSync(path.join(dataDir, 'state', 'grok-build', 'sessions'))).toBe(true);
   });
 
+  test('SessionEnd exports the completed current turn after a shutdown Stop no-op', () => {
+    const payload = { ...basePayload, transcript_path: updatesPath };
+    const chatFixture = fs.readFileSync(chatPath, 'utf8');
+    const updatesFixture = fs.readFileSync(updatesPath, 'utf8');
+    fs.writeFileSync(chatPath, '');
+    fs.writeFileSync(updatesPath, '');
+
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    fs.writeFileSync(chatPath, chatFixture);
+    fs.writeFileSync(updatesPath, updatesFixture);
+
+    expect(runHook('stop', { ...payload, stop_reason: 'shutdown' }).status).toBe(0);
+    expect(records()).toEqual([]);
+    expect(runHook('session_end', payload).status).toBe(0);
+
+    const emitted = records();
+    expect(emitted.length).toBeGreaterThan(0);
+    expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted']));
+    expect(runHook('stop', { ...payload, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(records()).toEqual(emitted);
+  });
+
+  test('rejects transcript paths outside the matching native Grok session directory', () => {
+    const outsideDir = path.join(tempRoot, 'outside-session');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    const outsideUpdates = path.join(outsideDir, 'updates.jsonl');
+    fs.copyFileSync(path.join(FIXTURES, 'updates.redacted-real.jsonl'), outsideUpdates);
+    fs.copyFileSync(
+      path.join(FIXTURES, 'chat_history.redacted-real.jsonl'),
+      path.join(outsideDir, 'chat_history.jsonl'),
+    );
+
+    const result = runHook('stop', {
+      ...basePayload,
+      transcript_path: outsideUpdates,
+      stop_reason: 'end_turn',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(records()).toEqual([]);
+    const stateDir = path.join(dataDir, 'state', 'grok-build', 'sessions');
+    const persisted = fs.existsSync(stateDir)
+      ? fs.readdirSync(stateDir)
+        .filter(name => name.endsWith('.json'))
+        .map(name => fs.readFileSync(path.join(stateDir, name), 'utf8'))
+        .join('\n')
+      : '';
+    expect(persisted).not.toContain(outsideUpdates);
+  });
+
   test('classifies StopFailure and emits an LLM attempt only with a real inference start', () => {
     const sid = 'session-failure';
+    useSession(sid);
     fs.writeFileSync(chatPath, [
       { type: 'system', content: 'system' },
       { type: 'user', prompt_index: 0, content: '<user_query>fail</user_query>', timestamp: '2026-07-29T03:48:52.600Z' },
@@ -187,6 +248,18 @@ describe('Grok Build hook lifecycle', () => {
 
     dataDir = path.join(tempRoot, 'pilot-no-attempt');
     fs.mkdirSync(dataDir, { recursive: true });
+    useSession('session-no-attempt', false);
+    fs.writeFileSync(chatPath, [
+      { type: 'system', content: 'system' },
+      { type: 'user', prompt_index: 0, content: '<user_query>fail</user_query>', timestamp: '2026-07-29T03:48:52.600Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296932,
+      params: {
+        _meta: { promptId: 'prompt-failure', agentTimestampMs: 1785296932600, turnStartMs: 1785296932600 },
+        update: { sessionUpdate: 'user_message_chunk', _meta: { promptIndex: 0 } },
+      },
+    }) + '\n');
     fs.writeFileSync(unifiedPath, '');
     expect(runHook('stop_failure', {
       session_id: 'session-no-attempt',
@@ -225,10 +298,53 @@ describe('Grok Build hook lifecycle', () => {
     expect(serialized).not.toContain('license text');
   });
 
-  test('delays cancelled-turn export until the next prompt and deduplicates concurrent terminal hooks', async () => {
+  test('UPS does not borrow an unrelated historical chat turn without correlation evidence', () => {
+    const sid = 'session-no-chat-correlation';
+    useSession(sid, false);
     fs.writeFileSync(chatPath, '');
     fs.writeFileSync(updatesPath, '');
+    fs.writeFileSync(unifiedPath, '');
+    const payload = {
+      session_id: sid,
+      prompt_id: 'prompt-current',
+      transcript_path: updatesPath,
+      cwd: '/workspace',
+      timestamp: '2026-07-29T03:49:00.000Z',
+    };
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+
+    fs.writeFileSync(chatPath, [
+      { type: 'user', prompt_index: 0, content: '<user_query>historical secret</user_query>' },
+      { type: 'assistant', content: 'historical answer', model_id: 'grok' },
+      { type: 'user', prompt_index: 1, content: '<user_query>cancelled target</user_query>' },
+      { type: 'assistant', content: 'target partial', model_id: 'grok' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296940,
+      params: {
+        _meta: { agentTimestampMs: 1785296940000 },
+        update: {
+          sessionUpdate: 'turn_completed',
+          promptId: 'prompt-cancelled',
+          stopReason: 'cancelled',
+        },
+      },
+    }) + '\n');
+
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    const emitted = records();
+    expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-cancelled']));
+    expect(emitted.filter(record => record['event.name'].startsWith('llm.'))).toHaveLength(0);
+    expect(JSON.stringify(emitted)).not.toContain('historical secret');
+    expect(JSON.stringify(emitted)).not.toContain('historical answer');
+  });
+
+  test('delays cancelled-turn export until the next prompt and deduplicates concurrent terminal hooks', async () => {
     const sid = 'session-delayed-cancel';
+    useSession(sid, false);
+    fs.writeFileSync(chatPath, '');
+    fs.writeFileSync(updatesPath, '');
     const firstPrompt = {
       session_id: sid,
       prompt_id: 'prompt-1',

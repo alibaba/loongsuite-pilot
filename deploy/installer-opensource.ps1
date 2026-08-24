@@ -2424,6 +2424,12 @@ function Cmd-Uninstall {
     Remove-OpenClawPlugin
     Write-Host ""
 
+    # This cleanup executes Node.js. Run it before installation assets or a
+    # pinned runtime can disappear, matching the POSIX uninstall ordering.
+    Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
+    Remove-GrokBuildHookConfig
+    Write-Host ""
+
     Msg "==> 删除安装目录..." "==> Removing installation..."
     Remove-PilotInstallationFiles
     Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
@@ -2442,7 +2448,6 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
-    Remove-GrokBuildHookConfig
     Remove-CodexHookConfig
     Remove-CodexTrustState
     Write-Host ""

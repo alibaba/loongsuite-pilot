@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { writeTextFileAtomic } from '../utils/fs-utils.js';
 
 /**
  * Runtime files imported by the Grok Build hook entry points.
@@ -68,13 +69,8 @@ export async function restoreGrokBuildHookAssets(
     const target = path.join(targetRoot, relativePath);
     await fs.access(source);
     await fs.mkdir(path.dirname(target), { recursive: true });
-    const temp = `${target}.grok-build-${process.pid}-${Date.now()}.tmp`;
-    try {
-      await fs.copyFile(source, temp);
-      await fs.chmod(temp, relativePath.endsWith('.sh') ? 0o755 : 0o644).catch(() => {});
-      await fs.rename(temp, target);
-    } finally {
-      await fs.rm(temp, { force: true }).catch(() => {});
-    }
+    const content = await fs.readFile(source, 'utf8');
+    await writeTextFileAtomic(target, content);
+    await fs.chmod(target, relativePath.endsWith('.sh') ? 0o755 : 0o644).catch(() => {});
   }
 }

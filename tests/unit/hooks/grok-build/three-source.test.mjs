@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseGrokTranscript } from '../../../../assets/hooks/grok-build/transcript-parser.mjs';
 import { parseGrokUpdates } from '../../../../assets/hooks/grok-build/updates-parser.mjs';
 import {
+  MAX_UNIFIED_BYTES,
   parseGrokUnified,
   selectUnifiedGroups,
 } from '../../../../assets/hooks/grok-build/unified-parser.mjs';
@@ -18,6 +19,10 @@ const UPDATES = path.join(FIXTURES, 'updates.redacted-real.jsonl');
 const UNIFIED = path.join(FIXTURES, 'unified.redacted-real.jsonl');
 
 describe('Grok Build three-source reconstruction', () => {
+  test('bounds the shared unified-log scan close to Grok Build native rotation size', () => {
+    expect(MAX_UNIFIED_BYTES).toBe(8 * 1024 * 1024);
+  });
+
   test('parses the compact redacted source rails and keeps torn JSONL for retry', () => {
     const chat = parseGrokTranscript(CHAT);
     expect(chat.systemPrompt).toContain('Grok Build');
@@ -159,6 +164,92 @@ describe('Grok Build three-source reconstruction', () => {
     });
     expect(fused.llmCalls[0].tools[0].durationMs).toBe(0);
     expect(fused.llmCalls[0].output_content[0].id).toBe('prompt-mismatch:l1:t1');
+  });
+
+  test('does not use a unified array index to attach an unidentified update completion', () => {
+    const fused = fuseGrokTurn({
+      chatTurn: {
+        prompt: 'run a command',
+        llmCalls: [{
+          protocol: 'anthropic',
+          message_id: 'response-1',
+          input_messages: [],
+          output_content: [{
+            type: 'tool_use',
+            id: 'shell_1_1',
+            source_id: null,
+            name: 'shell',
+            input: { command: 'pwd' },
+          }],
+          declaredToolIds: ['shell_1_1'],
+          toolDetails: new Map(),
+        }],
+      },
+      updateTurn: {
+        startMs: 1000,
+        endMs: 3000,
+        completed: true,
+        toolStarts: [],
+        toolCompletions: [{
+          timestampMs: 1900,
+          toolId: '',
+          toolName: null,
+          toolStatus: 'failure',
+          toolOutput: 'result from a different tool',
+        }],
+      },
+      unifiedGroups: [{
+        loopIndex: 1,
+        startMs: 1100,
+        endMs: 1500,
+        tools: [{
+          name: 'shell',
+          startMs: 1600,
+          endMs: 1700,
+          elapsedMs: 100,
+          success: true,
+        }],
+      }],
+      promptId: 'prompt-no-cross-index',
+      stopReason: 'end_turn',
+      hookTimestampMs: 3000,
+    });
+
+    expect(fused.llmCalls[0].tools[0]).toMatchObject({
+      status: 'success',
+      resultPresent: false,
+      matchStrategy: 'name_order',
+      timingSource: 'unified',
+    });
+    expect(fused.llmCalls[0].tools[0].result).toBeUndefined();
+  });
+
+  test('reads promptIndex from params metadata when update metadata omits it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-updates-prompt-index-'));
+    const file = path.join(dir, 'updates.jsonl');
+    fs.writeFileSync(file, JSON.stringify({
+      timestamp: 1785296939,
+      params: {
+        _meta: {
+          promptId: 'prompt-params-meta',
+          promptIndex: 7,
+          agentTimestampMs: 1785296939000,
+        },
+        update: {
+          sessionUpdate: 'turn_completed',
+          stopReason: 'end_turn',
+        },
+      },
+    }) + '\n');
+    try {
+      expect(parseGrokUpdates(file).turns[0]).toMatchObject({
+        promptId: 'prompt-params-meta',
+        promptIndex: '7',
+        completed: true,
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('keeps inference_done timing when Grok omits usage instead of inventing zero tokens', () => {

@@ -516,6 +516,13 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
 });
 
 describe('Grok Build uninstall smoke', () => {
+  it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.match(/Remove-GrokBuildHookConfig/g)).toHaveLength(1);
+  });
+
   it('removes Pilot direct and nested hooks from an isolated HOME and preserves third-party hooks', () => {
     const root = mkdtempSync(join(tmpdir(), 'pilot-grok-uninstall-'));
     try {

@@ -18,9 +18,21 @@ export const STATE_VERSION = 1;
 export const MAX_RECENT_PROMPT_IDS = 64;
 export const STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
-export const STATE_LOCK_TIMEOUT_MS = 2_000;
+// Grok's ordinary hooks (including SessionEnd) default to a 5 second timeout.
+// Leave enough budget for the lock owner to finish its own bounded processing.
+export const STATE_LOCK_TIMEOUT_MS = 3_000;
 export const STATE_LOCK_STALE_MS = 30_000;
 const STATE_LOCK_RETRY_MS = 25;
+const ATOMIC_RENAME_RETRY_MS = [50, 100];
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+export class GrokStateLockTimeoutError extends Error {
+  constructor(sessionId) {
+    super(`timed out acquiring Grok session state lock for ${sanitizeSessionId(sessionId)}`);
+    this.name = 'GrokStateLockTimeoutError';
+    this.code = 'STATE_LOCK_TIMEOUT';
+  }
+}
 
 function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
@@ -57,6 +69,27 @@ function closedMarkerPath(sessionId) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function renameSyncWithRetry(source, destination) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (err) {
+      if (
+        !TRANSIENT_RENAME_CODES.has(err?.code)
+        || attempt >= ATOMIC_RENAME_RETRY_MS.length
+      ) {
+        throw err;
+      }
+      sleepSync(ATOMIC_RENAME_RETRY_MS[attempt]);
+    }
+  }
 }
 
 function removeLockIfOwned(lockPath, token) {
@@ -107,7 +140,7 @@ export async function withSessionStateLock(sessionId, callback, options = {}) {
         }
       } catch {}
       if (Date.now() - startedAt >= timeoutMs) {
-        throw new Error(`timed out acquiring Grok session state lock for ${sanitizeSessionId(sessionId)}`);
+        throw new GrokStateLockTimeoutError(sessionId);
       }
       await sleep(retryMs);
     }
@@ -198,7 +231,7 @@ export function saveState(sessionId, state) {
 
   try {
     fs.writeFileSync(tmp, JSON.stringify(cleanState), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmp, dest);
+    renameSyncWithRetry(tmp, dest);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch {}
     throw err;
@@ -237,7 +270,7 @@ export function markSessionClosed(sessionId, now = Date.now()) {
   const tmp = `${dest}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify({ closed_at_ms: now }), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmp, dest);
+    renameSyncWithRetry(tmp, dest);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch {}
     throw err;
@@ -248,7 +281,7 @@ function writeCleanupMarker(markerPath, now) {
   const tmp = `${markerPath}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify({ last_run_ms: now }), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmp, markerPath);
+    renameSyncWithRetry(tmp, markerPath);
   } catch {
     try { fs.unlinkSync(tmp); } catch {}
   }

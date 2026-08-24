@@ -77,8 +77,11 @@ function promptIdOf(params, update) {
   return typeof value === 'string' && value ? value : null;
 }
 
-function promptIndexOf(update) {
-  const value = update?._meta?.promptIndex ?? update?._meta?.prompt_index;
+function promptIndexOf(params, update) {
+  const value = update?._meta?.promptIndex
+    ?? update?._meta?.prompt_index
+    ?? params?._meta?.promptIndex
+    ?? params?._meta?.prompt_index;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value === 'string' && value) return value;
   return null;
@@ -284,7 +287,7 @@ export function parseGrokUpdates(filePath, checkpoint = {}, options = {}) {
       kind,
       type,
       promptId: promptIdOf(params, update),
-      promptIndex: promptIndexOf(update),
+      promptIndex: promptIndexOf(params, update),
       timestampMs: timestampMs(raw, params),
       turnStartMs: finiteNumber(params?._meta?.turnStartMs ?? params?._meta?.turn_start_ms),
       eventId: params?._meta?.eventId ?? params?._meta?.event_id ?? null,

@@ -10,7 +10,10 @@
 
 import fs from 'node:fs';
 
-export const MAX_UNIFIED_BYTES = 50 * 1024 * 1024;
+// Grok Build rotates unified.jsonl at 5 MiB and retains roughly its newest
+// half. Keep a small overshoot allowance for a concurrent final append, while
+// preventing an unexpected/stale file from putting 50 MiB on the Hook path.
+export const MAX_UNIFIED_BYTES = 8 * 1024 * 1024;
 
 function parseTimestampMs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {

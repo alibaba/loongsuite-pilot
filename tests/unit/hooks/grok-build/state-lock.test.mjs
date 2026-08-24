@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import {
+  renameSyncWithRetry,
   sanitizeSessionId,
   withSessionStateLock,
 } from '../../../../assets/hooks/grok-build/state.mjs';
@@ -62,5 +63,39 @@ describe('Grok session state lock', () => {
       expect(fs.existsSync(file)).toBe(true);
     }, { staleMs: 1_000 });
     expect(fs.existsSync(file)).toBe(false);
+  });
+
+  test('classifies bounded lock acquisition timeouts', async () => {
+    const first = withSessionStateLock('timeout-session', () => wait(150));
+    await wait(10);
+    await expect(withSessionStateLock('timeout-session', async () => {}, {
+      timeoutMs: 50,
+      retryMs: 5,
+    })).rejects.toMatchObject({
+      name: 'GrokStateLockTimeoutError',
+      code: 'STATE_LOCK_TIMEOUT',
+    });
+    await first;
+  });
+
+  test('retries transient Windows rename errors before surfacing failure', () => {
+    const source = path.join(dataDir, 'source.tmp');
+    const destination = path.join(dataDir, 'destination.json');
+    fs.writeFileSync(source, 'state');
+    const originalRename = fs.renameSync.bind(fs);
+    const rename = vi.spyOn(fs, 'renameSync')
+      .mockImplementationOnce(() => {
+        const error = new Error('temporarily locked');
+        error.code = 'EPERM';
+        throw error;
+      })
+      .mockImplementation((...args) => originalRename(...args));
+    try {
+      renameSyncWithRetry(source, destination);
+      expect(rename).toHaveBeenCalledTimes(2);
+      expect(fs.readFileSync(destination, 'utf8')).toBe('state');
+    } finally {
+      rename.mockRestore();
+    }
   });
 });
