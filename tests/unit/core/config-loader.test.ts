@@ -1047,6 +1047,19 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('loadConfig preserves traceEndpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlpTrace: {
+          traceEndpoint: 'http://trace-collector:4318',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.otlpTrace).toMatchObject({
+        traceEndpoint: 'http://trace-collector:4318',
+      });
+    });
+
     it('otlpTrace is undefined when not in config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
@@ -1083,6 +1096,53 @@ describe('ConfigLoader', () => {
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig prefers traceEndpoint over legacy endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://legacy-trace:4318',
+          traceEndpoint: 'http://trace-collector:4318',
+        },
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints).toEqual([expect.objectContaining({
+        name: 'user-otlp',
+        endpoint: undefined,
+        traceEndpoint: 'http://trace-collector:4318',
+      })]);
+    });
+
+    it('treats a blank traceEndpoint as unset and falls back to endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://legacy-trace:4318',
+          traceEndpoint: '   ',
+        },
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints).toEqual([expect.objectContaining({
+        endpoint: 'http://legacy-trace:4318',
+        traceEndpoint: undefined,
+      })]);
+    });
+
+    it('rejects an invalid traceEndpoint before constructing the flusher', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { traceEndpoint: 'not a URL' },
+      });
+
+      const config = await loadConfig();
+
+      expect(() => buildOtlpTraceConfig(config))
+        .toThrow('[otlp-trace] traceEndpoint must be an absolute HTTP(S) URL');
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
@@ -1294,6 +1354,69 @@ describe('ConfigLoader', () => {
       expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-tenant']);
     });
 
+    it('dedups equivalent legacy and exact trace routes', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          traceEndpoint: 'http://collector:4318/v1/traces',
+          headers: { Authorization: 'token' },
+        },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{
+          name: 'managed',
+          endpoint: 'http://collector:4318',
+          headers: { Authorization: 'token' },
+        }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints).toHaveLength(1);
+      expect(result!.endpoints[0]).toMatchObject({
+        traceEndpoint: 'http://collector:4318/v1/traces',
+      });
+    });
+
+    it('keeps exact trace routes distinct when their trailing slashes differ', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          traceEndpoint: 'http://collector:4318/v1/traces/',
+          headers: { Authorization: 'token' },
+        },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{
+          name: 'managed',
+          endpoint: 'http://collector:4318',
+          headers: { Authorization: 'token' },
+        }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints).toHaveLength(2);
+    });
+
+    it('supports traceEndpoint for a managed OTLP backend', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{
+          name: 'managed',
+          traceEndpoint: 'http://collector.internal:4318/custom/traces',
+        }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints).toEqual([expect.objectContaining({
+        name: 'managed',
+        endpoint: undefined,
+        traceEndpoint: 'http://collector.internal:4318/custom/traces',
+      })]);
+    });
+
     it('buildOtlpTraceConfig keeps same-url/license/project backends that differ only by workspace', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
@@ -1354,6 +1477,35 @@ describe('ConfigLoader', () => {
 
       expect(result).toBeDefined();
       expect(result!.endpoints[0]!.endpoint).toBe('http://from-env:4318');
+    });
+
+    it('signal-specific trace env var overrides the file route', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          traceEndpoint: 'http://trace-from-file:4318',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT', 'http://trace-from-env:4318');
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints[0]).toMatchObject({
+        traceEndpoint: 'http://trace-from-env:4318',
+      });
+    });
+
+    it('signal-specific trace env var overrides the legacy endpoint env var', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT', 'http://trace-from-env:4318/custom');
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_ENDPOINT', 'http://legacy-from-env:4318');
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints[0]).toMatchObject({
+        endpoint: undefined,
+        traceEndpoint: 'http://trace-from-env:4318/custom',
+      });
     });
 
     it('env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers', async () => {

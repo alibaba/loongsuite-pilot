@@ -27,6 +27,7 @@ import {
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { resolveOtlpTraceUrl } from '../utils/otlp-endpoint.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -88,7 +89,7 @@ export type OtlpExporterFactory = (opts: {
 
 interface ResolvedOtlpEndpoint {
   name: string;
-  url: string;
+  traceUrl: string;
   headers: Record<string, string>;
   compression: CompressionAlgorithm;
   serviceName: string;
@@ -118,14 +119,6 @@ interface AgentResourceIdentity {
 }
 
 const SENSITIVE_RESOURCE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
-
-function resolveEndpointUrl(raw: string): string {
-  let url = raw.replace(/\/+$/, '');
-  if (!url.endsWith('/v1/traces')) {
-    url += '/v1/traces';
-  }
-  return url;
-}
 
 const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression }) =>
   new OTLPTraceExporter({ url, headers, compression });
@@ -199,14 +192,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.cfg = cfg;
     this.globalAttributesProvider = globalAttributesProvider;
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
-    this.endpoints = cfg.endpoints.map((ep, i) => ({
-      name: ep.name || `otlp-${i}`,
-      url: resolveEndpointUrl(ep.endpoint),
-      headers: ep.headers ?? {},
-      compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
-      serviceName: ep.serviceName || cfg.serviceName,
-      appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
-    }));
+    this.endpoints = cfg.endpoints
+      .map((ep, i) => {
+        return {
+          name: ep.name || `otlp-${i}`,
+          traceUrl: resolveOtlpTraceUrl(ep),
+          headers: ep.headers ?? {},
+          compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
+          serviceName: ep.serviceName || cfg.serviceName,
+          appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
+        };
+      })
+      .filter((ep): ep is ResolvedOtlpEndpoint => !!ep.traceUrl);
+    if (this.endpoints.length === 0) {
+      throw new Error('[otlp-trace-flusher] every endpoint is missing a trace route');
+    }
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
@@ -229,7 +229,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     logger.info(
-      `OTLP trace flusher initialized → ${this.endpoints.map(e => `${e.name}(${e.url})`).join(', ')}`,
+      `OTLP trace flusher initialized → ${this.endpoints.map((endpoint) => `${endpoint.name}(${endpoint.traceUrl})`).join(', ')}`,
     );
   }
 
@@ -990,7 +990,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .map((ep) => ({
         name: ep.name,
         exporter: this.exporterFactory({
-          url: ep.url,
+          url: ep.traceUrl,
           headers: ep.headers,
           compression: ep.compression,
           name: ep.name,
