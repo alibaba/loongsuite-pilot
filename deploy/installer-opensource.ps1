@@ -2798,6 +2798,27 @@ function Remove-PilotInstallationFiles {
     }
 }
 
+# >>> dsh-unpatch-refusal >>>
+# Would removing the plugin assets leave a reference behind? Only a patch file that still
+# carries our managed block would, so that is the one question worth refusing over.
+#
+# Consulted only on the paths that would otherwise refuse to continue, never on the
+# working path: this reads a file owned by a third-party tool, and an unreadable one must
+# not be able to turn a healthy uninstall into a failing one. Unreadable is answered
+# "still managed" on purpose -- we cannot prove nothing dangles, so we keep the
+# conservative answer and let the caller refuse.
+function Test-DshPatchStillManaged {
+    param([string]$PatchPath)
+    if (-not $PatchPath) { return $false }
+    if (-not (Test-Path -LiteralPath $PatchPath -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        return [bool](Select-String -LiteralPath $PatchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)
+    } catch {
+        return $true
+    }
+}
+# <<< dsh-unpatch-refusal <<<
+
 # ============================================================
 # Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
 # Unix and Windows both execute assets/plugins/dsh/cleanup.mjs.
@@ -2824,14 +2845,26 @@ function Remove-DshYamlPatch {
     }
 
     if (-not (Test-Path -LiteralPath $cleanupScript)) {
-        if ((Test-Path -LiteralPath $patchPath) -and
-            (Select-String -LiteralPath $patchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)) {
+        if (Test-DshPatchStillManaged -PatchPath $patchPath) {
             throw "DSH cleanup helper is missing; refusing to remove plugin assets still referenced by $patchPath"
         }
         return
     }
     if (-not $script:NODE_BIN) {
-        throw "No usable Node.js; cannot safely remove the DSH YAML patch"
+        # Gated the same way as the branch above, which it was not. Resolve-Node returns
+        # $null when no candidate is suitable, so this throw has always been reachable,
+        # and uninstall now also arrives here after a failed Node probe instead of dying
+        # inside Resolve-Node itself. Refusing unconditionally aborted the entire
+        # uninstall -- Cmd-Uninstall calls this before every other cleanup step, and
+        # -Purge, the step that deletes config.json and the reporting credentials in it,
+        # is the last thing in the function -- on machines where DSH was never patched and
+        # there was nothing to protect. Refuse only when something would really dangle.
+        if (Test-DshPatchStillManaged -PatchPath $patchPath) {
+            throw "No usable Node.js; cannot safely remove the DSH YAML patch at $patchPath"
+        }
+        Msg "    ⚠️  跳过: 无可用 node,且 $patchPath 里没有 Pilot 托管块,无需 unpatch" `
+            "    ⚠️  Skipped: no usable node, and $patchPath carries no Pilot-managed block, so there is nothing to unpatch"
+        return
     }
 
     & $script:NODE_BIN $cleanupScript --patch $patchPath --plugin-dir $pluginDir
@@ -2939,8 +2972,11 @@ function Cmd-Uninstall {
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {
         Msg "📁 数据目录已保留: $DataDir" "📁 Data directory preserved: $DataDir"
-        Msg "   (包含配置和日志，如需彻底删除请加 -Purge)" `
-            "   (contains config and logs, add -Purge to remove)"
+        # Names the credentials rather than saying "config": this line is the only notice
+        # a user gets that an uninstall they consider finished left an SLS AccessKeySecret
+        # readable on disk, and "contains config and logs" does not read like that.
+        Msg "   (包含配置和日志，其中 config.json 里有上报凭据；如需彻底删除请加 -Purge)" `
+            "   (contains config and logs -- config.json holds reporting credentials; add -Purge to remove)"
     }
     Write-Host ""
 

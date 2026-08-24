@@ -115,6 +115,60 @@ describe('uninstall continues when Node cannot be resolved', () => {
   }
 });
 
+describe('a refusal to unpatch DSH is gated on something actually dangling', () => {
+  // Remove-DshYamlPatch is the first thing Cmd-Uninstall calls and it deliberately
+  // throws rather than delete plugin assets a DSH patch still references. Reasonable --
+  // except the no-Node branch threw unconditionally, and $pluginDir lives under
+  // $DataDir, so the throw skipped the `if ($Purge)` branch at the very bottom of
+  // Cmd-Uninstall: the same config.json this file exists to get deleted survived, on
+  // machines that had never patched DSH at all. Two refusals, one question, so both
+  // branches have to ask it.
+  for (const file of INSTALLERS) {
+    it(`${file}: both refusals check the managed block first`, () => {
+      const src = read(file);
+      const code = codeOf(funcOf(src, 'Remove-DshYamlPatch'));
+      const refusals = code.split('\n').filter(l => l.includes('throw'));
+      // Missing helper, no Node, and cleanup.mjs exiting non-zero. The third one has run
+      // the unpatch and knows it failed, so it needs no probe.
+      expect(refusals.length, `${file}: refusal count changed`).toBe(3);
+      const unguarded = refusals.filter(l => !/referenced by|DSH YAML patch at|Pilot assets were preserved/.test(l));
+      expect(unguarded, `${file}: a refusal names no reason`).toEqual([]);
+      // The probe, not an inline Select-String: an unreadable third-party file must not
+      // be able to fail the working path, which is why this moved behind a helper.
+      expect(code, file).not.toContain('Select-String');
+      const gates = code.split('\n').filter(l => l.includes('Test-DshPatchStillManaged -PatchPath'));
+      expect(gates.length, `${file}: both branches must gate`).toBe(2);
+      // And the no-Node branch must fall through to a skip, not to the unpatch call.
+      expect(code, file).toMatch(/if \(-not \$script:NODE_BIN\)[\s\S]*?Msg[\s\S]*?\n\s*return\n/);
+    });
+
+    it(`${file}: the probe answers "managed" when it cannot tell`, () => {
+      const block = blockOf(read(file), 'dsh-unpatch-refusal');
+      expect(block, `${file}: dsh-unpatch-refusal block missing`).toBeTruthy();
+      const code = codeOf(block);
+      // A missing patch file is a real "nothing dangles". A patch file we failed to read
+      // is not, and answering $false there would delete the assets anyway.
+      expect(code, file).toMatch(/Test-Path[^\n]*-ErrorAction SilentlyContinue[^\n]*\{ return \$false \}/);
+      expect(code, file).toMatch(/catch\s*\{\s*\n\s*return \$true/);
+    });
+  }
+
+  it('the block is byte-identical across the installers', () => {
+    const blocks = INSTALLERS.map(f => blockOf(read(f), 'dsh-unpatch-refusal'));
+    expect(blocks.filter(b => !b)).toEqual([]);
+    expect(new Set(blocks).size).toBe(1);
+  });
+
+  for (const file of INSTALLERS) {
+    it(`${file}: a preserved data dir says what is still in it`, () => {
+      // The counterpart to the refusals above: whenever uninstall keeps $DataDir, this is
+      // the only line telling the user an AccessKeySecret is still readable there.
+      const code = codeOf(funcOf(read(file), 'Cmd-Uninstall'));
+      expect(code, file).toContain('config.json holds reporting credentials');
+    });
+  }
+});
+
 describe('the scheduled-task failure reaches the user', () => {
   for (const file of INSTALLERS) {
     it(`${file}: the schtasks call runs at "Continue" and restores in finally`, () => {
