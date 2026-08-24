@@ -136,6 +136,13 @@ describe('CLI probe detector', () => {
     ]);
   });
 
+  it('preserves generic Agent detection errors', async () => {
+    const failure = new Error('generic detector failed');
+    vi.mocked(detectAgent).mockRejectedValueOnce(failure);
+
+    await expect(probeAgentDefinition(genericDef())).rejects.toBe(failure);
+  });
+
   it('preserves list-only behavior without consulting runtime discovery', async () => {
     const locate = vi.fn();
 

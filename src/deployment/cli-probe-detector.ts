@@ -60,8 +60,9 @@ function describeDshTarget(target: DshRuntimeTarget): string {
  *
  * DSH is intentionally the only special case: its runtime home may exist only
  * in a running Node process environment, so the generic path/PATH boolean is
- * insufficient. All failures remain local to this Agent so one transient or
- * ambiguous procfs result cannot erase the complete installer menu.
+ * insufficient. DSH discovery failures remain local to DSH so one transient
+ * or ambiguous procfs result cannot erase the complete installer menu. Other
+ * Agents retain the generic detector's existing error behavior.
  */
 export async function probeAgentDefinition(
   def: AgentDefinition,
@@ -76,8 +77,8 @@ export async function probeAgentDefinition(
 
   if (options.listOnly) return result;
 
-  try {
-    if (def.deployMode === 'dsh-yaml-patch') {
+  if (def.deployMode === 'dsh-yaml-patch') {
+    try {
       const locator = options.dshRuntimeLocator ?? new DshRuntimeLocator();
       const target = await locator.locate(def);
       if (!target) return result;
@@ -88,17 +89,17 @@ export async function probeAgentDefinition(
           ? await findDetectionReason(def)
           : describeDshTarget(target),
       };
+    } catch {
+      return result;
     }
-
-    const detected = await detectAgent(def.detection);
-    return {
-      ...result,
-      detected,
-      reason: detected ? await findDetectionReason(def) : '',
-    };
-  } catch {
-    return result;
   }
+
+  const detected = await detectAgent(def.detection);
+  return {
+    ...result,
+    detected,
+    reason: detected ? await findDetectionReason(def) : '',
+  };
 }
 
 export async function probeAgentDefinitions(
