@@ -60,6 +60,12 @@ const ALLOWED_STATIC_ACCESS = new Set([
   // than piped -- see tests/unit/scripts/ps1-json-encoding.test.mjs.
   '[Console]::OutputEncoding',
   '[System.Text.Encoding]::UTF8',
+  // (c) Test-PilotElevated, in try/catch. GetCurrent() is a static *method* call and so
+  // is genuinely CLM-forbidden; the catch returns $false, which only costs the elevated
+  // install warning -- see the pilot-elevation-warning block. Administrator is an enum
+  // field read, i.e. (a) as well.
+  '[Security.Principal.WindowsIdentity]::GetCurrent',
+  '[Security.Principal.WindowsBuiltInRole]::Administrator',
 ]);
 
 // Shapes that are never acceptable, whatever the file. `.PSObject` is included
