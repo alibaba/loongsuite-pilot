@@ -65,6 +65,41 @@ export class CorrelationStore {
     this.dir = correlateDir;
   }
 
+  private sessionConsumedPath(sessionId: string): string {
+    return path.join(this.dir, `${safeName(sessionId)}.session-context.done`);
+  }
+
+  private isSessionConsumedOnDisk(sessionId: string): boolean {
+    try {
+      return fs.statSync(this.sessionConsumedPath(sessionId)).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Atomically claim the session-level context across collector processes.
+   * EEXIST means another collector (or an earlier collector incarnation) has
+   * already applied it. Other I/O failures remain fail-open after a warning.
+   */
+  private claimSessionContext(sessionId: string): boolean {
+    try {
+      fs.writeFileSync(
+        this.sessionConsumedPath(sessionId),
+        JSON.stringify({ sessionId, ts: new Date().toISOString() }),
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') return false;
+      logger.warn('failed to persist session context consumption', {
+        sessionId,
+        error: String(err),
+      });
+      return true;
+    }
+  }
+
   private load(sessionId: string): SessionState | null {
     const file = path.join(this.dir, `${safeName(sessionId)}.jsonl`);
     let stat: fs.Stats;
@@ -114,7 +149,7 @@ export class CorrelationStore {
       turns,
       sessions,
       consumedTurns: existing?.consumedTurns ?? new Set<number>(),
-      sessionConsumed: existing?.sessionConsumed ?? false,
+      sessionConsumed: existing?.sessionConsumed ?? this.isSessionConsumedOnDisk(sessionId),
       // Rebuilt on every (re)read; indices are stable (append-only file), and
       // cursors re-derive from consumedTurns on first use, so a reset is safe.
       hashIndex: buildHashIndex(turns),
@@ -177,7 +212,20 @@ export class CorrelationStore {
     const state = this.load(sessionId);
     if (!state || state.sessions.length === 0 || state.sessionConsumed) return null;
     state.sessionConsumed = true;
+    if (!this.claimSessionContext(sessionId)) return null;
     return state.sessions[0].traceparent;
+  }
+
+  /**
+   * Consume a session-level fallback without returning it. A first-turn ACP
+   * record has higher priority, but the environment context must still expire
+   * with that first turn so a collector restart cannot apply it later.
+   */
+  markSessionConsumed(sessionId: string): void {
+    const state = this.load(sessionId);
+    if (!state || state.sessions.length === 0 || state.sessionConsumed) return;
+    state.sessionConsumed = true;
+    this.claimSessionContext(sessionId);
   }
 
   /**

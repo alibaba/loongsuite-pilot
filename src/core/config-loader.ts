@@ -134,6 +134,7 @@ export interface ConfigFile {
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
+    generateTraceWhenMissing?: boolean;
     ttlMs?: number;
   };
 
@@ -315,6 +316,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     propagateToTools: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,
+    ),
+    generateTraceWhenMissing: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
+      file?.upstreamLink?.generateTraceWhenMissing ?? false,
     ),
     // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
     // deleting all freshly-written correlation files and silently breaking linking.

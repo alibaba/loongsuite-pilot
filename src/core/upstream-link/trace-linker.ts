@@ -138,7 +138,10 @@ export class TraceLinker {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
         const turnTp = this.store.resolveTurn(sessionId, text);
-        if (turnTp) return turnTp;
+        if (turnTp) {
+          if (isFirstTurn) this.store.markSessionConsumed(sessionId);
+          return turnTp;
+        }
         if (attempt < this.retries) await sleep(this.retryDelayMs);
       }
     }
