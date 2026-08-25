@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { CorrelationStore } from '../../src/core/upstream-link/correlation-store.ts';
 import { TraceLinker } from '../../src/core/upstream-link/trace-linker.ts';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.ts';
+import { contentHash } from '../../src/utils/content-hash.ts';
 import {
   invokeClaudeHook,
   simulateClaudeBashTool,
@@ -443,6 +444,142 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
     expect(toolSpan).toBeDefined();
     expect(toolSpan.spanContext().traceId).toBe(received.traceId);
     expect(toolSpan.spanContext().spanId).toBe(received.parentSpanId);
+  });
+
+  test('ACP-managed sessions avoid a competing local trace while resource attributes still reach the CLI', async () => {
+    fs.writeFileSync(
+      path.join(dataDir, 'config.json'),
+      JSON.stringify({
+        upstreamLink: {
+          enabled: true,
+          propagateToTools: true,
+          generateTraceWhenMissing: true,
+        },
+      }),
+      'utf-8',
+    );
+
+    const sessionId = 'acp-managed-session';
+    const promptId = 'acp-prompt-1';
+    const toolUseId = 'toolu_acp_cli';
+    const prompt = 'run the ACP downstream demo cli';
+    const acpTraceId = 'dddddddddddddddddddddddddddddddd';
+    const acpSpanId = 'eeeeeeeeeeeeeeee';
+    const acpTraceparent = `00-${acpTraceId}-${acpSpanId}-01`;
+    const correlateDir = path.join(dataDir, 'acp-correlate');
+    fs.mkdirSync(correlateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(correlateDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        type: 'turn',
+        sessionId,
+        contentHash: contentHash(prompt),
+        contentPrefix: prompt,
+        traceparent: acpTraceparent,
+      })}\n`,
+      'utf-8',
+    );
+
+    const resourceAttributes = 'team=acp';
+    const receiverOutput = path.join(dataDir, 'acp-received-context.json');
+    const originalCommand = [
+      shellSingleQuote(process.execPath),
+      shellSingleQuote(DEMO_CLI),
+      '--allow-missing',
+      '--output',
+      shellSingleQuote(receiverOutput),
+    ].join(' ');
+    const payload = {
+      session_id: sessionId,
+      prompt_id: promptId,
+      cwd: dataDir,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_use_id: toolUseId,
+      tool_input: { command: originalCommand },
+    };
+    const simulation = simulateClaudeBashTool({
+      hookPath: HOOK,
+      payload,
+      hookEnv: {
+        LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES: resourceAttributes,
+      },
+    });
+
+    expect(simulation.hook.status).toBe(0);
+    expect(simulation.wasUpdated).toBe(true);
+    expect(simulation.tool.status).toBe(0);
+    expect(JSON.parse(fs.readFileSync(receiverOutput, 'utf-8'))).toMatchObject({
+      traceparent: null,
+      valid: false,
+      resourceAttributes,
+    });
+
+    const transcriptPath = path.join(dataDir, 'acp-transcript.jsonl');
+    const transcript = [
+      {
+        type: 'user',
+        promptId,
+        timestamp: '2026-08-24T03:00:00.000Z',
+        message: { content: [{ type: 'text', text: prompt }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-24T03:00:01.000Z',
+        message: {
+          id: 'msg_acp_1',
+          content: [{ type: 'tool_use', id: toolUseId, name: 'Bash', input: payload.tool_input }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+          stop_reason: 'tool_use',
+        },
+      },
+      {
+        type: 'user',
+        promptId,
+        timestamp: '2026-08-24T03:00:01.100Z',
+        message: {
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: simulation.tool.stdout.trim(),
+          }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-24T03:00:02.000Z',
+        message: {
+          id: 'msg_acp_2',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input_tokens: 12, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ];
+    fs.writeFileSync(
+      transcriptPath,
+      `${transcript.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      'utf-8',
+    );
+    const stop = invokeClaudeHook({
+      hookPath: HOOK,
+      subcommand: 'stop',
+      payload: {
+        session_id: sessionId,
+        prompt_id: promptId,
+        stop_reason: 'end_turn',
+        transcript_path: transcriptPath,
+      },
+      env: { LOONGSUITE_PILOT_DATA_DIR: dataDir },
+    });
+    expect(stop.status).toBe(0);
+
+    const records = readClaudeRecords(dataDir);
+    await new TraceLinker(new CorrelationStore(correlateDir), { retries: 0 }).stamp(records);
+    expect(new Set(records.map((record) => record.trace_id))).toEqual(new Set([acpTraceId]));
+    expect(records.find((record) =>
+      record['event.name'] === 'other')?.parent_span_id).toBe(acpSpanId);
   });
 
   test('disabled propagation leaves the downstream process without hidden inherited context', () => {

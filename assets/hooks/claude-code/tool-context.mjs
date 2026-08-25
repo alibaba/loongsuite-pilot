@@ -9,9 +9,9 @@
  * traceparent whose parent id is that reserved span id. The Stop processor
  * consumes the same record by tool_use_id while building tool.call/result.
  *
- * Files are intentionally one-per-tool so parallel PreToolUse hook processes
- * never contend on a shared session JSON document. Orphans live under
- * acp-correlate and are removed by the existing upstream-link retention job.
+ * Parallel hooks share one immutable turn record and publish it atomically,
+ * then publish one immutable record per tool. Orphans live under acp-correlate
+ * and are removed by the existing upstream-link retention job.
  */
 
 import fs from 'node:fs';
@@ -23,6 +23,10 @@ const ZERO_TRACE = '0'.repeat(32);
 const ZERO_SPAN = '0'.repeat(16);
 const TRACESTATE_MAX_LENGTH = 512;
 const RESOURCE_ATTRIBUTES_MAX_LENGTH = 8 * 1024;
+const ACP_SESSION_SCAN_MAX_BYTES = 64 * 1024;
+const PUBLISHED_RECORD_READ_RETRIES = 20;
+const PUBLISHED_RECORD_READ_RETRY_MS = 5;
+const WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 function safeName(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
@@ -73,13 +77,59 @@ function sanitizeTracestate(value) {
 
 function sanitizeResourceAttributes(value) {
   if (typeof value !== 'string') return undefined;
-  if (!value.trim() || Buffer.byteLength(value, 'utf8') > RESOURCE_ATTRIBUTES_MAX_LENGTH) {
+  // File- and PowerShell-derived values commonly retain the final line ending.
+  // Strip only terminal CR/LF bytes; embedded control bytes remain invalid.
+  const normalized = value.replace(/[\r\n]+$/, '');
+  if (!normalized.trim()
+      || Buffer.byteLength(normalized, 'utf8') > RESOURCE_ATTRIBUTES_MAX_LENGTH) {
     return undefined;
   }
-  if (/[\x00-\x1f\x7f]/.test(value)) return undefined;
+  if (/[\x00-\x1f\x7f]/.test(normalized)) return undefined;
   // This is an opaque carrier. Leave parsing and semantic validation to the
   // downstream OpenTelemetry SDK and preserve the caller's exact value.
-  return value;
+  return normalized;
+}
+
+function waitForPublishedRecord() {
+  Atomics.wait(WAIT_BUFFER, 0, 0, PUBLISHED_RECORD_READ_RETRY_MS);
+}
+
+function readPublishedRecord(file, reader) {
+  for (let attempt = 0; attempt <= PUBLISHED_RECORD_READ_RETRIES; attempt++) {
+    const record = reader(file);
+    if (record) return record;
+    if (attempt < PUBLISHED_RECORD_READ_RETRIES) waitForPublishedRecord();
+  }
+  return null;
+}
+
+/**
+ * Publish a complete JSON record without ever exposing an empty/partial target.
+ * A same-directory hard link is an atomic create-if-absent operation on the
+ * supported local filesystems. Losers reuse the winner after a bounded retry,
+ * which also interoperates with an older Pilot writer that created before write.
+ */
+function publishRecordExclusive(file, record, reader) {
+  const tmp = path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(record), {
+      encoding: 'utf-8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+    try {
+      fs.linkSync(tmp, file);
+      return record;
+    } catch (err) {
+      if (err?.code === 'EEXIST') return readPublishedRecord(file, reader);
+      throw err;
+    }
+  } finally {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
 }
 
 function readTurnRecord(file) {
@@ -139,6 +189,47 @@ function readRecord(file) {
 
 function shellSingleQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * ACP writes its per-turn upstream record before sending the prompt. PreToolUse
+ * cannot identify that record by prompt text, so generating a competing local
+ * context would later be overwritten by TraceLinker and split the trace. Treat
+ * a session containing ACP turn records as ACP-managed and fail open without
+ * trace injection; resource attributes are still handled independently.
+ */
+function hasAcpTurnRecord(dataDir, sessionId) {
+  const file = path.join(correlateDir(dataDir), `${safeName(sessionId)}.jsonl`);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size === 0) return false;
+    const length = Math.min(stat.size, ACP_SESSION_SCAN_MAX_BYTES);
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, 0);
+    const raw = buffer.subarray(0, bytesRead).toString('utf-8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed?.type === 'turn' && parseTraceparent(parsed.traceparent)) return true;
+      } catch {
+        // A concurrently appended ACP record may be partial. The textual marker
+        // is enough to choose the conservative no-local-trace path.
+        if (/"type"\s*:\s*"turn"/.test(line)) return true;
+      }
+    }
+    // A large session correlation file necessarily exceeds the bounded scan.
+    // Conservatively avoid local generation rather than risk a split trace.
+    return stat.size > ACP_SESSION_SCAN_MAX_BYTES;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
 }
 
 export function isToolPropagationConsumed(dataDir, sessionId) {
@@ -208,13 +299,7 @@ function reserveTurnContext({
           ts: new Date().toISOString(),
         };
 
-    try {
-      fs.writeFileSync(file, JSON.stringify(record), { encoding: 'utf-8', flag: 'wx' });
-      return record;
-    } catch (err) {
-      if (err?.code === 'EEXIST') return readTurnRecord(file);
-      throw err;
-    }
+    return publishRecordExclusive(file, record, readTurnRecord);
   } catch {
     return null;
   }
@@ -233,6 +318,11 @@ export function reserveToolContext({
   generateTraceWhenMissing = false,
 }) {
   if (!dataDir || !sessionId || !toolUseId) return null;
+
+  // ACP owns trace selection for the whole session. Without a reliable
+  // PreToolUse prompt-to-turn key, injecting either the process upstream or a
+  // local trace here could later disagree with the ACP turn selected by Pilot.
+  if (hasAcpTurnRecord(dataDir, sessionId)) return null;
 
   let turnContext = null;
   if (promptId) {
@@ -285,15 +375,7 @@ export function reserveToolContext({
       ts: new Date().toISOString(),
     };
 
-    try {
-      fs.writeFileSync(file, JSON.stringify(record), { encoding: 'utf-8', flag: 'wx' });
-      return record;
-    } catch (err) {
-      // Duplicate hook invocation: the process that won O_EXCL owns the
-      // record; reuse it so both invocations return the same context.
-      if (err?.code === 'EEXIST') return readRecord(file);
-      throw err;
-    }
+    return publishRecordExclusive(file, record, readRecord);
   } catch {
     return null;
   }

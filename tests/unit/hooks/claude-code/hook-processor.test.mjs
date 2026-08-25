@@ -311,7 +311,7 @@ describe('claude-code-hook-processor v2 端到端', () => {
     expect(later.stdout.trim()).toBe('{}');
   });
 
-  test('没有上游时按 prompt 生成 trace，并向下游注入 resource attributes', () => {
+  test('没有上游时按 hook prompt 生成 trace，并在 transcript 缺 promptId 时保持一致', () => {
     enableToolPropagation({ generateTraceWhenMissing: true });
     const resourceAttributes = "team=O'Reilly,deployment.environment.name=prod";
 
@@ -336,9 +336,9 @@ describe('claude-code-hook-processor v2 端到端', () => {
     const reservedToolSpanId = injected[2];
 
     const transcriptPath = writeTranscript('s-local', [
-      { type: 'user', promptId: 'prompt-local-1', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'run local cli' }] } },
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'run local cli' }] } },
       { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg-local-1', content: [{ type: 'tool_use', id: 'tu-local-1', name: 'Bash', input: { command: 'my-cli --local' } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
-      { type: 'user', promptId: 'prompt-local-1', timestamp: '2026-06-04T02:57:49.200Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-local-1', content: 'done' }] } },
+      { type: 'user', timestamp: '2026-06-04T02:57:49.200Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-local-1', content: 'done' }] } },
       { type: 'assistant', timestamp: '2026-06-04T02:57:52.000Z', message: { id: 'msg-local-2', content: [{ type: 'text', text: 'complete' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
     ]);
     const stop = runHook('stop', {

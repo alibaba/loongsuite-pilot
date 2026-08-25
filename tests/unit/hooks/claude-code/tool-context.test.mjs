@@ -160,6 +160,75 @@ describe('claude-code per-tool context', () => {
     expect(new Set(duplicateContexts.map((context) => context.spanId)).size).toBe(1);
   });
 
+  it('retries a partial record from an older writer without exposing a split trace', async () => {
+    const legacyTraceId = 'cccccccccccccccccccccccccccccccc';
+    const legacyWriter = `
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const dir = path.join(process.env.TEST_DATA_DIR, 'acp-correlate');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, 'sid-legacy.prompt-legacy.turn-context.json');
+      const fd = fs.openSync(file, 'wx', 0o600);
+      process.stdout.write('ready\\n');
+      setTimeout(() => {
+        fs.writeFileSync(fd, JSON.stringify({
+          type: 'turn',
+          source: 'local',
+          sessionId: 'sid-legacy',
+          promptId: 'prompt-legacy',
+          traceId: '${legacyTraceId}',
+          flags: '01',
+        }));
+        fs.closeSync(fd);
+      }, 30);
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', legacyWriter], {
+      env: { ...process.env, TEST_DATA_DIR: dataDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const exited = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`legacy writer exited ${code}`));
+      });
+    });
+    await new Promise((resolve) => child.stdout.once('data', resolve));
+
+    const context = reserveToolContext({
+      dataDir,
+      sessionId: 'sid-legacy',
+      promptId: 'prompt-legacy',
+      toolUseId: 'tool-legacy',
+      generateTraceWhenMissing: true,
+    });
+    await exited;
+
+    expect(context?.traceId).toBe(legacyTraceId);
+    expect(readTurnContext(dataDir, 'sid-legacy', 'prompt-legacy')?.traceId).toBe(legacyTraceId);
+  });
+
+  it('does not generate a competing tool context for an ACP-managed session', () => {
+    const dir = path.join(dataDir, 'acp-correlate');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'sid-acp.jsonl'),
+      `${JSON.stringify({
+        type: 'turn',
+        sessionId: 'sid-acp',
+        traceparent: TRACEPARENT,
+      })}\n`,
+    );
+
+    expect(reserveToolContext({
+      dataDir,
+      sessionId: 'sid-acp',
+      promptId: 'prompt-acp',
+      toolUseId: 'tool-acp',
+      generateTraceWhenMissing: true,
+    })).toBeNull();
+  });
+
   it('uses a local trace on later prompts after the environment upstream is consumed', () => {
     const upstream = reserveToolContext({
       dataDir,
@@ -200,6 +269,24 @@ describe('claude-code per-tool context', () => {
     );
     expect(updated.command).not.toContain('TRACEPARENT');
     expect(updated.command.endsWith('my-cli --work')).toBe(true);
+  });
+
+  it('accepts terminal line endings in resource attributes but rejects embedded newlines', () => {
+    const lf = buildBashUpdatedInput(
+      { command: 'my-cli' },
+      { resourceAttributes: 'team=infra\n' },
+    );
+    const crlf = buildBashUpdatedInput(
+      { command: 'my-cli' },
+      { resourceAttributes: 'team=infra\r\n' },
+    );
+
+    expect(lf?.command).toContain("export OTEL_RESOURCE_ATTRIBUTES='team=infra'");
+    expect(crlf?.command).toContain("export OTEL_RESOURCE_ATTRIBUTES='team=infra'");
+    expect(buildBashUpdatedInput(
+      { command: 'my-cli' },
+      { resourceAttributes: 'team=infra\nowner=pilot' },
+    )).toBeNull();
   });
 
   it('consumes the context once and rejects later turns after Stop', () => {

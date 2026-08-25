@@ -44,7 +44,9 @@ Pilot 为每个 Bash TOOL span 预留一个 span ID，并将以下内容传给�
 
 ## 用户需要配置什么
 
-已有的两个总开关仍然必需：
+已有的两个总开关仍然必需。推荐写入
+`~/.loongsuite-pilot/config.json`，这样 Pilot 采集进程和 Claude Code hook
+读取的是同一份配置：
 
 ```json
 {
@@ -95,7 +97,8 @@ loongsuite-pilot restart
 
 配置优先级为：环境变量 > `config.json` > 内置默认值。
 
-也可以全部通过环境变量配置 Pilot：
+也可以通过环境变量配置，但环境变量只对继承它的进程生效。以下方式要求在同一
+终端中重启 Pilot，并从该终端启动一个新的 Claude Code 进程：
 
 ```bash
 export LOONGSUITE_PILOT_UPSTREAM_LINK=true
@@ -103,7 +106,22 @@ export LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS=true
 export LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING=true
 
 loongsuite-pilot restart
+claude
 ```
+
+`loongsuite-pilot restart` 只会让新启动的 Pilot 采集进程读取当前配置/环境，
+不会把变量注入已经运行的 Claude Code。反过来，只在启动 `claude` 的命令前设置
+环境变量，也不会修改已经运行的 Pilot 采集进程。因此：
+
+- `upstreamLink.enabled` 必须对 Pilot 采集进程生效；
+- `enabled`、`propagateToTools` 和 `generateTraceWhenMissing` 必须能被 Claude Code
+  的 hook 读取；
+- `TRACEPARENT`、`TRACESTATE` 和 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` 必须设置在
+  新启动的 Claude Code 进程上。
+
+如果 Pilot 由系统服务或其他进程管理器启动，优先使用 `config.json` 配置三个
+`upstreamLink` 开关，仅把每次调用不同的 Trace Context 和资源属性放在
+`claude` 启动命令上。
 
 ## 使用方式
 
@@ -257,8 +275,9 @@ Pilot 只处理主 Agent 的 `Bash` 工具调用。每次调用时：
 4. 组装下游 `TRACEPARENT`，并映射可选资源属性。
 5. 通过 `hookSpecificOutput.updatedInput` 更新 Bash 命令。
 
-turn 和工具预留记录保存在 `~/.loongsuite-pilot/acp-correlate/`，通过独占创建
-保证并行调用安全和 hook 重试幂等。过期记录由现有 retention 任务清理。
+turn 和工具预留记录保存在 `~/.loongsuite-pilot/acp-correlate/`。Hook 先完整写入
+临时文件，再通过原子 create-if-absent 发布，保证并行调用不会读取空文件或半条
+JSON，同时保持 hook 重试幂等。过期记录由现有 retention 任务清理。
 
 ### Stop 阶段
 
@@ -277,12 +296,14 @@ Trace 来源优先级如下：
 2. `generateTraceWhenMissing=true` 时生成的本地 turn Trace。
 3. 两者都不存在时沿用原有采集逻辑，不向下游注入 `TRACEPARENT`。
 
-环境变量上游上下文保持“会话首轮消费一次”的现有语义。开启本地生成后，后续
-turn 会生成新的本地 Trace，而不是复用首轮上游 trace ID。
+环境变量上游上下文保持“会话首轮消费一次”的现有语义，消费状态会持久化，Pilot
+采集进程重启也不会把同一上游错误地应用到后续 turn。开启本地生成后，后续 turn
+会生成新的本地 Trace，而不是复用首轮上游 trace ID。
 
 仅通过 ACP per-turn 关联文件提供、但未出现在 Claude Code 进程环境中的上游
-上下文，当前仍不能在 `PreToolUse` 阶段传播给下游；请不要在同一 turn 同时依赖
-ACP-only 上游关联与本地生成模式。
+上下文，当前仍不能在 `PreToolUse` 阶段传播给下游。Pilot 检测到 ACP 管理的会话
+后会跳过 `TRACEPARENT` 注入（包括本地生成），避免 Claude Code span 最终关联到
+ACP trace、而下游 CLI 落到另一条本地 trace。资源属性仍会独立传播。
 
 本地生成依赖 Claude Code hook 事件中的稳定 `prompt_id`。缺少该字段时 Pilot
 会 fail-open：保留原有首轮环境变量上游传播，但不生成本地 Trace。
@@ -292,9 +313,10 @@ ACP-only 上游关联与本地生成模式。
 - `TRACEPARENT` 必须是合法的 W3C version `00` 格式，且 trace ID 和 span ID
   不能全零。
 - `TRACESTATE` 必须非空、不超过 512 个字符且不含控制字符。
-- `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` 必须非空、UTF-8 编码不超过 8 KiB
-  且不含控制字符。Pilot 将属性字符串原样作为不透明值传播；格式和属性语义由 OpenTelemetry
-  SDK 或探针校验。
+- `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` 必须非空、UTF-8 编码不超过 8 KiB。
+  Pilot 会去掉末尾的 CR/LF（兼容文件和 PowerShell 读取结果），但拒绝中间包含
+  换行或其他控制字符的值。属性字符串其余部分作为不透明值传播；格式和属性语义
+  由 OpenTelemetry SDK 或探针校验。
 - 所有注入值都经过 shell 单引号转义。
 - Trace Context 和资源属性不应承载 AccessKey、API Key、Cookie 或用户隐私。
 
@@ -351,7 +373,9 @@ Trace Context 和资源属性相互独立。例如，非法资源属性不会阻
 ### 下游没有收到任何字段
 
 检查 `upstreamLink.enabled`、`upstreamLink.propagateToTools` 是否为 `true`，
-修改配置后是否重启了 Pilot，以及 Claude Code 调用的是否为主 Agent `Bash`。
+修改配置后是否重启了 Pilot、是否重新启动了继承正确环境的 Claude Code，以及
+Claude Code 调用的是否为主 Agent `Bash`。ACP 管理的会话当前只传播资源属性，
+不会向下游注入 Trace Context。
 
 ### 没有上游时未收到 TRACEPARENT
 
@@ -366,7 +390,8 @@ Trace Context 和资源属性相互独立。例如，非法资源属性不会阻
 ### 下游没有收到资源属性
 
 检查 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` 是否设置在 Claude Code 进程上，
-值是否为空、超过 8 KiB 或包含换行等控制字符。下游读取的字段名是标准
+值是否为空、超过 8 KiB 或在中间包含换行等控制字符。末尾 CR/LF 会被去掉。
+下游读取的字段名是标准
 `OTEL_RESOURCE_ATTRIBUTES`，不是 Pilot 私有载体名。
 
 ### 后续 turn 的 trace ID 与首轮不同
