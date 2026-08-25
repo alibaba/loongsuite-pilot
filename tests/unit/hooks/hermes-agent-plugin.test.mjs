@@ -650,6 +650,47 @@ describe('Hermes Agent native plugin', () => {
       .toBe(5);
   });
 
+  it('normalizes Hermes Responses API top-level instructions', () => {
+    const instructions = 'Use the Responses API house rules.';
+    const responsesBody = {
+      model: 'gpt-5',
+      messages: undefined,
+      instructions,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: [{
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object' },
+      }],
+      store: false,
+    };
+    const { records } = replay(toolDefinitionsTurn(responsesBody));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const { records: recordsWithoutInstructions } = replay(toolDefinitionsTurn({
+      ...responsesBody,
+      instructions: '   ',
+    }));
+    const requestWithoutInstructions = recordsWithoutInstructions.find(
+      record => record['event.name'] === 'llm.request',
+    );
+
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: instructions },
+    ]);
+    expect(request['gen_ai.input.messages'][0]).toEqual({
+      role: 'system',
+      parts: [{ type: 'text', content: instructions }],
+    });
+    expect(request['gen_ai.input.messages_delta'][0]).toEqual({
+      role: 'system',
+      parts: [{ type: 'text', content: instructions }],
+    });
+    expect(request['gen_ai.input.messages_hash'])
+      .not.toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
+    expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
+  });
+
   it('does not persist the system prompt when message content capture is disabled', () => {
     const marker = 'private-system-prompt-marker';
     const { records, raw } = replay(

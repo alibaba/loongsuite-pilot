@@ -318,9 +318,9 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
     Hermes never replays system messages through conversation_history, so the
     request body built for the provider is the only place the prompt is
     observable. Shapes differ per provider: Anthropic/Bedrock keep it in a
-    top-level "system" field, Gemini nests it under systemInstruction.parts,
-    and OpenAI-compatible providers carry it as leading system/developer
-    messages.
+    top-level "system" field, Responses uses top-level "instructions", Gemini
+    nests it under systemInstruction.parts, and OpenAI-compatible providers
+    carry it as leading system/developer messages.
     """
     if not isinstance(request, dict):
         return []
@@ -328,7 +328,7 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
     if not isinstance(body, dict):
         return []
 
-    for key in ("system", "systemInstruction", "system_instruction"):
+    for key in ("system", "instructions", "systemInstruction", "system_instruction"):
         if key in body:
             parts = _text_parts(body.get(key))
             if parts:
