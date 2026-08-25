@@ -35,8 +35,6 @@ import {
   getStringValue,
 } from './agent-event-normalizer.mjs';
 
-const MAX_INPUT_MESSAGES_BYTES = 1024 * 1024;
-
 async function main() {
   const { agentId, logPrefix } = parseArgs();
   const payload = await parseStdinPayload(agentId);
@@ -238,12 +236,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
   let prevToolCalls = []; // tool calls from previous step, for building assistant + tool_result delta
   let prevAssistantOutputParts = []; // exact assistant output from previous step
   let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
-  // Mirror Codex's message-context model: emit both the per-step delta and the
-  // complete context while it remains reasonably sized. Keeping the explicit
-  // context makes the assistant/tool role boundary independent of converter
-  // batching or restart state.
-  let fullInputMessages = [];
-
   let stepCounter = 0;
   for (const group of llmGroups) {
     stepCounter++;
@@ -287,19 +279,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
       }
     }
 
-    let inputMessages;
-    if (inputDelta && fullInputMessages !== undefined) {
-      const candidate = [...fullInputMessages, ...inputDelta];
-      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_INPUT_MESSAGES_BYTES) {
-        fullInputMessages = candidate;
-        inputMessages = candidate;
-      } else {
-        // Continue emitting deltas, but stop duplicating an oversized complete
-        // context into every subsequent request event.
-        fullInputMessages = undefined;
-      }
-    }
-
     // llm.request time:
     //   step 1 = user input ts (user message arrival, a reasonable proxy for LLM start)
     //   step N>1 = 上一个 step 最后一个 tool_result ts (工具返回后模型立刻开始处理)
@@ -307,7 +286,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
     const assistantOutput = extractAssistantOutput(group);
-    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, inputMessages, cwd, llmRequestTs, turnMetadata);
+    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -415,7 +394,7 @@ function extractAssistantOutput(group) {
   return { outputParts, toolCalls };
 }
 
-function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, inputMessages, cwd, llmRequestTs, turnMetadata = {}) {
+function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -445,10 +424,9 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
   // Each step's delta contains only the NEW content since the previous step:
   //   - Step 1: user prompt
   //   - Step N>1: previous assistant tool_calls followed by tool_results
-  // We also emit the complete input context (up to 1 MiB), following Codex's
-  // approach. This preserves the assistant/tool split even when conversion
-  // starts from a partial batch; the delta remains available for incremental
-  // consumers.
+  // The converter accumulates these deltas into the full input context carried
+  // by each OTLP LLM span. Keep the Hook event incremental so existing event-log
+  // consumers do not receive a second, duplicated representation of history.
   const llmRequestFields = {
     ...turnMetadata,
     'event.name': 'llm.request',
@@ -465,9 +443,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
   };
   if (inputDelta) {
     llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
-  }
-  if (inputMessages) {
-    llmRequestFields['gen_ai.input.messages'] = inputMessages;
   }
   records.push(buildRecord(llmRequestFields, firstRow, runtimeConfig, cwd));
 

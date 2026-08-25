@@ -213,9 +213,7 @@ describe('QoderWork OTLP message semantics', () => {
       event['event.name'] === 'llm.request' && event['gen_ai.step.id'] === 'turn-1:s2');
     const firstRequest = events.find(event =>
       event['event.name'] === 'llm.request' && event['gen_ai.step.id'] === 'turn-1:s1');
-    expect(firstRequest['gen_ai.input.messages']).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: 'inspect a file' }] },
-    ]);
+    expect(firstRequest['gen_ai.input.messages']).toBeUndefined();
     expect(secondRequest['gen_ai.input.messages_delta']).toEqual([
       {
         role: 'assistant',
@@ -231,22 +229,7 @@ describe('QoderWork OTLP message semantics', () => {
         parts: [{ type: 'tool_call_response', id: 'call-1', response: 'file contents' }],
       },
     ]);
-    expect(secondRequest['gen_ai.input.messages']).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: 'inspect a file' }] },
-      {
-        role: 'assistant',
-        parts: [{
-          type: 'tool_call',
-          id: 'call-1',
-          name: 'Read',
-          arguments: { file_path: 'a.txt' },
-        }],
-      },
-      {
-        role: 'tool',
-        parts: [{ type: 'tool_call_response', id: 'call-1', response: 'file contents' }],
-      },
-    ]);
+    expect(secondRequest['gen_ai.input.messages']).toBeUndefined();
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
@@ -381,9 +364,7 @@ describe('QoderWork OTLP message semantics', () => {
         parts: [{ type: 'tool_call_response', id: 'call-2', response: 'b contents' }],
       },
     ]);
-    expect(secondRequest['gen_ai.input.messages'].map(message => message.role)).toEqual([
-      'user', 'assistant', 'tool', 'tool',
-    ]);
+    expect(secondRequest['gen_ai.input.messages']).toBeUndefined();
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
