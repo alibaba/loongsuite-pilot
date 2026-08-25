@@ -24,10 +24,49 @@ import {
   MAX_MULTIMODAL_PENDING_BYTES,
   MAX_MULTIMODAL_PENDING_UPLOADS,
   MULTIMODAL_SHUTDOWN_TIMEOUT_MS,
+  PATH_TO_URI_DEADLINE_MS,
 } from './types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
+
+/** Race a promise; timeout does not cancel the underlying work. */
+export async function withDeadline<T>(
+  promise: Promise<T>,
+  deadlineMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    return promise;
+  }
+
+  let settled = false;
+  const work = promise.then(
+    value => {
+      settled = true;
+      return value;
+    },
+    err => {
+      settled = true;
+      throw err;
+    },
+  );
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>(resolve => {
+        timer = setTimeout(() => resolve(onTimeout()), deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!settled) {
+      void work.catch(() => undefined);
+    }
+  }
+}
 
 interface PathUriCacheEntry {
   mtimeMs: number;
@@ -74,6 +113,22 @@ export class MultimodalProcessor {
       return null;
     }
 
+    const deadlineMs = opts?.deadlineMs ?? PATH_TO_URI_DEADLINE_MS;
+    return withDeadline(
+      this.convertPathToUri(filePath, timeUnixMs, opts),
+      deadlineMs,
+      () => {
+        logger.warn('multimodal pathToUri timed out', { path: filePath, deadlineMs });
+        return null;
+      },
+    );
+  }
+
+  private async convertPathToUri(
+    filePath: string,
+    timeUnixMs?: number,
+    opts?: PathToUriOptions,
+  ): Promise<UriResult | null> {
     const key = normalizeLocalImagePath(filePath);
     if (!key) return null;
 
@@ -286,17 +341,11 @@ export class MultimodalProcessor {
     this.pathUriInflight.clear();
 
     if (this.pending.size > 0) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.allSettled([...this.pending]),
-          new Promise<void>(resolve => {
-            timer = setTimeout(resolve, timeoutMs);
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await withDeadline(
+        Promise.allSettled([...this.pending]).then(() => undefined),
+        timeoutMs,
+        () => undefined,
+      );
       if (this.pending.size > 0) {
         logger.warn('multimodal shutdown timed out with uploads still in flight', {
           pending: this.pending.size,

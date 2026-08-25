@@ -9,6 +9,7 @@ import {
   extractToolImagePaths,
   resolveImagePath,
 } from '../../../src/inputs/qoder-trace/qoder-cli-multimodal.js';
+import { withDeadline } from '../../../src/multimodal/processor.js';
 import { statImagePath } from '../../../src/multimodal/resolve.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { UriResult } from '../../../src/multimodal/index.js';
@@ -351,6 +352,39 @@ describe('enrichCliMultimodal', () => {
     await enrichCliMultimodal([dup], { uploadMode: 'tool', pathToUri: fakePathToUri() });
     const dupUris = (dup['gen_ai.tool.call.result'] as any[]).filter((p: any) => p.type === 'uri');
     expect(dupUris).toHaveLength(1);
+  });
+
+  it('times out a never-resolving pathToUri and still converts later images', async () => {
+    const dir = makeTempDir();
+    const hang = writePng(dir, 'hang.png', 'hang');
+    const ok = writePng(dir, 'ok.png', 'ok');
+    const tool = cliEntry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.result': `Read image: ${hang} (1KB)\nRead image: ${ok} (1KB)`,
+    });
+    const started = Date.now();
+    await enrichCliMultimodal([tool], {
+      uploadMode: 'tool',
+      pathToUri: (filePath: string) =>
+        withDeadline(
+          (async () => {
+            if (filePath === hang) return new Promise(() => {});
+            return {
+              uri: 'oss://test/ok',
+              mime_type: 'image/png',
+              modality: 'image',
+              size: 2,
+              sha256: 'ok',
+            };
+          })(),
+          40,
+          () => null,
+        ),
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    const result = tool['gen_ai.tool.call.result'] as any[];
+    expect(result[0]).toEqual({ type: 'text', content: `Read image: ${hang} (1KB)\nRead image: ${ok} (1KB)` });
+    expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
   });
 
   it('does not throw when pathToUri throws; original result text remains', async () => {

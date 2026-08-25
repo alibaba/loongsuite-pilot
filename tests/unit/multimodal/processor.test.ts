@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MultimodalProcessor } from '../../../src/multimodal/processor.js';
+import { MultimodalProcessor, withDeadline } from '../../../src/multimodal/processor.js';
 import { mergeAllowedRootPaths } from '../../../src/multimodal/resolve.js';
 import { yyyymmddLocal } from '../../../src/multimodal/resolve.js';
 import {
@@ -34,6 +34,33 @@ function writeTempPng(name: string, content: string): string {
   fs.writeFileSync(file, Buffer.concat([PNG_HDR, Buffer.from(content)]));
   return file;
 }
+
+describe('withDeadline', () => {
+  it('returns the value when work finishes first', async () => {
+    await expect(withDeadline(Promise.resolve('ok'), 50, () => 'late')).resolves.toBe('ok');
+  });
+
+  it('returns onTimeout when work never settles', async () => {
+    const started = Date.now();
+    await expect(withDeadline(new Promise<string>(() => {}), 30, () => 'late')).resolves.toBe('late');
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  it('does not swallow a fast rejection', async () => {
+    await expect(withDeadline(Promise.reject(new Error('boom')), 50, () => 'late'))
+      .rejects.toThrow('boom');
+  });
+
+  it('deadlineMs <= 0 disables the race', async () => {
+    let resolve!: (value: string) => void;
+    const pending = new Promise<string>(r => {
+      resolve = r;
+    });
+    const raced = withDeadline(pending, 0, () => 'late');
+    resolve('ok');
+    await expect(raced).resolves.toBe('ok');
+  });
+});
 
 describe('MultimodalProcessor.blobToUri', () => {
   it('returns optimistic uri and enqueues upload', async () => {
@@ -481,6 +508,35 @@ describe('MultimodalProcessor.pathToUri', () => {
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     expect(await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW)).toBeNull();
     await processor.shutdown(100);
+  });
+
+  it('times out a never-resolving stat and returns null', async () => {
+    vi.resetModules();
+    vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
+      return {
+        ...actual,
+        lstatRegularImageFile: () => new Promise(() => {}),
+      };
+    });
+    try {
+      const { MultimodalProcessor: HungProcessor } = await import(
+        '../../../src/multimodal/processor.js'
+      );
+      const file = writeTempPng('hang.png', 'hang');
+      const uploader = new FakeUploader();
+      const processor = new HungProcessor(STORAGE_BASE, uploader);
+      const started = Date.now();
+      expect(await processor.pathToUri(file, EVENT_TIME_MS, {
+        ...TMP_ALLOW,
+        deadlineMs: 40,
+      })).toBeNull();
+      expect(Date.now() - started).toBeLessThan(500);
+      await processor.shutdown(100);
+    } finally {
+      vi.doUnmock('../../../src/multimodal/resolve.js');
+      vi.resetModules();
+    }
   });
 
   it('rejects pathToUri after shutdown', async () => {

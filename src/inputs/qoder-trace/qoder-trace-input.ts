@@ -81,6 +81,7 @@ export class QoderTraceInput extends BaseInput {
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
   private readonly allowedRootPaths: string[];
+  private multimodalStopped = false;
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -91,6 +92,11 @@ export class QoderTraceInput extends BaseInput {
     this.allowedRootPaths = this.multimodalEnabled
       ? resolveQoderAllowedRootPaths(opts.multimodal?.allowedRootPaths)
       : [];
+  }
+
+  override async stop(): Promise<void> {
+    this.multimodalStopped = true;
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -178,19 +184,23 @@ export class QoderTraceInput extends BaseInput {
     }
 
     if (this.multimodalEnabled && this.multimodalProcessor) {
-      const pathToUri = (filePath: string, timeUnixMs?: number) =>
-        this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
+      const pathToUri = async (filePath: string, timeUnixMs?: number) => {
+        if (this.multimodalStopped) return null;
+        return this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
           allowedRootPaths: this.allowedRootPaths,
         });
+      };
       for (const sessionEntries of ideSessionGroups.values()) {
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;
+        if (this.multimodalStopped) break;
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,
         });
       }
       for (const turnEntries of cliTurns) {
+        if (this.multimodalStopped) break;
         await enrichCliMultimodal(turnEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,

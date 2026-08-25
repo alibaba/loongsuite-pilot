@@ -16,6 +16,7 @@ import {
   resolveQoderAllowedRootPaths,
 } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
 import { canonicalizeRootPath, statImagePath } from '../../../src/multimodal/resolve.js';
+import { withDeadline } from '../../../src/multimodal/processor.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { UriResult } from '../../../src/multimodal/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -1532,6 +1533,106 @@ describe('QoderTraceInput multimodal', () => {
         const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
         expect(idea['gen_ai.tool.call.result']).toBe(`Image file: ${imgPath}`);
         expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('collect still returns text when pathToUri never resolves', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-hang-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) =>
+                withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 40, () => null),
+            } as any,
+          },
+        });
+
+        const started = Date.now();
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        expect(Date.now() - started).toBeLessThan(500);
+        const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
+        expect(cli['gen_ai.tool.call.result']).toBe(`Read image: ${imgPath} (1KB)`);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('stop finishes while a collect cycle is blocked on never-resolving pathToUri', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-stop-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        let pathToUriCalls = 0;
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) => {
+                pathToUriCalls += 1;
+                return withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 80, () => null);
+              },
+            } as any,
+          },
+        });
+
+        const started = input.start();
+        await vi.waitFor(() => expect(pathToUriCalls).toBeGreaterThan(0));
+        const stopStarted = Date.now();
+        await expect(input.stop()).resolves.toBeUndefined();
+        expect(Date.now() - stopStarted).toBeLessThan(500);
+        await expect(started).resolves.toBeUndefined();
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }

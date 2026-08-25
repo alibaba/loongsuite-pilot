@@ -76,6 +76,8 @@ export type PathToUriFn = (
 export interface PathToUriOptions {
   /** If empty / omitted, pathToUri rejects the read. */
   allowedRootPaths?: string[];
+  /** Per-read deadline; `<= 0` disables. Default `PATH_TO_URI_DEADLINE_MS`. */
+  deadlineMs?: number;
 }
 
 export interface PathStat {
@@ -100,4 +102,6 @@ export const MAX_MULTIMODAL_PATH_INFLIGHT = 1024;
 /** Max base64 chars (~4/3 of MAX_MULTIMODAL_DATA_SIZE). */
 export const MAX_MULTIMODAL_BASE64_CHARS = Math.ceil(MAX_MULTIMODAL_DATA_SIZE * 4 / 3) + 16;
 export const MULTIMODAL_SHUTDOWN_TIMEOUT_MS = 1_500;
+/** Per-image stat/read deadline so a hung mount cannot block collect/stop. */
+export const PATH_TO_URI_DEADLINE_MS = 3_000;
 export const MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';
