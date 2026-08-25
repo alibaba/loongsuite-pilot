@@ -152,6 +152,20 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       JSON.stringify(record['gen_ai.system_instructions'])
         === JSON.stringify([{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }])))
       .toBe(true);
+    expect(requestRecords.every(record => {
+      const messages = record['gen_ai.input.messages'];
+      return Array.isArray(messages)
+        && JSON.stringify(messages[0]) === JSON.stringify({
+          role: 'system',
+          parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
+        });
+    })).toBe(true);
+    expect(requestRecords[0]?.['gen_ai.input.messages_delta']).toEqual(expect.arrayContaining([{
+      role: 'system',
+      parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
+    }]));
+    expect((requestRecords[1]?.['gen_ai.input.messages_delta'] as Array<{ role?: string }> | undefined)
+      ?.some(message => message.role === 'system')).toBe(false);
     expect(requestRecords.every(record =>
       JSON.stringify(record['gen_ai.tool.definitions']) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
       .toBe(true);
@@ -195,6 +209,13 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       const agentSpan = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
       expect(agentSpan && toolDefinitions(agentSpan)).toEqual([EXPECTED_TOOL_DEFINITION]);
+      const agentInputMessages = JSON.parse(
+        String(agentSpan?.attributes['gen_ai.input.messages']),
+      ) as Array<{ role?: string; parts?: Array<{ content?: string }> }>;
+      expect(agentInputMessages[0]).toEqual({
+        role: 'system',
+        parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
+      });
       expect(llmSpans).toHaveLength(2);
       // otel-util-genai currently models definitions as turn-level metadata;
       // raw request-level attachment is asserted above for both API steps.
@@ -204,6 +225,14 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       expect(llmSpans.every(span =>
         String(span.attributes['gen_ai.system_instructions']).includes(EXPECTED_SYSTEM_PROMPT)))
         .toBe(true);
+      expect(llmSpans.every(span => {
+        const messages = JSON.parse(String(span.attributes['gen_ai.input.messages'])) as Array<{
+          role?: string;
+          parts?: Array<{ content?: string }>;
+        }>;
+        return messages[0]?.role === 'system'
+          && messages[0]?.parts?.[0]?.content === EXPECTED_SYSTEM_PROMPT;
+      })).toBe(true);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

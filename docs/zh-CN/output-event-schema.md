@@ -115,6 +115,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 `hermes` 的 system prompt 取自 `pre_api_request` 观测到的 provider 请求 body，因为 `conversation_history` 从不回放 system 消息。各 provider 形态归一化为同一组 parts：OpenAI 兼容的 `messages[]` 中 role 为 `system` / `developer` 的消息、Anthropic 与 Bedrock 的顶层 `system`（字符串或 block 列表）、Gemini 的 `systemInstruction.parts[].text`。prompt 为空或不存在时不产出该字段。
 
+为保留发送给模型的完整输入视图，`hermes` 还会把同一组 parts 作为 `role: "system"` 消息放在每条 `llm.request` 的 `gen_ai.input.messages` 首部。它只在当前 turn 第一条 request 的 `gen_ai.input.messages_delta` 中出现一次，后续 request 不重复追加；因此，下游 OTLP 的 LLM span 和 turn 级 AGENT span 都会在 `gen_ai.input.messages` 中包含该 system 消息。`gen_ai.input.messages_hash` 基于包含该 system 消息的完整输入计算。
+
 ## 多模态消息 Parts
 
 > **实验性。** 多模态 `uri` parts 与 `gen_ai.*.multimodal_metadata` 字段可能调整。
