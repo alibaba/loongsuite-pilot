@@ -868,10 +868,23 @@ describe('QoderTraceInput multimodal', () => {
       ]);
     });
 
-    it('parses angle-bracket destinations and optional titles', () => {
-      expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)')).toEqual(['/tmp/My Image.png']);
-      expect(extractMarkdownImagePaths('![x](/tmp/a.png "preview")')).toEqual(['/tmp/a.png']);
-      expect(extractMarkdownImagePaths("![x](/tmp/b.jpg 'preview')")).toEqual(['/tmp/b.jpg']);
+    it('parses markdown destinations and joins relative paths with cwd', () => {
+      const cwd = '/proj';
+      expect(extractMarkdownImagePaths('![x](images/a.png)', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](<images/My Image.png>)', cwd)).toEqual([
+        path.resolve(cwd, 'images/My Image.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](images/a.png "preview")', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths("![x](rel/b.jpg 'preview')", cwd)).toEqual([
+        path.resolve(cwd, 'rel/b.jpg'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](/tmp/a.png)', cwd)).toEqual(['/tmp/a.png']);
+      expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)', cwd)).toEqual(['/tmp/My Image.png']);
+      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual(['images/a.png']);
     });
 
     it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
@@ -1265,6 +1278,27 @@ describe('QoderTraceInput multimodal', () => {
       await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri() });
       const result = both['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-gate')).toBe(true);
+    });
+
+    it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
+      const dir = makeMmTempDir();
+      writePng(dir, 'rel.png', 'rel-img');
+      const pathToUri = fakePathToUri();
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          {
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'here ![g](rel.png)' }],
+          },
+        ],
+      });
+      (response as Record<string, unknown>)['agent.qoder.cwd'] = dir;
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      expect(pathToUri).toHaveBeenCalledWith(path.resolve(dir, 'rel.png'), expect.any(Number));
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/rel-img' });
     });
 
     it('output mode appends uri parts for markdown images on llm.response', async () => {

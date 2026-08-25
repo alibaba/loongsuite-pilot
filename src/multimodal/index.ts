@@ -3,7 +3,7 @@ export {
   isAgentMultimodalEnabled,
 } from './agent-gate.js';
 export { MultimodalProcessor } from './processor.js';
-export { isImageFilePath, matchAll, takeUniqueExtractedPaths } from './resolve.js';
+export { isImageFilePath, matchAll, resolveImagePath, takeUniqueExtractedPaths } from './resolve.js';
 export { attachMultimodalMetadataForEntry } from './rewrite.js';
 export { createUploader } from './uploader/factory.js';
 export type {

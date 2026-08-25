@@ -127,6 +127,22 @@ export function normalizeLocalImagePath(filePath: string): string | null {
   return path.resolve(bare);
 }
 
+/** Absolute stays; relative joins cwd (win32 vs posix). */
+export function resolveImagePath(raw: string, cwd?: string): string {
+  const trimmed = raw.trim().replace(/^['"]|['"]$/g, '');
+  if (!trimmed) return '';
+
+  if (process.platform === 'win32') {
+    if (path.win32.isAbsolute(trimmed)) return path.win32.normalize(trimmed);
+    if (cwd && cwd.trim()) return path.win32.resolve(cwd.trim(), trimmed);
+    return path.win32.resolve(trimmed);
+  }
+
+  if (path.isAbsolute(trimmed)) return path.normalize(trimmed);
+  if (cwd && cwd.trim()) return path.resolve(cwd.trim(), trimmed);
+  return path.resolve(trimmed);
+}
+
 /** Expand `~` and realpath a root. Missing paths stay lexical. */
 export function canonicalizeRootPath(raw: string): string {
   const trimmed = raw.trim();

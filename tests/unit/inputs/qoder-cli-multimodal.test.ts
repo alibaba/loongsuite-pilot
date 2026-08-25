@@ -7,10 +7,9 @@ import {
   enrichCliMultimodal,
   extractInputImagePaths,
   extractToolImagePaths,
-  resolveImagePath,
 } from '../../../src/inputs/qoder-trace/qoder-cli-multimodal.js';
 import { withDeadline } from '../../../src/multimodal/processor.js';
-import { statImagePath } from '../../../src/multimodal/resolve.js';
+import { resolveImagePath, statImagePath } from '../../../src/multimodal/resolve.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { UriResult } from '../../../src/multimodal/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';

@@ -7,6 +7,7 @@ import {
 import {
   attachMultimodalMetadataForEntry,
   matchAll,
+  resolveImagePath,
   takeUniqueExtractedPaths,
   MAX_MULTIMODAL_PARTS,
   MAX_MULTIMODAL_PATH_CHARS,
@@ -264,7 +265,7 @@ async function enrichOutputMarkdownImages(
       }
       if (texts.length === 0) continue;
 
-      const paths = extractMarkdownImagePaths(texts.join('\n'));
+      const paths = extractMarkdownImagePaths(texts.join('\n'), cwdOf(entry));
       if (paths.length === 0) continue;
 
       const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
@@ -361,8 +362,16 @@ export function extractToolImagePaths(text: string): string[] {
   ]);
 }
 
-export function extractMarkdownImagePaths(text: string): string[] {
-  return takeUniqueExtractedPaths(matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]));
+export function extractMarkdownImagePaths(text: string, cwd?: string): string[] {
+  return takeUniqueExtractedPaths(
+    matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]),
+    cwd ? raw => resolveImagePath(raw, cwd) : undefined,
+  );
+}
+
+function cwdOf(entry: AgentActivityEntry): string | undefined {
+  const cwd = (entry as Record<string, unknown>)['agent.qoder.cwd'];
+  return typeof cwd === 'string' && cwd.trim() ? cwd.trim() : undefined;
 }
 
 function requestIdOf(entry: AgentActivityEntry): string | undefined {

@@ -1,4 +1,3 @@
-import * as path from 'node:path';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import {
   multimodalUploadIncludesInput,
@@ -7,6 +6,7 @@ import {
 import {
   attachMultimodalMetadataForEntry,
   matchAll,
+  resolveImagePath,
   takeUniqueExtractedPaths,
   MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
@@ -256,23 +256,6 @@ function stripSizeSuffix(raw: string): string {
 
 function stripImageSourcePath(raw: string): string {
   return raw.replace(/,\s*original\b.*$/i, '').trim();
-}
-
-export function resolveImagePath(raw: string, cwd?: string): string {
-  const trimmed = raw.trim().replace(/^['"]|['"]$/g, '');
-  if (!trimmed) return '';
-
-  if (process.platform === 'win32') {
-    // Windows host: resolve with win32 semantics only (drive / UNC / relative).
-    if (path.win32.isAbsolute(trimmed)) return path.win32.normalize(trimmed);
-    if (cwd && cwd.trim()) return path.win32.resolve(cwd.trim(), trimmed);
-    return path.win32.resolve(trimmed);
-  }
-
-  // Linux / macOS: original posix path behavior.
-  if (path.isAbsolute(trimmed)) return path.normalize(trimmed);
-  if (cwd && cwd.trim()) return path.resolve(cwd.trim(), trimmed);
-  return path.resolve(trimmed);
 }
 
 function collectMessageDeltaTexts(entry: AgentActivityEntry): string {
