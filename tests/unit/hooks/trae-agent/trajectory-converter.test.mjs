@@ -259,6 +259,67 @@ describe('convertTrajectory - strip task_done from last step output (P1-9)', () 
     const bashPart = lastResp['gen_ai.output.messages'][0].parts.find(p => p.type === 'tool_call');
     expect(bashPart.name).toBe('bash');
   });
+
+  test('P1-10:末步 task_done 是唯一 part + content 空时，placeholder text 兜底', () => {
+    // Synthetic:末步 LLM response content='' and tool_calls=[task_done only].
+    // After P1-9 strip, parts would be empty → output.messages attribute
+    // would be dropped entirely → semantic.llm_has_input_output ERROR.
+    // The converter must push a placeholder text part so attribute stays non-empty.
+    const mutated = JSON.parse(JSON.stringify(RAW));
+    mutated.llm_interactions[14].response.content = '';
+    mutated.llm_interactions[14].response.tool_calls = [
+      { call_id: 'toolu_only_task_done', name: 'task_done', arguments: {}, id: null },
+    ];
+    const { entries } = convertTrajectory(mutated, { seenStepNumbers: new Set() });
+    const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
+    expect(lastResp['gen_ai.output.messages']).toBeDefined();
+    expect(Array.isArray(lastResp['gen_ai.output.messages'])).toBe(true);
+    expect(lastResp['gen_ai.output.messages'].length).toBeGreaterThan(0);
+    const partTypes = lastResp['gen_ai.output.messages'][0].parts.map(p => p.type);
+    // no tool_call (task_done stripped)
+    expect(partTypes).not.toContain('tool_call');
+    // placeholder text part exists
+    expect(partTypes).toContain('text');
+    const textPart = lastResp['gen_ai.output.messages'][0].parts.find(p => p.type === 'text');
+    expect(typeof textPart.content).toBe('string');
+    expect(textPart.content.length).toBeGreaterThan(0);
+  });
+});
+
+describe('convertTrajectory - ENTRY/AGENT input.messages (P1-#4)', () => {
+  test('first emitted LLM request carries gen_ai.input.messages_delta', () => {
+    // The OTLP converter library reads _delta (NOT full messages) from the
+    // first llm.request to populate ENTRY/AGENT input.messages. Without it,
+    // those synthesized spans have no input.messages.
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const firstReq = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(':s1'));
+    expect(firstReq['gen_ai.input.messages_delta']).toBeDefined();
+    expect(Array.isArray(firstReq['gen_ai.input.messages_delta'])).toBe(true);
+    expect(firstReq['gen_ai.input.messages_delta'].length).toBeGreaterThan(0);
+    // full messages also present (LLM span uses this)
+    expect(firstReq['gen_ai.input.messages']).toBeDefined();
+  });
+
+  test('non-first LLM requests do NOT carry messages_delta (avoid double-accumulation)', () => {
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    for (let sn = 2; sn <= 15; sn++) {
+      const req = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      expect(req['gen_ai.input.messages_delta']).toBeUndefined();
+    }
+  });
+
+  test('with seen-step skipping, first EMITTED LLM request carries messages_delta', () => {
+    // If step 1 is already seen (skipped), the first emitted step is step 2;
+    // its LLM request should carry _delta so ENTRY/AGENT input.messages populates.
+    const seen = new Set([1]);
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: seen });
+    const firstEmittedReq = entries.find(e => e['event.name'] === 'llm.request');
+    expect(firstEmittedReq['gen_ai.step.id']?.endsWith(':s2')).toBe(true);
+    expect(firstEmittedReq['gen_ai.input.messages_delta']).toBeDefined();
+    // only the first emitted carries _delta
+    const allReqsWithDelta = entries.filter(e => e['event.name'] === 'llm.request' && e['gen_ai.input.messages_delta'] !== undefined);
+    expect(allReqsWithDelta.length).toBe(1);
+  });
 });
 
 describe('convertTrajectory - incremental dedup (P0-2)', () => {
