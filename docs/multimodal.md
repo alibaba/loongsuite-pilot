@@ -141,7 +141,7 @@ Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | `[Image: source: <path>]` (paste) and `@path` (relative paths join `agent.qoder.cwd`) on user `messages_delta` | Alt+V paste, `@` / `--attachment` |
+| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, and `@path` (relative paths join `agent.qoder.cwd`), then unique-resolve | Paste image, `@` / `--attachment` |
 | `tool` | `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Path in the prompt then Read; ImageGen then Read to preview |
 | `output` | None | CLI does not embed images in the final assistant text |
 | `both` | `input` + `tool` | Paste/`@` plus tool read/generate |
@@ -150,6 +150,7 @@ Notes:
 
 - Glob-only listings that were never `Read` / `ImageGen` are not collected.
 - Remote OSS URLs are not used as the source; local `pathToUri` is.
+- CLI (1.1.29) writes `type: "attachment"` / `image_file.filename` (absolute local path) into the transcript. The hook only copies matching `image_file` objects onto `agent.qoder.attachments`. `QoderTraceInput` unions those filenames with `[Image: source:]` / `@` and unique-resolves.
 
 ## Output Shape (Short)
 

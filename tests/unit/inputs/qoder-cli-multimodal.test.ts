@@ -3,6 +3,7 @@ import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  attachmentImageFilenames,
   enrichCliMultimodal,
   extractInputImagePaths,
   extractToolImagePaths,
@@ -108,6 +109,35 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     expect(extractInputImagePaths(
       '[Image: source: /tmp/chart,final.png, original 100x80, displayed at 50x40]',
     )).toEqual(['/tmp/chart,final.png']);
+  });
+
+  it('unions attachment filename with @ / Image:source and unique-resolves', () => {
+    const filename = process.platform === 'win32'
+      ? 'C:\\Users\\me\\workspace\\picture\\pipeline.jpg'
+      : '/Users/me/workspace/picture/pipeline.jpg';
+    const extra = process.platform === 'win32' ? 'C:\\tmp\\extra.png' : '/tmp/extra.png';
+    const cwd = process.platform === 'win32' ? 'C:\\Users\\me\\workspace' : '/Users/me/workspace';
+    const entry = cliEntry({
+      'event.name': 'llm.request',
+      'agent.qoder.cwd': cwd as any,
+      'agent.qoder.attachments': [
+        { type: 'image_file', filename, displayPath: 'picture/pipeline.jpg' },
+        { type: 'skill_listing', filename: '/tmp/ignore.png' },
+      ] as any,
+      'gen_ai.input.messages_delta': [
+        {
+          role: 'user',
+          parts: [
+            { type: 'text', content: '@picture/pipeline.jpg 用一句话说明这张图' },
+            { type: 'text', content: `[Image: source: ${extra}]` },
+          ],
+        },
+      ],
+    });
+    expect(attachmentImageFilenames(entry)).toEqual([filename]);
+    const resolvedFilename = process.platform === 'win32' ? path.win32.normalize(filename) : filename;
+    const resolvedExtra = process.platform === 'win32' ? path.win32.normalize(extra) : extra;
+    expect(extractInputImagePaths(entry, cwd)).toEqual([resolvedFilename, resolvedExtra]);
   });
 
   it('parses Read image / Image file / ImageGen tool texts', () => {

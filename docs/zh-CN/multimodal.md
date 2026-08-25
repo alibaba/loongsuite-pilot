@@ -141,7 +141,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | 用户 `messages_delta` 中的 `[Image: source: <path>]`（粘贴）与 `@path`（相对路径拼 `agent.qoder.cwd`） | Alt+V 粘贴、`@` / `--attachment` |
+| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`），再按解析后路径去重 | 粘贴图像、`@` / `--attachment` |
 | `tool` | `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
 | `output` | 无 | CLI 终端不把图嵌进最终助手文本 |
 | `both` | `input` + `tool` | 覆盖粘贴/`@` 与工具读图/生成 |
@@ -150,6 +150,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 
 - 仅 Glob 列出、未实际 `Read`/`ImageGen` 的路径不会采集。
 - OSS 预签名/匿名 URL 不作为采集源；以本地路径 `pathToUri` 为准。
+- CLI（1.1.29）会在 transcript 写入 `type: "attachment"` / `image_file.filename`（本地绝对路径）。Hook 只把本轮 `image_file` 原样拷到 `agent.qoder.attachments`；Input 把它和 `[Image: source:]` / `@` 一起提取，解析后去重。
 
 ## 输出形态（简述）
 

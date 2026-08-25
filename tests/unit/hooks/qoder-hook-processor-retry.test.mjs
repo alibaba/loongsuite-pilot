@@ -797,4 +797,84 @@ describe('buildEventsFromBoundaries CLI image source parts', () => {
     expect(parts[0]).toEqual({ type: 'text', content: '[Image #0]这个图像在讲什么？' });
     expect(parts.some(p => p.type === 'text' && p.content.includes('[Image: source:'))).toBe(true);
   });
+
+  it('reads image_file.filename from the attachment row, not from user/assistant stream', () => {
+    const filename = '/Users/me/workspace/loongsuite-pilot/picture/pipeline.jpg';
+    const otherFilename = '/Users/me/workspace/other.jpg';
+    const user = {
+      type: 'user',
+      uuid: 'user-1',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      entrypoint: 'cli',
+      promptId: 'p-at',
+      message: { role: 'user', content: '@picture/pipeline.jpg 用一句话说明这张图' },
+    };
+    const attachment = {
+      type: 'attachment',
+      uuid: 'att-1',
+      parentUuid: 'user-1',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      entrypoint: 'cli',
+      attachment: {
+        type: 'image_file',
+        filename,
+        displayPath: 'picture/pipeline.jpg',
+        url: 'https://example.invalid/oss.jpg',
+      },
+    };
+    const otherTurnAttachment = {
+      type: 'attachment',
+      uuid: 'att-2',
+      parentUuid: 'user-other',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      attachment: { type: 'image_file', filename: otherFilename },
+    };
+    const orphanAttachment = {
+      type: 'attachment',
+      uuid: 'att-orphan',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      attachment: { type: 'image_file', filename: '/tmp/orphan.jpg' },
+    };
+    const skillListing = {
+      type: 'attachment',
+      timestamp: '2026-08-25T04:56:24.623Z',
+      attachment: { type: 'skill_listing', content: 'ignore me' },
+    };
+    const assistant = {
+      type: 'assistant',
+      timestamp: '2026-08-25T04:56:27.515Z',
+      message: {
+        role: 'assistant',
+        model: 'auto',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    };
+    const contentEvents = [user, assistant];
+    const allParsed = [user, attachment, otherTurnAttachment, orphanAttachment, skillListing, assistant];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-25T04:56:24.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-25T04:56:28.000Z' },
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, contentEvents),
+      contentEvents,
+      allParsed,
+      'turn-filename',
+      'session-filename',
+      'qoder',
+      {},
+      '/Users/me/other',
+    );
+    const request = records.find(r => r['event.name'] === 'llm.request');
+    const parts = request['gen_ai.input.messages_delta'][0].parts;
+    expect(parts).toEqual([{ type: 'text', content: '@picture/pipeline.jpg 用一句话说明这张图' }]);
+    expect(request['agent.qoder.attachments']).toEqual([
+      { type: 'image_file', filename, displayPath: 'picture/pipeline.jpg' },
+    ]);
+    expect(JSON.stringify(request['agent.qoder.attachments'])).not.toContain(otherFilename);
+    expect(JSON.stringify(request['agent.qoder.attachments'])).not.toContain('/tmp/orphan.jpg');
+    expect(JSON.stringify(request)).not.toContain('ignore me');
+    expect(JSON.stringify(request)).not.toContain('example.invalid');
+  });
 });

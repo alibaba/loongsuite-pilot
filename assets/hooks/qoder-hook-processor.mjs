@@ -1000,6 +1000,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'agent.qoder.content_type': 'text',
         time_unix_nano: timestampToUnixNanos(userRow.timestamp),
         observed_time_unix_nano: observedTs,
+        ...cliAttachmentFields(agentType, userRow, allParsed),
       });
     }
   }
@@ -1077,6 +1078,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: startNanos,
         observed_time_unix_nano: observedTs,
+        ...(i === 0 ? cliAttachmentFields(agentType, userRow, allParsed) : {}),
       });
     }
 
@@ -1372,6 +1374,41 @@ function extractToolResults(rows) {
 
 function isMetaUser(row) {
   return row?.isMeta === true || row?.isMeta === 'true';
+}
+
+function isImageFileAttachment(row) {
+  return row?.type === 'attachment' && row?.attachment?.type === 'image_file';
+}
+
+function collectTurnImageFileAttachments(rows, userRow) {
+  const out = [];
+  const userUuid = typeof userRow?.uuid === 'string' ? userRow.uuid : '';
+  if (!Array.isArray(rows) || !userUuid) return out;
+
+  for (const row of rows) {
+    if (!isImageFileAttachment(row) || row.parentUuid !== userUuid) continue;
+    const att = row.attachment || {};
+    const filename = typeof att.filename === 'string' ? att.filename.trim() : '';
+    if (filename) out.push(slimImageFileAttachment(att, filename));
+  }
+  return out;
+}
+
+function slimImageFileAttachment(att, filename) {
+  const slim = { type: 'image_file', filename };
+  if (typeof att.displayPath === 'string' && att.displayPath.trim()) {
+    slim.displayPath = att.displayPath.trim();
+  }
+  if (typeof att.mediaType === 'string' && att.mediaType.trim()) {
+    slim.mediaType = att.mediaType.trim();
+  }
+  return slim;
+}
+
+function cliAttachmentFields(agentType, userRow, allParsed) {
+  if (agentType !== 'qoder-cli') return {};
+  const attachments = collectTurnImageFileAttachments(allParsed, userRow);
+  return attachments.length > 0 ? { 'agent.qoder.attachments': attachments } : {};
 }
 
 function isRealUserPrompt(row) {

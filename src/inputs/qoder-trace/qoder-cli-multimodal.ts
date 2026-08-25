@@ -35,7 +35,8 @@ export interface EnrichCliMultimodalOptions {
 
 /**
  * CLI-only multimodal enrichment. Mutates entries in place.
- * Input: paste (`[Image: source:]`) and `@path`. Tool: Read/ImageGen local paths.
+ * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`, and
+ * `@path`, then unique-resolve. Tool: Read/ImageGen.
  * No output surface (CLI assistant text does not embed images). Fail-open.
  */
 export async function enrichCliMultimodal(
@@ -97,7 +98,7 @@ async function enrichInputImages(
     if (name !== 'llm.request' && name !== 'other') continue;
     if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
     const cwd = cwdOf(entry);
-    const paths = extractInputImagePaths(collectMessageDeltaTexts(entry), cwd);
+    const paths = extractInputImagePaths(entry, cwd);
     if (paths.length === 0) continue;
     const n = await appendUriPartsToMessagesDelta(
       entry,
@@ -209,11 +210,31 @@ async function convertPathsToUriParts(
   return parts;
 }
 
-export function extractInputImagePaths(text: string, cwd?: string): string[] {
+export function extractInputImagePaths(
+  source: AgentActivityEntry | string,
+  cwd?: string,
+): string[] {
+  const text = typeof source === 'string' ? source : collectMessageDeltaTexts(source);
   return resolveUniqueImagePaths([
+    ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
   ], cwd);
+}
+
+export function attachmentImageFilenames(entry: AgentActivityEntry): string[] {
+  const raw = (entry as Record<string, unknown>)['agent.qoder.attachments'];
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (rec.type !== 'image_file') continue;
+    if (typeof rec.filename !== 'string') continue;
+    const filename = rec.filename.trim();
+    if (filename) out.push(filename);
+  }
+  return out;
 }
 
 export function extractToolImagePaths(text: string, cwd?: string): string[] {
