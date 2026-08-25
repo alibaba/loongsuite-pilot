@@ -220,18 +220,18 @@ describe('UpdaterMetrics', () => {
   });
 
   describe('sendAlarm / sendStatus integration', () => {
-    it('calls sendStatus for queued events on flush', async () => {
+    it('does NOT send events as status rows (collector folds them into the heartbeat)', async () => {
       const m = createMetrics();
       await m.start();
       m.writeEvent('updater_started');
       await m.stop();
 
-      expect(mockSendStatus).toHaveBeenCalled();
-      const call = mockSendStatus.mock.calls.find(
+      // Events are persisted to the local JSONL only; no pilot_updater_event topic.
+      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(1);
+      const statusCall = mockSendStatus.mock.calls.find(
         (c: unknown[]) => c[0] === 'pilot_updater_event',
       );
-      expect(call).toBeDefined();
-      expect(call![1]).not.toHaveProperty('__topic__');
+      expect(statusCall).toBeUndefined();
     });
 
     it('calls sendAlarm for queued alarms on flush', async () => {

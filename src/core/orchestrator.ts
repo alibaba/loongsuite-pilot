@@ -79,7 +79,8 @@ import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
-import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
+import type { DataflowSnapshot, FlusherEndpointStats, InputStats } from '../metrics/metrics-collector.js';
+import type { OtlpEndpointCounter } from '../flushers/otlp-trace-flusher.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
@@ -102,6 +103,16 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
+  /**
+   * Listener id → the agent it belongs to, which is also the key `config.agents`
+   * gates on. Both roles are why the values are what they are and not simply the
+   * input's own `agentType`: the four qoder listeners deliberately roll up to one
+   * `qoder` agent, and renaming a value here would silently re-point a gate.
+   *
+   * A listener missing from this map is not an error — snapshot reporting falls
+   * back to the input's `agentType`. Entries exist for listeners whose agent name
+   * differs from that, plus the ones a gate looks up.
+   */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
@@ -1600,60 +1611,112 @@ export class Orchestrator extends EventEmitter {
     const inputCounters = this.inputManager.getInputCounters();
     const activeIds = this.inputManager.getActiveInputIds();
 
-    let sendEntriesTotal = 0;
-    let receivedBytesTotal = 0;
+    // Ingress only. The instance's egress is measured where the writes actually
+    // happen — the flusher counters below — so it is not summed from the inputs.
+    let inEventsTotal = 0;
+    let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
-      sendEntriesTotal += counter.outEvents;
-      receivedBytesTotal += counter.inBytes;
+      inEventsTotal += counter.inEvents;
+      inBytesTotal += counter.inBytes;
     }
 
-    // Aggregate flusher runner stats
-    const flusherRunner = {
-      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
-      totalDelayMs: 0, lastFlushTime: '', startTime: '',
-    };
+    // One entry per write destination, keyed by family plus the configured
+    // destination name — unique per flusher, and only ever a map key: the name is
+    // process-local ('user-sls', 'internal-cms'), so what identifies a row to a
+    // consumer is project + logstore, never the alias.
+    const flushers = new Map<string, FlusherEndpointStats>();
 
-    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
-
-    // Get SLS flusher counters if available
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) {
-      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
-        flusherRunner.inEntries += counter.inEntries;
-        flusherRunner.inBytes += counter.inBytes;
-        flusherRunner.outEntries += counter.outEntries;
-        flusherRunner.outFailed += counter.outFailed;
-        flusherRunner.totalDelayMs += counter.totalDelayMs;
-        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
-          flusherRunner.lastFlushTime = counter.lastFlushTime;
-        }
-        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
-          flusherRunner.startTime = counter.startTime;
-        }
-        flushers.set(epName, {
-          ...counter,
-          flusherName: 'sls',
+      for (const [name, counter] of slsFlusher.getEndpointCounters()) {
+        flushers.set(`sls:${name}`, {
+          kind: 'sls',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: counter.mode,
+          // SLS serializes the payload here, so these are real bytes.
+          bytesBasis: 'measured',
+          inEntries: counter.inEntries,
+          inBytes: counter.inBytes,
+          outEntries: counter.outEntries,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
         });
       }
     }
 
-    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    // OTLP spans: ARMS/CMS backends are their own family, everything else is
+    // plain otlp. A CMS destination resolves to a project and ARMS's fixed trace
+    // logstore, so its bytes sit on the same billing axis as an SLS row; a plain
+    // OTLP backend has no project of ours, so its row carries the family alone.
+    const otlpCounters = this.getOtlpEndpointCounters();
+    if (otlpCounters) {
+      for (const [name, counter] of otlpCounters) {
+        flushers.set(`${counter.isCms ? 'cms' : 'otlp'}:${name}`, {
+          kind: counter.isCms ? 'cms' : 'otlp',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: '',
+          // The OTLP exporter owns the encoding and reports no wire size, so these
+          // bytes are a per-span estimate — flagged, not passed off as measured.
+          bytesBasis: 'estimated',
+          inEntries: counter.inSpans,
+          inBytes: counter.inBytes,
+          outEntries: counter.outSpans,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
+        });
+      }
+    }
+
+    const inputs = new Map<string, InputStats & { type: string; agent: string; running: boolean }>();
     const inputIdleMinutes = new Map<string, number>();
+    const runningIds = new Set(activeIds);
     for (const [id, counter] of inputCounters) {
-      inputs.set(id, { ...counter });
+      // L2 rolls ingress up by owning agent; several inputs can share one agent.
+      // The map wins where it rolls several listeners into one agent; otherwise the
+      // input's own agentType is the answer. Never counter.type — that is the
+      // collection method, and reporting 'hook-jsonl' as an agent merges every
+      // unmapped hook input into one meaningless row.
+      const agent = Orchestrator.LISTENER_AGENT_MAP[id] ?? counter.agentType ?? id;
+      // `running` is what makes the owning agent count as installed: discovery only
+      // starts an input once it has detected the agent on this host.
+      inputs.set(id, { ...counter, agent, running: runningIds.has(id) });
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
     return {
-      sendEntriesTotal,
-      receivedBytesTotal,
-      inputCount: inputCounters.size,
-      activeInputCount: activeIds.length,
-      flusherRunner,
+      inEventsTotal,
+      inBytesTotal,
       inputs,
       flushers,
       inputIdleMinutes,
     };
+  }
+
+  /**
+   * Duck-typed on purpose: OtlpTraceFlusher is imported lazily so a missing
+   * OpenTelemetry dependency can't break startup, and a static `instanceof`
+   * import here would defeat that.
+   */
+  private getOtlpEndpointCounters(): Map<string, OtlpEndpointCounter> | null {
+    const candidates = this.flusher instanceof MultiFlusher
+      ? this.flusher.getFlushers()
+      : [this.flusher];
+    for (const f of candidates) {
+      if (f.name !== 'otlp-trace') continue;
+      const getter = (f as { getEndpointCounters?: unknown }).getEndpointCounters;
+      if (typeof getter === 'function') {
+        return (getter as () => Map<string, OtlpEndpointCounter>).call(f);
+      }
+    }
+    return null;
   }
 
   private getSlsFlusher(): SlsFlusher | null {

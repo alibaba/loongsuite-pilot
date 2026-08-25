@@ -519,6 +519,19 @@ describe('InputManager', () => {
     });
   });
 
+  describe('counter identity', () => {
+    it('records the collection method and the owning agent separately', () => {
+      // Reporting rolls ingress up by agent, so the counter has to carry the agent
+      // the input collects for. Without it the only label left is the collection
+      // method, and every unmapped input of one method collapses into one row.
+      manager.registerInput(new StubInput('qoder-ide') as any);
+
+      const counter = manager.getInputCounters().get('qoder-ide')!;
+      expect(counter.type).toBe(CollectionMethod.IdeSnapshotPolling);
+      expect(counter.agentType).toBe(ClientType.Qoder);
+    });
+  });
+
   describe('registerInput deduplication (T032)', () => {
     it('ignores duplicate registration for same id', () => {
       const input1 = new StubInput('dup-id');
