@@ -52,11 +52,15 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly segmentPairs: Map<string, SegmentLlmPair[]> = new Map();
   // Per-session tool timing from segments, keyed by tool_call_id.
   private readonly segmentToolTimings: Map<string, Map<string, SegmentToolTiming>> = new Map();
+  // Logical LLM iterations keyed by loop_id. QoderWork may change request_id
+  // after an internal retry without emitting another model.request.started, so
+  // request_id is intentionally not the pairing key for current segment logs.
+  private readonly segmentIterations: Map<string, Map<string, SegmentIterationLlmState>> = new Map();
   // Per-session set of turn_ids known to be subagent. We only filter LLM calls
   // whose turn_id is in this set. A turn_id absent from the set is treated as
   // main (covers the rare case where turn.started is split across files).
   private readonly subagentTurns: Map<string, Map<string, number>> = new Map();
-  // Per-session in-flight LLM pairs (request seen, response not yet seen).
+  // Legacy request-id pairing for old segment writers that do not emit loop_id.
   private readonly inFlightPairs: Map<string, Map<string, InFlightPair>> = new Map();
   // Legacy SDK fallback is token-only. It must never change timing or model.
   private readonly sdkTokenPairs: Map<string, SdkTokenPair[]> = new Map();
@@ -240,6 +244,7 @@ export class QoderWorkTraceInput extends BaseInput {
     for (const filePath of files) {
       await this.readSegmentsFile(sessionId, filePath);
     }
+    this.materializeCompletedSegmentIterations(sessionId);
   }
 
   private async resolveSegmentsDir(sessionId: string, cwd: string): Promise<string | undefined> {
@@ -340,15 +345,26 @@ export class QoderWorkTraceInput extends BaseInput {
         return;
       }
       case 'model.request.started': {
-        if (!event.turn_id || !event.request_id || !event.ts) return;
+        if (!event.turn_id || !event.ts) return;
         // Skip subagent LLM calls — hook transcript only carries main agent.
         if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
         const startNano = isoToNano(event.ts);
         if (!startNano) return;
+        if (event.loop_id) {
+          const state = this.getOrCreateSegmentIteration(sessionId, event, seenAtMs);
+          if (!state) return;
+          state.requestStartNano = earlierNano(state.requestStartNano, startNano);
+          state.model ||= event.data?.model || '';
+          state.seenAtMs = seenAtMs;
+          return;
+        }
+        if (!event.request_id) return;
         let m = this.inFlightPairs.get(sessionId);
         if (!m) { m = new Map(); this.inFlightPairs.set(sessionId, m); }
         m.set(event.request_id, {
           turnId: event.turn_id,
+          loopId: event.loop_id,
+          requestIndex: positiveNumber(event.data?.request_index),
           startNano,
           model: event.data?.model || '',
           seenAtMs,
@@ -356,17 +372,34 @@ export class QoderWorkTraceInput extends BaseInput {
         return;
       }
       case 'model.response.completed': {
-        if (!event.turn_id || !event.request_id || !event.ts) return;
+        if (!event.turn_id || !event.ts) return;
         if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const endNano = isoToNano(event.ts);
+        if (!endNano) return;
+        if (event.loop_id) {
+          const state = this.getOrCreateSegmentIteration(sessionId, event, seenAtMs);
+          if (!state) return;
+          // A future writer may emit several completed attempts for one logical
+          // iteration. The final completion owns end/model/usage/stop reason.
+          if (!state.responseEndNano || BigInt(endNano) >= BigInt(state.responseEndNano)) {
+            state.responseEndNano = endNano;
+            state.model = event.data?.model || state.model || '';
+            state.usage = extractSegmentUsage(event.data);
+            state.stopReason = getSegmentString(event.data?.stop_reason);
+          }
+          state.seenAtMs = seenAtMs;
+          return;
+        }
+        if (!event.request_id) return;
         const inFlightForSession = this.inFlightPairs.get(sessionId);
         const inFlight = inFlightForSession?.get(event.request_id);
         if (!inFlight) return; // orphan response (e.g. resumed mid-stream)
         inFlightForSession!.delete(event.request_id);
-        const endNano = isoToNano(event.ts);
-        if (!endNano) return;
         const list = this.segmentPairs.get(sessionId) ?? [];
         list.push({
           turnId: inFlight.turnId,
+          loopId: inFlight.loopId || event.loop_id,
+          requestIndex: inFlight.requestIndex ?? positiveNumber(event.data?.request_index),
           startNano: inFlight.startNano,
           endNano,
           model: event.data?.model || inFlight.model || '',
@@ -376,6 +409,26 @@ export class QoderWorkTraceInput extends BaseInput {
         this.segmentPairs.set(sessionId, list);
         return;
       }
+      case 'loop.iteration.started':
+      case 'loop.iteration.finished': {
+        if (!event.turn_id || !event.loop_id || !event.ts) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const nano = isoToNano(event.ts);
+        if (!nano) return;
+        const state = this.getOrCreateSegmentIteration(sessionId, event, seenAtMs);
+        if (!state) return;
+        if (event.type === 'loop.iteration.started') {
+          state.iterationStartNano = earlierNano(state.iterationStartNano, nano);
+        } else {
+          state.iterationEndNano = laterNano(state.iterationEndNano, nano);
+        }
+        state.seenAtMs = seenAtMs;
+        return;
+      }
+      case 'model.request.attempt_failed':
+        // Attempt failure does not close the logical loop. A later completed
+        // event may use a different request_id but the same loop_id.
+        return;
       case 'tool.requested':
       case 'tool.execution.finished': {
         if (!event.turn_id || !event.tool_call_id || !event.ts) return;
@@ -392,6 +445,30 @@ export class QoderWorkTraceInput extends BaseInput {
         } else {
           existing.finishedNano = nano;
         }
+        timings.set(event.tool_call_id, existing);
+        this.segmentToolTimings.set(sessionId, timings);
+        return;
+      }
+      case 'hook.started': {
+        if (!event.tool_call_id || !event.ts) return;
+        const hookEventName = getSegmentString(event.data?.hook_event_name);
+        const isPre = hookEventName === 'PreToolUse';
+        const isPost = hookEventName === 'PostToolUse' || hookEventName === 'PostToolUseFailure';
+        if (!isPre && !isPost) return;
+        const nano = isoToNano(event.ts);
+        if (!nano) return;
+        const timings = this.segmentToolTimings.get(sessionId) ?? new Map<string, SegmentToolTiming>();
+        const existing = timings.get(event.tool_call_id) ?? {
+          turnId: event.turn_id || '',
+          seenAtMs,
+        };
+        existing.seenAtMs = seenAtMs;
+        const candidate: SegmentHookTiming = {
+          nano,
+          source: getSegmentString(event.data?.source),
+        };
+        if (isPre) (existing.preHookTimings ??= []).push(candidate);
+        else (existing.postHookTimings ??= []).push(candidate);
         timings.set(event.tool_call_id, existing);
         this.segmentToolTimings.set(sessionId, timings);
         return;
@@ -432,7 +509,13 @@ export class QoderWorkTraceInput extends BaseInput {
           const pair = this.takeSegmentPair(sessionId, turnId, request, response);
           if (pair) {
             (request as Record<string, unknown>)['time_unix_nano'] = pair.startNano;
+            if (pair.iterationStartNano) {
+              (request as Record<string, unknown>)['agent.qoderwork.step.start_time_unix_nano'] = pair.iterationStartNano;
+            }
             (response as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
+            if (pair.iterationEndNano) {
+              (request as Record<string, unknown>)['agent.qoderwork.step.end_time_unix_nano'] = pair.iterationEndNano;
+            }
 
             if (pair.model) {
               for (const e of stepEntries) {
@@ -489,7 +572,10 @@ export class QoderWorkTraceInput extends BaseInput {
 
       const nextRequest = nextStepEntries.find(e => e['event.name'] === 'llm.request');
       if (!nextRequest) continue;
-      const nextStartNano = nextRequest['time_unix_nano'] as string | undefined;
+      const nextStartNano = (
+        nextRequest['agent.qoderwork.step.start_time_unix_nano']
+        ?? nextRequest['time_unix_nano']
+      ) as string | undefined;
       if (!nextStartNano) continue;
       const nextStartBig = BigInt(nextStartNano);
       const capNano = String(nextStartBig - 1_000_000n); // 减 1ms
@@ -717,6 +803,7 @@ export class QoderWorkTraceInput extends BaseInput {
     const cutoff = Date.now() - SEGMENT_STATE_TTL_MS;
     evictMapValues(this.segmentPairs, pair => pair.seenAtMs >= cutoff);
     evictNestedMapValues(this.segmentToolTimings, timing => timing.seenAtMs >= cutoff);
+    evictNestedMapValues(this.segmentIterations, timing => timing.seenAtMs >= cutoff);
     evictNestedMapValues(this.subagentTurns, seenAtMs => seenAtMs >= cutoff);
     evictNestedMapValues(this.inFlightPairs, pair => pair.seenAtMs >= cutoff);
     evictMapValues(this.sdkTokenPairs, pair => pair.seenAtMs >= cutoff);
@@ -725,6 +812,60 @@ export class QoderWorkTraceInput extends BaseInput {
     }
     for (const [sessionId, cachedDir] of this.segmentDirBySession) {
       if (cachedDir.seenAtMs < cutoff) this.segmentDirBySession.delete(sessionId);
+    }
+  }
+
+  private getOrCreateSegmentIteration(
+    sessionId: string,
+    event: SegmentEvent,
+    seenAtMs: number,
+  ): SegmentIterationLlmState | undefined {
+    if (!event.turn_id || !event.loop_id) return undefined;
+    const states = this.segmentIterations.get(sessionId) ?? new Map<string, SegmentIterationLlmState>();
+    const state = states.get(event.loop_id) ?? {
+      turnId: event.turn_id,
+      loopId: event.loop_id,
+      requestIndex: positiveNumber(event.data?.request_index) ?? loopIterationIndex(event.loop_id),
+      model: '',
+      usage: {},
+      seenAtMs,
+    };
+    state.turnId = event.turn_id;
+    state.requestIndex ??= positiveNumber(event.data?.request_index) ?? loopIterationIndex(event.loop_id);
+    state.seenAtMs = seenAtMs;
+    states.set(event.loop_id, state);
+    this.segmentIterations.set(sessionId, states);
+    return state;
+  }
+
+  private materializeCompletedSegmentIterations(sessionId: string): void {
+    const states = this.segmentIterations.get(sessionId);
+    if (!states?.size) return;
+
+    const pairs = this.segmentPairs.get(sessionId) ?? [];
+    for (const [loopId, state] of states) {
+      if (!state.responseEndNano) continue;
+      const startNano = state.requestStartNano ?? state.iterationStartNano;
+      if (!startNano) continue;
+      pairs.push({
+        turnId: state.turnId,
+        loopId,
+        requestIndex: state.requestIndex,
+        startNano,
+        endNano: state.responseEndNano,
+        iterationStartNano: state.iterationStartNano,
+        iterationEndNano: state.iterationEndNano,
+        model: state.model,
+        usage: state.usage,
+        stopReason: state.stopReason,
+        seenAtMs: state.seenAtMs,
+      });
+      states.delete(loopId);
+    }
+    if (states.size === 0) this.segmentIterations.delete(sessionId);
+    if (pairs.length > 0) {
+      pairs.sort(compareSegmentPairs);
+      this.segmentPairs.set(sessionId, pairs);
     }
   }
 
@@ -737,7 +878,18 @@ export class QoderWorkTraceInput extends BaseInput {
     const buffer = this.segmentPairs.get(sessionId);
     if (!buffer?.length) return undefined;
 
-    let idx = turnId ? buffer.findIndex(pair => pair.turnId === turnId) : -1;
+    let idx = -1;
+    const stepIndex = stepIterationIndex(request['gen_ai.step.id']);
+    if (turnId && stepIndex !== undefined) {
+      idx = buffer.findIndex(pair => pair.turnId === turnId && pair.requestIndex === stepIndex);
+      // Once a writer provides iteration indexes, a missing pair is a real gap
+      // (for example an interrupted loop). Do not shift the following pair into
+      // this transcript step.
+      if (idx < 0 && buffer.some(pair => pair.turnId === turnId && pair.requestIndex !== undefined)) {
+        return undefined;
+      }
+    }
+    if (idx < 0 && turnId) idx = buffer.findIndex(pair => pair.turnId === turnId);
     if (idx < 0) {
       idx = buffer.findIndex(pair => this.isSegmentPairCompatible(pair, request, response));
     }
@@ -762,26 +914,37 @@ export class QoderWorkTraceInput extends BaseInput {
 
   private applySegmentToolTiming(sessionId: string, stepEntries: AgentActivityEntry[]): void {
     const timings = this.segmentToolTimings.get(sessionId);
-    if (!timings?.size) return;
 
     const usedCallIds = new Set<string>();
+    const modelResponseNano = stepEntries.find(entry => entry['event.name'] === 'llm.response')
+      ?.time_unix_nano as string | undefined;
     for (const entry of stepEntries) {
       const eventName = entry['event.name'];
       if (eventName !== 'tool.call' && eventName !== 'tool.result') continue;
       const callId = entry['gen_ai.tool.call.id'] as string | undefined;
       if (!callId) continue;
-      const timing = timings.get(callId);
-      if (!timing) continue;
+      const timing = timings?.get(callId);
 
-      if (eventName === 'tool.call' && timing.requestedNano) {
-        (entry as Record<string, unknown>)['time_unix_nano'] = timing.requestedNano;
+      if (eventName === 'tool.call') {
+        // Prefer timestamps emitted closest to QoderWork's own runtime:
+        // runtime > user settings > plugins. If no PreToolUse exists, the
+        // owning model response completion is the safest start fallback.
+        const startNano = selectPreferredHookNano(timing?.preHookTimings)
+          ?? modelResponseNano
+          ?? timing?.requestedNano;
+        if (!startNano) continue;
+        (entry as Record<string, unknown>)['time_unix_nano'] = startNano;
         usedCallIds.add(callId);
-      } else if (eventName === 'tool.result' && timing.finishedNano) {
-        (entry as Record<string, unknown>)['time_unix_nano'] = timing.finishedNano;
+      } else if (eventName === 'tool.result') {
+        const endNano = selectPreferredHookNano(timing?.postHookTimings)
+          ?? timing?.finishedNano;
+        if (!endNano) continue;
+        (entry as Record<string, unknown>)['time_unix_nano'] = endNano;
         usedCallIds.add(callId);
       }
     }
 
+    if (!timings) return;
     for (const callId of usedCallIds) {
       const timing = timings.get(callId);
       const hasCallEntry = stepEntries.some(entry =>
@@ -790,7 +953,12 @@ export class QoderWorkTraceInput extends BaseInput {
       const hasResultEntry = stepEntries.some(entry =>
         entry['event.name'] === 'tool.result' && entry['gen_ai.tool.call.id'] === callId
       );
-      if (hasCallEntry && hasResultEntry && timing?.requestedNano && timing.finishedNano) {
+      const hasStartTiming = !!selectPreferredHookNano(timing?.preHookTimings)
+        || !!timing?.requestedNano
+        || !!modelResponseNano;
+      const hasEndTiming = !!selectPreferredHookNano(timing?.postHookTimings)
+        || !!timing?.finishedNano;
+      if (hasCallEntry && hasResultEntry && hasStartTiming && hasEndTiming) {
         timings.delete(callId);
       }
     }
@@ -845,6 +1013,7 @@ interface SegmentEvent {
   turn_id?: string;
   request_id?: string;
   tool_call_id?: string;
+  loop_id?: string;
   data?: {
     model?: string;
     is_subagent?: boolean;
@@ -855,6 +1024,8 @@ interface SegmentEvent {
 
 interface InFlightPair {
   turnId: string;
+  loopId?: string;
+  requestIndex?: number;
   startNano: string;
   model: string;
   seenAtMs: number;
@@ -862,10 +1033,15 @@ interface InFlightPair {
 
 interface SegmentLlmPair {
   turnId: string;
+  loopId?: string;
+  requestIndex?: number;
   startNano: string;
   endNano: string;
+  iterationStartNano?: string;
+  iterationEndNano?: string;
   model: string;
   usage: TokenUsage;
+  stopReason?: string;
   seenAtMs: number;
 }
 
@@ -874,6 +1050,27 @@ interface SegmentToolTiming {
   toolName?: string;
   requestedNano?: string;
   finishedNano?: string;
+  preHookTimings?: SegmentHookTiming[];
+  postHookTimings?: SegmentHookTiming[];
+  seenAtMs: number;
+}
+
+interface SegmentHookTiming {
+  nano: string;
+  source: string;
+}
+
+interface SegmentIterationLlmState {
+  turnId: string;
+  loopId: string;
+  requestIndex?: number;
+  iterationStartNano?: string;
+  iterationEndNano?: string;
+  requestStartNano?: string;
+  responseEndNano?: string;
+  model: string;
+  usage: TokenUsage;
+  stopReason?: string;
   seenAtMs: number;
 }
 
@@ -897,6 +1094,58 @@ interface SdkInFlightMessage {
 interface CachedSegmentDir {
   path: string;
   seenAtMs: number;
+}
+
+const HOOK_SOURCE_PRIORITY: Record<string, number> = {
+  runtime: 0,
+  user: 1,
+  plugins: 2,
+};
+
+function selectPreferredHookNano(candidates: SegmentHookTiming[] | undefined): string | undefined {
+  if (!candidates?.length) return undefined;
+  return [...candidates]
+    .sort((left, right) => {
+      const priorityDelta = (HOOK_SOURCE_PRIORITY[left.source] ?? 3)
+        - (HOOK_SOURCE_PRIORITY[right.source] ?? 3);
+      if (priorityDelta !== 0) return priorityDelta;
+      return BigInt(left.nano) < BigInt(right.nano) ? -1 : BigInt(left.nano) > BigInt(right.nano) ? 1 : 0;
+    })[0]?.nano;
+}
+
+function getSegmentString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function earlierNano(current: string | undefined, candidate: string): string {
+  return !current || BigInt(candidate) < BigInt(current) ? candidate : current;
+}
+
+function laterNano(current: string | undefined, candidate: string): string {
+  return !current || BigInt(candidate) > BigInt(current) ? candidate : current;
+}
+
+function loopIterationIndex(loopId: string): number | undefined {
+  const match = loopId.match(/:(\d+)$/);
+  return match ? positiveNumber(Number(match[1])) : undefined;
+}
+
+function stepIterationIndex(stepId: unknown): number | undefined {
+  if (typeof stepId !== 'string') return undefined;
+  const match = stepId.match(/:s(\d+)$/);
+  return match ? positiveNumber(Number(match[1])) : undefined;
+}
+
+function compareSegmentPairs(left: SegmentLlmPair, right: SegmentLlmPair): number {
+  if (left.requestIndex !== undefined && right.requestIndex !== undefined
+    && left.requestIndex !== right.requestIndex) {
+    return left.requestIndex - right.requestIndex;
+  }
+  if (left.requestIndex !== undefined) return -1;
+  if (right.requestIndex !== undefined) return 1;
+  const leftStart = left.iterationStartNano ?? left.startNano;
+  const rightStart = right.iterationStartNano ?? right.startNano;
+  return BigInt(leftStart) < BigInt(rightStart) ? -1 : BigInt(leftStart) > BigInt(rightStart) ? 1 : 0;
 }
 
 function isoToNano(iso: string): string | undefined {

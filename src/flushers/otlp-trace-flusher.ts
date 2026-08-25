@@ -156,6 +156,81 @@ function estimateSpanSize(span: ReadableSpan): number {
   return size;
 }
 
+/**
+ * Apply QoderWork's explicit loop.iteration boundaries to STEP spans without
+ * changing the enclosed LLM timestamps. The converter otherwise derives STEP
+ * start/end from child records, which loses the small but real orchestration
+ * window around each model/tool wave.
+ */
+export function applyQoderWorkStepTiming(
+  records: AgentActivityEntry[],
+  spans: ReadableSpan[],
+): void {
+  // OtlpTraceFlusher invokes the converter once per turn, so session + round
+  // uniquely identifies a STEP even though the converter does not carry the
+  // event-log turn id onto STEP spans.
+  const boundaries = new Map<string, { startNano?: string; endNano?: string }>();
+  for (const record of records) {
+    const sessionId = record['gen_ai.session.id'];
+    const stepId = record['gen_ai.step.id'];
+    if (typeof sessionId !== 'string' || typeof stepId !== 'string') continue;
+    const startNano = record['agent.qoderwork.step.start_time_unix_nano'];
+    const endNano = record['agent.qoderwork.step.end_time_unix_nano'];
+    if (typeof startNano !== 'string' && typeof endNano !== 'string') continue;
+    const round = stepRound(stepId);
+    if (round === undefined) continue;
+    boundaries.set(`${sessionId}\0${round}`, {
+      ...(typeof startNano === 'string' ? { startNano } : {}),
+      ...(typeof endNano === 'string' ? { endNano } : {}),
+    });
+  }
+  if (boundaries.size === 0) return;
+
+  for (const span of spans) {
+    if (span.attributes['gen_ai.span.kind'] !== 'STEP') continue;
+    const sessionId = span.attributes['gen_ai.session.id'];
+    const round = span.attributes['gen_ai.react.round'];
+    if (typeof sessionId !== 'string' || typeof round !== 'number') continue;
+    const boundary = boundaries.get(`${sessionId}\0${round}`);
+    if (!boundary) continue;
+
+    const currentStartNano = hrTimeToNano(span.startTime);
+    const currentEndNano = currentStartNano + hrTimeToNano(span.duration);
+    const desiredStartNano = parseNano(boundary.startNano) ?? currentStartNano;
+    const desiredEndNano = parseNano(boundary.endNano) ?? currentEndNano;
+    if (desiredEndNano < desiredStartNano) continue;
+
+    // ReadableSpan declares these values readonly and SDK Span exposes duration
+    // through a getter. Define per-instance values so this stays independent of
+    // the SDK Span's private backing fields.
+    Object.defineProperties(span, {
+      startTime: { value: nanoToHrTime(desiredStartNano), configurable: true },
+      endTime: { value: nanoToHrTime(desiredEndNano), configurable: true },
+      duration: { value: nanoToHrTime(desiredEndNano - desiredStartNano), configurable: true },
+    });
+  }
+}
+
+function stepRound(stepId: string): number | undefined {
+  const match = stepId.match(/(?:^|[_:s])(\d+)$/);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function parseNano(value: string | undefined): bigint | undefined {
+  if (!value) return undefined;
+  try { return BigInt(value); } catch { return undefined; }
+}
+
+function hrTimeToNano(value: readonly [number, number]): bigint {
+  return BigInt(value[0]) * 1_000_000_000n + BigInt(value[1]);
+}
+
+function nanoToHrTime(value: bigint): [number, number] {
+  return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+}
+
 export class OtlpTraceFlusher extends BaseFlusher {
   readonly name = 'otlp-trace';
 
@@ -606,6 +681,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       inMem.reset();
 
       if (spans.length === 0) return;
+      applyQoderWorkStepTiming(records, spans);
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
         this.enrichOpenClawToolAttributes(records, spans);
