@@ -27,6 +27,7 @@ import {
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { formatTime } from '../utils/time-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,6 +100,75 @@ interface AgentExportState {
   exporters: Array<{ name: string; exporter: TraceExporterLike }>;
 }
 
+/**
+ * Per-endpoint export counters, mirroring SlsFlusher's EndpointCounter so both
+ * output legs of the agent pipeline can be reported side by side in L2.
+ * Unit is spans (the OTLP equivalent of SLS log entries).
+ */
+export interface OtlpEndpointCounter {
+  inSpans: number;
+  inBytes: number;
+  outSpans: number;
+  /**
+   * Estimated bytes actually exported to this endpoint (same estimator as
+   * inBytes). Counted per endpoint, so a span exported to two backends is
+   * counted twice — the billing view wants both writes.
+   */
+  outBytes: number;
+  outFailed: number;
+  totalDelayMs: number;
+  lastFlushTime: string;
+  startTime: string;
+  /** True when this endpoint is an ARMS/CMS backend (x-arms-* / x-cms-* headers). */
+  isCms: boolean;
+  /**
+   * SLS project this backend's spans land in, so a CMS destination is billable
+   * on the same project axis as an SLS one. ARMS derives it from the endpoint
+   * host, which config-loader has already done into `x-arms-project`; empty for
+   * a plain OTLP backend, whose storage is not ours to name.
+   */
+  project: string;
+  /** ARMS's fixed trace logstore. Empty for a plain OTLP backend. */
+  logstore: string;
+}
+
+/**
+ * Every ARMS trace endpoint writes into this one logstore inside its project —
+ * ARMS's own convention, not something the endpoint or headers tell us, so it
+ * is hardcoded here rather than derived.
+ */
+const ARMS_TRACE_LOGSTORE = 'logstore-tracing';
+
+/**
+ * A CMS/ARMS backend is an OTLP endpoint carrying the ARMS auth headers that
+ * cmsEntryToOtlpEndpoint injects. Classifying by header (not by endpoint name)
+ * keeps a plain user-configured OTLP backend from being mislabelled as CMS.
+ */
+function isCmsEndpoint(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((h) => {
+    const k = h.toLowerCase();
+    return k === 'x-cms-workspace' || k === 'x-arms-license-key' || k === 'x-arms-project';
+  });
+}
+
+/**
+ * The ARMS project for a CMS endpoint. config-loader already resolved it (from
+ * the entry's explicit project, else the endpoint host) into `x-arms-project`,
+ * so read that instead of parsing the URL a second time and risking a different
+ * answer. Falls back to the host's first label — an endpoint classified as CMS
+ * by workspace/license header alone carries no project header.
+ */
+function cmsProjectOf(headers: Record<string, string>, url: string): string {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === 'x-arms-project' && value) return value;
+  }
+  try {
+    return new URL(url).hostname.split('.')[0] ?? '';
+  } catch {
+    return '';
+  }
+}
+
 const RESERVED_RESOURCE_KEYS = new Set([
   'service.name',
   'service.version',
@@ -166,6 +236,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly instanceId = randomUUID();
   private readonly pilotVersion: string;
   private readonly endpoints: ResolvedOtlpEndpoint[];
+  private readonly endpointCounters: Map<string, OtlpEndpointCounter> = new Map();
   private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
@@ -207,6 +278,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       serviceName: ep.serviceName || cfg.serviceName,
       appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
     }));
+    for (const ep of this.endpoints) {
+      const isCms = isCmsEndpoint(ep.headers);
+      this.endpointCounters.set(ep.name, {
+        inSpans: 0, inBytes: 0, outSpans: 0, outBytes: 0, outFailed: 0,
+        totalDelayMs: 0, lastFlushTime: '', startTime: '',
+        isCms,
+        project: isCms ? cmsProjectOf(ep.headers, ep.url) : '',
+        logstore: isCms ? ARMS_TRACE_LOGSTORE : '',
+      });
+    }
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
@@ -680,20 +761,41 @@ export class OtlpTraceFlusher extends BaseFlusher {
     agentType: string,
     spans: ReadableSpan[],
   ): Promise<void> {
+    const counter = this.endpointCounters.get(endpointName);
+    const startMs = Date.now();
+    // Sized once and reused on the success path: in and out must measure the
+    // same thing, or the drop rate between them becomes meaningless.
+    let batchBytes = 0;
+    if (counter) {
+      counter.inSpans += spans.length;
+      for (const span of spans) batchBytes += estimateSpanSize(span);
+      counter.inBytes += batchBytes;
+      if (!counter.startTime) counter.startTime = formatTime(new Date());
+    }
     // Never rejects: a failing backend is isolated + persisted, not propagated.
     return new Promise<void>((resolve) => {
       exporter.export(spans, (result) => {
+        if (counter) counter.totalDelayMs += Date.now() - startMs;
         if (result.code !== ExportResultCode.SUCCESS) {
+          if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
           this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
           }).catch(() => undefined);
+        } else if (counter) {
+          counter.outSpans += spans.length;
+          counter.outBytes += batchBytes;
+          counter.lastFlushTime = formatTime(new Date());
         }
         resolve();
       });
     });
+  }
+
+  getEndpointCounters(): Map<string, OtlpEndpointCounter> {
+    return this.endpointCounters;
   }
 
   private getOrCreateConvertState(

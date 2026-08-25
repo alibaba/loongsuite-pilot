@@ -29,7 +29,14 @@ export interface InputCounter {
   outFailed: number;
   lastPollTime: string;
   startTime: string;
+  /** How this input collects (CollectionMethod) — never an agent name. */
   type: string;
+  /**
+   * The agent this input collects for, straight from the input itself. Reporting
+   * rolls ingress up by agent, and this is the only source that is right for
+   * every input, mapped or not.
+   */
+  agentType: string;
   lastActiveTime: number;
 }
 
@@ -110,6 +117,7 @@ export class InputManager extends EventEmitter {
       lastPollTime: '',
       startTime: '',
       type: input.collectionMethod,
+      agentType: input.agentType,
       lastActiveTime: 0,
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
