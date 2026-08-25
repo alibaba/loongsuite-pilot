@@ -153,6 +153,19 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
+## Send Failure Classification, Cooldown & Circuit Breaker
+
+After retries are exhausted, a send failure is classified by actionability, which drives the alarm level and recovery behavior:
+
+| Class | Trigger | Alarm behavior |
+|-------|---------|----------------|
+| `transient` | Timeout / network failure / 5xx | Not alarmed per-occurrence; failures are only reflected in the failure metric. A single alarm is raised only when one endpoint fails whole batches for several consecutive flush cycles. |
+| `quota` | 429 throttling | Alarmed per-occurrence (aggregated). |
+| `config` | 404 / 403 with an SLS error code, or project not-exist / forbidden / in-recycle-bin | Alarm is cooldown-gated (once per hour) and trips a circuit breaker for that endpoint. |
+| `payload` | 413, or a single entry larger than the per-request body cap | Alarmed (an oversize entry's largest field is truncated to fit, or the entry is dropped). |
+
+Circuit breaker: when an endpoint keeps returning terminal `config` failures, Pilot stops retrying it at high frequency and backs off exponentially (capped at 10 minutes). When the backoff elapses, one probe request is allowed through, and success clears the breaker automatically. Breaker state is in-memory and does not survive a restart. Regardless of whether an alarm is raised, failed entries are always counted in the flusher metric `out_failed_entries_total`.
+
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
 ```bash

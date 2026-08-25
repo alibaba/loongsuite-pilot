@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { splitForWebtracking, isRetryable, HttpError } from '../../../src/flushers/sls-transport.js';
+import {
+  splitForWebtracking,
+  isRetryable,
+  HttpError,
+  classifyFailure,
+  FAILURE_CLASS_ALARM_LEVEL,
+} from '../../../src/flushers/sls-transport.js';
 
 describe('splitForWebtracking', () => {
   it('returns single chunk when under limits', () => {
@@ -61,5 +67,46 @@ describe('isRetryable', () => {
   it('returns false for unknown errors', () => {
     expect(isRetryable(new Error('some random error'))).toBe(false);
     expect(isRetryable('string error')).toBe(false);
+  });
+});
+
+describe('classifyFailure', () => {
+  it('classifies 413 / body-too-large as payload', () => {
+    expect(classifyFailure(new HttpError(413, 'Request Entity Too Large'))).toBe('payload');
+    // ak SDK style: no status, message carries the API error
+    expect(classifyFailure(new Error('PostBodyTooLarge: body size must little than 10485760'))).toBe('payload');
+  });
+
+  it('classifies 429 / ServerBusy as quota', () => {
+    expect(classifyFailure(new HttpError(429, 'rate limited'))).toBe('quota');
+    expect(classifyFailure({ code: 'ServerBusy', message: 'slow down' })).toBe('quota');
+  });
+
+  it('classifies terminal config errors as config', () => {
+    expect(classifyFailure(new HttpError(404, '{"errorCode":"ProjectNotExist"}'))).toBe('config');
+    expect(classifyFailure(new HttpError(403, '{"errorCode":"ProjectForbidden"}'))).toBe('config');
+    // ak SDK style: errorCode field, no HTTP status
+    expect(classifyFailure({ errorCode: 'ProjectForbidden', message: 'forbidden' })).toBe('config');
+    expect(classifyFailure({ code: 'ProjectInRecycleBin' })).toBe('config');
+  });
+
+  it('does not classify a bare (proxy) 404/403 as config', () => {
+    // No SLS errorCode in the body → likely a proxy/CDN/WAF, not a terminal SLS error.
+    expect(classifyFailure(new HttpError(404, 'nginx not found'))).toBe('transient');
+    expect(classifyFailure(new HttpError(403, 'Forbidden'))).toBe('transient');
+  });
+
+  it('classifies timeouts / network / unknown as transient', () => {
+    expect(classifyFailure(new Error('TimeoutError'))).toBe('transient');
+    expect(classifyFailure(new Error('fetch failed'))).toBe('transient');
+    expect(classifyFailure(new HttpError(500, 'internal'))).toBe('transient');
+    expect(classifyFailure('some unknown error')).toBe('transient');
+  });
+
+  it('maps each class to the expected alarm level', () => {
+    expect(FAILURE_CLASS_ALARM_LEVEL.transient).toBe('3');
+    expect(FAILURE_CLASS_ALARM_LEVEL.quota).toBe('2');
+    expect(FAILURE_CLASS_ALARM_LEVEL.config).toBe('1');
+    expect(FAILURE_CLASS_ALARM_LEVEL.payload).toBe('1');
   });
 });

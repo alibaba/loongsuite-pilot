@@ -54,4 +54,23 @@ describe('AlarmManager', () => {
     manager.serialize();
     expect(manager.serialize()).toEqual([]);
   });
+
+  it('carries failure_class and keeps distinct classes on the same endpoint separate', () => {
+    manager.record('FLUSH_SEND_ALARM', '3', 'timeout', { endpoint_name: 'ep1', failure_class: 'transient' });
+    manager.record('FLUSH_SEND_ALARM', '1', 'project gone', { endpoint_name: 'ep1', failure_class: 'config' });
+
+    const entries = manager.serialize().sort((a, b) => (a.failure_class ?? '').localeCompare(b.failure_class ?? ''));
+    expect(entries).toHaveLength(2);
+    expect(entries[0].failure_class).toBe('config');
+    expect(entries[0].alarm_level).toBe('1');
+    expect(entries[1].failure_class).toBe('transient');
+    expect(entries[1].alarm_level).toBe('3');
+  });
+
+  it('omits failure_class when not provided (backward compatible)', () => {
+    manager.record('INPUT_STOP_ALARM', '3', 'timeout', { input_name: 'cursor-hook' });
+    const entries = manager.serialize();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].failure_class).toBeUndefined();
+  });
 });
