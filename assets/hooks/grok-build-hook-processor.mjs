@@ -815,34 +815,35 @@ async function processHookLocked(trigger, event, sessionId) {
     }
   }
 
-  if (
-    (chatRead.reset || updatesResult.reset)
-    && trigger !== 'stop'
-    && trigger !== 'stop_failure'
-  ) {
+  const resetObserved = chatRead.reset || updatesResult.reset;
+  if (resetObserved && trigger === 'user_prompt_submit') {
     // A replacement/truncation invalidates historical offsets. Re-establish
     // the current boundary without replaying records from the rewritten file.
     // UserPromptSubmit must keep the chat cursor before the new prompt: Grok
     // has already appended that prompt, and consuming it here would make the
     // following Stop see only the assistant suffix.
     state.initialized = true;
-    if (trigger === 'session_end') {
-      state.chat_checkpoint = checkpointFor(chatHistoryPath, chatResult.nextOffset);
-    }
     state.updates_checkpoint = updatesResult.checkpoint;
-    if (trigger === 'session_end') {
-      markSessionClosed(sessionId);
-      clearState(sessionId);
-    } else saveState(sessionId, state);
+    saveState(sessionId, state);
     return;
   }
 
   const hasCurrentEvidence = !!event.prompt_id
     || chatResult.turns.length > 0
     || updatesResult.turns.length > 0;
-  const candidateTargets = (hasCurrentEvidence
+  let candidateTargets = (hasCurrentEvidence
     ? terminalTargets(trigger, event, state, updatesResult.turns)
     : []);
+  if (trigger === 'session_end' && resetObserved && candidateTargets.length > 0) {
+    // SessionEnd remains the last chance to export a completed turn after Grok
+    // atomically rewrites or truncates either rail. Limit recovery to the
+    // explicit promptId when available, otherwise the newest completed turn,
+    // so a reset cannot replay unrelated history from the replacement file.
+    const exactTarget = event.prompt_id
+      ? candidateTargets.find((target) => target.promptId === event.prompt_id)
+      : null;
+    candidateTargets = [exactTarget ?? candidateTargets.at(-1)];
+  }
   const targets = candidateTargets
     .filter((target) => !hasExportedPrompt(state, target.promptId));
   if (targets.length === 0) {

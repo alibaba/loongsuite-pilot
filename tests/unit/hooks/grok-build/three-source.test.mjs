@@ -291,4 +291,99 @@ describe('Grok Build three-source reconstruction', () => {
     });
     expect(withoutAttempt.llmCalls).toHaveLength(0);
   });
+
+  test('binds a synthetic failed LLM to its incomplete group instead of an older completed group', () => {
+    const fused = fuseGrokTurn({
+      chatTurn: { prompt: 'hello', llmCalls: [] },
+      updateTurn: { promptIndex: '8', startMs: 1000, endMs: null },
+      unifiedGroups: [
+        {
+          loopIndex: 7,
+          startMs: 1100,
+          endMs: 1200,
+          promptTokens: 111,
+          completionTokens: 22,
+          tools: [],
+        },
+        {
+          loopIndex: 8,
+          startMs: 1300,
+          endMs: null,
+          promptTokens: null,
+          completionTokens: null,
+          tools: [],
+        },
+      ],
+      promptId: 'prompt-failure',
+      stopReason: 'error',
+      hookTimestampMs: 1400,
+    });
+
+    expect(fused.llmCalls).toHaveLength(1);
+    expect(fused.llmCalls[0]).toMatchObject({
+      incomplete: true,
+      loopIndex: 8,
+      requestStartMs: 1300,
+      responseEndMs: 1400,
+      finishReason: 'error',
+    });
+    expect(fused.llmCalls[0].input_tokens).toBeNull();
+    expect(fused.llmCalls[0].output_tokens).toBeNull();
+  });
+
+  test('keeps a completed chat response paired while adding a trailing incomplete failure attempt', () => {
+    const fused = fuseGrokTurn({
+      chatTurn: {
+        prompt: 'hello',
+        llmCalls: [{
+          type: 'llm_call',
+          message_id: 'completed-response',
+          input_messages: [],
+          output_content: [{ type: 'text', text: 'partial response' }],
+          stop_reason: 'end_turn',
+          declaredToolIds: [],
+          toolDetails: new Map(),
+        }],
+      },
+      updateTurn: { promptIndex: '8', startMs: 1000, endMs: null },
+      unifiedGroups: [
+        {
+          loopIndex: 7,
+          startMs: 1100,
+          endMs: 1200,
+          promptTokens: 111,
+          completionTokens: 22,
+          tools: [],
+        },
+        {
+          loopIndex: 8,
+          startMs: 1300,
+          endMs: null,
+          promptTokens: null,
+          completionTokens: null,
+          tools: [],
+        },
+      ],
+      promptId: 'prompt-failure',
+      stopReason: 'error',
+      hookTimestampMs: 1400,
+    });
+
+    expect(fused.llmCalls).toHaveLength(2);
+    expect(fused.llmCalls[0]).toMatchObject({
+      message_id: 'completed-response',
+      loopIndex: 7,
+      requestStartMs: 1100,
+      responseEndMs: 1200,
+      input_tokens: 111,
+      output_tokens: 22,
+    });
+    expect(fused.llmCalls[1]).toMatchObject({
+      incomplete: true,
+      loopIndex: 8,
+      requestStartMs: 1300,
+      responseEndMs: 1400,
+      finishReason: 'error',
+    });
+  });
 });

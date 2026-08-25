@@ -87,32 +87,40 @@ export function fuseGrokTurn({
   const completedEndMs = updateTurn?.completed ? updateTurn?.endMs : null;
   const endMs = completedEndMs ?? hookTimestampMs ?? updateTurn?.endMs ?? null;
   const isErrorTurn = stopReason === 'error';
-  const selectedGroups = selectUnifiedGroups(unifiedGroups ?? [], {
+  const windowedGroups = selectUnifiedGroups(unifiedGroups ?? [], {
     startMs,
     endMs,
-    // A failed request can have a real inference_start without a corresponding
-    // assistant chat record. Preserve the extra group so it can become an
-    // observed incomplete LLM attempt below.
-    expectedCount: isErrorTurn ? 0 : chatLlmCalls.length,
+    expectedCount: 0,
   });
-  const llmCalls = [...chatLlmCalls];
-  if (isErrorTurn && selectedGroups.length > chatLlmCalls.length) {
-    for (let index = chatLlmCalls.length; index < selectedGroups.length; index += 1) {
-      const group = selectedGroups[index];
+  const selectedGroups = chatLlmCalls.length > 0
+    ? selectUnifiedGroups(windowedGroups, { expectedCount: chatLlmCalls.length })
+    : [];
+  const callGroups = chatLlmCalls.map((call, index) => ({
+    call,
+    group: selectedGroups[index] ?? null,
+  }));
+  if (isErrorTurn) {
+    const pairedGroups = new Set(selectedGroups);
+    for (let index = 0; index < windowedGroups.length; index += 1) {
+      const group = windowedGroups[index];
+      if (pairedGroups.has(group)) continue;
       if (!Number.isFinite(group?.startMs) || Number.isFinite(group?.endMs)) continue;
-      llmCalls.push({
-        type: 'llm_call',
-        protocol: 'anthropic',
-        model: 'grok',
-        message_id: `${promptId}:incomplete:${group.loopIndex ?? index + 1}`,
-        input_messages: [],
-        _input_is_delta: true,
-        output_content: [],
-        stop_reason: 'error',
-        declaredToolIds: [],
-        toolDetails: new Map(),
-        promptIndex: updateTurn?.promptIndex ?? chatTurn?.promptIndex ?? null,
-        incomplete: true,
+      callGroups.push({
+        group,
+        call: {
+          type: 'llm_call',
+          protocol: 'anthropic',
+          model: 'grok',
+          message_id: `${promptId}:incomplete:${group.loopIndex ?? index + 1}`,
+          input_messages: [],
+          _input_is_delta: true,
+          output_content: [],
+          stop_reason: 'error',
+          declaredToolIds: [],
+          toolDetails: new Map(),
+          promptIndex: updateTurn?.promptIndex ?? chatTurn?.promptIndex ?? null,
+          incomplete: true,
+        },
       });
     }
   }
@@ -122,9 +130,8 @@ export function fuseGrokTurn({
   const usedUpdateCompletions = new Set();
   let previousStepEndMs = startMs ?? hookTimestampMs ?? endMs;
 
-  const fusedCalls = llmCalls.map((call, callIndex) => {
-    const group = selectedGroups[callIndex] ?? null;
-    const nextGroup = selectedGroups[callIndex + 1] ?? null;
+  const fusedCalls = callGroups.map(({ call, group }, callIndex) => {
+    const nextGroup = callGroups[callIndex + 1]?.group ?? null;
     const declaredIds = call.declaredToolIds ?? [];
     const unifiedUsed = new Set();
     const groupUpdateStarts = updateEventsForGroup(
@@ -266,7 +273,7 @@ export function fuseGrokTurn({
       .map((tool) => tool.startMs)
       .filter(Number.isFinite)
       .reduce((minimum, value) => Math.min(minimum, value), Number.POSITIVE_INFINITY);
-    const isLast = callIndex === llmCalls.length - 1;
+    const isLast = callIndex === callGroups.length - 1;
     const fallbackEnd = Number.isFinite(firstToolStartMs)
       ? firstToolStartMs
       : (isLast ? endMs : requestStartMs);
@@ -282,7 +289,7 @@ export function fuseGrokTurn({
     const finishReason = tools.length > 0
       ? 'tool_use'
       : (isLast ? stopReason : (call.stop_reason || 'end_turn'));
-    const singleCallUsage = llmCalls.length === 1 ? updateTurn?.usage : null;
+    const singleCallUsage = callGroups.length === 1 ? updateTurn?.usage : null;
 
     return {
       ...call,

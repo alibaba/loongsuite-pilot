@@ -182,6 +182,73 @@ describe('Grok Build hook lifecycle', () => {
     expect(records()).toEqual(emitted);
   });
 
+  test('SessionEnd recovers only its completed turn after both transcript rails are atomically replaced', () => {
+    const payload = { ...basePayload, transcript_path: updatesPath };
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    expect(runHook('stop', { ...payload, stop_reason: 'end_turn' }).status).toBe(0);
+    const beforeRewrite = records();
+    expect(new Set(beforeRewrite.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted']));
+
+    const rewrittenChat = [
+      { type: 'system', content: 'rewritten system prompt' },
+      { type: 'user', prompt_index: 7, content: '<user_query>do not replay</user_query>', timestamp: '2026-07-29T03:49:01.000Z' },
+      { type: 'assistant', content: 'historical response', model_id: 'grok', timestamp: '2026-07-29T03:49:01.100Z' },
+      { type: 'user', prompt_index: 8, content: '<user_query>recover this turn</user_query>', timestamp: '2026-07-29T03:49:02.000Z' },
+      { type: 'assistant', content: 'recovered response', model_id: 'grok', timestamp: '2026-07-29T03:49:02.100Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n';
+    const rewrittenUpdates = [
+      {
+        timestamp: 1785296941,
+        params: {
+          _meta: { promptId: 'prompt-rewritten-history', agentTimestampMs: 1785296941100 },
+          update: {
+            sessionUpdate: 'turn_completed',
+            stopReason: 'end_turn',
+            _meta: { promptIndex: 7 },
+          },
+        },
+      },
+      {
+        timestamp: 1785296942,
+        params: {
+          _meta: { promptId: 'prompt-rewritten-current', agentTimestampMs: 1785296942100 },
+          update: {
+            sessionUpdate: 'turn_completed',
+            stopReason: 'end_turn',
+            _meta: { promptIndex: 8 },
+          },
+        },
+      },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n';
+    fs.writeFileSync(`${chatPath}.replacement`, rewrittenChat);
+    fs.renameSync(`${chatPath}.replacement`, chatPath);
+    fs.writeFileSync(`${updatesPath}.replacement`, rewrittenUpdates);
+    fs.renameSync(`${updatesPath}.replacement`, updatesPath);
+    fs.writeFileSync(unifiedPath, '');
+
+    const currentPayload = {
+      ...payload,
+      prompt_id: 'prompt-rewritten-current',
+      timestamp: '2026-07-29T03:49:03.000Z',
+    };
+    expect(runHook('stop', { ...currentPayload, stop_reason: 'shutdown' }).status).toBe(0);
+    expect(records()).toEqual(beforeRewrite);
+    expect(runHook('session_end', currentPayload).status).toBe(0);
+
+    const afterSessionEnd = records();
+    expect(new Set(afterSessionEnd.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted', 'prompt-rewritten-current']));
+    const recovered = afterSessionEnd
+      .filter(record => record['gen_ai.turn.id'] === 'prompt-rewritten-current');
+    expect(recovered.length).toBeGreaterThan(0);
+    expect(JSON.stringify(recovered)).toContain('recover this turn');
+    expect(JSON.stringify(afterSessionEnd)).not.toContain('do not replay');
+
+    expect(runHook('stop', { ...currentPayload, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(records()).toEqual(afterSessionEnd);
+  });
+
   test('rejects transcript paths outside the matching native Grok session directory', () => {
     const outsideDir = path.join(tempRoot, 'outside-session');
     fs.mkdirSync(outsideDir, { recursive: true });
