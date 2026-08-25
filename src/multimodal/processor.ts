@@ -74,8 +74,12 @@ interface PathUriCacheEntry {
   result: UriResult | null;
 }
 
-function pathInflightKey(absPath: string, mtimeMs: number, size: number): string {
-  return `${absPath}\0${mtimeMs}\0${size}`;
+function pathCacheKey(absPath: string, day: string): string {
+  return `${absPath}\0${day}`;
+}
+
+function pathInflightKey(absPath: string, day: string, mtimeMs: number, size: number): string {
+  return `${absPath}\0${day}\0${mtimeMs}\0${size}`;
 }
 
 /** Convert blob/path to storage uri and enqueue async upload. */
@@ -86,7 +90,7 @@ export class MultimodalProcessor {
   private pendingBytes = 0;
   private shuttingDown = false;
   private readonly storageBasePath: string;
-  /** path→uri cache keyed by mtime+size. */
+  /** path→uri cache keyed by path + event day + mtime + size. */
   private readonly pathUriCache = new LruMap<PathUriCacheEntry>(MULTIMODAL_LRU_LIMIT);
   /** In-flight path reads. */
   private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
@@ -141,7 +145,9 @@ export class MultimodalProcessor {
     const stated = await lstatRegularImageFile(key);
     if (!stated) return null;
 
-    const cached = this.pathUriCache.get(key);
+    const day = yyyymmddFromUnixMs(timeUnixMs);
+    const cacheKey = pathCacheKey(key, day);
+    const cached = this.pathUriCache.get(cacheKey);
     if (
       cached
       && cached.mtimeMs === stated.mtimeMs
@@ -151,7 +157,7 @@ export class MultimodalProcessor {
       return cached.result;
     }
 
-    const slotKey = pathInflightKey(key, stated.mtimeMs, stated.size);
+    const slotKey = pathInflightKey(key, day, stated.mtimeMs, stated.size);
     const inflight = this.pathUriInflight.get(slotKey);
     if (inflight) return inflight;
 
@@ -169,7 +175,7 @@ export class MultimodalProcessor {
         const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots);
         if (!loaded) return null;
 
-        const cachedFresh = this.pathUriCache.get(key);
+        const cachedFresh = this.pathUriCache.get(cacheKey);
         if (
           cachedFresh
           && cachedFresh.mtimeMs === loaded.mtimeMs
@@ -185,7 +191,7 @@ export class MultimodalProcessor {
             ? { time_unix_ms: timeUnixMs }
             : {}),
         });
-        this.pathUriCache.set(key, {
+        this.pathUriCache.set(cacheKey, {
           mtimeMs: loaded.mtimeMs,
           size: loaded.size,
           result,

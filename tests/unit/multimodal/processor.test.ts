@@ -339,6 +339,25 @@ describe('MultimodalProcessor.pathToUri', () => {
     expect(uploader.items).toHaveLength(1);
   });
 
+  it('does not reuse a same-path URI across event days', async () => {
+    const file = writeTempPng('cross-day.png', 'same-bytes');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const day1Ms = Date.parse('2026-08-24T12:00:00+08:00');
+    const day2Ms = Date.parse('2026-08-25T12:00:00+08:00');
+    const day1 = yyyymmddLocal(new Date(day1Ms));
+    const day2 = yyyymmddLocal(new Date(day2Ms));
+
+    const first = await processor.pathToUri(file, day1Ms, TMP_ALLOW);
+    const second = await processor.pathToUri(file, day2Ms, TMP_ALLOW);
+    expect(first?.uri).toMatch(new RegExp(`/${day1}/[a-f0-9]{64}\\.png$`));
+    expect(second?.uri).toMatch(new RegExp(`/${day2}/[a-f0-9]{64}\\.png$`));
+    expect(second?.uri).not.toBe(first?.uri);
+
+    await processor.shutdown(1000);
+    expect(uploader.items.map(item => item.targetPath.split('/')[0])).toEqual([day1, day2]);
+  });
+
   it('LRU-caches path→uri so the same path is uploaded once', async () => {
     const file = writeTempPng('dup.png', 'same-bytes');
     const uploader = new FakeUploader();
