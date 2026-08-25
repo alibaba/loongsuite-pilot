@@ -44,6 +44,7 @@ Pilot 主要帮助回答这些问题：
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
 | DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |

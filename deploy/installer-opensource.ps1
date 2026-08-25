@@ -1837,6 +1837,74 @@ try {
     }
 }
 
+# Grok Build's hook file is Pilot-owned, but still preserve any third-party
+# entries that may have been added to it. Stable script-name matching also
+# works when Pilot was installed with a custom data directory.
+function Remove-GrokBuildHookConfig {
+    $cfg = Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json"
+    if (-not (Test-Path -LiteralPath $cfg)) { return }
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" `
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (Node.js unavailable; remove the Grok Build Pilot hook manually)"
+        return
+    }
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $result = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const cfg = process.argv[1];
+const owned = value => typeof value === "string"
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      if (owned(entry && entry.command)) { changed = true; continue; }
+      if (entry && Array.isArray(entry.hooks)) {
+        const nested = entry.hooks.filter(hook => !owned(hook && hook.command));
+        if (nested.length !== entry.hooks.length) changed = true;
+        if (entry.hooks.length > 0 && nested.length === 0) continue;
+        kept.push({ ...entry, hooks: nested });
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (Object.keys(hooks).length === 0) delete data.hooks;
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(cfg);
+  } else {
+    const tmp = `${cfg}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  }
+  process.stdout.write("cleaned");
+} catch (error) {
+  process.stderr.write(error.message); process.exit(1);
+}
+'@ $cfg 2>$null
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    $result = ([string]($result -join "")).Trim()
+
+    if ($exitCode -eq 0 -and $result -in @("cleaned", "nochange")) {
+        Msg "    ✅ 已清理: ~/.grok/hooks/loongsuite-pilot.json" `
+            "    ✅ Cleaned: ~/.grok/hooks/loongsuite-pilot.json"
+    } else {
+        Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (需手动清理)" `
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (manual cleanup needed)"
+    }
+}
+
 # ============================================================
 # Remove plugin-inject specs (OpenCode)
 # ============================================================
@@ -3076,6 +3144,12 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
     Remove-OpenClawPlugin
+    Write-Host ""
+
+    # This cleanup executes Node.js. Run it before installation assets or a
+    # pinned runtime can disappear, matching the POSIX uninstall ordering.
+    Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
+    Remove-GrokBuildHookConfig
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."

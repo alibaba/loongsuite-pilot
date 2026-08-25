@@ -532,6 +532,7 @@ function buildListenersConfig(
     'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
+    'grok-build-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
     'opencode-log': { enabled: true, pollInterval: 30_000 },
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },

@@ -41,6 +41,11 @@ const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
+const GROK_PASSTHROUGH_KEYS = [
+  'loongsuite.grok.match.strategy',
+  'loongsuite.grok.timing.source',
+] as const;
 // Hard cap on simultaneously-open turn buffers. Above this, the oldest
 // incomplete buffers are force-flushed to bound memory in pathological
 // cases (e.g. an agent that never emits a terminal llm.response AND never
@@ -71,6 +76,91 @@ interface AgentConvertState {
   inMem: InMemorySpanExporter;
   toolSpanIds: ToolSpanIdReservations;
   active: number;
+}
+
+interface GrokConversionMetadata {
+  systemInstructions: unknown[];
+  agentDescription?: string;
+  dataSourceId?: string;
+}
+
+function parseGrokSystemInstructions(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+  return [{ type: 'text', content: value }];
+}
+
+function stripSystemRoleMessages(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.filter(message =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system');
+  }
+  if (typeof value !== 'string' || value.length === 0) return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return value;
+    return JSON.stringify(parsed.filter(message =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system'));
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Isolate Grok-only reconstruction fields from the generic converter. The
+ * upstream converter treats several record attributes as turn-wide and can
+ * otherwise copy a system prompt or one tool's duration to sibling spans.
+ */
+function prepareGrokConversionRecords(records: AgentActivityEntry[]): {
+  records: AgentActivityEntry[];
+  metadata: GrokConversionMetadata;
+} {
+  const metadata: GrokConversionMetadata = { systemInstructions: [] };
+  const prepared = records.map((record) => {
+    const copy = { ...record } as AgentActivityEntry;
+    if (metadata.systemInstructions.length === 0 && copy['gen_ai.system_instructions'] != null) {
+      metadata.systemInstructions = parseGrokSystemInstructions(copy['gen_ai.system_instructions']);
+    }
+    if (!metadata.agentDescription && typeof copy['gen_ai.agent.description'] === 'string') {
+      metadata.agentDescription = copy['gen_ai.agent.description'];
+    }
+    if (!metadata.dataSourceId && typeof copy['gen_ai.data_source.id'] === 'string') {
+      metadata.dataSourceId = copy['gen_ai.data_source.id'];
+    }
+
+    delete copy['gen_ai.system_instructions'];
+    delete copy['gen_ai.agent.description'];
+    delete copy['gen_ai.data_source.id'];
+    delete copy['gen_ai.tool.call.duration'];
+    for (const key of ['gen_ai.input.messages', 'gen_ai.input.messages_delta'] as const) {
+      if (copy[key] != null) copy[key] = stripSystemRoleMessages(copy[key]) as never;
+    }
+
+    // Preserve a content-free structural marker for prompt-only and failed
+    // turns. The converter ignores an `other` event without a messages field.
+    if (
+      copy['event.name'] === 'other'
+      && copy['gen_ai.input.messages'] == null
+      && copy['gen_ai.input.messages_delta'] == null
+    ) {
+      copy['gen_ai.input.messages_delta'] = [] as never;
+    }
+
+    // Terminal errors describe ENTRY/AGENT, not the preceding tool_call LLM.
+    // Root status is applied after conversion using the original records.
+    if (copy['event.name'] === 'other') {
+      delete copy['error.type'];
+      delete copy['error.message'];
+    }
+    return copy;
+  });
+  return { records: prepared, metadata };
 }
 
 /** Minimal exporter surface used by the flusher; lets tests inject fakes. */
@@ -494,6 +584,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
       return entry['agent.openclaw.hook'] === 'llm_output';
     }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'grok-build') {
+      // The Grok processor emits one explicit turn-terminal `other` record.
+      // LLM finish reasons close model attempts, not the turn buffer itself;
+      // requiring the terminal record also prevents a single-record delivery
+      // path from flushing before later TOOL/terminal evidence arrives.
+      return entry['event.name'] === 'other'
+        && (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])
+          || hasFinishReason(
+            entry['gen_ai.response.finish_reasons'],
+            GROK_TERMINAL_FINISH_REASONS,
+          ));
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
@@ -608,6 +710,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     );
     const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
+    let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
 
     try {
       try {
@@ -633,13 +736,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
+        const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...agentSpecificKeys,
           ...customKeys,
           ...prefixKeys,
         ])];
-        const recordsForConversion = customKeys.length === 0
+        let recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {
               const copy: AgentActivityEntry = { ...r };
@@ -648,6 +753,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
               return copy;
             });
+        if (agentType === 'grok-build') {
+          const prepared = prepareGrokConversionRecords(recordsForConversion);
+          recordsForConversion = prepared.records;
+          grokMetadata = prepared.metadata;
+        }
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
@@ -691,6 +801,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (agentType === 'openclaw') {
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
+      }
+      if (agentType === 'grok-build') {
+        this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
 
       const exportState = this.getOrCreateExportState(agentType, serviceName);
@@ -912,6 +1025,152 @@ export class OtlpTraceFlusher extends BaseFlusher {
           span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
         }
       }
+    }
+  }
+
+  private enrichGrokBuildSpans(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+    metadata: GrokConversionMetadata,
+  ): void {
+    const toolData = new Map<string, {
+      duration?: number;
+      status?: string;
+      errorType?: string;
+      matchStrategy?: string;
+      timingSource?: string;
+    }>();
+    const llmData = new Map<string, {
+      errorType?: string;
+      timingSource?: string;
+    }>();
+    let terminal: { reason: string; errorType?: string } | undefined;
+
+    for (const record of records) {
+      if (record['event.name'] === 'tool.call' || record['event.name'] === 'tool.result') {
+        const callId = record['gen_ai.tool.call.id'];
+        if (typeof callId === 'string' && callId) {
+          const current = toolData.get(callId) ?? {};
+          const duration = record['gen_ai.tool.call.duration'];
+          const status = record['tool.result.status'];
+          const errorType = record['error.type'];
+          const matchStrategy = record['loongsuite.grok.match.strategy'];
+          const timingSource = record['loongsuite.grok.timing.source'];
+          if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+            current.duration = duration;
+          }
+          if (typeof status === 'string' && status) current.status = status;
+          if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+          if (typeof matchStrategy === 'string' && matchStrategy) current.matchStrategy = matchStrategy;
+          if (typeof timingSource === 'string' && timingSource) current.timingSource = timingSource;
+          toolData.set(callId, current);
+        }
+      }
+
+      if (record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response') {
+        const responseId = record['gen_ai.response.id'];
+        if (typeof responseId === 'string' && responseId) {
+          const current = llmData.get(responseId) ?? {};
+          const errorType = record['error.type'];
+          const timingSource = record['loongsuite.grok.timing.source'];
+          if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+          if (typeof timingSource === 'string' && timingSource) current.timingSource = timingSource;
+          llmData.set(responseId, current);
+        }
+      }
+
+      if (record['event.name'] === 'other') {
+        const rawReasons = record['gen_ai.response.finish_reasons'];
+        const reasons = Array.isArray(rawReasons)
+          ? rawReasons.filter((reason): reason is string => typeof reason === 'string')
+          : [];
+        const reason = reasons.find(value => value === 'error' || value === 'cancelled');
+        if (reason) {
+          const errorType = record['error.type'];
+          terminal = {
+            reason,
+            errorType: typeof errorType === 'string' && errorType ? errorType : undefined,
+          };
+        }
+      }
+    }
+
+    const llmSpans: ReadableSpan[] = [];
+    for (const span of spans) {
+      const spanKind = span.attributes['gen_ai.span.kind'];
+      if (spanKind === 'TOOL') {
+        const callId = span.attributes['gen_ai.tool.call.id'];
+        if (typeof callId !== 'string') continue;
+        const data = toolData.get(callId);
+        if (!data) continue;
+        if (data.duration !== undefined) {
+          span.attributes['gen_ai.tool.call.duration'] = data.duration;
+        }
+        if (data.status) span.attributes['tool.result.status'] = data.status;
+        if (data.matchStrategy) span.attributes['loongsuite.grok.match.strategy'] = data.matchStrategy;
+        if (data.timingSource) span.attributes['loongsuite.grok.timing.source'] = data.timingSource;
+        if (data.status === 'failure' || data.status === 'cancelled') {
+          const cancelled = data.status === 'cancelled';
+          span.attributes['error.type'] = data.errorType
+            ?? (cancelled ? 'ToolCancelled' : 'ToolError');
+          span.attributes['error.message'] = cancelled
+            ? 'tool execution cancelled'
+            : 'tool execution failed';
+          Object.assign(span.status, {
+            code: SpanStatusCode.ERROR,
+            message: cancelled ? 'tool execution cancelled' : 'tool execution failed',
+          });
+        }
+        continue;
+      }
+
+      if (spanKind === 'LLM') {
+        llmSpans.push(span);
+        const responseId = span.attributes['gen_ai.response.id'];
+        if (typeof responseId !== 'string') continue;
+        const data = llmData.get(responseId);
+        if (!data) continue;
+        if (data.timingSource) span.attributes['loongsuite.grok.timing.source'] = data.timingSource;
+        if (data.errorType) {
+          span.attributes['error.type'] = data.errorType;
+          span.attributes['error.message'] = 'model request failed';
+          Object.assign(span.status, {
+            code: SpanStatusCode.ERROR,
+            message: 'model request failed',
+          });
+        }
+        continue;
+      }
+
+      if (spanKind === 'AGENT') {
+        if (metadata.agentDescription) {
+          span.attributes['gen_ai.agent.description'] = metadata.agentDescription;
+        }
+        if (metadata.dataSourceId) {
+          span.attributes['gen_ai.data_source.id'] = metadata.dataSourceId;
+        }
+      }
+
+      if (terminal && (spanKind === 'AGENT' || spanKind === 'ENTRY')) {
+        const cancelled = terminal.reason === 'cancelled';
+        span.attributes['error.type'] = terminal.errorType
+          ?? (cancelled ? 'cancelled' : 'model_error');
+        span.attributes['error.message'] = cancelled ? 'turn cancelled' : 'model request failed';
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: cancelled ? 'turn cancelled' : 'model request failed',
+        });
+      }
+    }
+
+    if (metadata.systemInstructions.length > 0 && llmSpans.length > 0) {
+      llmSpans.sort((left, right) => {
+        if (left.startTime[0] !== right.startTime[0]) return left.startTime[0] - right.startTime[0];
+        return left.startTime[1] - right.startTime[1];
+      });
+      llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
+        metadata.systemInstructions,
+      );
     }
   }
 
@@ -1219,8 +1478,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
 }
 
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
+  return hasFinishReason(finishReasons, TERMINAL_FINISH_REASONS);
+}
+
+function hasFinishReason(finishReasons: unknown, expected: ReadonlySet<string>): boolean {
   return Array.isArray(finishReasons)
-    && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+    && finishReasons.some(reason => typeof reason === 'string' && expected.has(reason));
 }
 
 /**

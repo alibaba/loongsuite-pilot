@@ -17,6 +17,7 @@ type differences are called out in the notes.
 | Cursor | `cursor` | Hook integration. |
 | Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
 | DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. |
+| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
@@ -43,6 +44,34 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
+
+## Grok Build Collection And Lifecycle
+
+Pilot detects Grok Build from `~/.grok` and installs four fail-open hooks in
+`~/.grok/hooks/loongsuite-pilot.json`: `stop`, `stop_failure`,
+`user_prompt_submit`, and `session_end`. Subagent hooks are intentionally not
+installed or collected.
+
+Each completed turn is reconstructed from three Grok-owned JSONL sources:
+
+- Session `chat_history.jsonl` provides messages, model metadata, tool
+  arguments, tool results, and the system instruction.
+- Session `updates.jsonl` provides the real prompt ID, turn terminal state,
+  cancellation or failure, and tool status.
+- `~/.grok/logs/unified.jsonl` provides model timing and token usage plus tool
+  execution timing and success.
+
+Collection starts with the turn observed after installation and does not replay
+older session history. Because Grok persists cancellation asynchronously, a
+cancelled turn can be emitted on the next `user_prompt_submit` or
+`session_end`. Setting `agents["grok-build"].captureMessageContent` to `false`
+removes user, assistant, and system content as well as tool arguments, tool
+results, and raw error details.
+
+The installed assets include POSIX and PowerShell launchers. The Grok-specific
+watchdog check repairs missing or changed Pilot Hook assets and configuration;
+uninstall removes only the Pilot-owned Grok Hook entries and preserves third-
+party hooks.
 
 ## DeepSeek Harness Collection And Lifecycle
 

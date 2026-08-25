@@ -16,6 +16,7 @@
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
 | DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。 |
+| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
@@ -41,6 +42,32 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## Grok Build 采集与生命周期
+
+Pilot 通过 `~/.grok` 检测 Grok Build，并在
+`~/.grok/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
+`stop`、`stop_failure`、`user_prompt_submit` 和 `session_end`。当前明确
+不安装、不采集 subagent Hook。
+
+每个已完成 turn 由 Grok 自身的三类 JSONL 数据融合生成：
+
+- session 目录下的 `chat_history.jsonl` 提供消息、模型元数据、
+  工具参数、工具结果和 system instruction。
+- session 目录下的 `updates.jsonl` 提供真实 prompt ID、turn 终态、
+  取消或失败状态以及工具状态。
+- `~/.grok/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
+  和成功状态。
+
+采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
+由于 Grok 会异步持久化取消终态，取消 turn 可能在下一次
+`user_prompt_submit` 或 `session_end` 时补采。将
+`agents["grok-build"].captureMessageContent` 设置为 `false`，会同时清除
+user、assistant、system 内容、工具参数、工具结果和原始错误详情。
+
+安装产物同时包含 POSIX 和 PowerShell 启动器。Grok 专用 watchdog
+检查会修复缺失或被修改的 Pilot Hook 资产和配置；卸载只删除
+Pilot 所有的 Grok Hook 条目，保留第三方 Hook。
 
 ## DeepSeek Harness 采集与生命周期
 

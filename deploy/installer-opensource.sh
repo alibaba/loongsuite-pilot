@@ -2145,6 +2145,70 @@ try {
     done
 }
 
+# Grok Build uses a dedicated Pilot-owned hook file. Match the stable entry
+# script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
+# installations uninstall correctly, while unrelated hooks in the file remain.
+remove_grok_build_hook_config() {
+    local cfg="$HOME/.grok/hooks/loongsuite-pilot.json"
+    [ -f "$cfg" ] || return 0
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (Node.js unavailable; remove the Grok Build Pilot hook manually)"
+        return 0
+    fi
+
+    local result
+    result="$(node -e '
+const fs = require("fs");
+const cfg = process.argv[1];
+const owned = value => typeof value === "string"
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      if (owned(entry && entry.command)) { changed = true; continue; }
+      if (entry && Array.isArray(entry.hooks)) {
+        const nested = entry.hooks.filter(hook => !owned(hook && hook.command));
+        if (nested.length !== entry.hooks.length) changed = true;
+        if (entry.hooks.length > 0 && nested.length === 0) continue;
+        kept.push({ ...entry, hooks: nested });
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (Object.keys(hooks).length === 0) delete data.hooks;
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(cfg);
+  } else {
+    const tmp = `${cfg}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  }
+  process.stdout.write("cleaned");
+} catch (error) {
+  process.stderr.write(error.message); process.exit(1);
+}
+' "$cfg" 2>/dev/null || true)"
+
+    if [ "$result" = "cleaned" ] || [ "$result" = "nochange" ]; then
+        msg "    ✅ 已清理: ~/.grok/hooks/loongsuite-pilot.json" \
+            "    ✅ Cleaned: ~/.grok/hooks/loongsuite-pilot.json"
+    else
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (需手动清理)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (manual cleanup needed)"
+    fi
+}
+
 # ============================================================
 # Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
 # The same helper is invoked by the PowerShell installer.
@@ -2724,6 +2788,7 @@ cmd_uninstall() {
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
+    remove_grok_build_hook_config
     remove_qodercli_token_intercept
     remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept

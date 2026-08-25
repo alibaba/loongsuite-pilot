@@ -284,6 +284,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });

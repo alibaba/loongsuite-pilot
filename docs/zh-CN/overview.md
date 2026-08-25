@@ -26,6 +26,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
