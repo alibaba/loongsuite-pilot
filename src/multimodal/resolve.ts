@@ -2,8 +2,11 @@ import { constants as fsConstants, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveHome } from '../utils/fs-utils.js';
+import { createLogger } from '../utils/logger.js';
 import type { BlobPart, PathBytes, PathStat } from './types.js';
-import { MAX_MULTIMODAL_DATA_SIZE } from './types.js';
+import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS, MAX_MULTIMODAL_PATH_CHARS } from './types.js';
+
+const logger = createLogger('MultimodalResolve');
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -37,6 +40,61 @@ export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
 /** Image path by extension. */
 export function isImageFilePath(filePath: string): boolean {
   return mimeFromImagePath(filePath) !== null;
+}
+
+/** Collect capture groups until MAX_MULTIMODAL_PARTS. Default pick is group 1. */
+export function matchAll(
+  re: RegExp,
+  text: string,
+  pick: (match: RegExpExecArray) => string | undefined = m => m[1],
+): string[] {
+  const out: string[] = [];
+  re.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match[0].length === 0) {
+      re.lastIndex += 1;
+      continue;
+    }
+    const p = pick(match)?.trim();
+    if (!p) continue;
+    if (out.length >= MAX_MULTIMODAL_PARTS) {
+      logger.debug('multimodal extract match cap reached');
+      break;
+    }
+    out.push(p);
+  }
+  return out;
+}
+
+/** Dedup and cap extracted image paths. `normalize` can resolve; empty / non-image is skipped. */
+export function takeUniqueExtractedPaths(
+  rawPaths: string[],
+  normalize?: (raw: string) => string,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < rawPaths.length; i++) {
+    if (out.length >= MAX_MULTIMODAL_PARTS) {
+      logger.debug('multimodal extract path cap reached', {
+        leftover: rawPaths.length - i,
+      });
+      break;
+    }
+    const raw = rawPaths[i] ?? '';
+    const p = (normalize ? normalize(raw) : raw).trim();
+    if (
+      !p
+      || p.length > MAX_MULTIMODAL_PATH_CHARS
+      || seen.has(p)
+      || !isImageFilePath(p)
+    ) {
+      continue;
+    }
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
 }
 
 /** MIME from image extension. */

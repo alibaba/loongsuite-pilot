@@ -6,8 +6,9 @@ import {
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
-  isImageFilePath,
-  MAX_MULTIMODAL_PARTS,
+  matchAll,
+  takeUniqueExtractedPaths,
+  MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
@@ -15,11 +16,21 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('QoderCliMultimodal');
 
-const IMAGE_SOURCE_RE = /\[Image:\s*source:\s*([^\]]+)\]/gi;
-const AT_IMAGE_RE = /@(\S+?\.(?:png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff))\b/gi;
-const READ_IMAGE_RE = /Read image:\s*([^\n\r]+)/gi;
-const IMAGE_FILE_RE = /Image file:\s*([^\n\r]+)/gi;
-const IMAGE_GEN_PATH_RE = /The absolute path of the image is:\s*([^\n\r]+)/gi;
+const IMAGE_EXT = 'png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff';
+const IMAGE_SOURCE_RE = new RegExp(
+  `\\[Image:\\s*source:\\s*([^\\]]{1,${MAX_MULTIMODAL_PATH_CHARS}})\\]`,
+  'gi',
+);
+const AT_IMAGE_RE = new RegExp(
+  `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+  'gi',
+);
+const READ_IMAGE_RE = new RegExp(`Read image:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
+const IMAGE_FILE_RE = new RegExp(`Image file:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
+const IMAGE_GEN_PATH_RE = new RegExp(
+  `The absolute path of the image is:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`,
+  'gi',
+);
 const SIZE_SUFFIX_RE = /\s+\(\d+(?:\.\d+)?\s*[KMGT]?B\)\s*$/i;
 
 interface EnrichStats {
@@ -177,13 +188,7 @@ async function convertPathsToUriParts(
 ): Promise<UriPart[]> {
   const parts: UriPart[] = [];
   for (const filePath of paths) {
-    if (parts.length >= MAX_MULTIMODAL_PARTS) {
-      stats.skipped += 1;
-      logger.debug('qoder cli multimodal part cap reached', { skipped: filePath });
-      continue;
-    }
     const trimmed = filePath.trim();
-    if (!trimmed) continue;
     let result;
     try {
       result = await pathToUri(trimmed, timeMs);
@@ -215,11 +220,11 @@ export function extractInputImagePaths(
   cwd?: string,
 ): string[] {
   const text = typeof source === 'string' ? source : collectMessageDeltaTexts(source);
-  return resolveUniqueImagePaths([
+  return takeUniqueExtractedPaths([
     ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
-  ], cwd);
+  ], raw => resolveImagePath(raw, cwd));
 }
 
 export function attachmentImageFilenames(entry: AgentActivityEntry): string[] {
@@ -238,22 +243,11 @@ export function attachmentImageFilenames(entry: AgentActivityEntry): string[] {
 }
 
 export function extractToolImagePaths(text: string, cwd?: string): string[] {
-  return resolveUniqueImagePaths([
+  return takeUniqueExtractedPaths([
     ...matchAll(READ_IMAGE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_FILE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
-  ], cwd);
-}
-
-function matchAll(re: RegExp, text: string): string[] {
-  const out: string[] = [];
-  re.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
-    const p = match[1]?.trim();
-    if (p) out.push(p);
-  }
-  return out;
+  ], raw => resolveImagePath(raw, cwd));
 }
 
 function stripSizeSuffix(raw: string): string {
@@ -262,18 +256,6 @@ function stripSizeSuffix(raw: string): string {
 
 function stripImageSourcePath(raw: string): string {
   return raw.replace(/,\s*original\b.*$/i, '').trim();
-}
-
-function resolveUniqueImagePaths(rawPaths: string[], cwd?: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of rawPaths) {
-    const resolved = resolveImagePath(raw, cwd);
-    if (!resolved || seen.has(resolved) || !isImageFilePath(resolved)) continue;
-    seen.add(resolved);
-    out.push(resolved);
-  }
-  return out;
 }
 
 export function resolveImagePath(raw: string, cwd?: string): string {

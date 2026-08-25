@@ -166,6 +166,35 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     )).toEqual(['/tmp/gen.png']);
   });
 
+  it('scans long non-matching @ prefixes in linear time and still finds a later path', () => {
+    const started = Date.now();
+    const noise = '@a'.repeat(80_000);
+    const ok = process.platform === 'win32' ? 'C:\\tmp\\ok.png' : '/tmp/ok.png';
+    const resolved = process.platform === 'win32' ? path.win32.normalize(ok) : ok;
+    expect(extractInputImagePaths(`${noise} @${ok}`)).toEqual([resolved]);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(extractInputImagePaths(noise)).toEqual([]);
+  });
+
+  it('caps extracted and converted candidates before pathToUri, including missing files', async () => {
+    const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => (
+      process.platform === 'win32' ? `C:\\tmp\\missing-${i}.png` : `/tmp/missing-${i}.png`
+    ));
+    const expected = listed.slice(0, MAX_MULTIMODAL_PARTS).map(p => (
+      process.platform === 'win32' ? path.win32.normalize(p) : p
+    ));
+    expect(extractToolImagePaths(listed.map(p => `Read image: ${p} (1KB)`).join('\n'))).toEqual(expected);
+
+    const tool = cliEntry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.result': listed.map(p => `Read image: ${p} (1KB)`).join('\n'),
+    });
+    const pathToUri = vi.fn(async () => null);
+    await enrichCliMultimodal([tool], { uploadMode: 'tool', pathToUri });
+    expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
+    expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Read image: ${p} (1KB)`).join('\n'));
+  });
+
   it('ignores glob listings and non-image @ mentions', () => {
     expect(extractToolImagePaths('docs/_assets/img/dashboard.png\npicture/pipeline.jpg')).toEqual([]);
     expect(extractInputImagePaths('hello @someone please look')).toEqual([]);

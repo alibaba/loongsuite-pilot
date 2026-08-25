@@ -873,6 +873,24 @@ describe('QoderTraceInput multimodal', () => {
       expect(extractMarkdownImagePaths('![x](/tmp/a.png "preview")')).toEqual(['/tmp/a.png']);
       expect(extractMarkdownImagePaths("![x](/tmp/b.jpg 'preview')")).toEqual(['/tmp/b.jpg']);
     });
+
+    it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
+      const started = Date.now();
+      const noise = '!['.repeat(80_000);
+      expect(extractMarkdownImagePaths(`${noise} ![x](/tmp/ok.png)`)).toEqual(['/tmp/ok.png']);
+      expect(Date.now() - started).toBeLessThan(200);
+      expect(extractMarkdownImagePaths(noise)).toEqual([]);
+    });
+
+    it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      expect(extractToolImagePaths(listed.map(p => `Image file: ${p}`).join('\n'))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+      expect(extractMarkdownImagePaths(listed.map((p, i) => `![n${i}](${p})`).join(' '))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+    });
   });
 
   describe('enrichIdeMultimodal', () => {
@@ -1196,6 +1214,18 @@ describe('QoderTraceInput multimodal', () => {
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result[0]).toEqual({ type: 'text', content: `Image file: ${img}` });
       expect(result[1]).toMatchObject({ type: 'uri', uri: 'oss://test/read-img', modality: 'image' });
+    });
+
+    it('caps pathToUri attempts for missing tool images', async () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      const pathToUri = vi.fn(async () => null);
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': listed.map(p => `Image file: ${p}`).join('\n'),
+      });
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
+      expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Image file: ${p}`).join('\n'));
     });
 
     it('tool mode parses ImageGen success path', async () => {

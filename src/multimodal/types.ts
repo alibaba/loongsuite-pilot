@@ -94,6 +94,8 @@ export interface PathBytes {
 }
 
 export const MAX_MULTIMODAL_PARTS = 10;
+/** Max chars for one extracted image path (regex capture and resolve). */
+export const MAX_MULTIMODAL_PATH_CHARS = 1024;
 export const MAX_MULTIMODAL_DATA_SIZE = 30 * 1024 * 1024;
 export const MAX_MULTIMODAL_PENDING_UPLOADS = 1024;
 export const MAX_MULTIMODAL_PENDING_BYTES = 1024 * 1024 * 1024;

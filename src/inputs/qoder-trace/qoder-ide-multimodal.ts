@@ -6,7 +6,10 @@ import {
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
+  matchAll,
+  takeUniqueExtractedPaths,
   MAX_MULTIMODAL_PARTS,
+  MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
@@ -16,10 +19,18 @@ import { readAttachedImagePathsForRequestIds } from './sqlite-token-reader.js';
 
 const logger = createLogger('QoderIdeMultimodal');
 
+const MAX_MARKDOWN_ALT_CHARS = 200;
+const MAX_MARKDOWN_TITLE_CHARS = 200;
 // Path patterns found in current Qoder IDE surfaces; extend when new scenes appear.
-const IMAGE_FILE_RE = /Image file:\s*([^\n\r]+)/gi;
-const IMAGE_GEN_PATH_RE = /The absolute path of the image is:\s*([^\n\r]+)/gi;
-const MARKDOWN_IMAGE_RE = /!\[[^\]]*]\((?:<([^>]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
+const IMAGE_FILE_RE = new RegExp(`Image file:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
+const IMAGE_GEN_PATH_RE = new RegExp(
+  `The absolute path of the image is:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`,
+  'gi',
+);
+const MARKDOWN_IMAGE_RE = new RegExp(
+  `!\\[[^\\]]{0,${MAX_MARKDOWN_ALT_CHARS}}]\\((?:<([^>]{1,${MAX_MULTIMODAL_PATH_CHARS}})>|([^)\\s]{1,${MAX_MULTIMODAL_PATH_CHARS}}))(?:\\s+(?:"[^"]{0,${MAX_MARKDOWN_TITLE_CHARS}}"|'[^']{0,${MAX_MARKDOWN_TITLE_CHARS}}'))?\\)`,
+  'g',
+);
 
 /**
  * request_id → attached paths. Process-local LRU.
@@ -303,14 +314,21 @@ async function convertPathsToUriParts(
 ): Promise<UriPart[]> {
   const parts: UriPart[] = [];
   const seen = new Set<string>();
-  for (const filePath of paths) {
-    if (parts.length >= MAX_MULTIMODAL_PARTS) {
-      stats.skipped += 1;
-      continue;
-    }
-    const trimmed = filePath.trim();
+  let attempted = 0;
+  for (let i = 0; i < paths.length; i++) {
+    const trimmed = paths[i]?.trim();
     if (!trimmed || seen.has(trimmed)) continue;
+    if (attempted >= MAX_MULTIMODAL_PARTS) {
+      const leftover = paths.length - i;
+      stats.skipped += leftover;
+      logger.debug('qoder ide multimodal attempt cap reached', {
+        attempted,
+        leftover,
+      });
+      break;
+    }
     seen.add(trimmed);
+    attempted += 1;
     let result: Awaited<ReturnType<PathToUriFn>>;
     try {
       result = await pathToUri(trimmed, timeMs);
@@ -337,27 +355,14 @@ async function convertPathsToUriParts(
 }
 
 export function extractToolImagePaths(text: string): string[] {
-  const paths: string[] = [];
-  for (const re of [IMAGE_FILE_RE, IMAGE_GEN_PATH_RE]) {
-    re.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(text)) !== null) {
-      const p = match[1]?.trim();
-      if (p) paths.push(p);
-    }
-  }
-  return [...new Set(paths)];
+  return takeUniqueExtractedPaths([
+    ...matchAll(IMAGE_FILE_RE, text),
+    ...matchAll(IMAGE_GEN_PATH_RE, text),
+  ]);
 }
 
 export function extractMarkdownImagePaths(text: string): string[] {
-  const paths: string[] = [];
-  MARKDOWN_IMAGE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = MARKDOWN_IMAGE_RE.exec(text)) !== null) {
-    const p = (match[1] ?? match[2])?.trim();
-    if (p) paths.push(p);
-  }
-  return [...new Set(paths)];
+  return takeUniqueExtractedPaths(matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]));
 }
 
 function requestIdOf(entry: AgentActivityEntry): string | undefined {
