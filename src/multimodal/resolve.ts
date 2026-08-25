@@ -259,16 +259,41 @@ export async function openNormalizedLocalImage(
     const st = await fh.stat();
     if (!st.isFile() || st.size <= 0) return null;
     const toRead = Math.min(st.size, maxBytes + 1);
-    const buf = Buffer.allocUnsafe(toRead);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    if (bytesRead <= 0 || bytesRead > maxBytes) return null;
-    const bytes = Buffer.from(buf.subarray(0, bytesRead));
+    const bytes = await readFileHandleFully(fh, toRead);
+    if (!bytes || bytes.length > maxBytes) return null;
+
+    const after = await fh.stat();
+    if (
+      !after.isFile()
+      || after.size !== st.size
+      || after.mtimeMs !== st.mtimeMs
+      || bytes.length !== st.size
+    ) {
+      return null;
+    }
+
     const mime_type = sniffImageMime(bytes);
     if (!mime_type) return null;
     return { bytes, mime_type, size: bytes.length, mtimeMs: st.mtimeMs, resolvedPath };
   } finally {
     await fh.close();
   }
+}
+
+/** Loop until `byteLength` or EOF. One `read` is not guaranteed to fill. */
+async function readFileHandleFully(
+  fh: Awaited<ReturnType<typeof fs.open>>,
+  byteLength: number,
+): Promise<Buffer | null> {
+  const buf = Buffer.allocUnsafe(byteLength);
+  let offset = 0;
+  while (offset < byteLength) {
+    const { bytesRead } = await fh.read(buf, offset, byteLength - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset <= 0) return null;
+  return Buffer.from(buf.subarray(0, offset));
 }
 
 /** lstat a local image (no follow). */

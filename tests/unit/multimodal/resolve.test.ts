@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +37,25 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+type FileHandleRead = Awaited<ReturnType<typeof fsp.open>>['read'];
+
+async function withFileHandleRead(
+  file: string,
+  wrap: (orig: FileHandleRead) => FileHandleRead,
+  run: () => Promise<void>,
+): Promise<void> {
+  const probe = await fsp.open(file, 'r');
+  const proto = Object.getPrototypeOf(probe) as { read: FileHandleRead };
+  await probe.close();
+  const orig = proto.read;
+  const spy = vi.spyOn(proto, 'read').mockImplementation(wrap(orig));
+  try {
+    await run();
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 describe('multimodal resolve helpers', () => {
   it('decodes raw base64 content', () => {
@@ -222,6 +242,61 @@ describe('multimodal resolve helpers', () => {
     const loaded = await openNormalizedLocalImage(path.resolve(file));
     expect(loaded?.mime_type).toBe('image/png');
     expect(loaded?.bytes.equals(bytes)).toBe(true);
+  });
+
+  it('assembles a full image across short FileHandle.read calls', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'x.png');
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(32, 7),
+    ]);
+    fs.writeFileSync(file, bytes);
+
+    await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
+      return orig.call(this, buffer, offset, Math.min(length ?? buffer.length, 5), position);
+    }, async () => {
+      const loaded = await openNormalizedLocalImage(path.resolve(file));
+      expect(loaded?.bytes.equals(bytes)).toBe(true);
+      expect(loaded?.mime_type).toBe('image/png');
+    });
+  });
+
+  it('rejects when reads end before the stated size', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'x.png');
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(32, 7),
+    ]);
+    fs.writeFileSync(file, bytes);
+
+    let first = true;
+    await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
+      if (!first) return { bytesRead: 0, buffer };
+      first = false;
+      return orig.call(this, buffer, offset, Math.min(length ?? buffer.length, 8), position);
+    }, async () => {
+      expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
+    });
+  });
+
+  it('rejects when the file size changes during read', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'x.png');
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(32, 7),
+    ]);
+    fs.writeFileSync(file, bytes);
+
+    await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
+      const result = await orig.call(this, buffer, offset, length, position);
+      fs.appendFileSync(file, Buffer.from([1]));
+      return result;
+    }, async () => {
+      expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
+    });
   });
 
   it('rejects an oversized file without allocating the whole file', async () => {
