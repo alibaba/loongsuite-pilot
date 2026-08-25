@@ -111,6 +111,7 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.multimodalStopped = false;
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),

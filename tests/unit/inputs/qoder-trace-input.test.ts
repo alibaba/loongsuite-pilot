@@ -1650,6 +1650,70 @@ describe('QoderTraceInput multimodal', () => {
       }
     });
 
+    it('resumes image enrichment after stop then start', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-restart-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const toolEvent = (id: string, turnId: string) => ({
+          'event.id': id,
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': turnId,
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(toolEvent('cli-tool-1', 'cli-turn-1'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const entries: AgentActivityEntry[] = [];
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: async (filePath: string) => {
+                const stated = await statImagePath(filePath);
+                if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
+                return {
+                  uri: `oss://mm/${stated.mime_type}`,
+                  mime_type: stated.mime_type,
+                  modality: 'image',
+                  size: stated.size,
+                  sha256: 'x',
+                };
+              },
+            } as any,
+          },
+        });
+        input.on('entries', batch => entries.push(...batch));
+
+        await input.start();
+        const first = entries.find(e => e['event.id'] === 'cli-tool-1');
+        expect(Array.isArray(first?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+
+        await fs.appendFile(logFile, `${JSON.stringify(toolEvent('cli-tool-2', 'cli-turn-2'))}\n`);
+        await input.start();
+        const second = entries.find(e => e['event.id'] === 'cli-tool-2');
+        expect(Array.isArray(second?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it('stop finishes while a collect cycle is blocked on never-resolving pathToUri', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-stop-'));
       const imgPath = path.join(tmpDir, 'shot.png');
