@@ -1159,6 +1159,7 @@ export class Orchestrator extends EventEmitter {
       multimodal: {
         enabled: qoderMultimodalEnabled,
         uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qoderAgentCfg.multimodal?.allowedRootPaths,
         ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
       },
     });

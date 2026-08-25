@@ -174,14 +174,21 @@ export function isIdeaDbPath(dbPath: string | null): boolean {
 /** Relative path from a Qoder profile root to local.db. */
 const QODER_DB_TAIL = path.join('SharedClientCache', 'cache', 'db', 'local.db');
 
+/** Desktop Qoder data root (macOS Application Support / Windows AppData / Linux XDG). */
+export function resolveQoderAppRoot(): string {
+  if (process.platform === 'darwin') {
+    return resolveHome('~/Library/Application Support/Qoder');
+  }
+  if (process.platform === 'win32') {
+    const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appdata, 'Qoder');
+  }
+  return resolveHome('~/.config/Qoder');
+}
+
 /** Desktop app-support DB, hashed-profile DBs, and JetBrains ~/.qoder/shared_client. */
 export function resolveAllQoderDbPaths(): string[] {
-  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-  const qoderRoot = process.platform === 'darwin'
-    ? resolveHome('~/Library/Application Support/Qoder')
-    : process.platform === 'win32'
-      ? path.join(appdata, 'Qoder')
-      : resolveHome('~/.config/Qoder');
+  const qoderRoot = resolveQoderAppRoot();
 
   const candidates = [
     path.join(qoderRoot, QODER_DB_TAIL),

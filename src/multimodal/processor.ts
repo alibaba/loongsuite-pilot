@@ -1,17 +1,18 @@
 import { createHash } from 'node:crypto';
-import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
 import {
   decodeBlobContent,
   extFromMime,
-  isImageFilePath,
+  isRealPathInsideRoots,
   joinStorageUri,
-  readImagePathBytes,
-  statImagePath,
+  lstatRegularImageFile,
+  normalizeLocalImagePath,
+  openNormalizedLocalImage,
   yyyymmddFromUnixMs,
 } from './resolve.js';
 import type {
   BlobToUriParams,
+  PathToUriOptions,
   Uploader,
   UriConvertMeta,
   UriResult,
@@ -63,17 +64,26 @@ export class MultimodalProcessor {
   }
 
   /** Local image path → uri. */
-  async pathToUri(filePath: string, timeUnixMs?: number): Promise<UriResult | null> {
+  async pathToUri(
+    filePath: string,
+    timeUnixMs?: number,
+    opts?: PathToUriOptions,
+  ): Promise<UriResult | null> {
     if (this.shuttingDown) {
       logger.warn('multimodal pathToUri rejected', { reason: 'shutting_down' });
       return null;
     }
 
-    const trimmed = filePath.trim().split(/[?#]/)[0] ?? '';
-    if (!trimmed || !isImageFilePath(trimmed)) return null;
-    const key = path.resolve(trimmed);
+    const key = normalizeLocalImagePath(filePath);
+    if (!key) return null;
 
-    const stated = await statImagePath(key);
+    const roots = (opts?.allowedRootPaths ?? []).map(r => r.trim()).filter(Boolean);
+    if (roots.length === 0) {
+      logger.warn('multimodal pathToUri rejected', { reason: 'no_allowed_roots' });
+      return null;
+    }
+
+    const stated = await lstatRegularImageFile(key);
     if (!stated) return null;
 
     const cached = this.pathUriCache.get(key);
@@ -82,6 +92,7 @@ export class MultimodalProcessor {
       && cached.mtimeMs === stated.mtimeMs
       && cached.size === stated.size
     ) {
+      if (!(await isRealPathInsideRoots(key, roots))) return null;
       return cached.result;
     }
 
@@ -100,38 +111,17 @@ export class MultimodalProcessor {
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const fresh = await statImagePath(key);
-        if (!fresh) return null;
-
-        if (fresh.mtimeMs !== stated.mtimeMs || fresh.size !== stated.size) {
-          this.pathUriInflight.delete(slotKey);
-          return this.pathToUri(filePath, timeUnixMs);
-        }
+        const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots);
+        if (!loaded) return null;
 
         const cachedFresh = this.pathUriCache.get(key);
         if (
           cachedFresh
-          && cachedFresh.mtimeMs === fresh.mtimeMs
-          && cachedFresh.size === fresh.size
+          && cachedFresh.mtimeMs === loaded.mtimeMs
+          && cachedFresh.size === loaded.size
         ) {
           return cachedFresh.result;
         }
-
-        if (fresh.size <= 0 || fresh.size > MAX_MULTIMODAL_DATA_SIZE) {
-          logger.warn('multimodal path rejected', {
-            reason: 'size_limit',
-            size: fresh.size,
-          });
-          this.pathUriCache.set(key, {
-            mtimeMs: fresh.mtimeMs,
-            size: fresh.size,
-            result: null,
-          });
-          return null;
-        }
-
-        const loaded = await readImagePathBytes(fresh);
-        if (!loaded) return null;
 
         const result = this.bytesToUri(loaded.bytes, {
           mime_type: loaded.mime_type,
@@ -141,8 +131,8 @@ export class MultimodalProcessor {
             : {}),
         });
         this.pathUriCache.set(key, {
-          mtimeMs: fresh.mtimeMs,
-          size: fresh.size,
+          mtimeMs: loaded.mtimeMs,
+          size: loaded.size,
           result,
         });
         return result;

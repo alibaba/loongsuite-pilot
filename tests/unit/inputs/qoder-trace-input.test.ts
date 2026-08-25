@@ -10,8 +10,12 @@ import {
   extractMarkdownImagePaths,
   extractToolImagePaths,
 } from '../../../src/inputs/qoder-trace/qoder-ide-multimodal.js';
-import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
-import { readImagePathBytes, statImagePath } from '../../../src/multimodal/resolve.js';
+import {
+  QoderTraceInput,
+  qoderDefaultAllowedRootPaths,
+  resolveQoderAllowedRootPaths,
+} from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { canonicalizeRootPath, statImagePath } from '../../../src/multimodal/resolve.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { UriResult } from '../../../src/multimodal/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -804,13 +808,12 @@ describe('QoderTraceInput multimodal', () => {
     return vi.fn(async (filePath: string): Promise<UriResult | null> => {
       const stated = await statImagePath(filePath);
       if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-      const loaded = await readImagePathBytes(stated);
-      if (!loaded) return null;
+      const bytes = fsSync.readFileSync(stated.resolvedPath);
       return {
-        uri: `oss://test/${loaded.bytes.toString('utf8')}`,
-        mime_type: loaded.mime_type,
+        uri: `oss://test/${bytes.toString('utf8')}`,
+        mime_type: stated.mime_type,
         modality: 'image',
-        size: loaded.size,
+        size: stated.size,
         sha256: 'deadbeef',
       };
     });
@@ -827,6 +830,25 @@ describe('QoderTraceInput multimodal', () => {
       ...overrides,
     } as AgentActivityEntry;
   }
+
+  it('includes tmp, vibe_images, and IDE cache/images in default roots', () => {
+    const roots = qoderDefaultAllowedRootPaths();
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'tmp'));
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'vibe_images'));
+    const appRoot = process.platform === 'darwin'
+      ? path.join(os.homedir(), 'Library', 'Application Support', 'Qoder')
+      : process.platform === 'win32'
+        ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Qoder')
+        : path.join(os.homedir(), '.config', 'Qoder');
+    expect(roots).toContain(path.join(appRoot, 'SharedClientCache', 'cache', 'images'));
+  });
+
+  it('merges user-configured roots with defaults', () => {
+    const extra = canonicalizeRootPath('~/Documents');
+    const merged = resolveQoderAllowedRootPaths(['~/Documents']);
+    expect(merged).toContain(canonicalizeRootPath(path.join(os.homedir(), '.qoder', 'tmp')));
+    expect(merged).toContain(extra);
+  });
 
   describe('extractToolImagePaths / extractMarkdownImagePaths', () => {
     it('parses Read and ImageGen tool result paths', () => {
@@ -1424,13 +1446,11 @@ describe('QoderTraceInput multimodal', () => {
               pathToUri: async (filePath: string) => {
                 const stated = await statImagePath(filePath);
                 if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-                const loaded = await readImagePathBytes(stated);
-                if (!loaded) return null;
                 return {
-                  uri: `oss://mm/${loaded.mime_type}`,
-                  mime_type: loaded.mime_type,
+                  uri: `oss://mm/${stated.mime_type}`,
+                  mime_type: stated.mime_type,
                   modality: 'image',
-                  size: loaded.size,
+                  size: stated.size,
                   sha256: 'x',
                 };
               },
@@ -1495,13 +1515,11 @@ describe('QoderTraceInput multimodal', () => {
               pathToUri: async (filePath: string) => {
                 const stated = await statImagePath(filePath);
                 if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-                const loaded = await readImagePathBytes(stated);
-                if (!loaded) return null;
                 return {
-                  uri: `oss://mm/${loaded.mime_type}`,
-                  mime_type: loaded.mime_type,
+                  uri: `oss://mm/${stated.mime_type}`,
+                  mime_type: stated.mime_type,
                   modality: 'image',
-                  size: loaded.size,
+                  size: stated.size,
                   sha256: 'x',
                 };
               },

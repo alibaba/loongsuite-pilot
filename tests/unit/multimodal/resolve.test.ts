@@ -1,15 +1,23 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   decodeBlobContent,
   extFromMime,
   isImageFilePath,
+  isPathInsideRoots,
+  isRealPathInsideRoots,
+  isUncOrDevicePath,
   joinStorageUri,
+  canonicalizeRootPath,
+  lstatRegularImageFile,
+  mergeAllowedRootPaths,
   mimeFromImagePath,
+  normalizeLocalImagePath,
+  openNormalizedLocalImage,
+  sniffImageMime,
   modalityFromMime,
-  readImagePathBytes,
   statImagePath,
   yyyymmddFromUnixMs,
   yyyymmddLocal,
@@ -104,12 +112,15 @@ describe('multimodal resolve helpers', () => {
     expect(mimeFromImagePath('/a/b.txt')).toBeNull();
     expect(isImageFilePath('')).toBe(false);
     expect(mimeFromImagePath('/a/b.png?x=1')).toBe('image/png');
+    expect(normalizeLocalImagePath('/a/b.png?x=1')).toBe(path.resolve('/a/b.png'));
+    expect(normalizeLocalImagePath('not-an-image.txt')).toBeNull();
+    expect(normalizeLocalImagePath('\\\\server\\share\\a.png')).toBeNull();
   });
 
   it('stats and reads a local image path', async () => {
     const dir = makeTempDir();
     const file = path.join(dir, 'x.png');
-    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     fs.writeFileSync(file, bytes);
 
     const stated = await statImagePath(file);
@@ -120,8 +131,8 @@ describe('multimodal resolve helpers', () => {
     expect(stated?.mtimeMs).toEqual(expect.any(Number));
     expect(stated?.resolvedPath).toBe(path.resolve(file));
 
-    const loaded = await readImagePathBytes(stated!);
-    expect(loaded).toEqual({
+    const loaded = await openNormalizedLocalImage(stated!.resolvedPath);
+    expect(loaded).toMatchObject({
       bytes,
       mime_type: 'image/png',
       size: bytes.length,
@@ -140,5 +151,93 @@ describe('multimodal resolve helpers', () => {
     const asDir = path.join(dir, 'folder.png');
     fs.mkdirSync(asDir);
     expect(await statImagePath(asDir)).toBeNull();
+  });
+
+  it('detects UNC and device paths', () => {
+    expect(isUncOrDevicePath('\\\\server\\share\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('//server/share/a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\?\\UNC\\server\\share\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\?\\C:\\tmp\\a.png')).toBe(false);
+    expect(isUncOrDevicePath('/tmp/a.png')).toBe(false);
+  });
+
+  it('checks path containment without following parent escapes', () => {
+    const root = path.join(os.tmpdir(), 'mm-root');
+    expect(isPathInsideRoots(path.join(root, 'a.png'), [root])).toBe(true);
+    expect(isPathInsideRoots(path.join(root, '..', 'outside.png'), [root])).toBe(false);
+    expect(isPathInsideRoots(root, [root])).toBe(true);
+  });
+
+  it('canonicalizes existing roots once and leaves missing paths lexical', () => {
+    const dir = makeTempDir();
+    const missing = path.join(dir, 'does-not-exist');
+    expect(canonicalizeRootPath(dir)).toBe(fs.realpathSync(dir));
+    expect(canonicalizeRootPath(missing)).toBe(path.resolve(missing));
+    const merged = mergeAllowedRootPaths([dir, os.tmpdir()]);
+    expect(merged).toContain(fs.realpathSync(dir));
+    expect(merged).toContain(fs.realpathSync(os.tmpdir()));
+  });
+
+  it('merges caller defaults with user roots, expands ~, and dedupes', () => {
+    const tmp = canonicalizeRootPath(path.join(os.homedir(), '.qoder', 'tmp'));
+    const foo = canonicalizeRootPath('~/workspace/foo');
+    const merged = mergeAllowedRootPaths([tmp, tmp, '  '], ['~/workspace/foo', tmp]);
+    expect(merged).toContain(tmp);
+    expect(merged).toContain(foo);
+    expect(merged.filter(p => p === tmp)).toHaveLength(1);
+  });
+
+  it('rejects a file reached through a directory symlink outside the root', async () => {
+    const dir = makeTempDir();
+    const allowed = path.join(dir, 'allowed');
+    const outside = path.join(dir, 'outside');
+    fs.mkdirSync(allowed);
+    fs.mkdirSync(outside);
+    const secret = path.join(outside, 'secret.png');
+    fs.writeFileSync(secret, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    fs.symlinkSync(outside, path.join(allowed, 'via'));
+    const escaped = path.join(allowed, 'via', 'secret.png');
+    const roots = mergeAllowedRootPaths([allowed]);
+    expect(isPathInsideRoots(escaped, [allowed])).toBe(true);
+    expect(await isRealPathInsideRoots(escaped, roots)).toBe(false);
+    expect(await openNormalizedLocalImage(path.resolve(escaped), undefined, roots)).toBeNull();
+  });
+
+  it('sniffs image magic and rejects non-images', () => {
+    expect(sniffImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe('image/png');
+    expect(sniffImageMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('image/jpeg');
+    expect(sniffImageMime(Buffer.from('not-an-image'))).toBeNull();
+  });
+
+  it('rejects a symlink target', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'x.png');
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    fs.writeFileSync(file, bytes);
+    const link = path.join(dir, 'y.png');
+    fs.symlinkSync(file, link);
+    expect(await lstatRegularImageFile(path.resolve(link))).toBeNull();
+    expect(await statImagePath(link)).toBeNull();
+    expect(await openNormalizedLocalImage(path.resolve(link))).toBeNull();
+    const loaded = await openNormalizedLocalImage(path.resolve(file));
+    expect(loaded?.mime_type).toBe('image/png');
+    expect(loaded?.bytes.equals(bytes)).toBe(true);
+  });
+
+  it('rejects an oversized file without allocating the whole file', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'huge.png');
+    fs.writeFileSync(file, Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(200, 1),
+    ]));
+    const maxBytes = 32;
+    const allocSpy = vi.spyOn(Buffer, 'allocUnsafe');
+    try {
+      expect(await openNormalizedLocalImage(path.resolve(file), maxBytes)).toBeNull();
+      expect(allocSpy.mock.calls.map(([n]) => n)).toEqual([maxBytes + 1]);
+    } finally {
+      allocSpy.mockRestore();
+    }
   });
 });

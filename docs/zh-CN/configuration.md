@@ -73,7 +73,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 ## 多模态对象存储
 
-当需要把 Agent 消息中的图片（内联 base64，或由各 Agent 从本地路径读入后再编码）转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制，见 [多模态采集](multimodal.md)。
+当需要把 Agent 消息中的图片（内联 base64，或由各 Agent 从本地路径读入后再编码）转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制；本地 `pathToUri` 读取范围是 `agents.<id>.multimodal.allowedRootPaths` 加上 Agent 默认根。见 [多模态采集](multimodal.md)。
 
 ### OSS
 

@@ -73,6 +73,11 @@ export type PathToUriFn = (
   timeUnixMs?: number,
 ) => Promise<UriResult | null>;
 
+export interface PathToUriOptions {
+  /** If empty / omitted, pathToUri rejects the read. */
+  allowedRootPaths?: string[];
+}
+
 export interface PathStat {
   resolvedPath: string;
   mime_type: string;

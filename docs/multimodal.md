@@ -48,7 +48,10 @@ Example (Codex + Qoder IDE):
     "qoder": {
       "enabled": true,
       "captureMessageContent": true,
-      "multimodal": { "uploadMode": "both" }
+      "multimodal": {
+        "uploadMode": "both",
+        "allowedRootPaths": ["~/workspace/loongsuite-pilot"]
+      }
     }
   }
 }
@@ -73,6 +76,19 @@ Configured per agent under `agents.<id>.multimodal.uploadMode`:
 | `both` | Enable all surfaces above (for paths that are wired). |
 
 Unknown values fall back to `none`.
+
+## allowedRootPaths
+
+`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
+
+Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd is **not** added to the allowlist. Workspace paths and directories such as `~/Documents` need an explicit `allowedRootPaths` entry.
+
+| Agent | Defaults |
+|-------|----------|
+| `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
+| `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
+
+UNC/device paths, symlinks, and non-image magic bytes are skipped.
 
 ## What Each Agent Collects
 

@@ -8,7 +8,7 @@ import {
   extractToolImagePaths,
   resolveImagePath,
 } from '../../../src/inputs/qoder-trace/qoder-cli-multimodal.js';
-import { readImagePathBytes, statImagePath } from '../../../src/multimodal/resolve.js';
+import { statImagePath } from '../../../src/multimodal/resolve.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { UriResult } from '../../../src/multimodal/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -37,13 +37,12 @@ function fakePathToUri() {
   return vi.fn(async (filePath: string): Promise<UriResult | null> => {
     const stated = await statImagePath(filePath);
     if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-    const loaded = await readImagePathBytes(stated);
-    if (!loaded) return null;
+    const bytes = fsSync.readFileSync(stated.resolvedPath);
     return {
-      uri: `oss://test/${loaded.bytes.toString('utf8')}`,
-      mime_type: loaded.mime_type,
+      uri: `oss://test/${bytes.toString('utf8')}`,
+      mime_type: stated.mime_type,
       modality: 'image',
-      size: loaded.size,
+      size: stated.size,
       sha256: 'deadbeef',
     };
   });

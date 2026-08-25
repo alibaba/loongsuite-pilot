@@ -1,6 +1,9 @@
+import { constants as fsConstants, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { resolveHome } from '../utils/fs-utils.js';
 import type { BlobPart, PathBytes, PathStat } from './types.js';
+import { MAX_MULTIMODAL_DATA_SIZE } from './types.js';
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -17,7 +20,7 @@ const IMAGE_EXT_TO_MIME: Record<string, string> = {
 
 export type { PathBytes, PathStat };
 
-/** Decode raw base64 blob content. */
+/** Decode raw base64. */
 export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   const base64 = typeof part.content === 'string' ? part.content.trim() : '';
   if (!base64) return null;
@@ -31,12 +34,12 @@ export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   }
 }
 
-/** Whether path looks like an image by extension. */
+/** Image path by extension. */
 export function isImageFilePath(filePath: string): boolean {
   return mimeFromImagePath(filePath) !== null;
 }
 
-/** MIME from image file extension. */
+/** MIME from image extension. */
 export function mimeFromImagePath(filePath: string): string | null {
   const trimmed = filePath.trim();
   if (!trimmed) return null;
@@ -45,35 +48,168 @@ export function mimeFromImagePath(filePath: string): string | null {
   return IMAGE_EXT_TO_MIME[ext] ?? null;
 }
 
-/** Stat local image path. */
-export async function statImagePath(filePath: string): Promise<PathStat | null> {
-  const mime = mimeFromImagePath(filePath);
-  if (!mime) return null;
+/** UNC or Windows device path. */
+export function isUncOrDevicePath(filePath: string): boolean {
+  const trimmed = filePath.trim();
+  if (!trimmed) return false;
+  const win = trimmed.replace(/\//g, '\\');
+  if (/^\\\\[.?]\\UNC\\/i.test(win)) return true;
+  if (/^\\\\[.?]\\/i.test(win)) return false;
+  if (win.startsWith('\\\\')) return true;
+  if (/^\/\/[^/]/.test(trimmed)) return true;
+  return false;
+}
 
-  const resolvedPath = path.resolve(filePath.trim().split(/[?#]/)[0] ?? filePath.trim());
-  let stat;
+/** Resolve a local image path; reject UNC / non-image. */
+export function normalizeLocalImagePath(filePath: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  const bare = trimmed.split(/[?#]/)[0] ?? trimmed;
+  if (!bare || isUncOrDevicePath(bare) || !mimeFromImagePath(bare)) return null;
+  return path.resolve(bare);
+}
+
+/** Expand `~` and realpath a root. Missing paths stay lexical. */
+export function canonicalizeRootPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const resolved = path.resolve(resolveHome(trimmed));
   try {
-    stat = await fs.stat(resolvedPath);
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Merge and dedupe allowed roots. */
+export function mergeAllowedRootPaths(
+  defaultPaths: string[],
+  userPaths?: string[],
+): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [...defaultPaths, ...(userPaths ?? [])]) {
+    const resolved = canonicalizeRootPath(raw);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    merged.push(resolved);
+  }
+  return merged;
+}
+
+/** Whether path is inside any root (lexical). */
+export function isPathInsideRoots(absPath: string, roots: string[]): boolean {
+  for (const root of roots) {
+    if (!root) continue;
+    const rel = path.relative(root, absPath);
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return true;
+  }
+  return false;
+}
+
+/** Whether the file's realpath is inside any root. */
+export async function isRealPathInsideRoots(absPath: string, roots: string[]): Promise<boolean> {
+  let realFile: string;
+  try {
+    realFile = await fs.realpath(absPath);
+  } catch {
+    return false;
+  }
+  return isPathInsideRoots(realFile, roots);
+}
+
+/** Image MIME from magic bytes. */
+export function sniffImageMime(bytes: Buffer): string | null {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return 'image/png';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (bytes.length >= 6) {
+    const gif = bytes.subarray(0, 6).toString('ascii');
+    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif';
+  }
+  if (bytes.length >= 12
+    && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+    && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return 'image/webp';
+  }
+  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return 'image/bmp';
+  if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0) {
+    return 'image/x-icon';
+  }
+  if (bytes.length >= 4
+    && ((bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0)
+      || (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0 && bytes[3] === 0x2a))) {
+    return 'image/tiff';
+  }
+  const head = bytes.subarray(0, 256).toString('utf8').trimStart();
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && /<svg[\s>]/i.test(head))) {
+    return 'image/svg+xml';
+  }
+  return null;
+}
+
+export async function lstatRegularImageFile(resolvedPath: string) {
+  let listed;
+  try {
+    listed = await fs.lstat(resolvedPath);
   } catch {
     return null;
   }
-  if (!stat.isFile()) return null;
+  if (listed.isSymbolicLink() || !listed.isFile()) return null;
+  return listed;
+}
+
+/** Open and read an already-normalized local image path. */
+export async function openNormalizedLocalImage(
+  resolvedPath: string,
+  maxBytes = MAX_MULTIMODAL_DATA_SIZE,
+  allowedRootPaths?: string[],
+): Promise<(PathBytes & { mtimeMs: number; resolvedPath: string }) | null> {
+  if (allowedRootPaths) {
+    if (allowedRootPaths.length === 0) return null;
+    if (!(await isRealPathInsideRoots(resolvedPath, allowedRootPaths))) return null;
+  }
+
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fh;
+  try {
+    fh = await fs.open(resolvedPath, flags);
+  } catch {
+    return null;
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.size <= 0) return null;
+    const toRead = Math.min(st.size, maxBytes + 1);
+    const buf = Buffer.allocUnsafe(toRead);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    if (bytesRead <= 0 || bytesRead > maxBytes) return null;
+    const bytes = Buffer.from(buf.subarray(0, bytesRead));
+    const mime_type = sniffImageMime(bytes);
+    if (!mime_type) return null;
+    return { bytes, mime_type, size: bytes.length, mtimeMs: st.mtimeMs, resolvedPath };
+  } finally {
+    await fh.close();
+  }
+}
+
+/** lstat a local image (no follow). */
+export async function statImagePath(filePath: string): Promise<PathStat | null> {
+  const resolvedPath = normalizeLocalImagePath(filePath);
+  if (!resolvedPath) return null;
+  const listed = await lstatRegularImageFile(resolvedPath);
+  const mime = mimeFromImagePath(resolvedPath);
+  if (!listed || !mime) return null;
   return {
     resolvedPath,
     mime_type: mime,
-    size: stat.size,
-    mtimeMs: stat.mtimeMs,
+    size: listed.size,
+    mtimeMs: listed.mtimeMs,
   };
-}
-
-/** Read bytes for a stated image path. */
-export async function readImagePathBytes(stated: PathStat): Promise<PathBytes | null> {
-  try {
-    const bytes = await fs.readFile(stated.resolvedPath);
-    return { bytes, mime_type: stated.mime_type, size: bytes.length };
-  } catch {
-    return null;
-  }
 }
 
 export function extFromMime(mime: string): string {
@@ -119,7 +255,7 @@ export function yyyymmddLocal(date = new Date()): string {
   return `${y}${m}${d}`;
 }
 
-/** YYYYMMDD (local) from event time; else `fallback`/now. */
+/** YYYYMMDD (local) from event time. */
 export function yyyymmddFromUnixMs(
   timeUnixMs: number | undefined,
   fallback = new Date(),
@@ -130,7 +266,7 @@ export function yyyymmddFromUnixMs(
   return yyyymmddLocal(fallback);
 }
 
-/** Join storage base URI with relative object key. */
+/** Join storage base URI with object key. */
 export function joinStorageUri(storageBasePath: string, targetPath: string): string {
   const base = storageBasePath.replace(/\/+$/, '');
   const rel = targetPath.replace(/^\/+/, '');

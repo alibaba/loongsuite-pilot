@@ -1,7 +1,9 @@
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
+import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
 import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
@@ -11,7 +13,7 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
@@ -24,6 +26,7 @@ export interface QoderTraceInputOptions extends InputOptions {
     enabled: boolean;
     uploadMode?: MultimodalUploadMode;
     processor?: MultimodalProcessor;
+    allowedRootPaths?: string[];
   };
 }
 
@@ -32,6 +35,32 @@ function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
     const agentType = e['gen_ai.agent.type'] as string;
     return agentType === ClientType.QoderIdea || agentType === 'qoder-idea';
   });
+}
+
+const QODER_IDE_IMAGES_TAIL = path.join('SharedClientCache', 'cache', 'images');
+
+export function qoderDefaultAllowedRootPaths(): string[] {
+  const appRoot = resolveQoderAppRoot();
+  const roots = [
+    resolveHome('~/.qoder/tmp'),
+    resolveHome('~/.qoder/vibe_images'),
+    path.join(appRoot, QODER_IDE_IMAGES_TAIL),
+  ];
+  let names: string[];
+  try {
+    names = fsSync.readdirSync(appRoot);
+  } catch {
+    return roots;
+  }
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    roots.push(path.join(appRoot, name, QODER_IDE_IMAGES_TAIL));
+  }
+  return roots;
+}
+
+export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
+  return mergeAllowedRootPaths(qoderDefaultAllowedRootPaths(), userPaths);
 }
 
 /**
@@ -51,6 +80,7 @@ export class QoderTraceInput extends BaseInput {
   private readonly multimodalEnabled: boolean;
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
+  private readonly allowedRootPaths: string[];
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -58,6 +88,9 @@ export class QoderTraceInput extends BaseInput {
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = opts.multimodal?.processor ?? null;
+    this.allowedRootPaths = this.multimodalEnabled
+      ? resolveQoderAllowedRootPaths(opts.multimodal?.allowedRootPaths)
+      : [];
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -146,7 +179,9 @@ export class QoderTraceInput extends BaseInput {
 
     if (this.multimodalEnabled && this.multimodalProcessor) {
       const pathToUri = (filePath: string, timeUnixMs?: number) =>
-        this.multimodalProcessor!.pathToUri(filePath, timeUnixMs);
+        this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
+          allowedRootPaths: this.allowedRootPaths,
+        });
       for (const sessionEntries of ideSessionGroups.values()) {
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;

@@ -48,7 +48,10 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
     "qoder": {
       "enabled": true,
       "captureMessageContent": true,
-      "multimodal": { "uploadMode": "both" }
+      "multimodal": {
+        "uploadMode": "both",
+        "allowedRootPaths": ["~/workspace/loongsuite-pilot"]
+      }
     }
   }
 }
@@ -73,6 +76,19 @@ loongsuite-pilot restart
 | `both` | 同时开启上述全部表面（对已接线的路径生效）。 |
 
 未知取值会回落到 `none`。
+
+## allowedRootPaths
+
+`pathToUri` 只读取允许根内的文件。配置在 `agents.<id>.multimodal.allowedRootPaths`，与 **该 Agent 自己的默认根合并**（不是替换）。默认根写在各 Agent Input 上（`QoderTraceInput`、`CodexTranscriptInput`）；由 Input 自己合并用户配置并做一次规范化（`~` 展开、`realpath`），`multimodal` 只校验合并后的列表。
+
+提取器仍会用 `agent.qoder.cwd` 拼相对 `@` / Read 路径，但 **不会** 自动把 cwd 加进允许根。工作区或 `~/Documents` 等目录需要写进 `allowedRootPaths`。
+
+| Agent | 默认根 |
+|-------|--------|
+| `qoder` | `~/.qoder/tmp`（CLI 粘贴）、`~/.qoder/vibe_images`（ImageGen），以及桌面 IDE 粘贴缓存 `…/Qoder/SharedClientCache/cache/images`（`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`；远端 Linux hashed profile 是 `<appRoot>/<hash>/SharedClientCache/cache/images`）。 |
+| `codex` | `~/.codex`（预留；Codex 目前走内联 base64，不读盘）。 |
+
+UNC/设备路径、符号链接、非图片 magic 都会跳过。
 
 ## 各 Agent 采集内容
 
