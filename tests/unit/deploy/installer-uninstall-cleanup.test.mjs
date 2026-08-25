@@ -387,6 +387,38 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall.indexOf('Remove-CodexHookConfig'))
       .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
   });
+
+  it('passes a valid fs module literal to node when rewriting Codex files', () => {
+    const writer = ps1.slice(
+      ps1.indexOf('function Write-FileUtf8NoBom'),
+      ps1.indexOf('function Remove-CodexTrustState'),
+    );
+    expect(writer).toContain("$rewriteScript = @'");
+    expect(writer).toContain("const fs = require('fs');");
+    expect(writer).not.toContain("-e 'const fs=require(\"fs\")");
+    expect(writer).toContain('if ($rewriteExit -ne 0)');
+
+    const script = writer.match(/\$rewriteScript = @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+    expect(script).toBeDefined();
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-rewrite-'));
+    try {
+      const input = join(root, 'input.txt');
+      const output = join(root, 'output.txt');
+      writeFileSync(input, '\uFEFFcodex-hook-config', 'utf8');
+      const run = spawnSync(process.execPath, ['-e', script, input, output], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(readFileSync(output, 'utf8')).toBe('codex-hook-config');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('continues uninstall when dedicated Codex cleanup fails', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
+    expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+  });
 });
 
 describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
@@ -648,4 +680,91 @@ describe('Grok Build uninstall smoke', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe('Windows QoderWork-family runtime override lifecycle', () => {
+  const runtimeSection = ps1.slice(
+    ps1.indexOf('function Get-PilotRuntimeOverride'),
+    ps1.indexOf('function Install-Command'),
+  );
+  const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+
+  it('uses the final agent config and independently maintains both environment variables', () => {
+    expect(runtimeSection).toContain('config?.agents?.[agentId]?.enabled === false');
+    expect(runtimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
+    expect(runtimeSection).toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qwen-work-cn'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'");
+    expect(ps1.match(/Inject-QoderworkRuntimeWrapper/g)).toHaveLength(3);
+  });
+
+  it('uses CLM-safe registry persistence with a guarded Explorer broadcast', () => {
+    expect(runtimeSection).toContain('reg.exe query "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe add "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe delete "HKCU\\Environment"');
+    expect(runtimeSection).toContain('[Environment]::SetEnvironmentVariable');
+    expect(runtimeSection).toContain('catch {');
+    expect(runtimeSection).toContain('sign out and back in');
+  });
+
+  it('treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop', () => {
+    const getter = runtimeSection.slice(
+      runtimeSection.indexOf('function Get-PilotRuntimeOverride'),
+      runtimeSection.indexOf('function Test-AgentCollectionEnabled'),
+    );
+    expect(getter).toContain('$prevEAP = $ErrorActionPreference');
+    expect(getter).toContain('$ErrorActionPreference = "Continue"');
+    expect(getter).toContain('$regExitCode = $LASTEXITCODE');
+    expect(getter).toContain('$ErrorActionPreference = $prevEAP');
+    expect(getter.indexOf('$ErrorActionPreference = $prevEAP'))
+      .toBeLessThan(getter.indexOf('if ($regExitCode -ne 0)'));
+  });
+
+  it('detects app roots without assuming executables are outside version directories', () => {
+    expect(runtimeSection).toContain('Programs\\QwenWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork');
+    expect(runtimeSection).toContain('Programs\\QoderWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork CN');
+    expect(runtimeSection).not.toContain('QoderWork\\QoderWork.exe');
+    expect(runtimeSection).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
+  });
+
+  it('cleans an owned override before returning when the wrapper is missing', () => {
+    const sync = runtimeSection.slice(runtimeSection.indexOf('function Sync-PilotRuntimeOverride'));
+    expect(sync.indexOf('Get-PilotRuntimeOverride')).toBeLessThan(sync.indexOf('Test-Path $WrapperPath'));
+    expect(sync).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(sync).toContain('Wrapper missing; cleaned $Name');
+    expect(sync).toContain('Wrapper missing; did not set $Name');
+    expect(sync).toContain('$script:RUNTIME_WRAPPER_MISSING = $true');
+  });
+
+  it('uninstalls both overrides only when owned by the current dataDir', () => {
+    expect(uninstall).toContain("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')");
+    expect(uninstall).toContain('$currentRuntime -ieq $wrapperPath');
+    expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
+  });
+
+  it('continues external cleanup but preserves retry assets when runtime env cleanup fails', () => {
+    const envCleanup = uninstall.slice(
+      uninstall.indexOf("foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH'))"),
+      uninstall.indexOf('if ($script:RUNTIME_ENV_BROADCAST_FAILED)'),
+    );
+    expect(envCleanup).toMatch(/foreach[\s\S]*try\s*\{[\s\S]*Remove-PilotRuntimeOverride[\s\S]*\}\s*catch\s*\{/);
+    expect(envCleanup).toContain('$runtimeEnvCleanupFailed = $true');
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'));
+    expect(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall).toContain('installation files were preserved for retry');
+  });
+
+  it('cleans hook configs and runtime overrides before deleting their files and pinned node', () => {
+    expect(uninstall.indexOf('Remove-HookConfigs'))
+      .toBeLessThan(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"));
+    expect(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+  });
 });

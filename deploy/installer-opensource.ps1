@@ -201,9 +201,18 @@ function Resolve-Node {
         if ($pinned) { $candidates += $pinned }
     }
 
-    # nvm-windows
+    # nvm-windows. Both probes below must be non-fatal. NVM_HOME is often a *machine*
+    # level variable pointing into another account's profile
+    # (C:\Users\Administrator\AppData\Local\nvm was measured), and that directory's DACL
+    # grants nothing to the current user: a bare Test-Path raises a PermissionDenied
+    # UnauthorizedAccessException record, which the file header's
+    # $ErrorActionPreference = "Stop" promotes to a terminating error. Resolve-Node is
+    # called from uninstall before any cleanup runs, so one unreadable third-party node
+    # manager aborted the entire uninstall and left config.json -- credentials included --
+    # on disk even with -Purge. The Get-ChildItem calls were already guarded; these two
+    # were not. -LiteralPath as well, because a version manager path may contain [ or ].
     $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
+    if ($nvmHome -and (Test-Path -LiteralPath $nvmHome -ErrorAction SilentlyContinue)) {
         $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue |
                    Sort-Object Name -Descending
         foreach ($d in $nvmDirs) {
@@ -211,9 +220,9 @@ function Resolve-Node {
         }
     }
 
-    # fnm
+    # fnm -- same unreadable-directory hazard as the nvm branch above.
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
+    if (Test-Path -LiteralPath $fnmDir -ErrorAction SilentlyContinue) {
         $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
                    Sort-Object Name -Descending
         foreach ($d in $fnmDirs) {
@@ -1304,6 +1313,139 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 }
 
 # ============================================================
+# QoderWork-family runtime wrapper: persist the dedicated User-level overrides
+# in HKCU\Environment. reg.exe is the CLM-safe source of truth; the guarded
+# .NET call broadcasts WM_SETTINGCHANGE so Explorer-spawned apps see updates.
+# ============================================================
+function Get-PilotRuntimeOverride {
+    param([string]$Name)
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
+        $regExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($regExitCode -ne 0) { return "" }
+    foreach ($line in $regOut) {
+        if (($line -match '^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$') -and $Matches[1] -ieq $Name) {
+            return $Matches[2].Trim()
+        }
+    }
+    return ""
+}
+
+function Test-AgentCollectionEnabled {
+    param([string]$AgentId)
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path $configFile)) { return $false }
+
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $enabled = & $script:NODE_BIN -e @'
+try {
+  const config = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
+  const agentId = process.argv[2];
+  process.stdout.write(config?.agents?.[agentId]?.enabled === false ? 'false' : 'true');
+} catch {
+  process.stdout.write('false');
+}
+'@ $configFile $AgentId 2>$null
+    $ErrorActionPreference = $prevEAP
+    return "$enabled".Trim() -eq "true"
+}
+
+function Set-PilotRuntimeOverride {
+    param([string]$Name, [string]$Value)
+    reg.exe add "HKCU\Environment" /v $Name /t REG_SZ /d "$Value" /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set $Name" }
+    try {
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Remove-PilotRuntimeOverride {
+    param([string]$Name)
+    reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }
+    try {
+        [Environment]::SetEnvironmentVariable($Name, $null, 'User')
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Sync-PilotRuntimeOverride {
+    param(
+        [string]$Name,
+        [bool]$ShouldEnable,
+        [string]$WrapperPath,
+        [string]$ProductName
+    )
+    $current = Get-PilotRuntimeOverride -Name $Name
+    if (-not (Test-Path $WrapperPath)) {
+        $script:RUNTIME_WRAPPER_MISSING = $true
+        if ($current -and $current -ieq $WrapperPath) {
+            $broadcasted = Remove-PilotRuntimeOverride -Name $Name
+            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+            Msg "    ⚠️  wrapper 缺失，已清理 $Name" "    ⚠️  Wrapper missing; cleaned $Name"
+        } else {
+            Msg "    ⚠️  wrapper 缺失，未设置 $Name" "    ⚠️  Wrapper missing; did not set $Name"
+        }
+        return
+    }
+
+    if ($ShouldEnable) {
+        if ($current -ine $WrapperPath) {
+            $broadcasted = Set-PilotRuntimeOverride -Name $Name -Value $WrapperPath
+            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+            Msg "    ✅ $Name ($ProductName)" "    ✅ $Name ($ProductName)"
+        }
+    } elseif ($current -and $current -ieq $WrapperPath) {
+        $broadcasted = Remove-PilotRuntimeOverride -Name $Name
+        if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+        Msg "    ✅ 已清理 $Name" "    ✅ Cleaned $Name"
+    }
+}
+
+function Inject-QoderworkRuntimeWrapper {
+    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
+    $localAppData = $env:LOCALAPPDATA
+    if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
+
+    $qwenInstalled = Test-Path (Join-Path $localAppData "Programs\QwenWorkCN")
+    $qoderInstalled = Test-Path (Join-Path $localAppData "Programs\QoderWork")
+    $qoderCNInstalled = (Test-Path (Join-Path $localAppData "Programs\QoderWorkCN")) -or `
+                        (Test-Path (Join-Path $localAppData "Programs\QoderWork CN"))
+    $qwenShouldEnable = $qwenInstalled -and (Test-AgentCollectionEnabled -AgentId 'qwen-work-cn')
+    $qoderShouldEnable = ($qoderInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work')) -or `
+                         ($qoderCNInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'))
+
+    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
+    $script:RUNTIME_WRAPPER_MISSING = $false
+    Sync-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' `
+        -ShouldEnable $qwenShouldEnable -WrapperPath $wrapperPath -ProductName 'QwenWorkCN'
+    Sync-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' `
+        -ShouldEnable $qoderShouldEnable -WrapperPath $wrapperPath -ProductName 'QoderWork'
+
+    if ($script:RUNTIME_WRAPPER_MISSING) {
+        Msg "    ⚠️  runtime wrapper 未完整部署，已跳过 token 拦截以避免影响应用" `
+            "    ⚠️  Runtime wrapper is missing; token interception was skipped to protect the apps"
+    } elseif ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    ⚠️  环境变量已持久化，但无法通知 Explorer；请注销并重新登录 Windows" `
+            "    ⚠️  Environment persisted but Explorer could not be notified; sign out and back in"
+    } else {
+        Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
+            "    ⚠️  Fully quit and restart the corresponding apps for changes to take effect"
+    }
+    Write-Host ""
+}
+
+# ============================================================
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
 function Install-Command {
@@ -1641,9 +1783,21 @@ function Remove-HookConfigs {
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
         $short = $cfg.Replace($env:USERPROFILE, "~")
+        # Same guard Remove-OpenClawPlugin and Remove-OtelPlugin already carry, and the
+        # reason uninstall may now reach this function without a Node: without it the
+        # call below runs as & "" against a hook config that then goes unreported.
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
 
+        # Saved and restored around the try, not inside it: a throw from the native call
+        # (an install-dir node-bin pin that no longer exists, say) used to skip the
+        # restore and leave the whole rest of uninstall running at "Continue", where the
+        # later fail-fast checks stop failing fast.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         try {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -1674,10 +1828,11 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 '@ $cfg $HOOK_MARKER 2>$null
-            $ErrorActionPreference = $prevEAP
             Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
         } catch {
             Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
+        } finally {
+            $ErrorActionPreference = $prevEAP
         }
     }
 }
@@ -2218,6 +2373,9 @@ function Cmd-Install {
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
 
+    # Before anything is downloaded or registered, so Ctrl+C is still cheap.
+    Warn-ElevatedInstall
+
     Check-Deps
     Migrate-LegacyLayout
 
@@ -2247,6 +2405,7 @@ function Cmd-Install {
         }
         Write-Config
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2315,6 +2474,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
+        Inject-QoderworkRuntimeWrapper
 
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
@@ -2370,8 +2530,26 @@ function Write-FileUtf8NoBom {
     }
     $tmp = Join-Path $env:TEMP ("lp-write-" + (Get-Random) + ".tmp")
     Set-Content -LiteralPath $tmp -Value $Content -Encoding UTF8 -NoNewline
-    & $script:NODE_BIN -e 'const fs=require("fs");let s=fs.readFileSync(process.argv[1],"utf-8");if(s.charCodeAt(0)===0xFEFF)s=s.slice(1);fs.writeFileSync(process.argv[2],s);' $tmp $Path
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    # Windows PowerShell 5.1 strips nested double quotes while marshalling a
+    # single-quoted -e argument to a native executable. Keep the JavaScript in a
+    # here-string and use JS single-quoted literals so node receives the quotes.
+    $rewriteScript = @'
+const fs = require('fs');
+let content = fs.readFileSync(process.argv[1], 'utf-8');
+if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+fs.writeFileSync(process.argv[2], content);
+'@
+    $rewriteExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e $rewriteScript $tmp $Path
+        $rewriteExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
 function Remove-CodexTrustState {
@@ -2556,10 +2734,46 @@ function Remove-OnePilotScheduledTask {
     } catch {
         $unregisterError = $_.Exception.Message
         $fullTaskName = "$($TaskPath.TrimEnd('\'))\$TaskName"
-        & schtasks.exe /Delete /TN $fullTaskName /F 2>$null | Out-Null
-        $schtasksExit = $LASTEXITCODE
+        # Locally forced to Continue for the native call below. On Windows PowerShell 5.1
+        # a native command that writes stderr *while a 2> redirection is in effect*
+        # raises a NativeCommandError, and the file header's
+        # $ErrorActionPreference = "Stop" promotes that to a terminating error whose
+        # Message is nothing but the raw stderr line. schtasks.exe prints
+        # "ERROR: Access is denied." there on exactly the failure this branch exists to
+        # report, so the throw below -- the only place that tells the user why the task
+        # survived and what to do about it -- was unreachable: the user saw the bare
+        # stderr line and nothing else. Restored in finally so the rest of uninstall
+        # keeps failing fast. $schtasksExit starts at 1 so a schtasks.exe that cannot
+        # launch at all is treated as failure rather than inheriting a stale
+        # $LASTEXITCODE of 0.
+        $schtasksExit = 1
+        $schtasksOut = ""
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $schtasksOut = & schtasks.exe /Delete /TN $fullTaskName /F 2>&1
+            $schtasksExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
         if ($schtasksExit -ne 0) {
-            throw "Failed to remove scheduled task $fullTaskName (Unregister-ScheduledTask: $unregisterError; schtasks exit: $schtasksExit). Run uninstall from an elevated PowerShell."
+            # Each element here is an ErrorRecord, not a string: at "Continue" the
+            # NativeCommandError still goes to the error stream and 2>&1 merges the record
+            # itself, so Out-String rendered the whole PowerShell error block -- source
+            # line, squiggle line, CategoryInfo, FullyQualifiedErrorId -- into the middle
+            # of the sentence below. Measured on a 5.1 box: schtasks.exe emits two records
+            # for one stderr line, the second one empty. .Exception.Message is a property
+            # get, so it stays CLM-safe, and it is the raw stderr text and nothing else.
+            $schtasksLines = @()
+            foreach ($schtasksLine in $schtasksOut) {
+                $lineText = ""
+                if ($schtasksLine.Exception) { $lineText = [string]$schtasksLine.Exception.Message }
+                else { $lineText = [string]$schtasksLine }
+                $lineText = $lineText.Trim()
+                if ($lineText) { $schtasksLines += $lineText }
+            }
+            $schtasksDetail = $schtasksLines -join " "
+            throw "Failed to remove scheduled task $fullTaskName (Unregister-ScheduledTask: $unregisterError; schtasks exit: $schtasksExit): $schtasksDetail. If that says access is denied, this instance's scheduled tasks are owned by BUILTIN\Administrators, which is what registering them from an elevated session produces -- uninstall itself does not need administrator rights. Re-run uninstall from an elevated PowerShell, or reinstall without elevation."
         }
     }
 
@@ -2624,6 +2838,42 @@ function Get-PilotUserTag {
     return $tag
 }
 # <<< pilot-account-identity <<<
+
+# >>> pilot-elevation-warning >>>
+# "Run as administrator" is the reflex a lot of Windows users have for an installer, and
+# here it quietly costs them the ability to uninstall. The scheduled tasks are registered
+# with -RunLevel Limited into the shared \LoongsuitePilot folder, and the only reason a
+# standard user can delete them again is that folder's inherited CREATOR OWNER :
+# FullControl ACE. Under an elevated token CREATOR OWNER resolves to
+# BUILTIN\Administrators, so the tasks come out owned by Administrators and the same
+# account's ordinary session keeps only Read, Synchronize -- schtasks /Delete answers
+# "ERROR: Access is denied." and uninstall cannot remove them. Same mechanism as the file
+# ACLs that Reset-PilotInheritedAcl already repairs with icacls /reset; the task side has
+# no equivalent yet, so for now all we can do is say so before the user commits.
+#
+# The probe is best-effort by construction: both the cast and GetCurrent() are "supported
+# only on core types" under Constrained Language Mode, so under WDAC this throws and we
+# report not-elevated. Losing the hint is acceptable; failing an install over a hint is
+# not.
+function Test-PilotElevated {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]$identity
+        return [bool]$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Warn-ElevatedInstall {
+    if (-not (Test-PilotElevated)) { return }
+    Msg "⚠️  当前是提权(管理员)会话" "⚠️  This is an elevated (administrator) session"
+    Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
+    Msg "    继续安装的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
+    Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
+    Write-Host ""
+}
+# <<< pilot-elevation-warning <<<
 
 function Remove-PilotScheduledTasks {
     $taskFolder = "\LoongsuitePilot"
@@ -2769,6 +3019,27 @@ function Remove-PilotInstallationFiles {
     }
 }
 
+# >>> dsh-unpatch-refusal >>>
+# Would removing the plugin assets leave a reference behind? Only a patch file that still
+# carries our managed block would, so that is the one question worth refusing over.
+#
+# Consulted only on the paths that would otherwise refuse to continue, never on the
+# working path: this reads a file owned by a third-party tool, and an unreadable one must
+# not be able to turn a healthy uninstall into a failing one. Unreadable is answered
+# "still managed" on purpose -- we cannot prove nothing dangles, so we keep the
+# conservative answer and let the caller refuse.
+function Test-DshPatchStillManaged {
+    param([string]$PatchPath)
+    if (-not $PatchPath) { return $false }
+    if (-not (Test-Path -LiteralPath $PatchPath -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        return [bool](Select-String -LiteralPath $PatchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)
+    } catch {
+        return $true
+    }
+}
+# <<< dsh-unpatch-refusal <<<
+
 # ============================================================
 # Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
 # Unix and Windows both execute assets/plugins/dsh/cleanup.mjs.
@@ -2795,14 +3066,26 @@ function Remove-DshYamlPatch {
     }
 
     if (-not (Test-Path -LiteralPath $cleanupScript)) {
-        if ((Test-Path -LiteralPath $patchPath) -and
-            (Select-String -LiteralPath $patchPath -SimpleMatch "# BEGIN PILOT-OBSERVABILITY-MANAGED" -Quiet)) {
+        if (Test-DshPatchStillManaged -PatchPath $patchPath) {
             throw "DSH cleanup helper is missing; refusing to remove plugin assets still referenced by $patchPath"
         }
         return
     }
     if (-not $script:NODE_BIN) {
-        throw "No usable Node.js; cannot safely remove the DSH YAML patch"
+        # Gated the same way as the branch above, which it was not. Resolve-Node returns
+        # $null when no candidate is suitable, so this throw has always been reachable,
+        # and uninstall now also arrives here after a failed Node probe instead of dying
+        # inside Resolve-Node itself. Refusing unconditionally aborted the entire
+        # uninstall -- Cmd-Uninstall calls this before every other cleanup step, and
+        # -Purge, the step that deletes config.json and the reporting credentials in it,
+        # is the last thing in the function -- on machines where DSH was never patched and
+        # there was nothing to protect. Refuse only when something would really dangle.
+        if (Test-DshPatchStillManaged -PatchPath $patchPath) {
+            throw "No usable Node.js; cannot safely remove the DSH YAML patch at $patchPath"
+        }
+        Msg "    ⚠️  跳过: 无可用 node,且 $patchPath 里没有 Pilot 托管块,无需 unpatch" `
+            "    ⚠️  Skipped: no usable node, and $patchPath carries no Pilot-managed block, so there is nothing to unpatch"
+        return
     }
 
     & $script:NODE_BIN $cleanupScript --patch $patchPath --plugin-dir $pluginDir
@@ -2829,7 +3112,26 @@ function Cmd-Uninstall {
 
     # Resolve the pinned runtime before installation files (including node-bin)
     # are removed. JSON config cleanup must also work when Node is absent from PATH.
-    $script:NODE_BIN = Resolve-Node
+    if (-not $script:NODE_BIN) {
+        try {
+            $script:NODE_BIN = Resolve-Node
+        } catch {
+            # Non-fatal on purpose. Resolve-Node probes third-party version-manager
+            # directories, and under the file header's $ErrorActionPreference = "Stop"
+            # any unexpected error record in there becomes terminating. Unguarded, that
+            # aborted Cmd-Uninstall right here -- before plugin cleanup, before the
+            # install directory was deleted, and before -Purge -- so config.json
+            # survived on disk with its credentials in it. Every step below that needs
+            # Node already checks $script:NODE_BIN and reports what it skipped.
+            $script:NODE_BIN = ""
+            Msg "    ⚠️  解析 Node 失败: $($_.Exception.Message)" `
+                "    ⚠️  Resolving Node failed: $($_.Exception.Message)"
+        }
+    }
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  未解析到可用的 Node;依赖 Node 的清理步骤会逐项跳过并提示,其余步骤继续" `
+            "    ⚠️  No usable Node resolved; each Node-dependent cleanup step will be skipped with a notice, the rest continues"
+    }
 
     Msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
     Remove-DshYamlPatch
@@ -2850,26 +3152,44 @@ function Cmd-Uninstall {
     Remove-GrokBuildHookConfig
     Write-Host ""
 
-    Msg "==> 删除安装目录..." "==> Removing installation..."
-    Remove-PilotInstallationFiles
-    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
-
-    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
-    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
-    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
-    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
-    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
-    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
-    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
-    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    Write-Host ""
-
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
-    Remove-CodexHookConfig
-    Remove-CodexTrustState
+    try {
+        Remove-CodexHookConfig
+    } catch {
+        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    try {
+        Remove-CodexTrustState
+    } catch {
+        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    Write-Host ""
+
+    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
+    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
+    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
+    $runtimeEnvCleanupFailed = $false
+    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
+        try {
+            $currentRuntime = Get-PilotRuntimeOverride -Name $envName
+            if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
+                $broadcasted = Remove-PilotRuntimeOverride -Name $envName
+                if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
+                Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
+            }
+        } catch {
+            $runtimeEnvCleanupFailed = $true
+            Msg "    ⚠️  清理 $envName 失败，已保留安装文件以便重试: $($_.Exception.Message)" `
+                "    ⚠️  Failed to clean $envName; installation files will be preserved for retry: $($_.Exception.Message)"
+        }
+    }
+    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    ⚠️  请注销并重新登录 Windows 以刷新 Explorer 环境" `
+            "    ⚠️  Sign out and back in to refresh the Explorer environment"
+    }
     Write-Host ""
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
@@ -2888,6 +3208,29 @@ function Cmd-Uninstall {
     Remove-MimoCodePlugin
     Write-Host ""
 
+    if ($runtimeEnvCleanupFailed) {
+        throw "Runtime environment cleanup failed; installation files were preserved for retry"
+    }
+
+    # Keep the pinned node runtime and deployed helper assets available until
+    # every external config and runtime override has been cleaned. In
+    # particular, never leave a User env var pointing at a deleted wrapper.
+    Msg "==> 删除安装目录..." "==> Removing installation..."
+    Remove-PilotInstallationFiles
+    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
+
+    Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
+    if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
+    if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
+    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
+    Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
+    Write-Host ""
+
     if ($Purge) {
         Msg "==> 删除数据目录 (-Purge)..." "==> Removing data directory (-Purge)..."
         $safeDataDir = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
@@ -2897,8 +3240,11 @@ function Cmd-Uninstall {
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {
         Msg "📁 数据目录已保留: $DataDir" "📁 Data directory preserved: $DataDir"
-        Msg "   (包含配置和日志，如需彻底删除请加 -Purge)" `
-            "   (contains config and logs, add -Purge to remove)"
+        # Names the credentials rather than saying "config": this line is the only notice
+        # a user gets that an uninstall they consider finished left an SLS AccessKeySecret
+        # readable on disk, and "contains config and logs" does not read like that.
+        Msg "   (包含配置和日志，其中 config.json 里有上报凭据；如需彻底删除请加 -Purge)" `
+            "   (contains config and logs -- config.json holds reporting credentials; add -Purge to remove)"
     }
     Write-Host ""
 
