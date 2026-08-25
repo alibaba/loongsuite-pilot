@@ -160,12 +160,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
           parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
         });
     })).toBe(true);
-    expect(requestRecords[0]?.['gen_ai.input.messages_delta']).toEqual(expect.arrayContaining([{
-      role: 'system',
-      parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
-    }]));
-    expect((requestRecords[1]?.['gen_ai.input.messages_delta'] as Array<{ role?: string }> | undefined)
-      ?.some(message => message.role === 'system')).toBe(false);
+    expect(requestRecords.every(record =>
+      !(record['gen_ai.input.messages_delta'] as Array<{ role?: string }> | undefined)
+        ?.some(message => message.role === 'system'))).toBe(true);
     expect(requestRecords.every(record =>
       JSON.stringify(record['gen_ai.tool.definitions']) === JSON.stringify([EXPECTED_TOOL_DEFINITION])))
       .toBe(true);
@@ -206,16 +203,23 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
         span.attributes['gen_ai.user.id'] === 'fixture-user')).toBe(true);
       const toolDefinitions = (span: (typeof converted.spans)[number]): unknown =>
         JSON.parse(String(span.attributes['gen_ai.tool.definitions']));
+      const entrySpan = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
       const agentSpan = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
       expect(agentSpan && toolDefinitions(agentSpan)).toEqual([EXPECTED_TOOL_DEFINITION]);
+      const entryInputMessages = JSON.parse(
+        String(entrySpan?.attributes['gen_ai.input.messages']),
+      ) as Array<{ role?: string; parts?: Array<{ content?: string }> }>;
+      expect(entryInputMessages[0]?.role).toBe('user');
+      expect(entryInputMessages.some(message => message.role === 'system')).toBe(false);
+      expect(entrySpan?.attributes['gen_ai.system_instructions']).toBeUndefined();
       const agentInputMessages = JSON.parse(
         String(agentSpan?.attributes['gen_ai.input.messages']),
       ) as Array<{ role?: string; parts?: Array<{ content?: string }> }>;
-      expect(agentInputMessages[0]).toEqual({
-        role: 'system',
-        parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
-      });
+      expect(agentInputMessages[0]?.role).toBe('user');
+      expect(agentInputMessages.some(message => message.role === 'system')).toBe(false);
+      expect(String(agentSpan?.attributes['gen_ai.system_instructions']))
+        .toContain(EXPECTED_SYSTEM_PROMPT);
       expect(llmSpans).toHaveLength(2);
       // otel-util-genai currently models definitions as turn-level metadata;
       // raw request-level attachment is asserted above for both API steps.

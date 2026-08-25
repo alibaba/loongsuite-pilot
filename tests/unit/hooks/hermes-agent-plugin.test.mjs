@@ -639,13 +639,13 @@ describe('Hermes Agent native plugin', () => {
       { role: 'system', parts: [{ type: 'text', content: 'Developer rule.' }] },
       undefined,
     ]);
-    expect(requests[0]['gen_ai.input.messages_delta'][0]).toEqual({
-      role: 'system',
-      parts: [{ type: 'text', content: 'You are a careful assistant.' }],
-    });
-    expect(requests.slice(1).every(request =>
+    expect(requests.every(request =>
       !(request['gen_ai.input.messages_delta'] || []).some(message => message.role === 'system')))
       .toBe(true);
+    expect(requests[0]['gen_ai.input.messages_delta'][0]).toEqual({
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    });
     expect(new Set(requests.slice(0, 5).map(request => request['gen_ai.input.messages_hash'])).size)
       .toBe(5);
   });
@@ -682,10 +682,10 @@ describe('Hermes Agent native plugin', () => {
       role: 'system',
       parts: [{ type: 'text', content: instructions }],
     });
-    expect(request['gen_ai.input.messages_delta'][0]).toEqual({
-      role: 'system',
-      parts: [{ type: 'text', content: instructions }],
-    });
+    expect(request['gen_ai.input.messages_delta']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
     expect(request['gen_ai.input.messages_hash'])
       .not.toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
     expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');

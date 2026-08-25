@@ -774,9 +774,9 @@ def _build_records(
         input_messages = _with_system_message(
             _messages(input_source, capture), system_instructions
         )
+        # The delta feeds the business-level ENTRY/AGENT input. Keep provider
+        # system context in the complete LLM input and system_instructions only.
         input_delta = _messages(delta_source, capture)
-        if index == 0:
-            input_delta = _with_system_message(input_delta, system_instructions)
         output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
