@@ -232,6 +232,53 @@ describe('multimodal resolve helpers', () => {
     expect(await openNormalizedLocalImage(path.resolve(escaped), undefined, roots)).toBeNull();
   });
 
+  it('rejects when a parent directory is swapped to a symlink around open', async () => {
+    const dir = makeTempDir();
+    const allowed = path.join(dir, 'allowed');
+    const outside = path.join(dir, 'outside');
+    const via = path.join(allowed, 'via');
+    fs.mkdirSync(allowed);
+    fs.mkdirSync(outside);
+    fs.mkdirSync(via);
+    const png = (label: string) => Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from(label),
+    ]);
+    fs.writeFileSync(path.join(via, 'pic.png'), png('inside'));
+    fs.writeFileSync(path.join(outside, 'pic.png'), png('outside'));
+    const roots = mergeAllowedRootPaths([allowed]);
+    const target = path.resolve(path.join(via, 'pic.png'));
+    const parked = `${via}.parked`;
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        open: async (p: Parameters<typeof actual.open>[0], flags?: Parameters<typeof actual.open>[1]) => {
+          if (path.resolve(String(p)) === target) {
+            fs.renameSync(via, parked);
+            fs.symlinkSync(outside, via);
+          }
+          const fh = await actual.open(p, flags);
+          if (fs.existsSync(via) && fs.lstatSync(via).isSymbolicLink()) {
+            fs.unlinkSync(via);
+            fs.renameSync(parked, via);
+          }
+          return fh;
+        },
+      };
+    });
+    try {
+      const { openNormalizedLocalImage: openWithSwap } = await import(
+        '../../../src/multimodal/resolve.js'
+      );
+      expect(await openWithSwap(target, undefined, roots)).toBeNull();
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
   it('sniffs image magic and rejects non-images', () => {
     expect(sniffImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe('image/png');
     expect(sniffImageMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('image/jpeg');

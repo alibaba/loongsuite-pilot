@@ -194,7 +194,29 @@ export async function isRealPathInsideRoots(
   } catch {
     return false;
   }
-  return isPathInsideRoots(realFile, roots);
+  return !signal?.aborted && isPathInsideRoots(realFile, roots);
+}
+
+function sameFileId(
+  a: { dev: number | bigint; ino: number | bigint },
+  b: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  return BigInt(a.dev) === BigInt(b.dev) && BigInt(a.ino) === BigInt(b.ino);
+}
+
+/** Opened handle must be the file that realpath currently says is inside roots. */
+async function openedHandleMatchesAllowedPath(
+  opened: { dev: number | bigint; ino: number | bigint },
+  resolvedPath: string,
+  roots: string[],
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!(await isRealPathInsideRoots(resolvedPath, roots, signal))) return false;
+  try {
+    return sameFileId(opened, await fs.stat(resolvedPath));
+  } catch {
+    return false;
+  }
 }
 
 /** Image MIME from magic bytes. */
@@ -267,6 +289,12 @@ export async function openNormalizedLocalImage(
     if (signal?.aborted) return null;
     const st = await fh.stat();
     if (!st.isFile() || st.size <= 0) return null;
+    if (
+      allowedRootPaths
+      && !(await openedHandleMatchesAllowedPath(st, resolvedPath, allowedRootPaths, signal))
+    ) {
+      return null;
+    }
     const toRead = Math.min(st.size, maxBytes + 1);
     const bytes = await readFileHandleFully(fh, toRead, signal);
     if (!bytes || bytes.length > maxBytes) return null;
