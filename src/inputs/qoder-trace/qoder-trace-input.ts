@@ -30,6 +30,14 @@ export interface QoderTraceInputOptions extends InputOptions {
   };
 }
 
+const QODER_ATTACHMENTS_FIELD = 'agent.qoder.attachments';
+
+function stripQoderAttachmentCarrier(entries: AgentActivityEntry[]): void {
+  for (const entry of entries) {
+    delete (entry as Record<string, unknown>)[QODER_ATTACHMENTS_FIELD];
+  }
+}
+
 function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
   return entries.some(e => {
     const agentType = e['gen_ai.agent.type'] as string;
@@ -208,6 +216,7 @@ export class QoderTraceInput extends BaseInput {
         });
       }
     }
+    stripQoderAttachmentCarrier(rawEntries);
 
     // 4. Inject trace_id per turn
     for (const turnEntries of turnGroups.values()) {

@@ -150,7 +150,7 @@ Notes:
 
 - Glob-only listings that were never `Read` / `ImageGen` are not collected.
 - Remote OSS URLs are not used as the source; local `pathToUri` is.
-- CLI (1.1.29) writes `type: "attachment"` / `image_file.filename` (absolute local path) into the transcript. The hook only copies matching `image_file` objects onto `agent.qoder.attachments`. `QoderTraceInput` unions those filenames with `[Image: source:]` / `@` and unique-resolves.
+- CLI (1.1.29) writes `type: "attachment"` / `image_file.filename` (absolute local path) into the transcript. The hook only copies matching `image_file` objects onto `agent.qoder.attachments`. `QoderTraceInput` unions those filenames with `[Image: source:]` / `@`, unique-resolves, then drops the carrier before emit.
 
 ## Output Shape (Short)
 

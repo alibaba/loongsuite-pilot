@@ -150,7 +150,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 
 - 仅 Glob 列出、未实际 `Read`/`ImageGen` 的路径不会采集。
 - OSS 预签名/匿名 URL 不作为采集源；以本地路径 `pathToUri` 为准。
-- CLI（1.1.29）会在 transcript 写入 `type: "attachment"` / `image_file.filename`（本地绝对路径）。Hook 只把本轮 `image_file` 原样拷到 `agent.qoder.attachments`；Input 把它和 `[Image: source:]` / `@` 一起提取，解析后去重。
+- CLI（1.1.29）会在 transcript 写入 `type: "attachment"` / `image_file.filename`（本地绝对路径）。Hook 只把本轮 `image_file` 原样拷到 `agent.qoder.attachments`；Input 把它和 `[Image: source:]` / `@` 一起提取、解析后去重，出站前丢掉这个载体字段。
 
 ## 输出形态（简述）
 

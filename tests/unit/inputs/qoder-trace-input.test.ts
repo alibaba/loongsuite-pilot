@@ -1719,6 +1719,65 @@ describe('QoderTraceInput multimodal', () => {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it('drops agent.qoder.attachments before emit', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-attach-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const withAttach = (id: string, extra: Record<string, unknown> = {}) => ({
+          'event.id': id,
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': id,
+          'agent.qoder.attachments': [
+            { type: 'image_file', filename: imgPath },
+          ],
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+          time_unix_nano: '1780000000000000000',
+          ...extra,
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(withAttach('cli-off'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const off = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+        });
+        const offEntries = await (off as any).collect() as AgentActivityEntry[];
+        expect(offEntries[0]).not.toHaveProperty('agent.qoder.attachments');
+
+        await fs.appendFile(logFile, `${JSON.stringify(withAttach('cli-on'))}\n`);
+        const on = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'input',
+            processor: { pathToUri: fakePathToUri } as any,
+          },
+        });
+        const onEntries = await (on as any).collect() as AgentActivityEntry[];
+        const cli = onEntries.find(e => e['event.id'] === 'cli-on')!;
+        expect(cli).not.toHaveProperty('agent.qoder.attachments');
+        const parts = (cli['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/shot')).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 });
 
