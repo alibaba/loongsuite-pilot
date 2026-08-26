@@ -335,4 +335,30 @@ describe('Updater integration (real filesystem)', () => {
     const local = await (updater as any).readLocalVersion();
     expect(local).toEqual({ version: '0.9.0', gitCommit: 'legacy' });
   });
+
+  it('recovers a timed-out collector restart through start-only and verifies runtime health', async () => {
+    mockExecFile.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('restart-collector')) {
+        throw new Error('Command timed out after 30000ms');
+      }
+      if (args.includes('start-collector')) {
+        const logsDir = path.join(testDir, 'logs');
+        await fs.mkdir(logsDir, { recursive: true });
+        await fs.writeFile(path.join(logsDir, 'runtime.json'), JSON.stringify({
+          status: 'active',
+          packageVersion: '1.0.2',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        }));
+      }
+      return { stdout: '', stderr: '' };
+    });
+    const updater = new Updater(makeConfig(), testDir);
+
+    await (updater as any).restartCollector('1.0.2', false);
+
+    const commands = mockExecFile.mock.calls.map(([, args]: [string, string[]]) => args[0]);
+    expect(commands).toContain('restart-collector');
+    expect(commands).toContain('start-collector');
+  });
 });

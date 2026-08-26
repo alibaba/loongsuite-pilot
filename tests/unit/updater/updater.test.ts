@@ -158,8 +158,20 @@ describe('Updater', () => {
     mockFsAccess.mockRejectedValue(new Error('ENOENT'));
     // Default: execFile succeeds
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
-    // Default: readJsonFile / writeJsonFile
-    mockReadJsonFile.mockResolvedValue({});
+    // Default: config reads return an empty object; collector health reads see
+    // the freshly started target version so existing successful-upgrade tests
+    // exercise the health gate without waiting for a timer.
+    mockReadJsonFile.mockImplementation((filePath: string) => {
+      if (String(filePath).endsWith('/logs/runtime.json')) {
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return Promise.resolve({});
+    });
     mockWriteJsonFile.mockResolvedValue(undefined);
   });
 
@@ -823,8 +835,100 @@ describe('Updater', () => {
       const loongsuitePilotCalls = mockExecFile.mock.calls.filter(
         ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
       );
-      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual([
+        'restart-collector', '--defer-updater-restart',
+      ]);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual([
+        'schedule-updater-restart',
+      ]);
       expect(loongsuitePilotCalls.map(([, args]) => args).flat()).not.toContain('monitor');
+    });
+
+    it('recovers a timed-out restart with the start-only command before reporting success', async () => {
+      setupForDownload();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          const error = new Error('Command timed out');
+          (error as any).killed = true;
+          return Promise.reject(error);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      const commands = mockExecFile.mock.calls
+        .map(([, args]: [string, string[]]) => args[0]);
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('does not report restart success or run GC when collector health never appears', async () => {
+      setupForDownload();
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+      const gc = vi.spyOn(updater as any, 'gcOldVersions');
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      const commands = mockExecFile.mock.calls
+        .map(([, args]: [string, string[]]) => args[0]);
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
+      );
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure', expect.objectContaining({ consecutive_failures: 1 }),
+      );
+      expect(gc).not.toHaveBeenCalled();
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+  });
+
+  describe('collector health validation', () => {
+    it('requires the target version, a fresh heartbeat, and a new PID for rebuilds', () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const now = Date.now();
+      const runtime = {
+        status: 'active',
+        packageVersion: '1.0.2',
+        pid: process.pid,
+        updatedAt: new Date(now).toISOString(),
+      };
+
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, packageVersion: '1.0.1' }, '1.0.2', now, null,
+      )).toContain('expected 1.0.2');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, updatedAt: new Date(now - 1).toISOString() }, '1.0.2', now, null,
+      )).toBe('runtime record predates restart');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, process.pid,
+      )).toBe('collector PID did not change');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, null,
+      )).toBe('');
     });
   });
 
