@@ -107,7 +107,7 @@ SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一�
 写入方式由 `sls.writeVia` 决定（缺省 `putObject`）：
 
 - `putObject`：用 AK 或 ApiKey 调 SLS PutObject。事件 URI 为 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
-- `http`：用 AK 或 ApiKey 换预签名 URL，再裸 HTTP PUT。用 ApiKey 时只需 presign，不必有 PutObject 权限。事件 URI 仍是本地的 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`；上传在后台进行。
+- `http`：用 AK 或 ApiKey 换预签名 URL，再裸 HTTP PUT。启动时探测一次 presign，从 URL 拆出 bucket；事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。探测失败或超时则不开多模态。
 
 ```json
 {

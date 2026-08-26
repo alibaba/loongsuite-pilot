@@ -6,10 +6,14 @@ import {
   normalizeSlsEndpoint,
   parseSlsStorageBasePath,
   resolveSlsObjectAuth,
+  resolveMultimodalEventStorageBasePath,
+  parseOssBucketFromPresignedUrl,
   slsGeneratePresignedUrl,
   slsPutObject,
   slsPutPresignedObject,
   slsPutViaPresignedHttp,
+  sniffSlsHttpEventStorageBasePath,
+  SLS_HTTP_STORAGE_PROBE_KEY,
   tryParseSlsStorageBasePath,
 } from '../../../src/multimodal/uploader/sls-client.js';
 
@@ -215,6 +219,27 @@ describe('sls-client (SLS Auth V1 PutObject)', () => {
     expect(result.ok).toBe(false);
     expect(result.retryable).toBe(true);
     expect(result.error).toMatch(/aborted/i);
+  });
+
+  it('rejects non-positive timeoutMs without calling fetch', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await slsPutObject({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'p',
+      logstore: 'l',
+      objectKey: 'k.png',
+      mode: 'ak',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      body: Buffer.from('x'),
+      contentType: 'image/png',
+      timeoutMs: 0,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toMatch(/timeoutMs must be a positive number/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('puts object with LOG auth, encodes spaces, and omits Content-MD5', async () => {
@@ -567,5 +592,120 @@ describe('sls-client (presign)', () => {
     expect(result.ok).toBe(false);
     expect(result.retryable).toBe(false);
     expect(result.error).toMatch(/presigned URL is required/);
+  });
+
+  it('parses virtual-hosted OSS bucket from a presigned URL', () => {
+    expect(parseOssBucketFromPresignedUrl(
+      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/k.png?Expires=1&Signature=secret',
+    )).toBe('user-bucket');
+    expect(parseOssBucketFromPresignedUrl(
+      'https://sls-multimodal-storage-cn-zhangjiakou-spe-01.oss-cn-zhangjiakou.aliyuncs.com/p/l/k',
+    )).toBe('sls-multimodal-storage-cn-zhangjiakou-spe-01');
+    expect(parseOssBucketFromPresignedUrl('https://oss.example/obj?sig=1')).toBeNull();
+    expect(parseOssBucketFromPresignedUrl('not-a-url')).toBeNull();
+  });
+
+  it('sniffs oss:// event prefix from one presign and does not PUT', async () => {
+    const seen: string[] = [];
+    let bodyText = '';
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${url}`);
+      bodyText = Buffer.from(init?.body as Uint8Array).toString('utf8');
+      return new Response(JSON.stringify({
+        url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/_pilot/storage-probe?sig=secret',
+      }), { status: 200 });
+    });
+
+    const result = await sniffSlsHttpEventStorageBasePath({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'p',
+      logstore: 'l',
+      mode: 'apiKey',
+      apiKey: 'edge-key',
+      timeoutMs: 1000,
+    });
+    expect(result).toEqual({
+      ok: true,
+      storageBasePath: 'oss://user-bucket/p/l',
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('/presign');
+    expect(seen[0]).toMatch(/^POST /);
+    expect(JSON.parse(bodyText)).toEqual({ key: SLS_HTTP_STORAGE_PROBE_KEY, method: 'PUT' });
+  });
+
+  it('fails closed when sniff presign times out or is forbidden', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }));
+    const hung = sniffSlsHttpEventStorageBasePath({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'p',
+      logstore: 'l',
+      mode: 'ak',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      timeoutMs: 50,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const timeout = await hung;
+    expect(timeout.ok).toBe(false);
+    if (!timeout.ok) expect(timeout.error).toMatch(/aborted/i);
+
+    vi.useRealTimers();
+    vi.stubGlobal('fetch', async () => new Response('nope', { status: 403 }));
+    const forbidden = await sniffSlsHttpEventStorageBasePath({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'p',
+      logstore: 'l',
+      mode: 'ak',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      timeoutMs: 1000,
+    });
+    expect(forbidden.ok).toBe(false);
+    if (!forbidden.ok) expect(forbidden.error).toMatch(/403/);
+  });
+
+  it('keeps sls:// for putObject without calling SLS', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      uploader: 'sls',
+      storageBasePath: 'sls://proj/logstore',
+      sls: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+        writeVia: 'putObject',
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+    });
+    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('resolves oss:// for writeVia=http via one presign', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
+    }), { status: 200 }));
+    const result = await resolveMultimodalEventStorageBasePath({
+      uploader: 'sls',
+      storageBasePath: 'sls://proj/logstore',
+      sls: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+        writeVia: 'http',
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+    });
+    expect(result).toEqual({
+      ok: true,
+      storageBasePath: 'oss://user-bucket/proj/logstore',
+    });
   });
 });

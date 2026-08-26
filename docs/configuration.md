@@ -107,7 +107,7 @@ Configuring `uploader: sls` enables SLS multimodal collection on that logstore a
 `sls.writeVia` selects the write path (default `putObject`):
 
 - `putObject`: AK or ApiKey calls SLS PutObject. Event URI is `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
-- `http`: AK or ApiKey fetches a presigned URL for the local key `{YYYYMMDD}/{sha256}.ext`, then raw HTTP PUT. With ApiKey, only presign is required (not PutObject). Event URI is the local `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`; upload happens in the background.
+- `http`: AK or ApiKey fetches a presigned URL, then raw HTTP PUT. Startup sniffs one presign to learn the landing bucket; event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. Presign failure or timeout disables multimodal.
 
 ```json
 {

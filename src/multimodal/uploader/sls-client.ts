@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import type { MultimodalRuntimeConfig } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SlsClient');
@@ -318,6 +319,9 @@ async function slsHttpRequest(args: {
   body?: Buffer;
   timeoutMs: number;
 }): Promise<SlsHttpResult & { body?: Buffer }> {
+  if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) {
+    return { ok: false, error: 'SLS request timeoutMs must be a positive number', retryable: false };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), args.timeoutMs);
   try {
@@ -498,4 +502,95 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return undefined;
+}
+
+/** Startup-only sniff. Shorter than upload timeout so a hung presign does not stall start. */
+export const SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS = 5_000;
+export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
+
+/** Virtual-hosted OSS host → bucket. Does not log or return query credentials. */
+export function parseOssBucketFromPresignedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    const match = parsed.hostname.toLowerCase().match(/^(.+?)\.oss[-.]/i);
+    const bucket = match?.[1]?.trim() ?? '';
+    return bucket || null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildSlsHttpEventStorageBasePath(args: {
+  ossBucket: string;
+  project: string;
+  logstore: string;
+}): string {
+  const ossBucket = args.ossBucket.trim();
+  const project = args.project.trim();
+  const logstore = args.logstore.trim();
+  if (!ossBucket || !project || !logstore) {
+    throw new Error('oss bucket, project, and logstore are required');
+  }
+  return `oss://${ossBucket}/${project}/${logstore}`;
+}
+
+/** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
+export async function sniffSlsHttpEventStorageBasePath(
+  params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'> & { timeoutMs?: number },
+): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
+  const timeoutMs = params.timeoutMs ?? SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS;
+  const presign = await slsGeneratePresignedUrl({
+    ...params,
+    objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+    timeoutMs,
+  });
+  if (!presign.ok || !presign.url) {
+    return { ok: false, error: presign.error || 'presign failed' };
+  }
+  const bucket = parseOssBucketFromPresignedUrl(presign.url);
+  if (!bucket) {
+    return { ok: false, error: 'presign url missing oss bucket' };
+  }
+  try {
+    return {
+      ok: true,
+      storageBasePath: buildSlsHttpEventStorageBasePath({
+        ossBucket: bucket,
+        project: params.project,
+        logstore: params.logstore,
+      }),
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
+ * writeVia=http sniffs one presign; timeout or error → fail-closed (no processor).
+ */
+export async function resolveMultimodalEventStorageBasePath(
+  config: MultimodalRuntimeConfig,
+): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
+  if (config.uploader !== 'sls' || config.sls?.writeVia !== 'http') {
+    const storageBasePath = (config.storageBasePath ?? '').trim();
+    if (!storageBasePath) {
+      return { ok: false, error: 'multimodal storageBasePath is required' };
+    }
+    return { ok: true, storageBasePath };
+  }
+
+  const sls = config.sls;
+  return sniffSlsHttpEventStorageBasePath({
+    endpoint: sls.endpoint,
+    project: sls.project,
+    logstore: sls.logstore,
+    mode: sls.auth.mode,
+    accessKeyId: sls.auth.accessKeyId,
+    accessKeySecret: sls.auth.accessKeySecret,
+    securityToken: sls.auth.securityToken,
+    apiKey: sls.auth.apiKey,
+    timeoutMs: SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS,
+  });
 }
