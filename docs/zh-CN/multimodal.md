@@ -88,7 +88,7 @@ loongsuite-pilot restart
 | `qoder` | `~/.qoder/tmp`（CLI 粘贴）、`~/.qoder/vibe_images`（ImageGen），以及桌面 IDE 粘贴缓存 `…/Qoder/SharedClientCache/cache/images`（`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`；远端 Linux hashed profile 是 `<appRoot>/<hash>/SharedClientCache/cache/images`）。 |
 | `codex` | `~/.codex`（预留；Codex 目前走内联 base64，不读盘）。 |
 
-UNC/设备路径、符号链接、非图片 magic 都会跳过。
+UNC/设备路径、符号链接、非图片 magic 都会跳过。本地路径一律按文件系统路径处理；图片后缀后的 URL query（例如 markdown 里的 `a.png?x=1`）不会剥掉，`pathToUri` 不会回退到 `a.png`。
 
 ## 各 Agent 采集内容
 

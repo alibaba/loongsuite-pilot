@@ -80,13 +80,6 @@ export interface PathToUriOptions {
   deadlineMs?: number;
 }
 
-export interface PathStat {
-  resolvedPath: string;
-  mime_type: string;
-  size: number;
-  mtimeMs: number;
-}
-
 export interface PathBytes {
   bytes: Buffer;
   mime_type: string;

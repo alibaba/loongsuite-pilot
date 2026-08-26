@@ -15,10 +15,10 @@ import {
   qoderDefaultAllowedRootPaths,
   resolveQoderAllowedRootPaths,
 } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
-import { canonicalizeRootPath, statImagePath } from '../../../src/multimodal/resolve.js';
+import { canonicalizeRootPath } from '../../../src/multimodal/resolve.js';
 import { withDeadline } from '../../../src/multimodal/processor.js';
-import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
-import type { UriResult } from '../../../src/multimodal/index.js';
+import { fakePathToUri } from '../multimodal/fake-uri.js';
+import { MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
@@ -804,22 +804,6 @@ describe('QoderTraceInput multimodal', () => {
     return file;
   }
 
-  /** Test stand-in for MultimodalProcessor.pathToUri (no process LRU). */
-  function fakePathToUri() {
-    return vi.fn(async (filePath: string): Promise<UriResult | null> => {
-      const stated = await statImagePath(filePath);
-      if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-      const bytes = fsSync.readFileSync(stated.resolvedPath);
-      return {
-        uri: `oss://test/${bytes.toString('utf8')}`,
-        mime_type: stated.mime_type,
-        modality: 'image',
-        size: stated.size,
-        sha256: 'deadbeef',
-      };
-    });
-  }
-
   function mmEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
     return {
       'event.id': 'e1',
@@ -917,7 +901,7 @@ describe('QoderTraceInput multimodal', () => {
       it('attaches paths onto llm.request messages_delta by request_id', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'attach.png', 'attach');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
         const request = mmEntry({
           'event.name': 'llm.request',
           'gen_ai.request.id': 'req-1',
@@ -958,7 +942,7 @@ describe('QoderTraceInput multimodal', () => {
         for (const mode of ['tool', 'output'] as const) {
           clearAttachedImagePathsCache();
           const request = makeRequest();
-          await enrichIdeMultimodal([request], { uploadMode: mode, pathToUri: fakePathToUri() });
+          await enrichIdeMultimodal([request], { uploadMode: mode, pathToUri: fakePathToUri });
           const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
           expect(parts, mode).toHaveLength(1);
           expect(parts[0].type, mode).toBe('text');
@@ -966,7 +950,7 @@ describe('QoderTraceInput multimodal', () => {
 
         clearAttachedImagePathsCache();
         const both = makeRequest();
-        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri() });
+        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
         expect((both['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
           p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
       });
@@ -974,7 +958,7 @@ describe('QoderTraceInput multimodal', () => {
       it('prefers llm.request over other when both carry the same request_id', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'prefer.png', 'prefer');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
         const user = mmEntry({
           'event.name': 'other',
           'gen_ai.request.id': 'req-pref',
@@ -1001,7 +985,7 @@ describe('QoderTraceInput multimodal', () => {
         const dir = makeMmTempDir();
         const imgA = writePng(dir, 'a.png', 'a');
         const imgB = writePng(dir, 'b.png', 'b');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
         const reqA = mmEntry({
           'event.name': 'llm.request',
           'gen_ai.request.id': 'req-a',
@@ -1042,7 +1026,7 @@ describe('QoderTraceInput multimodal', () => {
       });
 
       it('skips when request_id missing or map is empty', async () => {
-        const pathToUri = fakePathToUri();
+        const pathToUri = vi.fn(fakePathToUri);
         const request = mmEntry({
           'event.name': 'llm.request',
           'gen_ai.input.messages_delta': [
@@ -1060,7 +1044,7 @@ describe('QoderTraceInput multimodal', () => {
       it('survives reader throwing and still processes tool surface', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 't.png', 't');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
         const request = mmEntry({
           'event.name': 'llm.request',
           'gen_ai.request.id': 'req-x',
@@ -1086,7 +1070,7 @@ describe('QoderTraceInput multimodal', () => {
       it('falls back to same-turn carrier when only llm.response has request_id', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'fb.png', 'fb');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
         const other = mmEntry({
           'event.name': 'other',
           'gen_ai.turn.id': 't1',
@@ -1116,7 +1100,7 @@ describe('QoderTraceInput multimodal', () => {
       it('after attach, same request_id is neither re-queried nor re-attached', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'cached.png', 'cached');
-        const pathToUri = fakePathToUri();
+        const pathToUri = vi.fn(fakePathToUri);
         mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', [img]]]));
 
         const first = mmEntry({
@@ -1147,7 +1131,7 @@ describe('QoderTraceInput multimodal', () => {
         const dir = makeMmTempDir();
         const imgA = writePng(dir, 'a.png', 'a');
         const imgB = writePng(dir, 'b.png', 'b');
-        const pathToUri = fakePathToUri();
+        const pathToUri = fakePathToUri;
 
         mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', [imgA]]]));
         const first = mmEntry({
@@ -1185,7 +1169,7 @@ describe('QoderTraceInput multimodal', () => {
       it('keeps cached paths when carrier is missing so a later batch can attach', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'late.png', 'late');
-        const pathToUri = fakePathToUri();
+        const pathToUri = vi.fn(fakePathToUri);
         mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-late', [img]]]));
 
         const responseOnly = mmEntry({
@@ -1215,7 +1199,7 @@ describe('QoderTraceInput multimodal', () => {
     it('tool mode rewrites Image file tool.result to text+uri parts', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'read.png', 'read-img');
-      const pathToUri = fakePathToUri();
+      const pathToUri = fakePathToUri;
       const tool = mmEntry({
         'event.name': 'tool.result',
         'gen_ai.tool.name': 'Read',
@@ -1244,7 +1228,7 @@ describe('QoderTraceInput multimodal', () => {
     it('tool mode parses ImageGen success path', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'gen.png', 'gen-img');
-      const pathToUri = fakePathToUri();
+      const pathToUri = fakePathToUri;
       const tool = mmEntry({
         'event.name': 'tool.result',
         'gen_ai.tool.name': 'ImageGen',
@@ -1270,12 +1254,12 @@ describe('QoderTraceInput multimodal', () => {
       for (const mode of ['input', 'output'] as const) {
         const tool = makeTool();
         const before = tool['gen_ai.tool.call.result'];
-        await enrichIdeMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri() });
+        await enrichIdeMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri });
         expect(tool['gen_ai.tool.call.result'], mode).toBe(before);
       }
 
       const both = makeTool();
-      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri() });
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
       const result = both['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-gate')).toBe(true);
     });
@@ -1283,7 +1267,7 @@ describe('QoderTraceInput multimodal', () => {
     it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
       const dir = makeMmTempDir();
       writePng(dir, 'rel.png', 'rel-img');
-      const pathToUri = fakePathToUri();
+      const pathToUri = vi.fn(fakePathToUri);
       const response = mmEntry({
         'event.name': 'llm.response',
         'gen_ai.output.messages': [
@@ -1304,7 +1288,7 @@ describe('QoderTraceInput multimodal', () => {
     it('output mode appends uri parts for markdown images on llm.response', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'out.png', 'out-img');
-      const pathToUri = fakePathToUri();
+      const pathToUri = fakePathToUri;
       const response = mmEntry({
         'event.name': 'llm.response',
         'gen_ai.output.messages': [
@@ -1333,14 +1317,14 @@ describe('QoderTraceInput multimodal', () => {
 
       for (const mode of ['input', 'tool'] as const) {
         const response = makeResponse();
-        await enrichIdeMultimodal([response], { uploadMode: mode, pathToUri: fakePathToUri() });
+        await enrichIdeMultimodal([response], { uploadMode: mode, pathToUri: fakePathToUri });
         const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
         expect(parts, mode).toHaveLength(1);
         expect(parts[0].type, mode).toBe('text');
       }
 
       const both = makeResponse();
-      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri() });
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
       expect((both['gen_ai.output.messages'] as any[])[0].parts.some((p: any) =>
         p.type === 'uri' && p.uri === 'oss://test/out-gate')).toBe(true);
     });
@@ -1348,7 +1332,7 @@ describe('QoderTraceInput multimodal', () => {
     it('both mode converts tool+output surfaces', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'shared.png', 'shared');
-      const pathToUri = fakePathToUri();
+      const pathToUri = fakePathToUri;
       const tool = mmEntry({
         'event.name': 'tool.result',
         'gen_ai.tool.call.result': `Image file: ${img}`,
@@ -1375,14 +1359,14 @@ describe('QoderTraceInput multimodal', () => {
       });
       const before = structuredClone(tool);
 
-      await enrichIdeMultimodal([tool], { uploadMode: 'none', pathToUri: fakePathToUri() });
+      await enrichIdeMultimodal([tool], { uploadMode: 'none', pathToUri: fakePathToUri });
       expect(tool).toEqual(before);
 
       const missing = mmEntry({
         'event.name': 'tool.result',
         'gen_ai.tool.call.result': 'Image file: /no/such/file.png',
       });
-      await enrichIdeMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri() });
+      await enrichIdeMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri });
       expect(missing['gen_ai.tool.call.result']).toBe('Image file: /no/such/file.png');
 
       const nullUri = mmEntry({
@@ -1399,7 +1383,7 @@ describe('QoderTraceInput multimodal', () => {
       for (let i = 0; i < MAX_MULTIMODAL_PARTS + 3; i++) {
         paths.push(writePng(dir, `n${i}.png`, `img-${i}`));
       }
-      const pathToUri = fakePathToUri();
+      const pathToUri = fakePathToUri;
       const response = mmEntry({
         'event.name': 'llm.response',
         'gen_ai.output.messages': [{
@@ -1508,17 +1492,7 @@ describe('QoderTraceInput multimodal', () => {
             enabled: true,
             uploadMode: 'tool',
             processor: {
-              pathToUri: async (filePath: string) => {
-                const stated = await statImagePath(filePath);
-                if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-                return {
-                  uri: `oss://mm/${stated.mime_type}`,
-                  mime_type: stated.mime_type,
-                  modality: 'image',
-                  size: stated.size,
-                  sha256: 'x',
-                };
-              },
+              pathToUri: fakePathToUri,
             } as any,
           },
         });
@@ -1577,17 +1551,7 @@ describe('QoderTraceInput multimodal', () => {
             enabled: true,
             uploadMode: 'tool',
             processor: {
-              pathToUri: async (filePath: string) => {
-                const stated = await statImagePath(filePath);
-                if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-                return {
-                  uri: `oss://mm/${stated.mime_type}`,
-                  mime_type: stated.mime_type,
-                  modality: 'image',
-                  size: stated.size,
-                  sha256: 'x',
-                };
-              },
+              pathToUri: fakePathToUri,
             } as any,
           },
         });
@@ -1683,17 +1647,7 @@ describe('QoderTraceInput multimodal', () => {
             enabled: true,
             uploadMode: 'tool',
             processor: {
-              pathToUri: async (filePath: string) => {
-                const stated = await statImagePath(filePath);
-                if (!stated || stated.size <= 0 || stated.size > MAX_MULTIMODAL_DATA_SIZE) return null;
-                return {
-                  uri: `oss://mm/${stated.mime_type}`,
-                  mime_type: stated.mime_type,
-                  modality: 'image',
-                  size: stated.size,
-                  sha256: 'x',
-                };
-              },
+              pathToUri: fakePathToUri,
             } as any,
           },
         });

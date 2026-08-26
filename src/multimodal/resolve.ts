@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
-import type { BlobPart, PathBytes, PathStat } from './types.js';
+import type { BlobPart, PathBytes } from './types.js';
 import { MAX_MULTIMODAL_DATA_SIZE, MAX_MULTIMODAL_PARTS, MAX_MULTIMODAL_PATH_CHARS } from './types.js';
 
 const logger = createLogger('MultimodalResolve');
@@ -21,7 +21,7 @@ const IMAGE_EXT_TO_MIME: Record<string, string> = {
   '.tiff': 'image/tiff',
 };
 
-export type { PathBytes, PathStat };
+export type { PathBytes };
 
 /** Decode raw base64. */
 export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
@@ -97,59 +97,63 @@ export function takeUniqueExtractedPaths(
   return out;
 }
 
-/** MIME from image extension. */
-export function mimeFromImagePath(filePath: string): string | null {
-  const trimmed = filePath.trim();
-  if (!trimmed) return null;
-  const bare = trimmed.split(/[?#]/)[0] ?? trimmed;
-  const ext = path.extname(bare).toLowerCase();
-  return IMAGE_EXT_TO_MIME[ext] ?? null;
+const IS_WIN32 = process.platform === 'win32';
+const osPath = IS_WIN32 ? path.win32 : path;
+const WIN32_EXTENDED_DRIVE = /^\\\\\?\\[a-zA-Z]:\\/;
+
+function asWinPath(filePath: string): string {
+  return filePath.replace(/\//g, '\\');
 }
 
-/** UNC or Windows device path. */
+/** Drop `\\?\C:\` after Node FS. Identity off win32. */
+function stripExtendedPrefix(filePath: string): string {
+  if (!IS_WIN32) return filePath;
+  const win = asWinPath(filePath);
+  return WIN32_EXTENDED_DRIVE.test(win) ? win.slice(4) : filePath;
+}
+
+/** MIME from image extension. */
+export function mimeFromImagePath(filePath: string): string | null {
+  const name = filePath.trim().split(/[/\\]/).pop() ?? '';
+  return name ? IMAGE_EXT_TO_MIME[path.extname(name).toLowerCase()] ?? null : null;
+}
+
+/** UNC or Windows device / pipe / GLOBALROOT. `\\?\C:\` is a local drive, not a device. */
 export function isUncOrDevicePath(filePath: string): boolean {
   const trimmed = filePath.trim();
   if (!trimmed) return false;
-  const win = trimmed.replace(/\//g, '\\');
-  if (/^\\\\[.?]\\UNC\\/i.test(win)) return true;
-  if (/^\\\\[.?]\\/i.test(win)) return false;
-  if (win.startsWith('\\\\')) return true;
-  if (/^\/\/[^/]/.test(trimmed)) return true;
+  const win = asWinPath(trimmed);
+  if (win.startsWith('\\??\\') || win.startsWith('\\\\.\\')) return true;
+  if (WIN32_EXTENDED_DRIVE.test(win)) return false;
+  if (win.startsWith('\\\\') || /^\/\/[^/]/.test(trimmed)) return true;
   return false;
 }
 
-/** Resolve a local image path; reject UNC / non-image. */
+/** Resolve a local image path; reject UNC / device / non-image. */
 export function normalizeLocalImagePath(filePath: string): string | null {
   const trimmed = filePath.trim();
-  if (!trimmed) return null;
-  const bare = trimmed.split(/[?#]/)[0] ?? trimmed;
-  if (!bare || isUncOrDevicePath(bare) || !mimeFromImagePath(bare)) return null;
-  return path.resolve(bare);
+  if (!trimmed || isUncOrDevicePath(trimmed)) return null;
+  if (!IS_WIN32 && asWinPath(trimmed).startsWith('\\\\')) return null;
+  const resolved = osPath.resolve(stripExtendedPrefix(trimmed));
+  return isImageFilePath(resolved) ? resolved : null;
 }
 
-/** Absolute stays; relative joins cwd (win32 vs posix). */
+/** Absolute stays; relative joins cwd. */
 export function resolveImagePath(raw: string, cwd?: string): string {
   const trimmed = raw.trim().replace(/^['"]|['"]$/g, '');
   if (!trimmed) return '';
-
-  if (process.platform === 'win32') {
-    if (path.win32.isAbsolute(trimmed)) return path.win32.normalize(trimmed);
-    if (cwd && cwd.trim()) return path.win32.resolve(cwd.trim(), trimmed);
-    return path.win32.resolve(trimmed);
-  }
-
-  if (path.isAbsolute(trimmed)) return path.normalize(trimmed);
-  if (cwd && cwd.trim()) return path.resolve(cwd.trim(), trimmed);
-  return path.resolve(trimmed);
+  if (osPath.isAbsolute(trimmed)) return osPath.normalize(trimmed);
+  if (cwd && cwd.trim()) return osPath.resolve(cwd.trim(), trimmed);
+  return osPath.resolve(trimmed);
 }
 
 /** Expand `~` and realpath a root. Missing paths stay lexical. */
 export function canonicalizeRootPath(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
-  const resolved = path.resolve(resolveHome(trimmed));
+  const resolved = path.resolve(resolveHome(stripExtendedPrefix(trimmed)));
   try {
-    return realpathSync(resolved);
+    return stripExtendedPrefix(realpathSync(resolved));
   } catch {
     return resolved;
   }
@@ -190,7 +194,7 @@ export async function isRealPathInsideRoots(
   if (signal?.aborted) return false;
   let realFile: string;
   try {
-    realFile = await fs.realpath(absPath);
+    realFile = stripExtendedPrefix(await fs.realpath(absPath));
   } catch {
     return false;
   }
@@ -345,21 +349,6 @@ async function readFileHandleFully(
   }
   if (offset <= 0 || signal?.aborted) return null;
   return Buffer.from(buf.subarray(0, offset));
-}
-
-/** lstat a local image (no follow). */
-export async function statImagePath(filePath: string): Promise<PathStat | null> {
-  const resolvedPath = normalizeLocalImagePath(filePath);
-  if (!resolvedPath) return null;
-  const listed = await lstatRegularImageFile(resolvedPath);
-  const mime = mimeFromImagePath(resolvedPath);
-  if (!listed || !mime) return null;
-  return {
-    resolvedPath,
-    mime_type: mime,
-    size: listed.size,
-    mtimeMs: listed.mtimeMs,
-  };
 }
 
 export function extFromMime(mime: string): string {

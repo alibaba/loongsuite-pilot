@@ -19,7 +19,6 @@ import {
   openNormalizedLocalImage,
   sniffImageMime,
   modalityFromMime,
-  statImagePath,
   yyyymmddFromUnixMs,
   yyyymmddLocal,
 } from '../../../src/multimodal/resolve.js';
@@ -140,10 +139,19 @@ describe('multimodal resolve helpers', () => {
     expect(mimeFromImagePath('/a/b.webp')).toBe('image/webp');
     expect(mimeFromImagePath('/a/b.txt')).toBeNull();
     expect(isImageFilePath('')).toBe(false);
-    expect(mimeFromImagePath('/a/b.png?x=1')).toBe('image/png');
-    expect(normalizeLocalImagePath('/a/b.png?x=1')).toBe(path.resolve('/a/b.png'));
+    expect(mimeFromImagePath('/a/b.png?x=1')).toBeNull();
+    expect(normalizeLocalImagePath('/a/b.png?x=1')).toBeNull();
+    expect(mimeFromImagePath('/a/photo?.png')).toBe('image/png');
+    expect(normalizeLocalImagePath('/a/photo?.png')).toBe(path.resolve('/a/photo?.png'));
     expect(normalizeLocalImagePath('not-an-image.txt')).toBeNull();
     expect(normalizeLocalImagePath('\\\\server\\share\\a.png')).toBeNull();
+    expect(normalizeLocalImagePath('\\\\.\\pipe\\a.png')).toBeNull();
+    expect(normalizeLocalImagePath('\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\a.png')).toBeNull();
+    if (process.platform === 'win32') {
+      expect(normalizeLocalImagePath('\\\\?\\C:\\tmp\\a.png')).toBe(path.win32.resolve('C:\\tmp\\a.png'));
+    } else {
+      expect(normalizeLocalImagePath('\\\\?\\C:\\tmp\\a.png')).toBeNull();
+    }
   });
 
   it('stats and reads a local image path', async () => {
@@ -152,15 +160,12 @@ describe('multimodal resolve helpers', () => {
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     fs.writeFileSync(file, bytes);
 
-    const stated = await statImagePath(file);
-    expect(stated).toMatchObject({
-      mime_type: 'image/png',
-      size: bytes.length,
-    });
-    expect(stated?.mtimeMs).toEqual(expect.any(Number));
-    expect(stated?.resolvedPath).toBe(path.resolve(file));
+    const resolved = normalizeLocalImagePath(file);
+    expect(resolved).toBe(path.resolve(file));
+    expect((await lstatRegularImageFile(resolved!))?.size).toBe(bytes.length);
+    expect(mimeFromImagePath(resolved!)).toBe('image/png');
 
-    const loaded = await openNormalizedLocalImage(stated!.resolvedPath);
+    const loaded = await openNormalizedLocalImage(resolved!);
     expect(loaded).toMatchObject({
       bytes,
       mime_type: 'image/png',
@@ -168,25 +173,36 @@ describe('multimodal resolve helpers', () => {
     });
   });
 
-  it('statImagePath returns null for missing file, directory, and non-image', async () => {
+  it('rejects missing file, directory, and non-image', async () => {
     const dir = makeTempDir();
-    expect(await statImagePath(path.join(dir, 'missing.png'))).toBeNull();
-    expect(await statImagePath(path.join(dir, 'a.txt'))).toBeNull();
+    const missing = path.join(dir, 'missing.png');
+    expect(normalizeLocalImagePath(missing)).toBe(path.resolve(missing));
+    expect(await lstatRegularImageFile(path.resolve(missing))).toBeNull();
+    expect(normalizeLocalImagePath(path.join(dir, 'a.txt'))).toBeNull();
 
     const empty = path.join(dir, 'empty.png');
     fs.writeFileSync(empty, Buffer.alloc(0));
-    expect(await statImagePath(empty)).toMatchObject({ size: 0, mime_type: 'image/png' });
+    expect((await lstatRegularImageFile(path.resolve(empty)))?.size).toBe(0);
 
     const asDir = path.join(dir, 'folder.png');
     fs.mkdirSync(asDir);
-    expect(await statImagePath(asDir)).toBeNull();
+    expect(await lstatRegularImageFile(path.resolve(asDir))).toBeNull();
   });
 
   it('detects UNC and device paths', () => {
     expect(isUncOrDevicePath('\\\\server\\share\\a.png')).toBe(true);
     expect(isUncOrDevicePath('//server/share/a.png')).toBe(true);
     expect(isUncOrDevicePath('\\\\?\\UNC\\server\\share\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\.\\UNC\\server\\share\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\.\\pipe\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('//./pipe/a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\.\\GLOBALROOT\\Device\\HarddiskVolume1\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\\\.\\C:\\tmp\\a.png')).toBe(true);
+    expect(isUncOrDevicePath('\\??\\C:\\tmp\\a.png')).toBe(true);
     expect(isUncOrDevicePath('\\\\?\\C:\\tmp\\a.png')).toBe(false);
+    expect(isUncOrDevicePath('//?/C:/tmp/a.png')).toBe(false);
     expect(isUncOrDevicePath('/tmp/a.png')).toBe(false);
   });
 
@@ -293,7 +309,6 @@ describe('multimodal resolve helpers', () => {
     const link = path.join(dir, 'y.png');
     fs.symlinkSync(file, link);
     expect(await lstatRegularImageFile(path.resolve(link))).toBeNull();
-    expect(await statImagePath(link)).toBeNull();
     expect(await openNormalizedLocalImage(path.resolve(link))).toBeNull();
     const loaded = await openNormalizedLocalImage(path.resolve(file));
     expect(loaded?.mime_type).toBe('image/png');
