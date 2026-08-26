@@ -84,6 +84,13 @@ describe('dsh-event-transform (real fixture)', () => {
       .filter(e => e['event.name'] === 'llm.request')
       .sort((a, b) => (a['gen_ai.step.id'] as string).localeCompare(b['gen_ai.step.id'] as string));
     expect(requests.length).toBe(3);
+    const accumulatedDelta: unknown[] = [];
+    for (const request of requests) {
+      const delta = request['gen_ai.input.messages_delta'] as unknown[];
+      expect(delta).toBeDefined();
+      accumulatedDelta.push(...delta);
+      expect(accumulatedDelta).toEqual(request['gen_ai.input.messages']);
+    }
     const step1 = requests[0]['gen_ai.input.messages'] as unknown[];
     expect(step1.length).toBeGreaterThanOrEqual(1);
     expect((step1[0] as { role: string }).role).toBe('user');
@@ -293,6 +300,7 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(r).toBeDefined();
     expect(r!['event.name']).toBe('llm.request');
     expect(r!['gen_ai.input.messages']).toBeUndefined();
+    expect(r!['gen_ai.input.messages_delta']).toBeUndefined();
   });
 
   it('records TTFT when the first assistant chunk is already an output delta', () => {
@@ -553,6 +561,7 @@ describe('dsh-event-transform (message sources)', () => {
         data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
       }, ClientType.Dsh, state);
       expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('injected context');
+      expect(JSON.stringify(request?.['gen_ai.input.messages_delta'])).toContain('injected context');
     },
   );
 
@@ -660,6 +669,7 @@ describe('dsh-event-transform (correlation isolation)', () => {
     expect(state.currentTurnHeader).toBeUndefined();
     expect(state.lastKnownHeader).toEqual({ model: 'old-model', provider: 'old-provider' });
     expect(state.inputMessages).toEqual([]);
+    expect(state.lastRequestInputMessageCount).toBe(0);
     expect(state.toolNames.size).toBe(0);
     expect(state.requestStartTimes.size).toBe(0);
     expect(state.firstOutputTimes.size).toBe(0);
