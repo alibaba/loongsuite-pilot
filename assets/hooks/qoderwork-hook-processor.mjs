@@ -255,12 +255,15 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         .map(tc => ({ tc, result: toolResultsByUseId.get(tc.id) }))
         .filter(item => item.result);
       if (completedToolCalls.length > 0) {
+        const completedToolCallIds = new Set(completedToolCalls.map(({ tc }) => tc.id));
         inputDelta = [
           {
             role: 'assistant',
             // The next model receives the complete previous assistant message,
-            // including reasoning/text that preceded its tool calls.
-            parts: prevAssistantOutputParts,
+            // including reasoning/text that preceded its tool calls. Filter only
+            // incomplete tool calls so every retained call has one tool response.
+            parts: prevAssistantOutputParts.filter(part =>
+              part.type !== 'tool_call' || completedToolCallIds.has(part.id)),
           },
           ...completedToolCalls.map(({ tc, result }) => {
             const content = result.block?.content;
