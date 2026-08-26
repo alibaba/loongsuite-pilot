@@ -39,17 +39,26 @@ afterEach(() => {
 });
 
 type FileHandleRead = Awaited<ReturnType<typeof fsp.open>>['read'];
+type FileHandleReadBuffer = (
+  this: unknown,
+  buffer: NodeJS.ArrayBufferView,
+  offset?: number | null,
+  length?: number | null,
+  position?: number | null,
+) => Promise<{ bytesRead: number; buffer: NodeJS.ArrayBufferView }>;
 
 async function withFileHandleRead(
   file: string,
-  wrap: (orig: FileHandleRead) => FileHandleRead,
+  wrap: (orig: FileHandleReadBuffer) => FileHandleReadBuffer,
   run: () => Promise<void>,
 ): Promise<void> {
   const probe = await fsp.open(file, 'r');
   const proto = Object.getPrototypeOf(probe) as { read: FileHandleRead };
   await probe.close();
-  const orig = proto.read;
-  const spy = vi.spyOn(proto, 'read').mockImplementation(wrap(orig));
+  const orig = proto.read as unknown as FileHandleReadBuffer;
+  const spy = vi.spyOn(proto, 'read').mockImplementation(
+    wrap(orig) as unknown as FileHandleRead,
+  );
   try {
     await run();
   } finally {
@@ -254,7 +263,7 @@ describe('multimodal resolve helpers', () => {
     fs.writeFileSync(file, bytes);
 
     await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
-      return orig.call(this, buffer, offset, Math.min(length ?? buffer.length, 5), position);
+      return orig.call(this, buffer, offset, Math.min(length ?? buffer.byteLength, 5), position);
     }, async () => {
       const loaded = await openNormalizedLocalImage(path.resolve(file));
       expect(loaded?.bytes.equals(bytes)).toBe(true);
@@ -275,7 +284,7 @@ describe('multimodal resolve helpers', () => {
     await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
       if (!first) return { bytesRead: 0, buffer };
       first = false;
-      return orig.call(this, buffer, offset, Math.min(length ?? buffer.length, 8), position);
+      return orig.call(this, buffer, offset, Math.min(length ?? buffer.byteLength, 8), position);
     }, async () => {
       expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
     });
@@ -296,6 +305,23 @@ describe('multimodal resolve helpers', () => {
       return result;
     }, async () => {
       expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
+    });
+  });
+
+  it('returns null when abort fires during read', async () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'x.png');
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(32, 7),
+    ]);
+    fs.writeFileSync(file, bytes);
+    const ac = new AbortController();
+    await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
+      ac.abort();
+      return orig.call(this, buffer, offset, length, position);
+    }, async () => {
+      expect(await openNormalizedLocalImage(path.resolve(file), undefined, undefined, ac.signal)).toBeNull();
     });
   });
 

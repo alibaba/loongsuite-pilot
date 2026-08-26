@@ -118,10 +118,13 @@ export class MultimodalProcessor {
     }
 
     const deadlineMs = opts?.deadlineMs ?? PATH_TO_URI_DEADLINE_MS;
+    const ac = new AbortController();
+    const token = { get timedOut() { return ac.signal.aborted; } };
     return withDeadline(
-      this.convertPathToUri(filePath, timeUnixMs, opts),
+      this.convertPathToUri(filePath, timeUnixMs, opts, token, ac.signal),
       deadlineMs,
       () => {
+        ac.abort();
         logger.warn('multimodal pathToUri timed out', { path: filePath, deadlineMs });
         return null;
       },
@@ -132,18 +135,23 @@ export class MultimodalProcessor {
     filePath: string,
     timeUnixMs?: number,
     opts?: PathToUriOptions,
+    token: { timedOut: boolean } = { timedOut: false },
+    signal?: AbortSignal,
   ): Promise<UriResult | null> {
     const key = normalizeLocalImagePath(filePath);
     if (!key) return null;
 
     const roots = (opts?.allowedRootPaths ?? []).map(r => r.trim()).filter(Boolean);
     if (roots.length === 0) {
-      logger.warn('multimodal pathToUri rejected', { reason: 'no_allowed_roots' });
+      logger.warn('multimodal pathToUri rejected', { reason: 'no_allowed_roots', path: key });
       return null;
     }
 
-    const stated = await lstatRegularImageFile(key);
-    if (!stated) return null;
+    const stated = await lstatRegularImageFile(key, signal);
+    if (!stated) {
+      if (!signal?.aborted) logger.warn('multimodal file read failed', { path: key });
+      return null;
+    }
 
     const day = yyyymmddFromUnixMs(timeUnixMs);
     const cacheKey = pathCacheKey(key, day);
@@ -153,7 +161,7 @@ export class MultimodalProcessor {
       && cached.mtimeMs === stated.mtimeMs
       && cached.size === stated.size
     ) {
-      if (!(await isRealPathInsideRoots(key, roots))) return null;
+      if (!(await isRealPathInsideRoots(key, roots, signal))) return null;
       return cached.result;
     }
 
@@ -164,6 +172,7 @@ export class MultimodalProcessor {
     if (this.pathUriInflight.size >= MAX_MULTIMODAL_PATH_INFLIGHT) {
       logger.warn('multimodal pathToUri rejected', {
         reason: 'path_inflight_full',
+        path: key,
         pending: this.pathUriInflight.size,
         limit: MAX_MULTIMODAL_PATH_INFLIGHT,
       });
@@ -172,8 +181,11 @@ export class MultimodalProcessor {
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots);
-        if (!loaded) return null;
+        const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
+        if (!loaded || token.timedOut) {
+          if (!loaded && !token.timedOut) logger.warn('multimodal file read failed', { path: key });
+          return null;
+        }
 
         const cachedFresh = this.pathUriCache.get(cacheKey);
         if (
@@ -191,6 +203,7 @@ export class MultimodalProcessor {
             ? { time_unix_ms: timeUnixMs }
             : {}),
         });
+        if (!result) return null;
         this.pathUriCache.set(cacheKey, {
           mtimeMs: loaded.mtimeMs,
           size: loaded.size,
@@ -198,7 +211,7 @@ export class MultimodalProcessor {
         });
         return result;
       } catch (err) {
-        logger.warn('multimodal pathToUri failed', { error: String(err) });
+        logger.warn('multimodal pathToUri failed', { path: key, error: String(err) });
         return null;
       }
     })();

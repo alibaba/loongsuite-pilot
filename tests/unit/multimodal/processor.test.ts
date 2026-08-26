@@ -529,6 +529,52 @@ describe('MultimodalProcessor.pathToUri', () => {
     await processor.shutdown(100);
   });
 
+  it('does not upload when a timed-out pathToUri later finishes reading', async () => {
+    vi.resetModules();
+    let releaseRead!: () => void;
+    const holdRead = new Promise<void>(resolve => {
+      releaseRead = resolve;
+    });
+    let readsFinished = 0;
+    vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
+      return {
+        ...actual,
+        openNormalizedLocalImage: async (
+          filePath: string,
+          maxBytes?: number,
+          allowedRootPaths?: string[],
+        ) => {
+          await holdRead;
+          readsFinished += 1;
+          return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
+        },
+      };
+    });
+    try {
+      const { MultimodalProcessor: DelayedProcessor } = await import(
+        '../../../src/multimodal/processor.js'
+      );
+      const file = writeTempPng('orphan.png', 'orphan');
+      const uploader = new FakeUploader();
+      const processor = new DelayedProcessor(STORAGE_BASE, uploader);
+      expect(await processor.pathToUri(file, EVENT_TIME_MS, {
+        ...TMP_ALLOW,
+        deadlineMs: 40,
+      })).toBeNull();
+      expect(uploader.items).toHaveLength(0);
+
+      releaseRead();
+      await vi.waitFor(() => expect(readsFinished).toBe(1));
+      expect(uploader.items).toHaveLength(0);
+      await processor.shutdown(100);
+    } finally {
+      releaseRead();
+      vi.doUnmock('../../../src/multimodal/resolve.js');
+      vi.resetModules();
+    }
+  });
+
   it('times out a never-resolving stat and returns null', async () => {
     vi.resetModules();
     vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {

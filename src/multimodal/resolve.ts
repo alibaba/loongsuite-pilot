@@ -182,7 +182,12 @@ export function isPathInsideRoots(absPath: string, roots: string[]): boolean {
 }
 
 /** Whether the file's realpath is inside any root. */
-export async function isRealPathInsideRoots(absPath: string, roots: string[]): Promise<boolean> {
+export async function isRealPathInsideRoots(
+  absPath: string,
+  roots: string[],
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return false;
   let realFile: string;
   try {
     realFile = await fs.realpath(absPath);
@@ -226,14 +231,15 @@ export function sniffImageMime(bytes: Buffer): string | null {
   return null;
 }
 
-export async function lstatRegularImageFile(resolvedPath: string) {
+export async function lstatRegularImageFile(resolvedPath: string, signal?: AbortSignal) {
+  if (signal?.aborted) return null;
   let listed;
   try {
     listed = await fs.lstat(resolvedPath);
   } catch {
     return null;
   }
-  if (listed.isSymbolicLink() || !listed.isFile()) return null;
+  if (signal?.aborted || listed.isSymbolicLink() || !listed.isFile()) return null;
   return listed;
 }
 
@@ -242,24 +248,27 @@ export async function openNormalizedLocalImage(
   resolvedPath: string,
   maxBytes = MAX_MULTIMODAL_DATA_SIZE,
   allowedRootPaths?: string[],
+  signal?: AbortSignal,
 ): Promise<(PathBytes & { mtimeMs: number; resolvedPath: string }) | null> {
   if (allowedRootPaths) {
     if (allowedRootPaths.length === 0) return null;
-    if (!(await isRealPathInsideRoots(resolvedPath, allowedRootPaths))) return null;
+    if (!(await isRealPathInsideRoots(resolvedPath, allowedRootPaths, signal))) return null;
   }
+  if (signal?.aborted) return null;
 
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
-  let fh;
+  let fh: Awaited<ReturnType<typeof fs.open>> | undefined;
+  const abortClose = () => {
+    if (fh) void fh.close().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', abortClose, { once: true });
   try {
     fh = await fs.open(resolvedPath, flags);
-  } catch {
-    return null;
-  }
-  try {
+    if (signal?.aborted) return null;
     const st = await fh.stat();
     if (!st.isFile() || st.size <= 0) return null;
     const toRead = Math.min(st.size, maxBytes + 1);
-    const bytes = await readFileHandleFully(fh, toRead);
+    const bytes = await readFileHandleFully(fh, toRead, signal);
     if (!bytes || bytes.length > maxBytes) return null;
 
     const after = await fh.stat();
@@ -275,8 +284,17 @@ export async function openNormalizedLocalImage(
     const mime_type = sniffImageMime(bytes);
     if (!mime_type) return null;
     return { bytes, mime_type, size: bytes.length, mtimeMs: st.mtimeMs, resolvedPath };
+  } catch {
+    return null;
   } finally {
-    await fh.close();
+    signal?.removeEventListener('abort', abortClose);
+    if (fh) {
+      try {
+        await fh.close();
+      } catch {
+        // already closed by abort
+      }
+    }
   }
 }
 
@@ -284,15 +302,20 @@ export async function openNormalizedLocalImage(
 async function readFileHandleFully(
   fh: Awaited<ReturnType<typeof fs.open>>,
   byteLength: number,
+  signal?: AbortSignal,
 ): Promise<Buffer | null> {
   const buf = Buffer.allocUnsafe(byteLength);
   let offset = 0;
   while (offset < byteLength) {
-    const { bytesRead } = await fh.read(buf, offset, byteLength - offset, offset);
-    if (bytesRead === 0) break;
-    offset += bytesRead;
+    try {
+      const { bytesRead } = await fh.read(buf, offset, byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    } catch {
+      return null;
+    }
   }
-  if (offset <= 0) return null;
+  if (offset <= 0 || signal?.aborted) return null;
   return Buffer.from(buf.subarray(0, offset));
 }
 
