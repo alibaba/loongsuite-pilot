@@ -17,6 +17,7 @@ import type {
   MultimodalRuntimeConfig,
   MultimodalSlsAuthMode,
   MultimodalSlsConfig,
+  MultimodalSlsHostedOssConfig,
   MultimodalSlsWriteVia,
   MultimodalUploadMode,
   MultimodalUploaderKind,
@@ -162,10 +163,10 @@ export interface ConfigFile {
         securityToken?: string;
         apiKey?: string;
       };
-      // hostedOss?: {
-      //   ossBucket?: string;
-      //   roleArn?: string;
-      // };
+      hostedOss?: {
+        ossBucket?: string;
+        roleArn?: string;
+      };
     };
   };
 
@@ -420,7 +421,10 @@ function buildMultimodalSlsConfig(
     accessKeySecret,
   });
   const writeVia = resolveMultimodalSlsWriteVia(sls?.writeVia);
-  // const hostedOss = resolveMultimodalSlsHostedOss(sls?.hostedOss);
+  const hostedOss = resolveMultimodalSlsHostedOss(sls?.hostedOss);
+  if (hostedOss && mode !== 'ak') {
+    throw new Error('multimodal.sls.hostedOss requires auth.mode=ak');
+  }
   if (mode === 'apiKey') {
     if (!apiKey) {
       throw new Error('multimodal.sls.auth requires apiKey when mode=apiKey');
@@ -440,7 +444,7 @@ function buildMultimodalSlsConfig(
       ...(securityToken ? { securityToken } : {}),
       ...(apiKey ? { apiKey } : {}),
     },
-    // ...(hostedOss ? { hostedOss } : {}),
+    ...(hostedOss ? { hostedOss } : {}),
   };
 }
 
@@ -460,24 +464,17 @@ function resolveMultimodalSlsAuthMode(
   );
 }
 
-// function resolveMultimodalSlsStorageBasePath(sls: MultimodalSlsConfig): string {
-//   if (sls.writeVia === 'http' && sls.hostedOss?.ossBucket) {
-//     return `oss://${sls.hostedOss.ossBucket}/${sls.project}/${sls.logstore}`;
-//   }
-//   return `sls://${sls.project}/${sls.logstore}`;
-// }
-//
-// function resolveMultimodalSlsHostedOss(
-//   raw: { ossBucket?: string; roleArn?: string } | undefined,
-// ): MultimodalSlsHostedOssConfig | undefined {
-//   const ossBucket = (raw?.ossBucket ?? '').trim();
-//   const roleArn = (raw?.roleArn ?? '').trim();
-//   if (!ossBucket && !roleArn) return undefined;
-//   if (!ossBucket || !roleArn) {
-//     throw new Error('multimodal.sls.hostedOss.ossBucket and roleArn must both be set or both omitted');
-//   }
-//   return { ossBucket, roleArn };
-// }
+function resolveMultimodalSlsHostedOss(
+  raw: { ossBucket?: string; roleArn?: string } | undefined,
+): MultimodalSlsHostedOssConfig | undefined {
+  const ossBucket = (raw?.ossBucket ?? '').trim();
+  const roleArn = (raw?.roleArn ?? '').trim();
+  if (!ossBucket && !roleArn) return undefined;
+  if (!ossBucket || !roleArn) {
+    throw new Error('multimodal.sls.hostedOss.ossBucket and roleArn must both be set or both omitted');
+  }
+  return { ossBucket, roleArn };
+}
 
 function resolveMultimodalSlsWriteVia(raw: string | undefined): MultimodalSlsWriteVia {
   const writeVia = (raw ?? 'putObject').trim();

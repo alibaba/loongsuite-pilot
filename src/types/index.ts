@@ -192,8 +192,11 @@ export interface MultimodalSlsConfig {
   writeVia?: MultimodalSlsWriteVia;
   /** SLS auth options */
   auth: MultimodalSlsAuthConfig;
-  // Hosted-user OSS is deferred until ak/apiKey + putObject/http are settled.
-  // hostedOss?: MultimodalSlsHostedOssConfig;
+  /**
+   * One-time SLS multimodal hosted-OSS bootstrap. Requires auth.mode=ak.
+   * Once Enabled on the logstore, SLS keeps the bucket even after Pilot stops.
+   */
+  hostedOss?: MultimodalSlsHostedOssConfig;
 }
 
 export interface MultimodalSlsAuthConfig {
@@ -205,10 +208,10 @@ export interface MultimodalSlsAuthConfig {
   apiKey?: string;
 }
 
-// export interface MultimodalSlsHostedOssConfig {
-//   ossBucket: string;
-//   roleArn: string;
-// }
+export interface MultimodalSlsHostedOssConfig {
+  ossBucket: string;
+  roleArn: string;
+}
 
 /** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
 export interface MultimodalRuntimeConfig {

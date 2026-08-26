@@ -12,6 +12,7 @@ import {
   slsPutObject,
   slsPutPresignedObject,
   slsPutViaPresignedHttp,
+  slsEnsureHostedOss,
   sniffSlsHttpEventStorageBasePath,
   SLS_HTTP_STORAGE_PROBE_KEY,
   tryParseSlsStorageBasePath,
@@ -707,5 +708,110 @@ describe('sls-client (presign)', () => {
       ok: true,
       storageBasePath: 'oss://user-bucket/proj/logstore',
     });
+  });
+
+  it('uses hostedOss bucket for http URI without sniffing', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      uploader: 'sls',
+      storageBasePath: 'sls://proj/logstore',
+      sls: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+        writeVia: 'http',
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        hostedOss: {
+          ossBucket: 'user-bucket',
+          roleArn: 'acs:ram::1:role/sls-mm',
+        },
+      },
+    });
+    expect(result).toEqual({
+      ok: true,
+      storageBasePath: 'oss://user-bucket/proj/logstore',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('sls-client (hosted OSS)', () => {
+  const base = {
+    endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+    project: 'p',
+    logstore: 'l',
+    accessKeyId: 'ak',
+    accessKeySecret: 'sk',
+    timeoutMs: 1000,
+    ossBucket: 'user-bucket',
+    roleArn: 'acs:ram::1:role/sls-mm',
+  };
+
+  it('enables when current status is Disabled', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${url}`);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return new Response(JSON.stringify({ status: 'Disabled' }), { status: 200 });
+      }
+      return new Response('', { status: 200 });
+    });
+    const result = await slsEnsureHostedOss(base);
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe('enabled');
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatch(/^GET /);
+    expect(seen[1]).toMatch(/^PUT /);
+  });
+
+  it('leaves Enabled config unchanged when ossBucket matches', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${url}`);
+      return new Response(JSON.stringify({
+        status: 'Enabled',
+        ossBucket: 'user-bucket',
+        roleArn: 'acs:ram::1:role/other',
+      }), { status: 200 });
+    });
+    const result = await slsEnsureHostedOss(base);
+    expect(result).toMatchObject({ ok: true, action: 'unchanged' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^GET /);
+  });
+
+  it('disables then enables when Enabled ossBucket differs', async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        return new Response(JSON.stringify({
+          status: 'Enabled',
+          ossBucket: 'other-bucket',
+        }), { status: 200 });
+      }
+      bodies.push(Buffer.from(init?.body as Uint8Array).toString('utf8'));
+      return new Response('', { status: 200 });
+    });
+    const result = await slsEnsureHostedOss(base);
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe('replaced');
+    expect(bodies.map(text => JSON.parse(text))).toEqual([
+      { status: 'Disabled' },
+      { status: 'Enabled', ossBucket: 'user-bucket', roleArn: 'acs:ram::1:role/sls-mm' },
+    ]);
+  });
+
+  it('fails closed on GET 403 without writing', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${url}`);
+      return new Response('denied', { status: 403 });
+    });
+    const result = await slsEnsureHostedOss(base);
+    expect(result.ok).toBe(false);
+    expect(result.statusCode).toBe(403);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^GET /);
   });
 });

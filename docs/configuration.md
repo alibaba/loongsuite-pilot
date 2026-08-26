@@ -166,6 +166,30 @@ HTTP presign upload (`writeVia=http`). Use ApiKey or AK (`auth.mode` selects whi
 }
 ```
 
+Hosted-user OSS (`hostedOss`). **AK only** — ApiKey cannot `GET/PUT multimodalconfiguration`. If this block is set and `auth.mode` is not `ak`, config is invalid and multimodal stays off. Use it only to point the logstore at a user bucket the first time; SLS keeps the setting after Pilot stops, so you can omit `hostedOss` later. Startup GETs first: Disabled → enable; Enabled with the same `ossBucket` → no write; Enabled with a different bucket → Disabled then Enabled. Any failure disables multimodal.
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      },
+      "hostedOss": {
+        "ossBucket": "your-bucket",
+        "roleArn": "acs:ram::<uid>:role/<roleName>"
+      }
+    }
+  }
+}
+```
+
 | Setting | Description |
 |---------|-------------|
 | `multimodal.sls.endpoint` | SLS endpoint. |
@@ -175,6 +199,7 @@ HTTP presign upload (`writeVia=http`). Use ApiKey or AK (`auth.mode` selects whi
 | `multimodal.sls.auth.mode` | Optional in user config; always set after load. `ak` or `apiKey`. If omitted: use `apiKey` when `apiKey` is present (even if AK is also set), otherwise use `ak` when both `accessKeyId` and `accessKeySecret` are present. |
 | `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`; optional `securityToken` for STS. |
 | `multimodal.sls.auth.apiKey` | Required when `mode=apiKey`. May coexist with AK; unused unless `mode=apiKey`. |
+| `multimodal.sls.hostedOss.ossBucket` / `roleArn` | Optional, must be a pair. `mode=ak` only. Startup hosts the logstore onto the user OSS bucket; omit after it is already set. |
 
 If global multimodal config is missing or invalid, Pilot fails open: text collection continues, and blob→uri conversion is skipped.
 

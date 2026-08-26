@@ -23,16 +23,28 @@ export interface SlsAuthApiKey {
 
 export type SlsObjectAuth = SlsAuthAk | SlsAuthApiKey;
 
-export interface SlsObjectTarget {
+export interface SlsRequest {
   endpoint: string;
   project: string;
   logstore: string;
-  objectKey: string;
   mode?: 'ak' | 'apiKey';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
   apiKey?: string;
+  timeoutMs?: number;
+}
+
+export interface SlsResult {
+  ok: boolean;
+  statusCode?: number;
+  requestId?: string;
+  error?: string;
+  retryable?: boolean;
+}
+
+export interface SlsObjectTarget extends SlsRequest {
+  objectKey: string;
   timeoutMs: number;
 }
 
@@ -42,15 +54,7 @@ export interface SlsPutObjectParams extends SlsObjectTarget {
   meta?: Record<string, string>;
 }
 
-export interface SlsPutObjectResult {
-  ok: boolean;
-  statusCode?: number;
-  requestId?: string;
-  error?: string;
-  retryable?: boolean;
-}
-
-export interface SlsPresignResult extends SlsPutObjectResult {
+export interface SlsPresignResult extends SlsResult {
   url?: string;
 }
 
@@ -59,12 +63,7 @@ export interface SlsEndpoint {
   host: string;
 }
 
-interface SlsHttpResult {
-  ok: boolean;
-  statusCode?: number;
-  requestId?: string;
-  error?: string;
-  retryable?: boolean;
+interface SlsHttpResult extends SlsResult {
   text?: string;
 }
 
@@ -168,7 +167,7 @@ function prepareSlsObjectTarget(params: SlsObjectTarget): {
   };
 }
 
-function failClosed(err: unknown): SlsPutObjectResult {
+function failClosed(err: unknown): SlsResult {
   return {
     ok: false,
     error: err instanceof Error ? err.message : String(err),
@@ -363,7 +362,7 @@ async function slsHttpRequest(args: {
 }
 
 /** SLS PutObject via AK Auth V1 or ApiKey Bearer. */
-export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsPutObjectResult> {
+export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResult> {
   try {
     const prepared = prepareSlsObjectTarget(params);
     const contentType = params.contentType || 'application/octet-stream';
@@ -459,7 +458,7 @@ export async function slsPutPresignedObject(params: {
   url: string;
   body: Buffer;
   timeoutMs: number;
-}): Promise<SlsPutObjectResult> {
+}): Promise<SlsResult> {
   try {
     if (!params.url.trim()) throw new Error('presigned URL is required');
     return await slsHttpRequest({
@@ -475,7 +474,7 @@ export async function slsPutPresignedObject(params: {
 }
 
 /** ApiKey/AK presign PUT, then upload to the returned URL with no extra headers. */
-export async function slsPutViaPresignedHttp(params: SlsPutObjectParams): Promise<SlsPutObjectResult> {
+export async function slsPutViaPresignedHttp(params: SlsPutObjectParams): Promise<SlsResult> {
   const presign = await slsGeneratePresignedUrl(params);
   if (!presign.ok || !presign.url) return presign;
   return slsPutPresignedObject({
@@ -504,9 +503,193 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
   return undefined;
 }
 
-/** Startup-only sniff. Shorter than upload timeout so a hung presign does not stall start. */
-export const SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS = 5_000;
+/** Startup sniff / hosted-OSS GET+PUT. Shorter than upload timeout so a hung call does not stall start. */
+const SLS_STARTUP_TIMEOUT_MS = 5_000;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
+
+export interface SlsMultimodalConfiguration {
+  status: 'Enabled' | 'Disabled';
+  ossBucket?: string;
+}
+
+export interface SlsMultimodalConfigParams extends SlsRequest {
+  accessKeyId: string;
+  accessKeySecret: string;
+}
+
+export interface SlsGetMultimodalConfigResult extends SlsResult {
+  config?: SlsMultimodalConfiguration;
+}
+
+export interface SlsEnsureHostedOssResult extends SlsResult {
+  action?: 'unchanged' | 'enabled' | 'replaced';
+}
+
+function slsMultimodalConfigResource(logstore: string): string {
+  return `/logstores/${logstore}/multimodalconfiguration`;
+}
+
+function prepareAkManageTarget(params: SlsMultimodalConfigParams): {
+  endpoint: SlsEndpoint;
+  project: string;
+  logstore: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+  timeoutMs: number;
+} {
+  const project = params.project.trim();
+  const logstore = params.logstore.trim();
+  const accessKeyId = params.accessKeyId.trim();
+  const accessKeySecret = params.accessKeySecret.trim();
+  if (!project || !logstore) throw new Error('SLS project and logstore are required');
+  if (!accessKeyId || !accessKeySecret) {
+    throw new Error('SLS hosted OSS management requires access key ID and secret');
+  }
+  return {
+    endpoint: normalizeSlsEndpoint(params.endpoint),
+    project,
+    logstore,
+    accessKeyId,
+    accessKeySecret,
+    securityToken: params.securityToken?.trim() || undefined,
+    timeoutMs: params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS,
+  };
+}
+
+function parseMultimodalConfiguration(text: string | undefined): SlsMultimodalConfiguration | undefined {
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const statusRaw = pickString(parsed, 'status') ?? '';
+    const normalized = statusRaw.toLowerCase();
+    if (normalized !== 'enabled' && normalized !== 'disabled') return undefined;
+    const ossBucket = pickString(parsed, 'ossBucket');
+    return {
+      status: normalized === 'enabled' ? 'Enabled' : 'Disabled',
+      ...(ossBucket ? { ossBucket } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** GET /logstores/{logstore}/multimodalconfiguration. AK only. */
+export async function slsGetMultimodalConfiguration(
+  params: SlsMultimodalConfigParams,
+): Promise<SlsGetMultimodalConfigResult> {
+  try {
+    const prepared = prepareAkManageTarget(params);
+    const { url, headers } = buildLogV1JsonRequest({
+      endpoint: prepared.endpoint,
+      project: prepared.project,
+      method: 'GET',
+      resource: slsMultimodalConfigResource(prepared.logstore),
+      accessKeyId: prepared.accessKeyId,
+      accessKeySecret: prepared.accessKeySecret,
+      securityToken: prepared.securityToken,
+    });
+    const result = await slsHttpRequest({
+      url,
+      method: 'GET',
+      headers,
+      timeoutMs: prepared.timeoutMs,
+    });
+    if (!result.ok) return result;
+    const config = parseMultimodalConfiguration(result.text);
+    if (!config) {
+      return {
+        ok: false,
+        statusCode: result.statusCode,
+        requestId: result.requestId,
+        error: 'multimodal configuration response invalid',
+        retryable: false,
+      };
+    }
+    return { ...result, config };
+  } catch (err) {
+    return failClosed(err);
+  }
+}
+
+/** PUT /logstores/{logstore}/multimodalconfiguration. AK only. */
+export async function slsPutMultimodalConfiguration(
+  params: SlsMultimodalConfigParams & {
+    status: 'Enabled' | 'Disabled';
+    ossBucket?: string;
+    roleArn?: string;
+  },
+): Promise<SlsResult> {
+  try {
+    const prepared = prepareAkManageTarget(params);
+    const ossBucket = params.ossBucket?.trim() ?? '';
+    const roleArn = params.roleArn?.trim() ?? '';
+    if (params.status === 'Enabled' && ((ossBucket && !roleArn) || (!ossBucket && roleArn))) {
+      throw new Error('ossBucket and roleArn must both be set or both omitted');
+    }
+    const payload: Record<string, string> = { status: params.status };
+    if (params.status === 'Enabled' && ossBucket && roleArn) {
+      payload.ossBucket = ossBucket;
+      payload.roleArn = roleArn;
+    }
+    const body = Buffer.from(JSON.stringify(payload), 'utf8');
+    const { url, headers } = buildLogV1JsonRequest({
+      endpoint: prepared.endpoint,
+      project: prepared.project,
+      method: 'PUT',
+      resource: slsMultimodalConfigResource(prepared.logstore),
+      accessKeyId: prepared.accessKeyId,
+      accessKeySecret: prepared.accessKeySecret,
+      securityToken: prepared.securityToken,
+      body,
+    });
+    return await slsHttpRequest({
+      url,
+      method: 'PUT',
+      headers,
+      body,
+      timeoutMs: prepared.timeoutMs,
+    });
+  } catch (err) {
+    return failClosed(err);
+  }
+}
+
+/**
+ * Make the logstore land on the configured user OSS bucket.
+ * Disabled → Enabled. Same ossBucket → no write. Different bucket → Disabled then Enabled.
+ */
+export async function slsEnsureHostedOss(
+  params: SlsMultimodalConfigParams & { ossBucket: string; roleArn: string },
+): Promise<SlsEnsureHostedOssResult> {
+  const ossBucket = params.ossBucket.trim();
+  const roleArn = params.roleArn.trim();
+  if (!ossBucket || !roleArn) {
+    return { ok: false, error: 'ossBucket and roleArn are required', retryable: false };
+  }
+
+  const current = await slsGetMultimodalConfiguration(params);
+  if (!current.ok || !current.config) return current;
+  if (current.config.status === 'Enabled' && (current.config.ossBucket ?? '') === ossBucket) {
+    return { ...current, action: 'unchanged' };
+  }
+  if (current.config.status === 'Enabled') {
+    const disabled = await slsPutMultimodalConfiguration({ ...params, status: 'Disabled' });
+    if (!disabled.ok) return disabled;
+  }
+
+  const enabled = await slsPutMultimodalConfiguration({
+    ...params,
+    status: 'Enabled',
+    ossBucket,
+    roleArn,
+  });
+  if (!enabled.ok) return enabled;
+  return {
+    ...enabled,
+    action: current.ok && current.config?.status === 'Enabled' ? 'replaced' : 'enabled',
+  };
+}
 
 /** Virtual-hosted OSS host → bucket. Does not log or return query credentials. */
 export function parseOssBucketFromPresignedUrl(url: string): string | null {
@@ -539,7 +722,7 @@ export function buildSlsHttpEventStorageBasePath(args: {
 export async function sniffSlsHttpEventStorageBasePath(
   params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'> & { timeoutMs?: number },
 ): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
-  const timeoutMs = params.timeoutMs ?? SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS;
+  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
   const presign = await slsGeneratePresignedUrl({
     ...params,
     objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
@@ -582,6 +765,21 @@ export async function resolveMultimodalEventStorageBasePath(
   }
 
   const sls = config.sls;
+  const hostedBucket = sls.hostedOss?.ossBucket?.trim() ?? '';
+  if (hostedBucket) {
+    try {
+      return {
+        ok: true,
+        storageBasePath: buildSlsHttpEventStorageBasePath({
+          ossBucket: hostedBucket,
+          project: sls.project,
+          logstore: sls.logstore,
+        }),
+      };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
   return sniffSlsHttpEventStorageBasePath({
     endpoint: sls.endpoint,
     project: sls.project,
@@ -591,6 +789,6 @@ export async function resolveMultimodalEventStorageBasePath(
     accessKeySecret: sls.auth.accessKeySecret,
     securityToken: sls.auth.securityToken,
     apiKey: sls.auth.apiKey,
-    timeoutMs: SLS_HTTP_STORAGE_SNIFF_TIMEOUT_MS,
+    timeoutMs: SLS_STARTUP_TIMEOUT_MS,
   });
 }

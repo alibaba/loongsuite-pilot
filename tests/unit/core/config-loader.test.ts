@@ -807,6 +807,79 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('loads sls hostedOss when auth.mode=ak', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+            hostedOss: {
+              ossBucket: 'user-bucket',
+              roleArn: 'acs:ram::1:role/sls-mm',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.sls).toMatchObject({
+        auth: { mode: 'ak' },
+        hostedOss: {
+          ossBucket: 'user-bucket',
+          roleArn: 'acs:ram::1:role/sls-mm',
+        },
+      });
+    });
+
+    it('disables multimodal when hostedOss is set without ak mode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            auth: {
+              mode: 'apiKey',
+              apiKey: 'sls-api-key',
+            },
+            hostedOss: {
+              ossBucket: 'user-bucket',
+              roleArn: 'acs:ram::1:role/sls-mm',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when hostedOss fields are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+            hostedOss: {
+              ossBucket: 'user-bucket',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
     it('disables multimodal when sls auth.mode cannot be inferred', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {

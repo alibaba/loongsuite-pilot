@@ -23,7 +23,10 @@ export {
   isUriPart,
 } from './rewrite.js';
 export { createUploader } from './uploader/factory.js';
-export { resolveMultimodalEventStorageBasePath } from './uploader/sls-client.js';
+export {
+  resolveMultimodalEventStorageBasePath,
+  slsEnsureHostedOss,
+} from './uploader/sls-client.js';
 export { OssUploader } from './uploader/oss-uploader.js';
 export { SlsUploader } from './uploader/sls-uploader.js';
 export type {

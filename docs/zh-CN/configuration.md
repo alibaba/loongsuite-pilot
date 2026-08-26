@@ -166,6 +166,30 @@ HTTP 预签名上传（`writeVia=http`）。可用 ApiKey 或 AK（由 `auth.mod
 }
 ```
 
+托管用户 OSS（`hostedOss`）。**只能用 AK 管理**，ApiKey 没有 `GET/PUT multimodalconfiguration` 权限。配了但 `auth.mode` 不是 `ak` 时，配置非法，多模态关闭。这一项只用于第一次把 logstore 指到用户 Bucket；SLS 侧配置会保留，之后可以删掉 `hostedOss`，Pilot 停止也不会关掉托管。启动时会先 GET：已是 Disabled 则打开；已 Enabled 且 `ossBucket` 相同则不动；已 Enabled 但 Bucket 不同则先 Disabled 再 Enabled。任一步失败则不开多模态。
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      },
+      "hostedOss": {
+        "ossBucket": "your-bucket",
+        "roleArn": "acs:ram::<uid>:role/<roleName>"
+      }
+    }
+  }
+}
+```
+
 | 配置项 | 说明 |
 |--------|------|
 | `multimodal.sls.endpoint` | SLS Endpoint。 |
@@ -175,6 +199,7 @@ HTTP 预签名上传（`writeVia=http`）。可用 ApiKey 或 AK（由 `auth.mod
 | `multimodal.sls.auth.mode` | 用户配置可省略，加载后必有。`ak` 或 `apiKey`。未填时：有 `apiKey` 就用 `apiKey`（即使也配了 AK）；否则 `accessKeyId` 与 `accessKeySecret` 都有才用 `ak`。 |
 | `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；可选 `securityToken`（STS）。 |
 | `multimodal.sls.auth.apiKey` | `mode=apiKey` 时必填。可与 AK 同时存在，仅在 `mode=apiKey` 时使用。 |
+| `multimodal.sls.hostedOss.ossBucket` / `roleArn` | 可选，必须成对。仅 `mode=ak` 可用。启动时把该 logstore 托管到用户 OSS；已配过可省略。 |
 
 全局多模态配置缺失或非法时，Pilot 会 fail-open：进程继续采集文本，但不做 blob→uri 转换。
 
