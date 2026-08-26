@@ -69,9 +69,12 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   });
 
   const validMultiToolGraph = () => [
+    graphEntry('evt-0', 'other', {
+      'gen_ai.turn.start': true,
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] }],
+    }),
     graphEntry('evt-1', 'llm.request', {
       'gen_ai.step.id': 'step-1',
-      'gen_ai.turn.start': true,
       'gen_ai.request.id': 'request-1',
       'gen_ai.request.model': 'model-synthetic',
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] }],
@@ -215,37 +218,37 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   it.each([
     {
       name: 'duplicate event IDs',
-      mutate: entries => { entries[7]['event.id'] = entries[0]['event.id']; },
+      mutate: entries => { entries[8]['event.id'] = entries[0]['event.id']; },
       category: 'duplicate_event_id=1',
     },
     {
       name: 'native JSON types and positive millisecond duration',
       mutate: entries => {
-        entries[2]['gen_ai.tool.call.arguments'] = '{"path":"/workspace/example/a.txt"}';
-        entries[4]['gen_ai.tool.call.duration'] = 0;
+        entries[3]['gen_ai.tool.call.arguments'] = '{"path":"/workspace/example/a.txt"}';
+        entries[5]['gen_ai.tool.call.duration'] = 0;
       },
       category: 'type_error=2',
     },
     {
       name: 'request/response pairing',
-      mutate: entries => { entries.splice(1, 1); },
+      mutate: entries => { entries.splice(2, 1); },
       category: 'model_pair_error=1',
     },
     {
       name: 'tool call/result pairing and name consistency',
-      mutate: entries => { entries[4]['gen_ai.tool.name'] = 'DifferentSyntheticTool'; },
+      mutate: entries => { entries[5]['gen_ai.tool.name'] = 'DifferentSyntheticTool'; },
       category: 'tool_pair_error=1',
     },
     {
       name: 'turn start/end uniqueness',
-      mutate: entries => { delete entries[7]['gen_ai.turn.end']; },
+      mutate: entries => { delete entries[8]['gen_ai.turn.end']; },
       category: 'turn_boundary_error=1',
     },
     {
       name: 'both turn boundaries missing',
       mutate: entries => {
         delete entries[0]['gen_ai.turn.start'];
-        delete entries[7]['gen_ai.turn.end'];
+        delete entries[8]['gen_ai.turn.end'];
       },
       category: 'turn_boundary_error=1',
     },
@@ -275,7 +278,7 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
 
   it('never prints prompt, tool payload, result, or user path values in validation errors', () => {
     const entries = validMultiToolGraph();
-    entries[2]['gen_ai.tool.call.arguments'] =
+    entries[3]['gen_ai.tool.call.arguments'] =
       '{"secret":"SENSITIVE_MARKER_MUST_NOT_APPEAR","path":"/Users/private/person"}';
     writeJsonl('workbuddy-2026-05-11.jsonl', entries);
     const r = runWorkBuddyValidator();
