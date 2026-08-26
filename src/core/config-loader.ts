@@ -34,12 +34,11 @@ import {
   SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 
 const logger = createLogger('ConfigLoader');
-
-const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 export interface SlsEndpointEntry {
   name?: string;
@@ -254,7 +253,7 @@ function envInt(key: string, fallback: number): number {
  * Env vars override config file values. Config file overrides defaults.
  */
 export async function loadConfig(): Promise<AnalyticsConfig> {
-  const configPath = resolveHome(env('AGENT_DATA_COLLECTION_CONFIG') ?? DEFAULT_CONFIG_PATH);
+  const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {
@@ -263,7 +262,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
+  const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 
   const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -161,6 +161,43 @@ describe('HermesLogInput', () => {
     await appendRecord(file, makeRecord('event-2'));
     expect((await input.collectOnce()).map(entry => entry['event.id'])).toEqual(['event-2']);
   });
+
+  // Reproducing EACCES needs real permission checks; root bypasses them.
+  const itNonRoot =
+    typeof process.getuid === 'function' && process.getuid() !== 0 ? it : it.skip;
+
+  itNonRoot(
+    'diagnoses an unreadable session directory once instead of failing silently',
+    async () => {
+      const lockedDir = path.join(tmpDir, 'locked');
+      await fs.mkdir(lockedDir);
+      await fs.writeFile(
+        path.join(lockedDir, 'hermes-agent-100.jsonl'),
+        JSON.stringify(makeRecord('event-1')) + '\n',
+      );
+      // The plugin creates this directory 0700 inside its host process; a
+      // differently-privileged writer makes it unreadable for this daemon.
+      await fs.chmod(lockedDir, 0o000);
+
+      const input = makeInput({ sessionDir: lockedDir });
+      const warnSpy = vi.spyOn((input as any).logger, 'warn');
+
+      try {
+        await expect(input.discoverOnce()).resolves.toEqual([]);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        const message = String(warnSpy.mock.calls[0][0]);
+        expect(message).toContain('ownership-mismatch');
+        expect(message).toContain('session directory');
+
+        // The condition is stable across cycles; the warning is not repeated.
+        await expect(input.discoverOnce()).resolves.toEqual([]);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        warnSpy.mockRestore();
+        await fs.chmod(lockedDir, 0o755).catch(() => {});
+      }
+    },
+  );
 
   function makeInput(
     overrides: Partial<Omit<HermesLogInputOptions, 'stateStore'>> = {},
