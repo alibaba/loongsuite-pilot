@@ -29,6 +29,7 @@ export interface SqliteTokenResult {
  * Keys are request_id; values are local image paths for that request.
  * DB paths are resolved the same way as token enrichment (not caller-supplied).
  * Fail-open: query errors are logged and skipped.
+ * Only request_ids that appear in a row are recorded (`[]` if extra has no images).
  */
 export async function readAttachedImagePathsForRequestIds(
   requestIds: string[],
@@ -59,7 +60,7 @@ export async function readAttachedImagePathsForRequestIds(
       const requestId = row.request_id?.trim();
       if (!requestId || result.has(requestId)) continue;
       const paths = parseAttachedImagePaths(row.extra);
-      if (paths.length > 0) result.set(requestId, paths);
+      result.set(requestId, paths);
     }
     if (result.size >= unique.length) break;
   }

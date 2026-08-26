@@ -35,7 +35,7 @@ const MARKDOWN_IMAGE_RE = new RegExp(
 
 /**
  * request_id → attached paths. Process-local LRU.
- * Empty means "no paths" or "already attached once" — both skip further input attach.
+ * Map values may be `[]` (confirmed empty or already attached). Ids absent from a lookup are not cached.
  */
 const attachedPathsByRequestId = new LruMap<string[]>(MULTIMODAL_LRU_LIMIT);
 
@@ -134,30 +134,28 @@ async function enrichInputAttachedImages(
   if (uniqueIds.length === 0) return;
 
   const byRequest = new Map<string, string[]>();
-  const missing: string[] = [];
+  const newIds: string[] = [];
   for (const id of uniqueIds) {
     const cached = attachedPathsByRequestId.get(id);
     if (cached !== undefined) {
       if (cached.length > 0) byRequest.set(id, cached);
     } else {
-      missing.push(id);
+      newIds.push(id);
     }
   }
 
-  if (missing.length > 0) {
+  if (newIds.length > 0) {
     try {
-      const fetched = await readAttachedImagePathsForRequestIds(missing);
-      for (const id of missing) {
-        const paths = fetched.get(id) ?? [];
-        attachedPathsByRequestId.set(id, paths);
-        if (paths.length > 0) byRequest.set(id, paths);
+      const fetched = await readAttachedImagePathsForRequestIds(newIds);
+      for (const [id, found] of fetched) {
+        attachedPathsByRequestId.set(id, found);
+        if (found.length > 0) byRequest.set(id, found);
       }
     } catch (err) {
       logger.warn('qoder ide multimodal attachedImagePaths lookup failed', {
         error: String(err),
-        requestIds: missing.length,
+        requestIds: newIds.length,
       });
-      // Keep cache hits; leave misses uncached for a later retry.
     }
   }
   if (byRequest.size === 0) return;

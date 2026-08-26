@@ -1194,6 +1194,48 @@ describe('QoderTraceInput multimodal', () => {
         expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
         expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
       });
+
+      it('caches a confirmed empty lookup and does not re-query', async () => {
+        const pathToUri = vi.fn(fakePathToUri);
+        const makeReq = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-empty',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-empty', []]]));
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect(pathToUri).not.toHaveBeenCalled();
+      });
+
+      it('does not cache a miss so a later lookup can still attach', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'retry.png', 'retry');
+        const pathToUri = fakePathToUri;
+        const makeReq = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-retry',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map());
+        const first = makeReq();
+        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
+        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-retry', [img]]]));
+        const second = makeReq();
+        await enrichIdeMultimodal([second], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((second['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/retry')).toBe(true);
+      });
     });
 
     it('tool mode rewrites Image file tool.result to text+uri parts', async () => {
