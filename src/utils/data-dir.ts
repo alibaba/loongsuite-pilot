@@ -66,6 +66,22 @@ export function pickDataDir(explicit: string | undefined, fileDataDir: string | 
 }
 
 /**
+ * LOONGSUITE_PILOT_DATA_DIR read with the SAME semantics as loadConfig()'s
+ * env() helper: on win32 the value is trimmed (Windows environment variables
+ * routinely pick up padding), elsewhere it is returned raw; undefined stays
+ * undefined. loadConfig() resolves the data dir through env(), so a divergent
+ * read here — e.g. the raw, untrimmed process.env — would make the eager
+ * injection path and the daemon disagree about the directory whenever the
+ * value is padded on Windows, reintroducing exactly the duplicate-hook class
+ * of bug this module exists to prevent.
+ */
+export function readEnvDataDir(): string | undefined {
+  const v = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  if (v === undefined) return undefined;
+  return process.platform === 'win32' ? v.trim() : v;
+}
+
+/**
  * Fully resolved data dir (absolute, `~` expanded) for callers outside the
  * daemon module graph — inject-hooks.ts today. The daemon itself keeps the
  * two-step shape: loadConfig() returns the raw value via pickDataDir(), and
@@ -74,6 +90,26 @@ export function pickDataDir(explicit: string | undefined, fileDataDir: string | 
  */
 export function resolveDataDir(explicit?: string): string {
   return resolveHome(
-    pickDataDir(explicit ?? process.env.LOONGSUITE_PILOT_DATA_DIR, readConfigFileDataDir()),
+    pickDataDir(explicit ?? readEnvDataDir(), readConfigFileDataDir()),
   );
+}
+
+/**
+ * The config file's `agents` gate, or undefined when the file is absent,
+ * unreadable, unparsable, or carries no `agents` object. Mirrors loadConfig()'s
+ * view of the same file (including the BOM strip). Used by the eager injection
+ * path to honour the same enabled/disabled gate the daemon applies via
+ * isAgentGatedEnabled(), so a disabled agent is not eagerly instrumented.
+ */
+export function readConfigAgentsGate(): Record<string, { enabled?: boolean } | undefined> | undefined {
+  try {
+    const text = fs.readFileSync(configJsonPath(), 'utf8').replace(/^\uFEFF/, '');
+    const parsed = JSON.parse(text) as { agents?: unknown };
+    if (parsed.agents && typeof parsed.agents === 'object') {
+      return parsed.agents as Record<string, { enabled?: boolean } | undefined>;
+    }
+  } catch {
+    // No readable/parsable config file — same conclusion loadConfig() reaches.
+  }
+  return undefined;
 }

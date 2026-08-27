@@ -85,10 +85,12 @@ describe('native-deps-guard', () => {
     expect(r.stderr).toContain('GLIBC_2.28');
     // And the reader must be told what it means and where to look next. The
     // payload's sqlite3 is the upstream prebuild (ancient glibc floor), so the
-    // diagnostic points at musl/corruption rather than a build-floor story.
+    // diagnostic points at musl/corruption rather than a build-floor story, and
+    // ends with a self-contained remediation (no external file reference — the
+    // guard must stay actionable from this repo alone).
     expect(r.stderr).toContain('upstream prebuilt');
     expect(r.stderr).toContain('musl');
-    expect(r.stderr).toContain('compatibility matrix');
+    expect(r.stderr).toContain('glibc base image');
 
     // The crash-loop breaker: the failure is recorded where the preload looks,
     // with the loader's message, so the deterministic failure is not respawned.

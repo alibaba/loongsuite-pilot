@@ -4,14 +4,6 @@ import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from './base-input.js';
 
-/**
- * Upper bound on per-path ownership warnings remembered for dedup. The set is
- * keyed by path and the condition is stable, so in practice it holds a handful
- * of entries; the cap only guards against unbounded growth if a writer keeps
- * recreating files under fresh names.
- */
-const OWNERSHIP_WARN_CAP = 512;
-
 export interface SessionInputOptions extends InputOptions {
   /** Glob-like base directory to scan for session files. */
   sessionDir: string;
@@ -32,9 +24,6 @@ export abstract class BaseSessionInput extends BaseInput {
 
   protected readonly sessionDir: string;
   protected readonly filePattern: string;
-
-  /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
-  private readonly ownershipWarned = new Set<string>();
 
   constructor(opts: SessionInputOptions) {
     super(opts);
@@ -128,64 +117,6 @@ export abstract class BaseSessionInput extends BaseInput {
     } finally {
       await handle.close();
     }
-  }
-
-  /**
-   * Diagnose an EACCES/EPERM on a session path by comparing the path's owner
-   * uid with this daemon's own uid, and warn at most once per path.
-   *
-   * The ownership invariant behind this: the in-process plugin writes its event
-   * files 0600 inside whatever process loaded it, so every process loading the
-   * plugin must run as the same uid as this daemon — otherwise the daemon can
-   * neither list the session directory nor read the files. A mismatch means a
-   * second, differently-privileged process (in practice: a root helper or a
-   * second gateway that never dropped privileges) loaded the plugin. Nothing
-   * this daemon does after the fact fixes that; the remediation is dropping the
-   * offending process's privileges, and the warning says exactly that.
-   */
-  protected async diagnoseUnreadablePath(
-    targetPath: string,
-    kind: 'event file' | 'session directory',
-  ): Promise<void> {
-    const warnKey = `${kind}:${targetPath}`;
-    if (this.ownershipWarned.has(warnKey)) return;
-    if (this.ownershipWarned.size >= OWNERSHIP_WARN_CAP) this.ownershipWarned.clear();
-    this.ownershipWarned.add(warnKey);
-
-    let ownerUid: number | undefined;
-    try {
-      ownerUid = (await fs.stat(targetPath)).uid;
-    } catch {
-      // Path vanished between the failed read and this stat; warn without the
-      // owner detail rather than not at all.
-    }
-    const daemonUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-    const meta = { path: targetPath, kind, ownerUid, daemonUid };
-
-    if (daemonUid === undefined) {
-      this.logger.warn(
-        `ownership-mismatch: cannot read ${kind} (EACCES); this platform exposes no ` +
-          'process uid, so ensure the process writing agent events runs as the same user as this daemon',
-        meta,
-      );
-      return;
-    }
-    if (ownerUid !== undefined && ownerUid !== daemonUid) {
-      this.logger.warn(
-        `ownership-mismatch: cannot read ${kind} (EACCES): owned by uid ${ownerUid}, but this ` +
-          `daemon runs as uid ${daemonUid}. A process running as a different uid loaded the pilot ` +
-          'plugin and writes event files this daemon cannot read. Fix: run every process that loads ' +
-          `the plugin as uid ${daemonUid} (drop the privileges of the uid-${ownerUid} process, ` +
-          'e.g. via su or runAsUser)',
-        meta,
-      );
-      return;
-    }
-    this.logger.warn(
-      `ownership-mismatch: cannot read ${kind} (EACCES) despite matching uid ${daemonUid}; ` +
-        'check the surrounding directory permissions or security modules (SELinux/AppArmor/ACLs)',
-      meta,
-    );
   }
 
   /** Discover session files to process. */

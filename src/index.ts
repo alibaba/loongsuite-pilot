@@ -143,6 +143,16 @@ async function main(): Promise<void> {
     flushLogsSync();
     lock.release();
     if (pidFile) removeOwnPidFileSync(pidFile);
+    // Release the spawn lock the same way the pid file is released: only when it
+    // still carries THIS daemon's pid, so a successor that already took over (or a
+    // pid-reused process) is never disturbed. Leaving a dead pid behind is exactly
+    // the hazard the prestop contract guards against — prestop.sh would SIGTERM a
+    // recycled pid. See the daemon.spawn.lock contract in prestop.sh.
+    try {
+      if (fs.readFileSync(spawnLockPath, 'utf8').trim() === String(process.pid)) {
+        fs.unlinkSync(spawnLockPath);
+      }
+    } catch { /* lock never written, or already gone — nothing to clean */ }
   });
 
   const orchestrator = new Orchestrator(config);

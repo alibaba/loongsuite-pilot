@@ -114,6 +114,28 @@ describe('data-dir precedence parity: loadConfig vs resolveDataDir', () => {
   });
 });
 
+describe('win32 env padding parity', () => {
+  // Windows environment variables routinely carry leading/trailing padding.
+  // loadConfig() reads LOONGSUITE_PILOT_DATA_DIR through env(), which trims on
+  // win32; the eager path used to read the raw, untrimmed process.env, so the
+  // two resolved different directories and the daemon re-appended hooks. This
+  // pins both consumers to the same trimmed answer.
+  it('loadConfig and resolveDataDir agree on a padded LOONGSUITE_PILOT_DATA_DIR', async () => {
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    try {
+      setConfig(JSON.stringify({ sls: { enabled: true } }));
+      const dir = path.join(tmp, 'padded-dir');
+      vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', `  ${dir}  `);
+      await assertParity();
+      // The resolved dir must be the trimmed value — any surviving padding means
+      // the two sides diverged again.
+      expect(resolveDataDir()).toBe(resolveHome(dir));
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+});
+
 describe('pickDataDir', () => {
   it.each([
     ['/explicit', '/from/file', '/explicit'],

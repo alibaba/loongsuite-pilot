@@ -142,6 +142,16 @@ export class QoderWorkTraceInput extends BaseInput {
         allEntries.push(...turnEntries);
       }
       return allEntries;
+    } catch (err) {
+      if (this.isUnreadableError(err)) {
+        // An unreadable hook/segment file (ownership mismatch) must not abort the
+        // whole cycle — diagnose it once and skip this round; the next cycle
+        // retries. Without this the error reaches runCycleOnce's catch-all and
+        // drops every source for this input this round.
+        await this.diagnoseUnreadablePath(this.logDir, 'session directory');
+        return [];
+      }
+      throw err;
     } finally {
       this.evictStaleState();
     }

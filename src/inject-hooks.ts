@@ -27,9 +27,9 @@ import { AgentDefLoader } from './deployment/agent-def-loader.js';
 import { HookManager } from './hooks/hook-manager.js';
 import { HookStrategy } from './deployment/hook-strategy.js';
 import { PluginInjectStrategy } from './deployment/plugin-inject-strategy.js';
-import { resolveHome } from './utils/fs-utils.js';
-import { resolveDataDir } from './utils/data-dir.js';
-import type { AgentDefinition } from './types/deployment.js';
+import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
+import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
+import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
 const __inject_dirname = __dirname;
@@ -157,6 +157,24 @@ function warn(msg: string): void {
 }
 
 /**
+ * The same decision deploy-command.isAgentGatedEnabled() makes for the daemon:
+ * no gate (or an empty one) means everything is enabled; otherwise an agent is
+ * enabled unless it is explicitly `enabled: false`. Re-decided here instead of
+ * imported because this entry must stay a self-contained bundle, and pinned by
+ * the inject-hooks gate-parity test so the two cannot drift. Without it a
+ * disabled agent would be eagerly instrumented and keep firing until the
+ * daemon's next undeployDisabledAgent pass — admission control silently off for
+ * short-lived Jobs that never live long enough for that pass.
+ */
+export function isGateEnabled(
+  gate: Record<string, { enabled?: boolean } | undefined> | undefined,
+  agentId: string,
+): boolean {
+  if (!gate || Object.keys(gate).length === 0) return true;
+  return gate[agentId]?.enabled !== false;
+}
+
+/**
  * Resolve the data dir exactly as loadConfig() does, including the config
  * file's `dataDir`. The chain lives in utils/data-dir.ts — the single home of
  * that precedence — because the hookCommand written into the agent's settings
@@ -196,11 +214,21 @@ async function main(): Promise<number> {
   const plan = planEagerDeploys(defs, args.agents);
   const byId = new Map(defs.map(def => [def.id, def]));
 
+  // The same enabled/disabled gate the daemon applies (deployAll(enabled) →
+  // isAgentGatedEnabled). Read once, not per agent.
+  const gate = readConfigAgentsGate();
+
   // Names of the agents actually written to, not of the agents considered. Under
   // sweep the plan holds every eager-safe definition while typically one is
   // installed, so reporting the plan would name 19 agents alongside "injected 1".
   const injected: string[] = [];
   let failed = 0;
+
+  // Records for agents we successfully deploy, written to deployed-agents.json
+  // after the loop. Without them the daemon's undeployDisabledAgent() sees no
+  // state record for an eagerly-installed hook and no-ops, so a later-disabled
+  // agent's hook would fire forever (see DeploymentManager.undeployDisabledAgent).
+  const newRecords: DeployedAgentsState = {};
 
   for (const entry of plan) {
     if (entry.action === 'unknown-id') {
@@ -215,6 +243,16 @@ async function main(): Promise<number> {
     }
 
     const def = byId.get(entry.agentId)!;
+
+    // Respect the enabled gate: an agent turned off in config.agents must not be
+    // eagerly instrumented. Silent under sweep for the same reason "not detected"
+    // is — the caller did not name it, so one line per disabled agent would be
+    // noise in every Pod.
+    if (!isGateEnabled(gate, def.id)) {
+      if (!sweep) warn(`${def.id} is disabled via config.agents — skipping eager injection`);
+      continue;
+    }
+
     const strategy = def.deployMode === 'hook' ? hookStrategy : pluginInjectStrategy;
     try {
       if (!await strategy.detect(def)) {
@@ -234,6 +272,9 @@ async function main(): Promise<number> {
       const result = await strategy.deploy(def);
       if (result.success) {
         injected.push(def.id);
+        // Same record shape the daemon writes (DeploymentManager.deployAgent),
+        // so the state file stays a single consistent schema.
+        newRecords[def.id] = { deployMode: def.deployMode, deployedAt: new Date().toISOString() };
       } else {
         failed++;
         warn(`failed to inject ${def.id}: ${result.error ?? 'unknown error'}`);
@@ -241,6 +282,20 @@ async function main(): Promise<number> {
     } catch (err) {
       failed++;
       warn(`failed to inject ${def.id}: ${(err as Error).message}`);
+    }
+  }
+
+  // Merge into (not clobber) any existing state, then persist. Runs before the
+  // daemon spawns, so there is no concurrent writer; the atomic write guards a
+  // crash mid-write. Best-effort — the hooks are already installed, and failing
+  // to record only delays disabled-agent cleanup until the daemon reconciles.
+  if (Object.keys(newRecords).length > 0) {
+    const stateFile = path.join(dataDir, 'deployed-agents.json');
+    try {
+      const existing = (await readJsonFile<DeployedAgentsState>(stateFile)) ?? {};
+      await writeJsonFile(stateFile, { ...existing, ...newRecords });
+    } catch (err) {
+      warn(`could not record deployment state: ${(err as Error).message}`);
     }
   }
 

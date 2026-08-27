@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentDefinition } from '../../../src/types/index.js';
-import { parseInjectArgs, planEagerDeploys } from '../../../src/inject-hooks.js';
+import { parseInjectArgs, planEagerDeploys, isGateEnabled } from '../../../src/inject-hooks.js';
+import { isAgentGatedEnabled } from '../../../src/deployment/deploy-command.js';
 
 /**
  * inject-hooks runs on the agent's startup critical path, spawned by
@@ -153,4 +154,33 @@ describe('planEagerDeploys with no requested ids (sweep)', () => {
     const viaFlag = planEagerDeploys(DEFS, parseInjectArgs(['--agents=  ,  ']).agents);
     expect(viaFlag).toEqual(planEagerDeploys(DEFS, []));
   });
+});
+
+/**
+ * The eager path re-decides the enabled gate instead of importing
+ * isAgentGatedEnabled (this entry must stay a self-contained bundle), so the two
+ * implementations must not drift: a disabled agent that eager-injects anyway
+ * keeps firing its hook until the daemon's next undeploy pass — admission
+ * control silently off. Pin them against the same matrix.
+ */
+describe('isGateEnabled parity with deploy-command.isAgentGatedEnabled', () => {
+  const ids = ['claude-code', 'openclaw', 'hermes-agent'];
+  const gates: Array<Record<string, { enabled?: boolean }> | undefined> = [
+    undefined,
+    {},
+    { 'claude-code': { enabled: true } },
+    { 'claude-code': { enabled: false } },
+    { openclaw: { enabled: false } },
+    { 'claude-code': { enabled: false }, openclaw: { enabled: false }, 'hermes-agent': { enabled: false } },
+    { 'claude-code': {} },
+  ];
+
+  for (const gate of gates) {
+    for (const id of ids) {
+      it(`agrees for gate=${JSON.stringify(gate)} id=${id}`, () => {
+        const config = { agents: gate } as never as Parameters<typeof isAgentGatedEnabled>[0];
+        expect(isGateEnabled(gate, id)).toBe(isAgentGatedEnabled(config, id));
+      });
+    }
+  }
 });

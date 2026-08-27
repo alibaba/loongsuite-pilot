@@ -73,9 +73,13 @@ function writeFatalMarker(reasonFirstLine: string): void {
     // mirrors, containerIdentity the same token the preload compares against.
     const dir = resolveDataDir();
     mkdirSync(dir, { recursive: true });
+    // The marker is whitespace-delimited (`fatal <identity> <timestamp> <reason>`)
+    // and the reader splits it on whitespace, so any newline/tab the loader put in
+    // the message must not spill into extra fields; collapse to single spaces.
+    const reason = reasonFirstLine.trim().replace(/\s+/g, ' ');
     writeFileSync(
       path.join(dir, 'daemon.fatal'),
-      `fatal ${containerIdentity()} ${new Date().toISOString()} ${reasonFirstLine}\n`,
+      `fatal ${containerIdentity()} ${new Date().toISOString()} ${reason}\n`,
       'utf8',
     );
   } catch { /* the stderr diagnostic is the primary channel; the marker is best-effort */ }
@@ -98,7 +102,9 @@ function fail(moduleName: string, err: unknown): never {
     '[pilot]',
     '[pilot] Impact: the collector cannot start. Hooks already installed keep',
     '[pilot] writing events to local files, but nothing will ship them.',
-    '[pilot] See the compatibility matrix in deploy/docker/README.md.',
+    '[pilot] Fix: run the agent container on a glibc base image (Debian/Ubuntu/',
+    '[pilot] Alibaba Cloud Linux), not musl/Alpine, and ensure the payload was',
+    '[pilot] built with a working node + native addon pairing.',
   ];
   try {
     process.stderr.write(lines.join('\n') + '\n');
