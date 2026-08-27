@@ -57,6 +57,24 @@ describe('QoderCliInput', () => {
     expect(entries[0]?.['agent.cwd']).toBe('/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript');
   });
 
+  it('drops agent.qoder.attachments from canonical hook records', async () => {
+    const entries = await collectRows([{
+      'event.id': 'canonical-attach-1',
+      'event.name': 'llm.request',
+      time_unix_nano: '1777628163513000000',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'sess-attach',
+      'gen_ai.input.messages_delta': [{ role: 'user', content: 'look' }],
+      'agent.qoder.attachments': [
+        { type: 'image_file', filename: '/Users/alice/secret.png' },
+      ],
+    }]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).not.toHaveProperty('agent.qoder.attachments');
+    expect(JSON.stringify(entries)).not.toContain('/Users/alice');
+  });
+
   it('prefers canonical hook records when present', async () => {
     const entries = await collectRows([{
       'event.id': 'canonical-qoder-1',
