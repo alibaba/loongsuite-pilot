@@ -15,10 +15,8 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 // 两边各写一份公式——否则跨源拼接静默失败".
 //
 // The .mjs also reuses hashJson from agent-event-normalizer.mjs, keeping the
-// sha256 derivation formula in exactly one place end-to-end.
-//
-// @ts-expect-error — .mjs has no type declarations; runtime ESM import works
-// under NodeNext module resolution.
+// sha256 derivation formula in exactly one place end-to-end. Types come from
+// the sibling event-emitter.d.mts (review P3) — no more @ts-expect-error.
 import { toW3CTraceId, deriveSpanId } from '../../../assets/hooks/shared/event-emitter.mjs';
 
 const DEFAULT_ROLLOUT_DIR = '~/.zcode/cli/rollout';
@@ -219,6 +217,16 @@ export class ZCodeRolloutInput extends BaseInput {
     // Flush pending toolCalls from previous batches using this batch's first
     // line. The first line's request.messages[role=tool] holds tool results
     // produced for the previous batch's last-line toolCalls.
+    //
+    // Review P1 fix: this is a SESSION-scoped flush. collect() processes each
+    // rollout file independently, so we only touch pending turns of the SAME
+    // session — draining other sessions' pending here would destroy their
+    // cross-batch pairing when their own file advances next. Every same-
+    // session pending turn (not just the exact current turn) is first PAIRED
+    // against the first line's role=tool messages — a next-turn line can
+    // still carry the previous turn's tool result in its context — and any
+    // still-unmatched call is drained truthfully WITHOUT a fabricated result.
+    // Skip entirely when the first line's sid is unknown.
     if (lines.length > 0) {
       const first = lines[0];
       const fsid = str(first.sessionId) ?? str(first.session_id);
@@ -226,12 +234,9 @@ export class ZCodeRolloutInput extends BaseInput {
       if (fsid && ftid && first.type === 'model_io') {
         allEntries.push(...this.flushPendingToolCalls(fsid, ftid, first));
       }
-      // Drain turns that will never be paired: a new batch starting on a
-      // different turn means the old turn ended without consuming its last
-      // tool results in a follow-up model_io. Emit the buffered tool.call
-      // records WITHOUT fabricating results (review: "result not observed"
-      // must stay truthful; orphan tool.call synthesis lives in the flusher).
-      allEntries.push(...this.drainStalePendingTurns(fsid ? `${fsid}+${ftid ?? ''}` : ''));
+      if (fsid) {
+        allEntries.push(...this.drainStalePendingTurns(fsid, `${fsid}+${ftid ?? ''}`, first));
+      }
     }
 
     for (let i = 0; i < lines.length; i++) {
@@ -276,51 +281,43 @@ export class ZCodeRolloutInput extends BaseInput {
   }
 
   /**
-   * Drain buffered tool calls for every pending turn EXCEPT the one currently
-   * active (currentTurnKey = `<sid>+<tid>`). Emits only the tool.call records
-   * — no fabricated tool.result (the source never observed a result). Clears
-   * the drained state keys and drops them from the registry.
+   * Drain buffered tool calls for pending turns of the SAME session (sid),
+   * EXCEPT the turn currently active (currentTurnKey = `<sid>+<tid>`).
+   * Emits only the tool.call records — no fabricated tool.result (the source
+   * never observed a result). Clears the drained state keys and drops them
+   * from the registry. Turns of OTHER sessions are left alone: their own
+   * rollout file's next batch drains them (cross-file drain would break
+   * concurrent sessions' pairing — review P1).
    */
-  private drainStalePendingTurns(currentTurnKey: string): AgentActivityEntry[] {
+  private drainStalePendingTurns(
+    sid: string,
+    currentTurnKey: string,
+    currentLine: Record<string, unknown>,
+  ): AgentActivityEntry[] {
     const registry = this.getPendingTurnRegistry();
     if (registry.length === 0) return [];
 
     const out: AgentActivityEntry[] = [];
     const remaining: string[] = [];
     for (const turnKey of registry) {
-      if (turnKey === currentTurnKey) {
+      // Only touch this session's turns; keep other sessions' pending intact.
+      if (!turnKey.startsWith(`${sid}+`)) {
         remaining.push(turnKey);
         continue;
       }
-      const pending = this.stateStore.get(`zcode-rollout:pending-tool-calls:${turnKey}`)
-        .extra?.pending as PendingToolCall[] | undefined;
-      if (pending && pending.length > 0) {
-        for (const p of pending) {
-          out.push(buildAgentActivityEntry({
-            time_unix_nano: p.completedAtNs,
-            'event.id': crypto.randomUUID(),
-            'event.name': 'tool.call',
-            'gen_ai.session.id': p.sid,
-            'gen_ai.turn.id': p.tid,
-            'gen_ai.step.id': p.stepId,
-            'gen_ai.agent.type': ClientType.ZCode,
-            'gen_ai.agent.id': p.sid,
-            'gen_ai.agent.name': 'ZCode',
-            'agent.source': 'zcode-rollout',
-            'gen_ai.provider.name': p.providerId,
-            'gen_ai.tool.name': p.toolName,
-            'gen_ai.tool.call.id': p.callId,
-            'gen_ai.tool.call.exec.id': p.callId,
-            ...(p.args !== undefined && p.args !== null
-              ? { 'gen_ai.tool.call.arguments': p.args as JsonValue }
-              : {}),
-            trace_id: p.traceId,
-            span_id: deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId),
-            parent_span_id: p.stepSpanId,
-          }));
-        }
+      if (turnKey === currentTurnKey) {
+        // The current turn's pending is handled by flushPendingToolCalls
+        // (same-turn continuation path) — keep it registered for now.
+        remaining.push(turnKey);
+        continue;
       }
-      this.stateStore.update(`zcode-rollout:pending-tool-calls:${turnKey}`, { extra: { pending: [] } });
+      // Same-session stale turn: first try pairing against the current
+      // line's role=tool messages — a next-turn line can still carry the
+      // previous turn's tool result in its context. flushPendingToolCalls
+      // emits tool.call always and tool.result only for matched calls
+      // (never fabricated), so routing through it keeps semantics honest.
+      const staleTid = turnKey.slice(sid.length + 1);
+      out.push(...this.flushPendingToolCalls(sid, staleTid, currentLine));
     }
     this.setPendingTurnRegistry(remaining);
     return out;

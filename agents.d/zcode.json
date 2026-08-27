@@ -14,6 +14,7 @@
     "hookCommand": "$PILOT_DATA/hooks/zcode-loongsuite-pilot-hook.sh",
     "format": "nested",
     "eventsRoot": "events",
+    "requiresEnabledFlag": true,
     "matcher": ".*",
     "eventSubcommand": "kebab-case",
     "replaceHookCommands": []

@@ -1080,3 +1080,148 @@ describe('ZCodeRolloutInput: no-next-record drain (review fix #2)', () => {
     expect(step0Resp['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
   });
 });
+
+// ─── scenario #15: cross-session drain isolation (rangemer333-cell review P1) ───
+// collect() processes each rollout file independently. Session A's batch must
+// NEVER drain session B's pending tool calls — B's own file advance pairs
+// them with real results. Only same-session stale turns are drained, and an
+// empty sid skips draining entirely.
+
+describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
+  const mkLine = (sid: string, tid: string, reqId: string, opts: {
+    toolCalls?: any[]; toolMsgs?: any[]; startedAt: string; completedAt: string;
+    finishReason?: string;
+  }): Record<string, unknown> => ({
+    type: 'model_io', sessionId: sid, turnId: tid,
+    traceId: '99999999-8888-7777-6666-555555555555', requestId: reqId,
+    startedAt: opts.startedAt, completedAt: opts.completedAt,
+    model: { modelId: 'synthetic-model', providerId: 'synthetic-provider' },
+    request: {
+      messages: [
+        { role: 'user', content: 'synthetic' },
+        ...(opts.toolMsgs ?? []),
+      ],
+      toolNames: [],
+    },
+    response: {
+      finishReason: opts.finishReason ?? (opts.toolCalls?.length ? 'tool-calls' : 'stop'),
+      modelId: 'synthetic-model', responseId: `resp-${reqId}`,
+      text: 'synthetic', toolCalls: opts.toolCalls ?? [],
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    },
+  });
+
+  test("session A's batch does NOT drain session B's pending tool calls", async () => {
+    const sidB = 'sess_concurrent_b';
+    const statePath = path.join(tmpRoot, 'cross-session-state.json');
+
+    // Session B ends a batch with an un-resulted toolCall → buffered pending.
+    {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      const batch = buildable.buildEntriesFromRolloutLines([
+        mkLine(sidB, 'turn_b1', 'req-b1', {
+          toolCalls: [{ id: 'call_b_1', name: 'Bash', input: {} }],
+          startedAt: '2026-07-13T10:00:00.000Z', completedAt: '2026-07-13T10:00:05.000Z',
+        }),
+      ]);
+      expect(batch.filter((r: any) => r['event.name'] === 'tool.call')).toHaveLength(0);
+      await ss.save();
+    }
+
+    // Session A's file advances a turn — must NOT touch B's pending.
+    {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      const batch = buildable.buildEntriesFromRolloutLines([
+        mkLine('sess_concurrent_a', 'turn_a1', 'req-a1', {
+          startedAt: '2026-07-13T10:01:00.000Z', completedAt: '2026-07-13T10:01:03.000Z',
+        }),
+      ]);
+      // No tool.call for B's buffered call leaked out of A's batch.
+      expect(batch.filter(
+        (r: any) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_b_1',
+      )).toHaveLength(0);
+      await ss.save();
+    }
+
+    // Session B's own file advances → the buffered call pairs with the real result.
+    {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      const batch = buildable.buildEntriesFromRolloutLines([
+        mkLine(sidB, 'turn_b2', 'req-b2', {
+          toolMsgs: [{ role: 'tool', toolCallId: 'call_b_1', content: 'real result b' }],
+          startedAt: '2026-07-13T10:02:00.000Z', completedAt: '2026-07-13T10:02:04.000Z',
+        }),
+      ]);
+      const call = batch.find(
+        (r: any) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_b_1',
+      );
+      const result = batch.find(
+        (r: any) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_b_1',
+      );
+      expect(call).toBeDefined();
+      expect(result).toBeDefined();
+      expect(result['tool.result.status']).toBe('success');
+      await ss.save();
+    }
+  });
+
+  test('same-session stale turn IS drained without fabricated results', async () => {
+    const sid = 'sess_same_session_drain';
+    const statePath = path.join(tmpRoot, 'same-session-state.json');
+
+    // Turn 1 ends with an un-resulted toolCall.
+    {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      buildable.buildEntriesFromRolloutLines([
+        mkLine(sid, 'turn_s1', 'req-s1', {
+          toolCalls: [{ id: 'call_s_1', name: 'Bash', input: {} }],
+          startedAt: '2026-07-13T11:00:00.000Z', completedAt: '2026-07-13T11:00:05.000Z',
+        }),
+      ]);
+      await ss.save();
+    }
+
+    // Same session, NEW turn, no role=tool message → turn_s1 drained truthfully.
+    {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      const batch = buildable.buildEntriesFromRolloutLines([
+        mkLine(sid, 'turn_s2', 'req-s2', {
+          startedAt: '2026-07-13T11:01:00.000Z', completedAt: '2026-07-13T11:01:03.000Z',
+        }),
+      ]);
+      const drainedCall = batch.find(
+        (r: any) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_s_1',
+      );
+      expect(drainedCall).toBeDefined();
+      expect(batch.find(
+        (r: any) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_s_1',
+      )).toBeUndefined();
+      await ss.save();
+    }
+  });
+});

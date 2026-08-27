@@ -112,6 +112,12 @@ function isoToUnixNanos(isoStr) {
  * correlate with the rollout STEP/LLM records under the same native IDs.
  *
  * Returns null when the file is missing or holds no complete line (fail-open).
+ *
+ * Known race (accepted): if a NEW turn starts between the last rollout write
+ * and this Stop hook firing, the envelope attaches to the newest turn rather
+ * than the one being stopped. Rollout writes happen before runStopHooks in
+ * practice, so the window is one sub-second interleaving; the damage is a
+ * mis-parented envelope, not data loss.
  */
 export function readLastRolloutRecord(sessionId, homeDirOverride) {
   try {
@@ -238,10 +244,6 @@ async function cmdStop() {
   if (turnId && state.last_exported_turn === turnId) {
     return;
   }
-  state.last_exported_turn = turnId || state.last_exported_turn;
-  state.cwd = cwd || state.cwd;
-  state.stop_time = Date.now() / 1000;
-  saveState(sessionId, state);
 
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const userId = resolveUserId({}, runtimeConfig);
@@ -250,6 +252,15 @@ async function cmdStop() {
   });
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+
+  // Persist the idempotency marker only AFTER the records hit disk (review
+  // P2): if writeJsonlRecords throws (disk full / permissions) the fail-open
+  // catch swallows it, and a pre-saved marker would silently dedup zcode's
+  // Stop retry — the envelope would never be emitted.
+  state.last_exported_turn = turnId || state.last_exported_turn;
+  state.cwd = cwd || state.cwd;
+  state.stop_time = Date.now() / 1000;
+  saveState(sessionId, state);
 }
 
 // ─── envelope records (ENTRY + AGENT, no messages) ───

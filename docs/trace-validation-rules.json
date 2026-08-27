@@ -1,7 +1,6 @@
 {
   "version": "1.0",
-  "generatedAt": "2026-06-04T12:05:42.948Z",
-  "specSource": "https://code.alibaba-inc.com/arms/semantic-conventions/blob/arms/arms_docs/trace/gen-ai.md",
+  "specSource": "docs/EVENT_LOG_TO_TRACE_SPEC.md",
   "commonAttributes": {
     "must": [
       {

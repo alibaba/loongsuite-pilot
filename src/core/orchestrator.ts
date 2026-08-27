@@ -465,7 +465,7 @@ export class Orchestrator extends EventEmitter {
         expectedHooks: def.hook.events,
         markers: [scriptName],
         eventsRoot: def.hook.eventsRoot,
-        requiresHooksEnabled: def.id === 'zcode',
+        requiresHooksEnabled: def.hook.requiresEnabledFlag === true,
         // Runtime gate: a user who has turned this agent off (config.agents[id]
         // .enabled === false) must never have its hook re-injected. Evaluated on
         // each check so a config change takes effect without rebuilding targets.

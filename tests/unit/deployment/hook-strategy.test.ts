@@ -853,6 +853,7 @@ describe('HookStrategy', () => {
         hookCommand: '/opt/pilot/hooks/zcode-loongsuite-pilot-hook.sh',
         format: 'nested',
         eventsRoot: 'events',
+        requiresEnabledFlag: true,
         eventSubcommand: 'kebab-case',
       },
     });

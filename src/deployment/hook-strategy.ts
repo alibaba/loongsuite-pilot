@@ -197,11 +197,12 @@ export class HookStrategy implements DeployStrategy {
         return { success: true, agentId: def.id, deployMode: 'hook' };
       }
 
-      // ZCode requires hooks.enabled=true in its config.json for hooks to fire.
-      // Fresh installs and users who previously disabled hooks need this set.
-      // Preserve existing user config — only write if absent or false.
-      if (def.id === 'zcode') {
-        await this.ensureZcodeHooksEnabled(hookConfig.settingsPath);
+      // Agents declaring requiresEnabledFlag (zcode) gate hook execution
+      // behind a global hooks.enabled switch in their config. Fresh installs
+      // and users who previously disabled hooks need this set. Preserve
+      // existing user config — only write if absent or false.
+      if (hookConfig.requiresEnabledFlag) {
+        await this.ensureHooksEnabledSwitch(hookConfig.settingsPath);
       }
 
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
@@ -368,10 +369,11 @@ export class HookStrategy implements DeployStrategy {
       }
     }
 
-    // Disable ZCode hooks on undeploy — but ONLY when no user-managed hook
+    // Disable the hooks.enabled switch on undeploy (agents declaring
+    // requiresEnabledFlag, e.g. zcode) — but ONLY when no user-managed hook
     // entries remain. Unconditionally writing enabled=false would also turn
     // off third-party hooks that survive in the same config (review fix).
-    if (def.id === 'zcode' && def.hook?.settingsPath) {
+    if (def.hook?.requiresEnabledFlag && def.hook?.settingsPath) {
       try {
         const resolvedPath = resolveHome(def.hook.settingsPath);
         const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
@@ -695,18 +697,18 @@ export class HookStrategy implements DeployStrategy {
   }
 
   /**
-   * Ensure ZCode's config.json has hooks.enabled=true.
+   * Ensure the agent's config has hooks.enabled=true.
    *
-   * ZCode's hook system requires `hooks.enabled: true` in the user-level
-   * config (~/.zcode/cli/config.json). Without this, the Stop hook will
-   * never fire even though the hook command is registered. This method
+   * Agents declaring `hook.requiresEnabledFlag` (zcode) gate hook execution
+   * behind this switch in their user-level config — without it the Stop hook
+   * never fires even though the hook command is registered. This method
    * reads the existing config, sets the flag if missing or false, and
    * writes back preserving all other user settings.
    *
    * Idempotent: skips write if already true.
    * Safe: preserves existing user config keys.
    */
-  private async ensureZcodeHooksEnabled(settingsPath: string): Promise<void> {
+  private async ensureHooksEnabledSwitch(settingsPath: string): Promise<void> {
     const resolvedPath = resolveHome(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
     if (!existing) return; // ensureSettingsFile should have created it
@@ -723,6 +725,6 @@ export class HookStrategy implements DeployStrategy {
     hooks.enabled = true;
     existing.hooks = hooks;
     await writeJsonFile(resolvedPath, existing);
-    logger.info('zcode hooks.enabled set to true', { settingsPath: resolvedPath });
+    logger.info('hooks.enabled set to true', { settingsPath: resolvedPath });
   }
 }
