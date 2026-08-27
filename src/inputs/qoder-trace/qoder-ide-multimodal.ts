@@ -22,6 +22,7 @@ const logger = createLogger('QoderIdeMultimodal');
 
 const MAX_MARKDOWN_ALT_CHARS = 200;
 const MAX_MARKDOWN_TITLE_CHARS = 200;
+const ATTACHED_IMAGE_LOOKUP_RETRY_DELAYS_MS = [25, 75] as const;
 // Path patterns found in current Qoder IDE surfaces; extend when new scenes appear.
 const IMAGE_FILE_RE = new RegExp(`Image file:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
 const IMAGE_GEN_PATH_RE = new RegExp(
@@ -146,7 +147,7 @@ async function enrichInputAttachedImages(
 
   if (newIds.length > 0) {
     try {
-      const fetched = await readAttachedImagePathsForRequestIds(newIds);
+      const fetched = await readAttachedImagePathsWithRetry(newIds);
       for (const [id, found] of fetched) {
         attachedPathsByRequestId.set(id, found);
         if (found.length > 0) byRequest.set(id, found);
@@ -208,6 +209,48 @@ async function enrichInputAttachedImages(
       attachedPathsByRequestId.set(requestId, []);
     }
   }
+}
+
+/**
+ * Qoder can append chat_record shortly after the transcript event becomes visible.
+ * Retry only absent request ids; a present `[]` is an authoritative empty result.
+ */
+async function readAttachedImagePathsWithRetry(
+  requestIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  let pending = requestIds;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= ATTACHED_IMAGE_LOOKUP_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (pending.length === 0) break;
+    if (attempt > 0) {
+      await delay(ATTACHED_IMAGE_LOOKUP_RETRY_DELAYS_MS[attempt - 1]);
+    }
+
+    try {
+      const fetched = await readAttachedImagePathsForRequestIds(pending);
+      for (const id of pending) {
+        const paths = fetched.get(id);
+        if (paths !== undefined) result.set(id, paths);
+      }
+      pending = pending.filter(id => !fetched.has(id));
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (lastError !== undefined && pending.length > 0) {
+    logger.warn('qoder ide multimodal attachedImagePaths lookup exhausted retries', {
+      error: String(lastError),
+      requestIds: pending.length,
+    });
+  }
+  return result;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function enrichToolResultImages(

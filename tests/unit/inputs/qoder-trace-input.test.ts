@@ -1012,6 +1012,7 @@ describe('QoderTraceInput multimodal', () => {
           return new Map([
             ['req-a', [imgA]],
             ['req-b', [imgB]],
+            ['req-empty', []],
           ]);
         });
 
@@ -1041,7 +1042,7 @@ describe('QoderTraceInput multimodal', () => {
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
       });
 
-      it('survives reader throwing and still processes tool surface', async () => {
+      it('caps persistent lookup failures at three attempts and still processes tool surface', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 't.png', 't');
         const pathToUri = fakePathToUri;
@@ -1063,8 +1064,36 @@ describe('QoderTraceInput multimodal', () => {
           pathToUri,
         });
 
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(3);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(1, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(2, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(3, ['req-x']);
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
         expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
+      });
+
+      it('retries a lookup exception and attaches when the next query recovers', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'recovered.png', 'recovered');
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-recovered',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths
+          .mockRejectedValueOnce(new Error('sqlite busy'))
+          .mockResolvedValueOnce(new Map([['req-recovered', [img]]]));
+
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri: fakePathToUri,
+        });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/recovered')).toBe(true);
       });
 
       it('falls back to same-turn carrier when only llm.response has request_id', async () => {
@@ -1212,11 +1241,11 @@ describe('QoderTraceInput multimodal', () => {
         expect(pathToUri).not.toHaveBeenCalled();
       });
 
-      it('does not cache a miss so a later lookup can still attach', async () => {
+      it('retries an absent row within the same event and attaches when it appears', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'retry.png', 'retry');
         const pathToUri = fakePathToUri;
-        const makeReq = () => mmEntry({
+        const request = mmEntry({
           'event.name': 'llm.request',
           'gen_ai.request.id': 'req-retry',
           'gen_ai.input.messages_delta': [
@@ -1224,16 +1253,14 @@ describe('QoderTraceInput multimodal', () => {
           ],
         });
 
-        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map());
-        const first = makeReq();
-        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
-        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+        mockReadAttachedImagePaths
+          .mockResolvedValueOnce(new Map())
+          .mockResolvedValueOnce(new Map([['req-retry', [img]]]));
 
-        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-retry', [img]]]));
-        const second = makeReq();
-        await enrichIdeMultimodal([second], { uploadMode: 'input', pathToUri });
+        await enrichIdeMultimodal([request], { uploadMode: 'input', pathToUri });
+
         expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
-        expect((second['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
           p.type === 'uri' && p.uri === 'oss://test/retry')).toBe(true);
       });
     });
