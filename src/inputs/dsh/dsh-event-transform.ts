@@ -58,6 +58,10 @@ export interface DshEventAggregatorState {
    * of a step arrives — at that point all input for the step has
    * landed (user prompt + any prior step's assistant msg + tool result). */
   inputMessages: unknown[];
+  /** Number of accumulated messages already represented by the previous
+   * llm.request. The accumulator only appends within one turn, so slicing from
+   * this position yields the exact request-level messages_delta. */
+  lastRequestInputMessageCount: number;
   /** Once true, omit input.messages instead of presenting a truncated history. */
   inputMessagesOverflowed: boolean;
 }
@@ -74,6 +78,7 @@ export function newState(): DshEventAggregatorState {
     firstOutputTimes: new Map(),
     toolNames: new Map(),
     inputMessages: [],
+    lastRequestInputMessageCount: 0,
     inputMessagesOverflowed: false,
   };
 }
@@ -88,6 +93,7 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.firstOutputTimes.clear();
   state.toolNames.clear();
   state.inputMessages = [];
+  state.lastRequestInputMessageCount = 0;
   state.inputMessagesOverflowed = false;
 }
 
@@ -349,10 +355,11 @@ export function transformDshRecord(
           if (state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
           state.emittedRequest.add(key);
           const inputSnapshot = state.inputMessages.slice();
+          const inputDelta = inputSnapshot.slice(state.lastRequestInputMessageCount);
           const header = state.currentTurnHeader ?? state.lastKnownHeader;
           const tools = header?.tools;
           const requestTime = state.requestStartTimes.get(key) ?? time;
-          return buildAgentActivityEntry({
+          const entry = buildAgentActivityEntry({
             ...common,
             'time_unix_nano': msToNano(requestTime),
             'event.name': 'llm.request',
@@ -365,7 +372,12 @@ export function transformDshRecord(
             'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
               ? toJsonValue(inputSnapshot)
               : undefined,
+            'gen_ai.input.messages_delta': !state.inputMessagesOverflowed && inputSnapshot.length > 0
+              ? toJsonValue(inputDelta)
+              : undefined,
           });
+          state.lastRequestInputMessageCount = inputSnapshot.length;
+          return entry;
         }
       }
       return null;
