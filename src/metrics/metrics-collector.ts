@@ -30,6 +30,12 @@ export interface L1Metrics {
   projects: string;
   cms_workspace: string;
   metric_json: {
+    // Cached logical file sizes; sampled_at identifies the last complete scan.
+    disk_data_bytes?: string;
+    disk_logs_bytes?: string;
+    disk_dir_sampled_at?: string;
+    disk_dir_scan_ms?: string;
+    disk_dir_status?: string;
     // Agent-dimensioned, not input-dimensioned: how many agents this host has
     // installed, and how many of those have ever produced data in this run.
     agent_count: string;
@@ -940,4 +946,3 @@ function countVersions(dataDir: string): number {
     return 0;
   }
 }
-

@@ -4,6 +4,8 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
+import { DISK_USAGE_STALE_MS, DiskUsageSampler } from './disk-usage-sampler.js';
+import type { DiskUsageSnapshot } from './disk-usage-sampler.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
@@ -22,6 +24,9 @@ const MEMORY_CRITICAL_THRESHOLD_MB = 2048;
 const MEMORY_SOFT_ALARM_CONSECUTIVE_SAMPLES = 3;
 const PROCESS_RESOURCE_ALARM_COOLDOWN_MS = 3_600_000;
 const INFRA_ALARM_COOLDOWN_MS = 3_600_000;
+const DISK_USAGE_SOFT_BYTES = 5 * 1024 ** 3;
+const DISK_USAGE_CRITICAL_BYTES = 10 * 1024 ** 3;
+const DISK_USAGE_ALARM_COOLDOWN_MS = 3_600_000;
 
 type MemoryThresholdTier = {
   name: 'soft' | 'hard' | 'critical';
@@ -47,6 +52,7 @@ export interface MetricsWriterOptions {
 export class MetricsWriter {
   private readonly logsDir: string;
   private readonly collector: MetricsCollector;
+  private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
@@ -61,6 +67,9 @@ export class MetricsWriter {
   private lastMemoryAlarm: { at: number; tierRank: number } | null = null;
   private readonly lastProcessAlarmAt: Map<string, number> = new Map();
   private readonly lastInfraAlarmAt: Map<string, number> = new Map();
+  private diskHighSamples = 0;
+  private lastDiskSampleAt: number | null = null;
+  private readonly lastDiskAlarmAt = new Map<AlarmLevel, number>();
 
   constructor(opts: MetricsWriterOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
@@ -77,10 +86,15 @@ export class MetricsWriter {
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
+    this.diskUsageSampler = new DiskUsageSampler({
+      dataDir: opts.dataDir,
+      onSample: (sample) => this.checkDiskUsage(sample),
+    });
   }
 
   async start(): Promise<void> {
     await ensureDir(this.logsDir);
+    this.diskUsageSampler.start();
 
     this.l1Timer = setInterval(() => void this.writeL1(), L1_INTERVAL_MS);
     this.l1Timer.unref();
@@ -100,6 +114,7 @@ export class MetricsWriter {
   }
 
   async stop(): Promise<void> {
+    this.diskUsageSampler.stop();
     if (this.l1Timer) {
       clearInterval(this.l1Timer);
       this.l1Timer = null;
@@ -122,6 +137,14 @@ export class MetricsWriter {
     try {
       const snapshot = this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
+      const disk = this.diskUsageSampler.getSnapshot();
+      metrics.metric_json.disk_dir_status = disk.status;
+      if (disk.scanMs !== undefined) metrics.metric_json.disk_dir_scan_ms = String(disk.scanMs);
+      if (disk.sampledAt !== undefined && disk.dataBytes !== undefined && disk.logsBytes !== undefined) {
+        metrics.metric_json.disk_data_bytes = String(disk.dataBytes);
+        metrics.metric_json.disk_logs_bytes = String(disk.logsBytes);
+        metrics.metric_json.disk_dir_sampled_at = new Date(disk.sampledAt).toISOString();
+      }
 
       this.checkThresholds(metrics);
       this.checkUserId();
@@ -147,6 +170,44 @@ export class MetricsWriter {
 
     const memMb = parseFloat(metrics.mem);
     this.checkMemoryThreshold(memMb);
+  }
+
+  /** Called only for new scan results, never for a repeated cached L1 report. */
+  private checkDiskUsage(sample: DiskUsageSnapshot): void {
+    if (!this.alarmManager) return;
+    const { dataBytes, logsBytes, sampledAt } = sample;
+    const now = Date.now();
+    if (sample.status !== 'ok'
+      || typeof dataBytes !== 'number' || !Number.isFinite(dataBytes) || dataBytes < 0
+      || typeof logsBytes !== 'number' || !Number.isFinite(logsBytes) || logsBytes < 0 || logsBytes > dataBytes
+      || typeof sampledAt !== 'number' || !Number.isFinite(sampledAt)
+      || sampledAt > now || now - sampledAt > DISK_USAGE_STALE_MS) {
+      this.diskHighSamples = 0;
+      this.lastDiskSampleAt = null;
+      return;
+    }
+    if (this.lastDiskSampleAt !== null && sampledAt <= this.lastDiskSampleAt) return;
+    if (this.lastDiskSampleAt === null || sampledAt - this.lastDiskSampleAt > DISK_USAGE_STALE_MS) {
+      this.diskHighSamples = 0;
+    }
+    this.lastDiskSampleAt = sampledAt;
+    if (dataBytes <= DISK_USAGE_SOFT_BYTES) {
+      this.diskHighSamples = 0;
+      return;
+    }
+    this.diskHighSamples++;
+    const critical = dataBytes > DISK_USAGE_CRITICAL_BYTES;
+    if (!critical && this.diskHighSamples < 2) return;
+    const level: AlarmLevel = critical ? '3' : '2';
+    const lastAlarmAt = this.lastDiskAlarmAt.get(level);
+    if (lastAlarmAt !== undefined && now - lastAlarmAt < DISK_USAGE_ALARM_COOLDOWN_MS) return;
+    this.lastDiskAlarmAt.set(level, now);
+    this.alarmManager.record(
+      'DISK_USAGE_ALARM', level,
+      `Pilot directory usage ${dataBytes} bytes (logs ${logsBytes} bytes) exceeds `
+        + `${critical ? DISK_USAGE_CRITICAL_BYTES : DISK_USAGE_SOFT_BYTES} bytes; `
+        + `sampled_at=${new Date(sampledAt).toISOString()}`,
+    );
   }
 
   private checkCpuThreshold(cpuPercent: number): void {
@@ -380,11 +441,12 @@ export class MetricsWriter {
       const entries = this.alarmManager.serialize();
       if (entries.length === 0) return;
       const filePath = path.join(this.logsDir, 'pilot-alarms.jsonl');
-      for (const entry of entries) {
-        await appendLine(filePath, JSON.stringify(entry));
-      }
+      // Invoke the existing sender before local IO, so ENOSPC cannot block it.
       for (const entry of entries) {
         sendAlarm('pilot_alarm', flattenToStrings(entry));
+      }
+      for (const entry of entries) {
+        await appendLine(filePath, JSON.stringify(entry));
       }
     } catch (err) {
       logger.warn('alarm write failed', { error: String(err) });
