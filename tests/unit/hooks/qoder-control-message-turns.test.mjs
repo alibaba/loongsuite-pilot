@@ -220,4 +220,31 @@ describe('qoder slash-command control rows', () => {
     expect(turns).toEqual([[prompt]]);
     expect(elapsed).toBeLessThan(200);
   });
+
+  it('keeps a mid-turn control trio out of the merged CLI input parts', () => {
+    // For qoder-cli, buildUserMessageParts folds every non-tool-result user row of
+    // the turn into the prompt's parts, so a control row surviving the split would
+    // resurface as user input on both the turn entry and the first llm.request.
+    const prompt = promptRow('杭州天气');
+    const assistant = assistantRow('杭州今天多云。');
+    const turns = splitContentEventsIntoTurns([
+      prompt, caveatRow(), commandRow(), stdoutRow(), assistant,
+    ]);
+
+    expect(turns).toHaveLength(1);
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, turns[0]),
+      turns[0],
+      turns[0],
+      'turn-parts',
+      'session-1',
+      'qoder',
+      {},
+      '/tmp/cwd',
+    );
+
+    expect(records.find(r => r['event.name'] === 'other')['gen_ai.agent.type']).toBe('qoder-cli');
+    expect(partsOf(records.find(r => r['event.name'] === 'other'))).toEqual(['杭州天气']);
+    expect(partsOf(records.find(r => r['event.name'] === 'llm.request'))).toEqual(['杭州天气']);
+  });
 });
