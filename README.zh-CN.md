@@ -177,9 +177,10 @@ loongsuite-pilot rollback
 `http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
 `logs/metrics-summary.json`。
 
-macOS 安装时还会生成 `~/Applications/LoongSuite Pilot Dashboard.app`。
-点击它，或运行 `loongsuite-pilot dashboard open`，即可按配置中的 `dashboard.port`
-用系统默认浏览器打开页面，不会启停 Pilot。详见[Dashboard 启动器](docs/zh-CN/installation.md#macos-dashboard-启动器)。
+macOS 可按需执行 `loongsuite-pilot dashboard shortcut install`，创建带雷达图标的
+Dashboard 网页快捷方式（`.webloc`），并添加到程序坞的文件区。普通安装和升级不会自动添加。
+点击后用默认浏览器打开页面，不会启停 Pilot；修改端口后重新执行此命令即可更新网址。
+详见[Dashboard 快捷方式](docs/zh-CN/installation.md#macos-dashboard-快捷方式)。
 
 macOS 菜单栏 App：
 

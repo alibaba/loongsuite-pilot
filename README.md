@@ -195,10 +195,11 @@ The local dashboard starts and stops with the collector. Open
 `http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
 collector-owned `logs/metrics-summary.json` file directly.
 
-On macOS, the installer also creates `~/Applications/LoongSuite Pilot Dashboard.app`.
-Click it (or run `loongsuite-pilot dashboard open`) to open the configured
-`dashboard.port` in your default browser. The shortcut does not start or stop
-Pilot. See [Dashboard launcher](docs/installation.md#macos-dashboard-launcher).
+On macOS, optionally run `loongsuite-pilot dashboard shortcut install` to create a
+Dashboard `.webloc` shortcut with a radar icon and add it to the Dock's files area.
+Normal installation and upgrades do not add shortcuts. It opens the configured
+URL in your default browser without starting or stopping Pilot. After changing
+the port, run the shortcut install command again. See [Dashboard shortcut](docs/installation.md#macos-dashboard-shortcut).
 
 macOS menu bar app:
 

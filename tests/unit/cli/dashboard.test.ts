@@ -44,7 +44,7 @@ describe('Dashboard configuration', () => {
   it.each([1, 80, 9000, 65535])('accepts configured port %s', value => {
     expect(resolveDashboardPort(value)).toBe(value);
   });
-  it('reads the port every time, without caching it in the app', async () => {
+  it('reads the port on every command invocation', async () => {
     await configure({ dashboard: { port: 9000 }, dataDir: root });
     expect(await loadDashboardTarget()).toEqual({ url: 'http://127.0.0.1:9000/', port: 9000, dataDir: root });
     await configure({ dashboard: { port: 9001 }, dataDir: root });
@@ -67,6 +67,53 @@ describe('Dashboard configuration', () => {
     expect(await runDashboardCommand(['url'], { stdout })).toBe(0);
     expect(stdout).toHaveBeenCalledTimes(1);
     expect(stdout).toHaveBeenCalledWith('http://127.0.0.1:8765/\n');
+  });
+});
+
+describe('dashboard shortcut command', () => {
+  function dependencies() {
+    return {
+      platform: 'darwin' as const, language: 'zh_CN', stdout: vi.fn(), stderr: vi.fn(),
+      loadTarget: vi.fn().mockResolvedValue({ port: 9001, url: 'http://127.0.0.1:9001/', dataDir: root }),
+      probe: vi.fn(), openBrowser: vi.fn(),
+      shortcut: vi.fn().mockResolvedValue({ shortcutPath: '/Users/test/Pilot.webloc', exists: true,
+        managed: true, url: 'http://127.0.0.1:9001/', dockMatches: 1, dockLocked: false,
+        changed: false, backupPath: null, warnings: [] }),
+    };
+  }
+  it('installs using the current shared config without probing or starting a browser', async () => {
+    const deps = dependencies();
+    expect(await runDashboardCommand(['shortcut', 'install'], deps)).toBe(0);
+    expect(deps.shortcut).toHaveBeenCalledWith('install', 'http://127.0.0.1:9001/');
+    expect(deps.probe).not.toHaveBeenCalled();
+    expect(deps.openBrowser).not.toHaveBeenCalled();
+    expect(deps.stdout.mock.calls.flat().join('')).toContain('端口变更');
+  });
+  it.each(['status', 'uninstall'])('%s works without loading configuration', async action => {
+    const deps = dependencies();
+    deps.loadTarget.mockRejectedValue(new Error('config missing'));
+    expect(await runDashboardCommand(['shortcut', action], deps)).toBe(0);
+    expect(deps.loadTarget).not.toHaveBeenCalled();
+    expect(deps.shortcut).toHaveBeenCalledWith(action, undefined);
+    expect(deps.stdout.mock.calls.flat().join('')).toContain('目标网址: http://127.0.0.1:9001/');
+  });
+  it('rejects unsupported platforms and arguments before running native code', async () => {
+    const deps = dependencies();
+    expect(await runDashboardCommand(['shortcut', '--help'], deps)).toBe(0);
+    expect(await runDashboardCommand(['shortcut'], deps)).toBe(2);
+    expect(await runDashboardCommand(['shortcut', 'install', '--port', '9000'], deps)).toBe(2);
+    expect(await runDashboardCommand(['shortcut', 'install'], { ...deps, platform: 'linux' })).toBe(1);
+    expect(deps.shortcut).not.toHaveBeenCalled();
+    expect(deps.loadTarget).not.toHaveBeenCalled();
+  });
+  it('reports errors without exposing configuration or subprocess output', async () => {
+    const deps = dependencies();
+    deps.shortcut.mockRejectedValue(new Error('secret child output'));
+    expect(await runDashboardCommand(['shortcut', 'install'], deps)).toBe(1);
+    expect(deps.stderr.mock.calls.flat().join('')).not.toContain('secret');
+    deps.loadTarget.mockRejectedValue(new Error('secret config content'));
+    expect(await runDashboardCommand(['shortcut', 'install'], deps)).toBe(1);
+    expect(deps.stderr.mock.calls.flat().join('')).not.toContain('secret');
   });
 });
 

@@ -1242,7 +1242,7 @@ cmd_deploy() {
 }
 
 cmd_dashboard() {
-    # Read-only path: no ensure_dirs, bootstrap sync, or collector lifecycle work.
+    # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
     local node_bin="" version_dir repo_dir entry config_path pin pinned
     repo_dir="$(dirname "$SCRIPT_DIR")"
     if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
@@ -2255,6 +2255,7 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  dashboard open Open Dashboard in the default browser (macOS)"
     echo "  dashboard url  Print the configured local Dashboard URL"
+    echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  worker ...      Manage local remote-controlled workers"

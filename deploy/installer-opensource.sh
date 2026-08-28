@@ -1823,59 +1823,6 @@ print_summary() {
 # ============================================================
 # CMD: install
 # ============================================================
-# Optional macOS shortcut; failure must never block collection installation.
-dashboard_app_manager() {
-    local cache_dir="$1" version="" candidate
-    if [ -r "$cache_dir/current" ]; then
-        IFS= read -r version < "$cache_dir/current" || true
-        case "$version" in
-            ''|.|..|*/*) ;;
-            *)
-                candidate="$cache_dir/versions/$version/scripts/manage-dashboard-app.mjs"
-                if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
-                ;;
-        esac
-    fi
-    candidate="$PERMANENT_DIR/scripts/manage-dashboard-app.mjs"
-    if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
-    return 1
-}
-
-install_dashboard_app() {
-    [ "$(uname -s)" = "Darwin" ] || return 0
-    local manager
-    manager=$(dashboard_app_manager "$HOME/.loongsuite-pilot") || return 0
-    if ! "$NODE_BIN" "$manager" install \
-        --config "$DATA_DIR/config.json" \
-        --cache-dir "$HOME/.loongsuite-pilot" \
-        --command "$HOME/.local/bin/loongsuite-pilot"; then
-        msg "    ⚠️ Dashboard App 创建失败；仍可在浏览器中访问 Dashboard" \
-            "    ⚠️ Could not create the Dashboard app; the browser Dashboard is still available"
-    fi
-    return 0
-}
-
-remove_dashboard_app() {
-    [ "$(uname -s)" = "Darwin" ] || return 0
-    local manager
-    manager=$(dashboard_app_manager "$HOME/.loongsuite-pilot") || return 0
-    local dashboard_node="" pin
-    for pin in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
-        if [ -f "$pin" ]; then
-            dashboard_node=$(cat "$pin")
-            [ -x "$dashboard_node" ] && break
-            dashboard_node=""
-        fi
-    done
-    if [ -z "$dashboard_node" ]; then dashboard_node=$(command -v node) || true; fi
-    if [ -z "$dashboard_node" ] || ! "$dashboard_node" "$manager" uninstall \
-        --config "$DATA_DIR/config.json" --cache-dir "$HOME/.loongsuite-pilot"; then
-        msg "    ⚠️ Dashboard App 未清理，可从 ~/Applications 手动移除" \
-            "    ⚠️ Dashboard app was not removed; remove it manually from ~/Applications"
-    fi
-    return 0
-}
-
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -1935,7 +1882,6 @@ cmd_install() {
     fi
     write_config
     install_loongsuite_pilot_command
-    install_dashboard_app
     inject_qodercli_token_intercept
     inject_qoderwork_runtime_wrapper
     inject_claude_code_fetch_intercept
@@ -1994,7 +1940,6 @@ cmd_upgrade() {
     local old_commit; old_commit=$(get_commit_from_dir "$PERMANENT_DIR")
 
     if [ -n "$new_ver" ] && [ "$new_ver" = "$old_ver" ] && [ "$new_commit" = "$old_commit" ]; then
-        install_dashboard_app
         msg "✅ 已是最新版本 v${new_ver} (${new_commit})，无需升级" \
             "✅ Already at latest version v${new_ver} (${new_commit}), nothing to do"
         exit 0
@@ -2058,7 +2003,6 @@ cmd_upgrade() {
             # GC: remove old versions beyond current + previous
             gc_old_versions
 
-            install_dashboard_app
             print_summary "upgrade"
             return 0
         fi
@@ -2868,9 +2812,6 @@ cmd_uninstall() {
     msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
     remove_mimocode_plugin
     echo ""
-
-    # Validate ownership before removing the optional app, while Node still exists.
-    remove_dashboard_app
 
     # Remove installation artifacts
     msg "==> 删除安装目录..." "==> Removing installation..."
