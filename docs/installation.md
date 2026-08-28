@@ -174,18 +174,9 @@ The Dock preference format is not a public Apple API: layout changes are checked
 before/after writing, and unsupported layouts fail rather than being overwritten.
 The Dock briefly refreshes when an entry or icon changes.
 
-The web shortcut does not check whether Pilot is running or whether another
-program has taken its port. For a checked, configuration-aware open on every
-invocation (without installing a shortcut), use:
-
-```bash
-loongsuite-pilot dashboard open  # macOS: verify the matching Pilot instance and open
-loongsuite-pilot dashboard url   # Linux/macOS: print the current configured URL
-```
-
-These commands do not start or stop the collector, load its native dependencies,
-or rewrite the Node runtime pin. A matching Dashboard can be opened before its
-first metrics snapshot is ready.
+The web shortcut only stores a URL. It does not check whether Pilot is running
+or whether another program has taken its port. Use `loongsuite-pilot status` to
+check Pilot's status if the browser cannot open the expected page.
 
 ## Uninstall
 

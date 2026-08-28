@@ -1,19 +1,16 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
-import {
-  DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT,
-  DASHBOARD_ID_HEADER, DASHBOARD_ID_VALUE, DASHBOARD_INSTANCE_HEADER,
-  dashboardInstanceId,
-} from './dashboard-config.js';
-
-export {
-  DEFAULT_DASHBOARD_HOST, DEFAULT_DASHBOARD_PORT,
-  DASHBOARD_ID_HEADER, DASHBOARD_ID_VALUE, DASHBOARD_INSTANCE_HEADER,
-} from './dashboard-config.js';
 
 const logger = createLogger('DashboardServer');
+
+export const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
+export const DEFAULT_DASHBOARD_PORT = 8_765;
+export const DASHBOARD_ID_HEADER = 'x-loongsuite-pilot-dashboard';
+export const DASHBOARD_ID_VALUE = 'metrics-summary-v1';
+export const DASHBOARD_INSTANCE_HEADER = 'x-loongsuite-pilot-instance';
 
 export interface DashboardServerOptions {
   dataDir: string;
@@ -43,7 +40,7 @@ export class DashboardServer {
     this.port = options.port ?? DEFAULT_DASHBOARD_PORT;
     this.assetPath = options.assetPath;
     this.summaryPath = path.join(options.dataDir, 'logs', 'metrics-summary.json');
-    this.instanceId = dashboardInstanceId(options.dataDir);
+    this.instanceId = createHash('sha256').update(path.resolve(options.dataDir)).digest('hex');
   }
 
   get running(): boolean {

@@ -8,7 +8,7 @@ Swift, Xcode, or third-party Dock utility is required.
 Developer-only regeneration:
 
 ```bash
-bash assets/dashboard-launcher/generate-icon.sh
+bash assets/dashboard-shortcut/generate-icon.sh
 ```
 
 The shortcut manager applies the icon to the managed `.webloc` using AppKit.

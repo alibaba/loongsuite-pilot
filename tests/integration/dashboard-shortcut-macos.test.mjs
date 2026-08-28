@@ -4,7 +4,6 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildSync } from 'esbuild';
 
 // Real Foundation/AppKit/defaults, but a disposable preferences domain and home.
 // Never edits com.apple.dock, refreshes the user's Dock, or opens their browser.
@@ -43,7 +42,7 @@ function run(argv) {
   } catch (error) { return JSON.stringify({ ok: false, error: String(error.message) }); }
 }`);
     request = { action: 'install', configPath: join(root, "配置 ' $() ;/config.json"), url: 'http://127.0.0.1:9123/',
-      iconPath: resolve('assets/dashboard-launcher/AppIcon.icns'), iconVersion: 'a'.repeat(64) };
+      iconPath: resolve('assets/dashboard-shortcut/AppIcon.icns'), iconVersion: 'a'.repeat(64) };
     shortcut = join(root, 'Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc');
   });
   afterEach(() => {
@@ -100,12 +99,12 @@ function run(argv) {
     expect(run()).toMatchObject({ ok: false });
     expect(existsSync(shortcut)).toBe(false);
   });
-  it('runs the dependency-free CLI bundle with custom config and refreshes a stored port only on install', () => {
+  it('runs the shipped scripts without build output or dependencies and updates the stored port only on install', () => {
     const pkg = join(root, 'package with spaces');
-    for (const dir of ['dist', 'scripts', 'assets/dashboard-launcher']) mkdirSync(join(pkg, dir), { recursive: true });
-    const entry = join(pkg, 'dist/dashboard-cli.cjs');
-    buildSync({ entryPoints: [resolve('src/dashboard-cli.ts')], outfile: entry, platform: 'node', target: 'es2022', format: 'cjs', bundle: true });
-    copyFileSync(request.iconPath, join(pkg, 'assets/dashboard-launcher/AppIcon.icns'));
+    for (const dir of ['scripts', 'assets/dashboard-shortcut']) mkdirSync(join(pkg, dir), { recursive: true });
+    const entry = join(pkg, 'scripts/dashboard-shortcut.mjs');
+    copyFileSync(resolve('scripts/dashboard-shortcut.mjs'), entry);
+    copyFileSync(request.iconPath, join(pkg, 'assets/dashboard-shortcut/AppIcon.icns'));
     const source = readFileSync(resolve('scripts/manage-dashboard-shortcut.js'), 'utf8');
     writeFileSync(join(pkg, 'scripts/manage-dashboard-shortcut.js'), source + `
 function run(argv) {
@@ -120,7 +119,7 @@ function run(argv) {
   } catch (error) { return JSON.stringify({ ok: false, error: String(error.message) }); }
 }`);
     const config = join(root, "配置 ' & spaces.json");
-    const cli = action => execFileSync(process.execPath, [entry, 'shortcut', action], { encoding: 'utf8', env: {
+    const cli = action => execFileSync(process.execPath, [entry, action], { encoding: 'utf8', env: {
       ...process.env, AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_LANG: 'en', NODE_PATH: '',
     } });
     writeFileSync(config, '\uFEFF' + JSON.stringify({ dashboard: { port: 9130 }, dataDir: root }));
@@ -131,9 +130,22 @@ function run(argv) {
     expect(cli('install')).toContain('http://127.0.0.1:9131/');
     expect(defaults(['export', domain, '-'])).toBe(snapshot);
     rmSync(config);
+    rmSync(join(pkg, 'assets/dashboard-shortcut/AppIcon.icns'));
     expect(cli('status')).toContain('http://127.0.0.1:9131/');
     expect(cli('uninstall')).toContain('Shortcut: not installed');
     expect(defaults(['export', domain, '-'])).toBe(initial);
     expect(existsSync(join(pkg, 'node_modules'))).toBe(false);
+    expect(existsSync(join(pkg, 'dist'))).toBe(false);
+    expect(existsSync(join(pkg, 'src'))).toBe(false);
   }, 30_000);
+  it('refuses an existing operation lock without touching the shortcut or Dock', () => {
+    const base = join(root, 'Library/Application Support/LoongSuite Pilot/Shortcuts');
+    mkdirSync(join(base, 'Operation.lock'), { recursive: true });
+    const result = run();
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toContain('Another shortcut command');
+    expect(existsSync(shortcut)).toBe(false);
+    expect(existsSync(join(base, 'Operation.lock'))).toBe(true);
+    expect(defaults(['export', domain, '-'])).toBe(initial);
+  });
 });

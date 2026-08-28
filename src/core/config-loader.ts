@@ -35,7 +35,6 @@ import {
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
-import { resolveDashboardPort } from '../dashboard/dashboard-config.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 
@@ -658,8 +657,15 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
   };
 }
 
+const DEFAULT_DASHBOARD_PORT = 8_765;
+
 function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
-  return { port: resolveDashboardPort(file?.dashboard?.port) };
+  const port = file?.dashboard?.port;
+  return {
+    port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
+      ? port
+      : DEFAULT_DASHBOARD_PORT,
+  };
 }
 
 function buildFlushersConfig(

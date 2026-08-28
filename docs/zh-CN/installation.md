@@ -208,16 +208,8 @@ loongsuite-pilot dashboard shortcut uninstall
 卸载快捷方式时保留备份。程序坞配置格式不是 Apple 公开接口，因此会在写入前后检查布局，
 遇到不支持的格式直接报错，不覆盖原布局。入口或图标变化时程序坞会短暂刷新。
 
-网页快捷方式不会判断 Pilot 是否正在运行，也不会识别端口是否被其他程序占用。
-如果希望每次打开前读取最新配置并检查对应的 Pilot 实例，可使用：
-
-```bash
-loongsuite-pilot dashboard open  # macOS：检查对应实例后用默认浏览器打开
-loongsuite-pilot dashboard url   # Linux/macOS：输出当前配置中的页面地址
-```
-
-这些命令不会启停采集服务、加载其原生依赖或修改 Node 路径记录；对应的 Dashboard
-即使尚未生成首份汇总文件也可以打开。
+网页快捷方式只保存网址，不会判断 Pilot 是否正在运行，也不会识别端口是否被其他程序占用。
+浏览器无法打开预期页面时，可用 `loongsuite-pilot status` 检查 Pilot 状态。
 
 ## 卸载
 

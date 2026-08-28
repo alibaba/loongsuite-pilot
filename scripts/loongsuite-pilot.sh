@@ -1243,25 +1243,33 @@ cmd_deploy() {
 
 cmd_dashboard() {
     # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
+    case "${1:-}" in
+        shortcut) shift ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+    esac
     local node_bin="" version_dir repo_dir entry config_path pin pinned
     repo_dir="$(dirname "$SCRIPT_DIR")"
     if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
-        entry="$repo_dir/dist/dashboard-cli.cjs"
+        entry="$repo_dir/scripts/dashboard-shortcut.mjs"
     else
         version_dir=$(resolve_current_version 2>/dev/null) || {
-            echo "Pilot is not installed. Install Pilot before opening Dashboard." >&2
+            echo "Pilot is not installed. Install Pilot before managing Dashboard shortcuts." >&2
             return 1
         }
-        entry="$version_dir/dist/dashboard-cli.cjs"
+        entry="$version_dir/scripts/dashboard-shortcut.mjs"
     fi
     if [ ! -f "$entry" ]; then
-        echo "Dashboard launcher is missing. Upgrade Pilot (or run npm run build in the source checkout)." >&2
+        echo "Dashboard shortcut command is missing. Upgrade or repair Pilot." >&2
         return 1
     fi
-    config_path="${AGENT_DATA_COLLECTION_CONFIG:-$CONFIG_FILE}"
-    case "$config_path" in '~/'*) config_path="$HOME/${config_path#\~/}" ;; esac
+    config_path="${AGENT_DATA_COLLECTION_CONFIG:-}"
+    config_path="${config_path#"${config_path%%[![:space:]]*}"}"
+    config_path="${config_path%"${config_path##*[![:space:]]}"}"
+    config_path="${config_path:-$CONFIG_FILE}"
+    case "$config_path" in '~') config_path="$HOME" ;; '~/'*) config_path="$HOME/${config_path#\~/}" ;; esac
     # A custom --data-dir installer pins Node next to config.json, not the cache.
-    # Preserve spaces in the pinned path. Finder has no interactive shell PATH.
+    # Preserve spaces in the pinned path; never rewrite the pin on this path.
     for pin in "$(dirname "$config_path")/node-bin" "$NODE_PIN_FILE"; do
         if [ -r "$pin" ]; then
             IFS= read -r pinned < "$pin" || true
@@ -2253,8 +2261,6 @@ cmd_help() {
     echo "                    --require <ids>  comma-separated agent ids that must deploy"
     echo "                    --json           machine-readable result"
     echo "  token-usage     Show token usage TUI"
-    echo "  dashboard open Open Dashboard in the default browser (macOS)"
-    echo "  dashboard url  Print the configured local Dashboard URL"
     echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
