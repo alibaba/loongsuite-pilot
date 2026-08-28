@@ -37,17 +37,32 @@ interface EntryRuntime {
 }
 
 /**
+ * Replace the user's home directory with `~`.
+ *
+ * Two cases a naive substring replace gets wrong:
+ * - A degenerate home (`/`, seen in root containers) would rewrite every path
+ *   separator; such an environment has no user name in its paths anyway, so
+ *   leave the text alone.
+ * - The home path can be a prefix of an unrelated path, so only a whole path
+ *   segment is masked: with home `/root`, `/rootfs/lib` must stay intact.
+ *
+ * Exported for unit tests: `os.homedir()` reads the real process environment,
+ * so the home value has to be injected to cover these cases.
+ */
+export function maskHomeDir(text: string, home: string): string {
+  if (home.length <= 1) return text;
+  const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(`${escaped}(?![\\w.-])`, 'g'), '~');
+}
+
+/**
  * Condense an error into a single-line, length-bounded summary safe to attach
  * to an alarm message: collapse whitespace, hide the user's home directory, and
  * truncate. Lifecycle errors (enabled/isAvailable/start) may embed absolute
  * paths, so the home directory is masked to `~`.
  */
 export function summarizeError(err: unknown): string {
-  const home = os.homedir();
-  let text = String(err).replace(/\s+/g, ' ').trim();
-  if (home) {
-    text = text.split(home).join('~');
-  }
+  let text = maskHomeDir(String(err).replace(/\s+/g, ' ').trim(), os.homedir());
   if (text.length > ERROR_SUMMARY_MAX_LEN) {
     text = `${text.slice(0, ERROR_SUMMARY_MAX_LEN - 1)}…`;
   }

@@ -85,7 +85,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...original, watch: (...args: unknown[]) => mockFsWatch(...args) };
 });
 
-import { AgentDiscoveryService, summarizeError } from '../../../src/core/agent-discovery-service.js';
+import { AgentDiscoveryService, maskHomeDir, summarizeError } from '../../../src/core/agent-discovery-service.js';
 
 function makeEntry(overrides: Partial<AgentDetectionEntry> = {}): AgentDetectionEntry {
   return {
@@ -592,5 +592,32 @@ describe('summarizeError', () => {
     const summary = summarizeError(new Error(`ENOENT: no such file, open '${home}/.loongsuite-pilot/x'`));
     expect(summary).not.toContain(home);
     expect(summary).toContain('~/.loongsuite-pilot/x');
+  });
+});
+
+describe('maskHomeDir', () => {
+  it('masks the home path even without a trailing separator', () => {
+    const masked = maskHomeDir("EACCES: permission denied, stat '/Users/alice'", '/Users/alice');
+    expect(masked).toBe("EACCES: permission denied, stat '~'");
+  });
+
+  it('leaves the text untouched when the home directory is / (root container)', () => {
+    const text = 'ENOENT: no such file, open /foo/bar/baz.txt';
+    expect(maskHomeDir(text, '/')).toBe(text);
+  });
+
+  it('does not mangle an unrelated path that the home directory prefixes', () => {
+    const text = 'EIO: i/o error, read /rootfs/lib/agent.db';
+    expect(maskHomeDir(text, '/root')).toBe(text);
+  });
+
+  it('masks every occurrence of the home directory', () => {
+    const masked = maskHomeDir('copy /home/bob/a.db to /home/bob/b.db', '/home/bob');
+    expect(masked).toBe('copy ~/a.db to ~/b.db');
+  });
+
+  it('treats regex metacharacters in the home path literally', () => {
+    const masked = maskHomeDir('open /Users/a.b+c/x', '/Users/a.b+c');
+    expect(masked).toBe('open ~/x');
   });
 });
