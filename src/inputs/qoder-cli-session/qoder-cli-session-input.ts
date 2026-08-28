@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
-import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, timestampToUnixNanos, type StandardAgentActivityOptions } from '../../normalization/entry-builder.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
   BaseSessionInput,
@@ -13,7 +13,10 @@ import {
 
 const DEFAULT_SESSION_DIR = '~/.qoder/logs/sessions';
 const SOURCE = 'qoder-cli-session-segment';
-const SUPPORTED_EVENT_TYPE = 'model.response.completed';
+const SUPPORTED_EVENT_TYPES = new Set([
+  'model.request.started',
+  'model.response.completed',
+]);
 const UNKNOWN_MODEL = 'unknown';
 
 export interface QoderCliSessionInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
@@ -24,8 +27,10 @@ export interface QoderCliSessionInputOptions extends Omit<SessionInputOptions, '
 /**
  * Qoder CLI — native session segment token usage input.
  *
- * Reads Qoder's own session segment JSONL files and emits only token usage
- * records from model response completion events.
+ * Reads Qoder's own session segment JSONL files and emits paired
+ * llm.request / llm.response records carrying top-level gen_ai.turn.id
+ * and gen_ai.step.id so the converter produces properly grouped,
+ * non-zero-duration LLM spans.
  */
 export class QoderCliSessionInput extends BaseSessionInput {
   readonly id = 'qoder-cli-session';
@@ -73,21 +78,23 @@ export class QoderCliSessionInput extends BaseSessionInput {
     record: Record<string, unknown>,
     filePath: string,
   ): Promise<AgentActivityEntry | null> {
-    if (record.type !== SUPPORTED_EVENT_TYPE) return null;
+    const type = stringValue(record.type);
+    if (!type || !SUPPORTED_EVENT_TYPES.has(type)) return null;
 
+    const isRequest = type === 'model.request.started';
     const data = asRecord(record.data);
     const sessionInfo = extractSessionInfo(filePath);
     const timestamp = parseTimestamp(record.ts);
-    const inputTokens = finiteNumber(data.input_tokens);
-    const outputTokens = finiteNumber(data.output_tokens);
-    const cacheReadTokens = finiteNumber(data.cache_read_input_tokens);
-    const cacheWriteTokens = finiteNumber(data.cache_creation_input_tokens);
+    const timeUnixNano = timestampToUnixNanos(timestamp);
     const model = stringValue(data.model) ?? UNKNOWN_MODEL;
     const responseId = stringValue(record.request_id);
+    const turnId = stringValue(record.turn_id);
+    const requestIndex = finiteNumber(data.request_index);
+    const stepId = buildStepId(turnId, requestIndex);
 
     const attributes: Record<string, JsonValue> = {
       source: SOURCE,
-      'qoder.type': SUPPORTED_EVENT_TYPE,
+      'qoder.type': type,
       segment_file: filePath,
       segment_name: path.basename(filePath),
     };
@@ -95,28 +102,39 @@ export class QoderCliSessionInput extends BaseSessionInput {
     addIfPresent(attributes, 'seq', finiteNumber(record.seq));
     addIfPresent(attributes, 'level', stringValue(record.level));
     addIfPresent(attributes, 'request_id', responseId);
-    addIfPresent(attributes, 'turn_id', stringValue(record.turn_id));
+    addIfPresent(attributes, 'turn_id', turnId);
     addIfPresent(attributes, 'loop_id', stringValue(record.loop_id));
-    addIfPresent(attributes, 'request_index', finiteNumber(data.request_index));
+    addIfPresent(attributes, 'request_index', requestIndex);
     addIfPresent(attributes, 'stop_reason', stringValue(data.stop_reason));
     addIfPresent(attributes, 'content_block_count', finiteNumber(data.content_block_count));
 
-    return buildAgentActivityEntry({
+    const base: StandardAgentActivityOptions = {
       timestamp,
-      time_unix_nano: timestampToUnixNanos(timestamp),
+      time_unix_nano: timeUnixNano,
       'event.id': buildDeterministicEventId(filePath, record, responseId),
-      'event.name': 'llm.response',
+      'event.name': isRequest ? 'llm.request' : 'llm.response',
       'gen_ai.session.id': sessionInfo.sessionId,
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.request.model': model,
-      'gen_ai.response.model': model,
-      'gen_ai.usage.input_tokens': inputTokens,
-      'gen_ai.usage.output_tokens': outputTokens,
-      'gen_ai.usage.cache_read.input_tokens': cacheReadTokens,
-      'gen_ai.usage.cache_creation.input_tokens': cacheWriteTokens,
-      'gen_ai.usage.total_tokens': sumIfPresent(inputTokens, outputTokens),
       attributes,
-    });
+    };
+    if (turnId) base['gen_ai.turn.id'] = turnId;
+    if (stepId) base['gen_ai.step.id'] = stepId;
+
+    if (!isRequest) {
+      const inputTokens = finiteNumber(data.input_tokens);
+      const outputTokens = finiteNumber(data.output_tokens);
+      const cacheReadTokens = finiteNumber(data.cache_read_input_tokens);
+      const cacheWriteTokens = finiteNumber(data.cache_creation_input_tokens);
+      base['gen_ai.response.model'] = model;
+      base['gen_ai.usage.input_tokens'] = inputTokens;
+      base['gen_ai.usage.output_tokens'] = outputTokens;
+      base['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
+      base['gen_ai.usage.cache_creation.input_tokens'] = cacheWriteTokens;
+      base['gen_ai.usage.total_tokens'] = sumIfPresent(inputTokens, outputTokens);
+    }
+
+    return buildAgentActivityEntry(base);
   }
 
   private stateKey(filePath: string): string {
@@ -176,6 +194,14 @@ function extractSessionInfo(filePath: string): { sessionId: string; cwdKey: stri
     sessionId: path.basename(sessionDir),
     cwdKey: path.basename(cwdDir),
   };
+}
+
+function buildStepId(
+  turnId: string | undefined,
+  requestIndex: number | undefined,
+): string | undefined {
+  if (!turnId || requestIndex === undefined) return undefined;
+  return `${turnId}:s${requestIndex}`;
 }
 
 function buildDeterministicEventId(

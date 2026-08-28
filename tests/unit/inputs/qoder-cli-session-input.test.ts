@@ -167,6 +167,8 @@ describe('QoderCliSessionInput', () => {
       'gen_ai.usage.cache_read.input_tokens': 21814,
       'gen_ai.usage.cache_creation.input_tokens': 4,
       'gen_ai.usage.total_tokens': 22193,
+      'gen_ai.turn.id': 'turn-123',
+      'gen_ai.step.id': 'turn-123:s1',
       time_unix_nano: '1777659871533000000',
     });
     expect(entries[0]).toMatchObject({
@@ -186,8 +188,6 @@ describe('QoderCliSessionInput', () => {
     });
     expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
-    expect(entries[0]?.['gen_ai.turn.id']).toBeUndefined();
-    expect(entries[0]?.['gen_ai.step.id']).toBeUndefined();
   });
 
   it('generates deterministic event ids for the same source row', async () => {
@@ -215,6 +215,136 @@ describe('QoderCliSessionInput', () => {
     expect(entry?.['gen_ai.response.model']).toBe('unknown');
   });
 
+  // --- Fix A: paired llm.request + top-level step.id/turn.id ---
+
+  it('emits llm.request for model.request.started with startNanos from record.ts', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+    const row = makeModelRequestStarted({
+      requestId: 'req-1',
+      turnId: 'turn-1',
+      seq: 7,
+      requestIndex: 3,
+    });
+
+    const entry = await input.mapOnce(row, file);
+
+    expect(entry).not.toBeNull();
+    expect(entry?.['event.name']).toBe('llm.request');
+    expect(entry?.['gen_ai.request.model']).toBe('auto');
+    expect(entry?.['gen_ai.response.model']).toBeUndefined();
+    expect(entry?.['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(entry?.['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(entry?.['gen_ai.turn.id']).toBe('turn-1');
+    expect(entry?.['gen_ai.step.id']).toBe('turn-1:s3');
+    expect(entry?.['agent.qoder.type']).toBe('model.request.started');
+    expect(entry?.time_unix_nano).toBe('1777659871533000000');
+  });
+
+  it('pairs model.request.started + model.response.completed into llm.request + llm.response with matching step.id', async () => {
+    const file = await writeSegmentFile('cwd-a', 'session-a', 'a.jsonl', []);
+    const input = makeInput();
+    await input.baselineOnce();
+
+    await fs.appendFile(file, `${JSON.stringify(makeModelRequestStarted({
+      requestId: 'req-pair',
+      turnId: 'turn-pair',
+      seq: 5,
+      requestIndex: 2,
+      ts: '2026-08-28T11:25:42.331+08:00',
+    }))}\n`);
+    await fs.appendFile(file, `${JSON.stringify(makeModelResponse({
+      requestId: 'req-pair',
+      turnId: 'turn-pair',
+      seq: 6,
+      requestIndex: 2,
+      ts: '2026-08-28T11:25:54.000+08:00',
+      inputTokens: 22030,
+      outputTokens: 163,
+    }))}\n`);
+
+    const entries = await input.collectOnce();
+
+    expect(entries).toHaveLength(2);
+    const request = entries.find(e => e['event.name'] === 'llm.request');
+    const response = entries.find(e => e['event.name'] === 'llm.response');
+    expect(request).toBeDefined();
+    expect(response).toBeDefined();
+    expect(request?.['gen_ai.step.id']).toBe('turn-pair:s2');
+    expect(response?.['gen_ai.step.id']).toBe('turn-pair:s2');
+    expect(request?.['gen_ai.turn.id']).toBe('turn-pair');
+    expect(response?.['gen_ai.turn.id']).toBe('turn-pair');
+    expect(request?.time_unix_nano).toBe('1787887542331000000');
+    expect(response?.time_unix_nano).toBe('1787887554000000000');
+    expect(response?.['gen_ai.usage.input_tokens']).toBe(22030);
+    expect(response?.['gen_ai.usage.output_tokens']).toBe(163);
+    expect(request?.['gen_ai.usage.input_tokens']).toBeUndefined();
+  });
+
+  it('still emits llm.response when model.request.started is missing (backward compatible)', async () => {
+    const file = await writeSegmentFile('cwd-a', 'session-a', 'a.jsonl', []);
+    const input = makeInput();
+    await input.baselineOnce();
+
+    await fs.appendFile(file, `${JSON.stringify(makeModelResponse({
+      requestId: 'lone-response',
+      turnId: 'turn-lone',
+      seq: 1,
+      requestIndex: 0,
+    }))}\n`);
+
+    const entries = await input.collectOnce();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.['event.name']).toBe('llm.response');
+    expect(entries[0]?.['gen_ai.turn.id']).toBe('turn-lone');
+    expect(entries[0]?.['gen_ai.step.id']).toBe('turn-lone:s0');
+  });
+
+  it('produces gen_ai.step.id matching the groupByStep round extraction regex :s(\\d+)$', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const cases: Array<{ turnId: string; requestIndex: number; expected: string }> = [
+      { turnId: '96866b2d935cf', requestIndex: 21, expected: '96866b2d935cf:s21' },
+      { turnId: 'aa9fce91-9296-4964-9ab4-ce5eda305af7', requestIndex: 1, expected: 'aa9fce91-9296-4964-9ab4-ce5eda305af7:s1' },
+      { turnId: 'turn-0', requestIndex: 0, expected: 'turn-0:s0' },
+    ];
+
+    for (const { turnId, requestIndex, expected } of cases) {
+      const row = makeModelRequestStarted({
+        requestId: `req-${requestIndex}`,
+        turnId,
+        requestIndex,
+        seq: requestIndex,
+      });
+      const entry = await input.mapOnce(row, file);
+      expect(entry?.['gen_ai.step.id']).toBe(expected);
+      expect(/:s(\d+)$/.test(entry?.['gen_ai.step.id'] ?? '')).toBe(true);
+    }
+  });
+
+  it('omits gen_ai.step.id when turn_id or request_index is missing', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const noTurn = makeModelRequestStarted({ requestId: 'r1', seq: 1, requestIndex: 1 });
+    delete (noTurn as Record<string, unknown>).turn_id;
+    const noIndex = makeModelRequestStarted({ requestId: 'r2', turnId: 'turn-x', seq: 2 });
+    delete (noIndex.data as Record<string, unknown>).request_index;
+
+    const entryNoTurn = await input.mapOnce(noTurn, file);
+    const entryNoIndex = await input.mapOnce(noIndex, file);
+
+    expect(entryNoTurn?.['gen_ai.step.id']).toBeUndefined();
+    expect(entryNoTurn?.['gen_ai.turn.id']).toBeUndefined();
+    expect(entryNoIndex?.['gen_ai.step.id']).toBeUndefined();
+    expect(entryNoIndex?.['gen_ai.turn.id']).toBe('turn-x');
+  });
+
   function makeInput(): TestQoderCliSessionInput {
     return new TestQoderCliSessionInput({
       stateStore: stateStore as any,
@@ -239,33 +369,64 @@ describe('QoderCliSessionInput', () => {
   }
 });
 
+// Fixture derived from researcher attachment p0-evidence.json (issue AGE-1730,
+// thread comment 3351def6): raw segment event for problem span at 11:25:42.
+// Shape: { ts, seq, level, type, turn_id, loop_id, request_id, data:{...} }.
 function makeModelResponse(overrides: {
   requestId?: string;
   turnId?: string;
   loopId?: string;
   seq?: number;
+  requestIndex?: number;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  ts?: string | number;
 } = {}): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    request_index: overrides.requestIndex ?? 1,
+    model: 'auto',
+    stop_reason: 'end_turn',
+    content_block_count: 2,
+    input_tokens: overrides.inputTokens ?? 10,
+    output_tokens: overrides.outputTokens ?? 2,
+    cache_read_input_tokens: overrides.cacheReadTokens ?? 3,
+    cache_creation_input_tokens: overrides.cacheWriteTokens ?? 0,
+  };
   return {
-    ts: 1_777_659_871_533,
+    ts: overrides.ts ?? 1_777_659_871_533,
     seq: overrides.seq ?? 1,
     level: 'info',
     type: 'model.response.completed',
     turn_id: overrides.turnId ?? 'turn-1',
     loop_id: overrides.loopId ?? 'turn-1:1',
     request_id: overrides.requestId ?? 'request-1',
+    data,
+  };
+}
+
+// model.request.started segment event — same shape as model.response.completed
+// but emitted at request start, so token counts are absent.
+function makeModelRequestStarted(overrides: {
+  requestId?: string;
+  turnId?: string;
+  loopId?: string;
+  seq?: number;
+  requestIndex?: number;
+  ts?: string | number;
+} = {}): Record<string, unknown> {
+  return {
+    ts: overrides.ts ?? 1_777_659_871_533,
+    seq: overrides.seq ?? 1,
+    level: 'info',
+    type: 'model.request.started',
+    turn_id: overrides.turnId ?? 'turn-1',
+    loop_id: overrides.loopId ?? 'turn-1:1',
+    request_id: overrides.requestId ?? 'request-1',
     data: {
-      request_index: 1,
+      request_index: overrides.requestIndex ?? 1,
       model: 'auto',
-      stop_reason: 'end_turn',
-      content_block_count: 2,
-      input_tokens: overrides.inputTokens ?? 10,
-      output_tokens: overrides.outputTokens ?? 2,
-      cache_read_input_tokens: overrides.cacheReadTokens ?? 3,
-      cache_creation_input_tokens: overrides.cacheWriteTokens ?? 0,
     },
   };
 }
