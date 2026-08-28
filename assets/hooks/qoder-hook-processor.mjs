@@ -1427,15 +1427,27 @@ function isRealUserPrompt(row) {
 }
 
 // Slash-command plumbing Qoder CLI writes as type=user: the caveat banner, the
-// command echo, and its stdout/stderr. None of them involves a model call, and
-// only the caveat/stdout rows carry isMeta, so the content envelope is the only
-// reliable signal.
+// command echo (`<command-message>` and `<command-name>` share one row), and the
+// command's stdout/stderr. None of them involves a model call, and only the
+// caveat/stdout rows carry isMeta, so the content envelope is the only reliable
+// signal.
+//
+// The text must consist of complete envelopes and nothing else, so that a real
+// prompt merely quoting one of these tags is never dropped. The backreference
+// ties each closing tag to the tag that opened it.
 const CONTROL_ENVELOPE_RE =
-  /^\s*<(?:local-command-caveat|command-message|command-name|local-command-stdout|local-command-stderr)>/;
+  /^(?:\s*<(local-command-caveat|command-message|command-name|local-command-stdout|local-command-stderr)>[\s\S]*?<\/\1>)+\s*$/;
+
+function isCompleteControlEnvelope(text) {
+  return CONTROL_ENVELOPE_RE.test(text);
+}
 
 function isControlUserRow(row) {
-  if (row?.type !== 'user' || isToolResult(row)) return false;
-  return CONTROL_ENVELOPE_RE.test(extractUserText(row));
+  // A promptId means the CLI itself booked the row as a submitted prompt, so it
+  // can never be plumbing. Most rows carry no promptId, so this only
+  // short-circuits; the envelope shape is what decides.
+  if (row?.type !== 'user' || isToolResult(row) || row.promptId) return false;
+  return isCompleteControlEnvelope(extractUserText(row));
 }
 
 function extractUserText(row) {

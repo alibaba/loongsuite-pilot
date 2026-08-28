@@ -135,4 +135,45 @@ describe('qoder slash-command control rows', () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]).toEqual([prompt, assistant, result]);
   });
+
+  it('keeps a real prompt that starts with control-like XML', () => {
+    const prompt = promptRow(
+      '<command-name>model</command-name> 这段标签是什么意思？',
+    );
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  // Same shape without a promptId, which is the common case: the CLI stamps one
+  // on only a small minority of prompts, so the envelope check has to carry this
+  // on its own.
+  it('keeps a promptId-less prompt that starts with control-like XML', () => {
+    const prompt = userRow(
+      '<command-name>model</command-name> 这段标签是什么意思？',
+    );
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('keeps a prompt that wraps a complete envelope in its own words', () => {
+    const prompt = userRow(
+      '为什么 transcript 里会出现 <local-command-stdout>Model set to Ultimate'
+      + '</local-command-stdout> 这种行？',
+    );
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('keeps a prompt whose control tag is never closed', () => {
+    // A dangling opener is prose, not plumbing: the CLI always closes its tags.
+    const prompt = userRow('这个 <command-message> 标签要怎么闭合？');
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('keeps a prompt whose closing tag does not match its opener', () => {
+    const prompt = userRow('<command-message>model</command-name>');
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
 });
