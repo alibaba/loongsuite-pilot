@@ -1008,9 +1008,14 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  // If no progress boundaries detected, fall back to legacy behavior
+  // If no progress boundaries detected, fall back to legacy behavior. The turn
+  // entry `other` is already in `records`, so hand the legacy path only the rows
+  // it still owns. Qoder encodes tool results as type=user, so they must survive.
   if (boundaries.length === 0) {
-    const legacyRecords = buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
+    const residualEvents = contentEvents.filter(
+      row => row.type === 'assistant' || isToolResult(row),
+    );
+    const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
     return finalizeRecords(legacyRecords, cwd);
   }
 
@@ -1474,14 +1479,16 @@ function resolveUserId(row, runtimeConfig) {
   return '';
 }
 
-// --- Legacy fallback (no progress events) ------------------------------------
-// Used when transcript has no progress events AND no assistant blocks detected.
+// --- Legacy fallback (no LLM boundaries) -------------------------------------
+// Used when `buildLlmBoundaries` yields nothing, i.e. the turn has no assistant
+// block. Progress events alone do not prevent this path.
 // Limitations: no llm.request synthesis (LLM spans will be 0ms orphan responses),
 // no multi-part merging. QoderTraceInput's token enricher provides tokens but timing is approximate.
 
-function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs) {
-  // When no progress events are available, use the old per-line normalization
-  for (const row of contentEvents) {
+function buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs) {
+  // Per-line normalization for the rows the caller did not emit itself. The
+  // turn's user prompt already arrives via `existingRecords`.
+  for (const row of residualEvents) {
     const record = buildQoderHookRecord(row, { agentId, runtimeConfig, turnId });
     if (record) existingRecords.push(record);
   }
