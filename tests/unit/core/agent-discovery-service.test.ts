@@ -430,6 +430,38 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
 
+    it('still reaches the threshold when unavailable-debounce polls interleave', async () => {
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const availableFn = vi.fn().mockResolvedValue(true);
+      // High unavailable threshold so the flapping polls take the debounce
+      // branch instead of stopping the entry as 'unavailable'.
+      const entry = makeEntry({
+        start: startFn,
+        isAvailable: availableFn,
+        runOnActive: true,
+        unavailableThreshold: 99,
+      });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ reason: string }> = [];
+      svc.on('agent:stopped', (_id: string, reason: string) => stopped.push({ reason }));
+
+      await svc.start();
+      startFn.mockRejectedValue(new Error('start permanently broken'));
+
+      // Availability flaps: a debounce poll between every failing start() must
+      // not wipe the evidence, otherwise the real failure is masked forever.
+      for (let i = 0; i < 3; i++) {
+        availableFn.mockResolvedValue(true);
+        await svc.refresh(`fail-${i}`);
+        availableFn.mockResolvedValue(false);
+        await svc.refresh(`flap-${i}`);
+        vi.setSystemTime(Date.now() + 30_000);
+      }
+
+      expect(stopped).toEqual([{ reason: 'unexpected' }]);
+      await svc.stop();
+    });
+
     it('resets the error counter and window when a poll succeeds between failures', async () => {
       const startFn = vi.fn().mockResolvedValue(undefined);
       const entry = makeEntry({ start: startFn, runOnActive: true });

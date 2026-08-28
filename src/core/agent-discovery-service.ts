@@ -199,6 +199,11 @@ export class AgentDiscoveryService extends EventEmitter {
             this.resetErrorCounter(rt);
             await this.stopEntry(rt, 'unavailable');
           } else {
+            // Deliberately does not reset the lifecycle error counter: this
+            // poll neither started nor stopped the entry, so it proves nothing
+            // about input health. Resetting here would let an entry whose
+            // availability flaps while start() is permanently broken never
+            // reach the threshold, masking the failure forever.
             logger.debug('agent unavailable, debouncing', {
               id: entry.id,
               consecutiveUnavailable: rt.consecutiveUnavailable,
