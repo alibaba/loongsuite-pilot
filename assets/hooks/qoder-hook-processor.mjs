@@ -1318,12 +1318,15 @@ function assignContentToBoundaries(boundaries, contentEvents) {
 /**
  * Split a list of content events into turns.
  * isMeta rows stay on the preceding prompt, same as tool results.
+ * Slash-command control rows are dropped entirely: they neither start a turn
+ * nor contribute content to one.
  */
 export function splitContentEventsIntoTurns(contentEvents) {
   const turns = [];
   let currentTurn = [];
 
   for (const row of contentEvents) {
+    if (isControlUserRow(row)) continue;
     if (isRealUserPrompt(row)) {
       if (currentTurn.length > 0) {
         turns.push(currentTurn);
@@ -1416,6 +1419,18 @@ function cliAttachmentFields(agentType, userRow, allParsed) {
 
 function isRealUserPrompt(row) {
   return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row);
+}
+
+// Slash-command plumbing Qoder CLI writes as type=user: the caveat banner, the
+// command echo, and its stdout/stderr. None of them involves a model call, and
+// only the caveat/stdout rows carry isMeta, so the content envelope is the only
+// reliable signal.
+const CONTROL_ENVELOPE_RE =
+  /^\s*<(?:local-command-caveat|command-message|command-name|local-command-stdout|local-command-stderr)>/;
+
+function isControlUserRow(row) {
+  if (row?.type !== 'user' || isToolResult(row)) return false;
+  return CONTROL_ENVELOPE_RE.test(extractUserText(row));
 }
 
 function extractUserText(row) {
