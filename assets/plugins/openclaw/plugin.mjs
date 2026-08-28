@@ -28,6 +28,10 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from "../shared/resource-context.mjs";
 
 const AGENT_TYPE = "openclaw";
 const PLUGIN_ID = "loongsuite-pilot-openclaw";
@@ -38,6 +42,16 @@ const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
 const MIN_OPENCLAW_VERSION = "2026.5.12";
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
+  agentId: AGENT_TYPE,
+  fieldMap: {
+    AGENTTEAMS_WORKER_NAME: "agentteams.worker.name",
+  },
+});
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ---------------------------------------------------------------------------
 // Caller-supplied span attributes (inlined mirror of resource-context.mjs)
@@ -498,6 +512,8 @@ function buildCommonFields(run, sessionId, userId) {
     "user.id": userId,
     ...(agentCwd ? { "agent.openclaw.cwd": agentCwd } : {}),
     ...SPAN_ATTRIBUTES,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
   if (run) {
     base.trace_id = run.traceId;
