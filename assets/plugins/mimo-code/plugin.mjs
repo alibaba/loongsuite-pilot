@@ -175,6 +175,9 @@ function resolveUserId(cfg) {
 // ---------------------------------------------------------------------------
 
 let _logDirReady = false;
+// MiMo passes the project directory at server initialization. Individual
+// message.updated events can provide a more precise per-session path.
+let agentCwd;
 
 function writeRecord(record) {
   try {
@@ -227,6 +230,7 @@ function getSession(sessionID) {
       stepStartTimeMs: null,
       stepFinishData: null,
       stepEmittedResponse: false,
+      cwd: agentCwd,
     };
     sessions.set(sessionID, s);
     if (sessions.size > MAX_SESSIONS) {
@@ -256,6 +260,7 @@ function clearSession(sessionID) {
 
 function buildCommonFields(sessionID, session, userId) {
   const turn = session.currentTurn;
+  const cwd = session.cwd || agentCwd;
   return {
     time_unix_nano: nowNanos(),
     "event.id": crypto.randomUUID(),
@@ -266,6 +271,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": session.agentMeta?.name || AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.id || undefined,
+    ...(cwd ? { [`agent.${AGENT_TYPE}.cwd`]: cwd } : {}),
     // ARMS GenAI semconv: every span should carry gen_ai.framework so CMS can
     // route the trace to the right pipeline. The OTLP trace flusher also sets
     // it as a resource attribute, but mirroring it here on every record keeps
@@ -438,6 +444,13 @@ function handleChatMessage(inp, out, userId) {
   if (!sessionID) return;
 
   const session = getSession(sessionID);
+  session.cwd = selectCwd(
+    out?.message?.path?.cwd,
+    inp?.directory,
+    inp?.cwd,
+    session.cwd,
+    agentCwd,
+  );
 
   const msg = out?.message;
   const userMessageID = msg?.id || inp.messageID;
@@ -757,6 +770,7 @@ function handleMessageUpdated(props, userId) {
   if (!sessionID) return;
 
   const session = getSession(sessionID);
+  session.cwd = selectCwd(info.path?.cwd, session.cwd, agentCwd);
 
   // User message: turn boundary. This is the fallback path when the
   // chat.message hook did not fire (e.g. --pure mode). When chat.message
@@ -1062,6 +1076,13 @@ function safe(fn) {
   };
 }
 
+function selectCwd(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry point
 // ---------------------------------------------------------------------------
@@ -1071,6 +1092,8 @@ export default {
 
   server: async (input, _options) => {
     ensureDir(logDir());
+
+    agentCwd = selectCwd(input?.directory, input?.cwd, process.cwd());
 
     const cfg = loadPilotConfig();
     const userId = resolveUserId(cfg);

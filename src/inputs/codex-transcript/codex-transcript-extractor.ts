@@ -1,5 +1,11 @@
 import * as path from 'node:path';
-import type { JsonValue } from '../../types/index.js';
+import { MAX_MULTIMODAL_PARTS, type BlobToUriFn } from '../../multimodal/types.js';
+import {
+  multimodalUploadIncludesInput,
+  multimodalUploadIncludesTool,
+  type JsonValue,
+  type MultimodalUploadMode,
+} from '../../types/index.js';
 import type {
   CodexPartialTurnExtraction,
   CodexExtractedTranscriptTurn,
@@ -23,6 +29,12 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const subagent = asRecord(source?.subagent);
   const threadSpawn = asRecord(subagent?.thread_spawn);
   const parentThreadId = stringValue(threadSpawn?.parent_thread_id);
+  // First-party fork/resume lineage marker written at the top-level of the
+  // session_meta payload. Present for both subagent spawns and Desktop
+  // resume/fork, and is the most reliable trigger for "this file begins with a
+  // copied ancestor-history prefix". Subagent copies also expose
+  // parent_thread_id via thread_spawn; user resume/fork exposes only this.
+  const forkedFromId = stringValue(payload.forked_from_id);
   const agentPath = stringValue(threadSpawn?.agent_path);
   const agentNickname = stringValue(threadSpawn?.agent_nickname);
   const agentRole = stringValue(threadSpawn?.agent_role);
@@ -46,6 +58,7 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
     rootSessionId: stringValue(payload.session_id) ?? threadId,
     threadSource,
     ...(parentThreadId ? { parentThreadId } : {}),
+    ...(forkedFromId ? { forkedFromId } : {}),
     depth,
     ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
     ...(agentPath ? { agentPath } : {}),
@@ -62,9 +75,15 @@ export function extractCodexTerminalTurn(
   meta: CodexTranscriptMeta | null,
   fallbackSessionId: string,
   expectedTurnId: string,
+  opts: {
+    blobToUri?: BlobToUriFn;
+    uploadMode?: MultimodalUploadMode;
+  } = {},
 ): CodexExtractedTranscriptTurn | null {
   return extractCodexTurn(toSourceRecords(records), meta, fallbackSessionId, expectedTurnId, {
     requireTerminal: true,
+    blobToUri: opts.blobToUri,
+    uploadMode: opts.uploadMode,
   })?.turn ?? null;
 }
 
@@ -75,17 +94,25 @@ export function extractCodexPartialTurn(
   expectedTurnId: string,
   opts: {
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
+    blobToUri?: BlobToUriFn;
+    uploadMode?: MultimodalUploadMode;
   } = {},
 ): CodexExtractedTranscriptTurn | null {
   return extractCodexTurn(toSourceRecords(records), meta, fallbackSessionId, expectedTurnId, {
     requireTerminal: false,
     startedAtMs: opts.startedAtMs,
+    nextStepStartedAtMs: opts.nextStepStartedAtMs,
+    lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
+    blobToUri: opts.blobToUri,
+    uploadMode: opts.uploadMode,
   })?.turn ?? null;
 }
 
@@ -96,17 +123,25 @@ export function extractCodexPartialTurnWithBoundaries(
   expectedTurnId: string,
   opts: {
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
+    blobToUri?: BlobToUriFn;
+    uploadMode?: MultimodalUploadMode;
   } = {},
 ): CodexPartialTurnExtraction | null {
   return extractCodexTurn(records, meta, fallbackSessionId, expectedTurnId, {
     requireTerminal: false,
     startedAtMs: opts.startedAtMs,
+    nextStepStartedAtMs: opts.nextStepStartedAtMs,
+    lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
+    blobToUri: opts.blobToUri,
+    uploadMode: opts.uploadMode,
   });
 }
 
@@ -115,6 +150,7 @@ interface StepEnvelope {
   sourceRange: CodexTranscriptSourceRange;
   llmClosed: boolean;
   followedByAnotherWave: boolean;
+  lastCumulativeTokenTotal?: number;
 }
 
 function extractCodexTurn(
@@ -124,7 +160,11 @@ function extractCodexTurn(
   expectedTurnId: string,
   opts: {
     requireTerminal: boolean;
+    blobToUri?: BlobToUriFn;
+    uploadMode?: MultimodalUploadMode;
     startedAtMs?: number;
+    nextStepStartedAtMs?: number;
+    lastCumulativeTokenTotal?: number;
     model?: string;
     cwd?: string;
     developerInstructions?: string;
@@ -140,6 +180,9 @@ function extractCodexTurn(
   let model = opts.model ?? 'unknown';
   let cwd = opts.cwd;
   let developerInstructions = opts.developerInstructions;
+  const blobToUri = opts.blobToUri;
+  // Default both when blobToUri is set without mode.
+  const uploadMode = opts.uploadMode ?? (blobToUri ? 'both' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
@@ -150,7 +193,8 @@ function extractCodexTurn(
   const webSearchEnds = new Map<string, number>();
   let currentStep: StepEnvelope | null = null;
   let lastUsage: CodexTranscriptUsage | undefined;
-  let lastActivityAtMs = 0;
+  let lastActivityAtMs = opts.nextStepStartedAtMs ?? 0;
+  let lastCumulativeTokenTotal = opts.lastCumulativeTokenTotal;
 
   const beginStep = (timestamp: number, source: CodexTranscriptSourceRecord): StepEnvelope => {
     if (!currentStep) {
@@ -189,6 +233,7 @@ function extractCodexTurn(
     if (!currentStep) return;
     const step = currentStep.step;
     if (force || step.reasoning.length > 0 || step.tools.length > 0 || step.finalText) {
+      currentStep.lastCumulativeTokenTotal = lastCumulativeTokenTotal;
       stepEnvelopes.push(currentStep);
     }
     currentStep = null;
@@ -290,19 +335,39 @@ function extractCodexTurn(
       if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
         if (!usage) continue;
+        const cumulativeTokenTotal = extractCumulativeTokenTotal(payload.info);
+        const repeatedSnapshot = cumulativeTokenTotal !== undefined
+          && lastCumulativeTokenTotal !== undefined
+          && cumulativeTokenTotal === lastCumulativeTokenTotal;
         const envelope = activeStep();
         if (envelope?.step.hasResponseEvidence) {
+          if (repeatedSnapshot) {
+            // A repeated cumulative total reports no new accounting for this wave, so it
+            // is not an authoritative close. Keep the wave open: closing here would
+            // strand the next fresh sample in unmatchedTokenUsages and emit 0 for a wave
+            // that really did consume tokens.
+            envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
+            touchStep(envelope, source);
+            lastUsage = usage;
+            markActivity(timestamp);
+            continue;
+          }
           envelope.step.tokenUsage = usage;
           envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
           envelope.llmClosed = true;
           touchStep(envelope, source);
           lastUsage = usage;
+          if (cumulativeTokenTotal !== undefined) lastCumulativeTokenTotal = cumulativeTokenTotal;
           markActivity(timestamp);
           flushCurrentStep();
-        } else if (!sameUsage(lastUsage, usage)) {
-          // Do not shift an unanchored sample onto a later response wave.
-          unmatchedTokenUsages.push(usage);
+        } else {
+          if (!repeatedSnapshot && !sameUsage(lastUsage, usage)) {
+            // Do not shift an unanchored sample onto a later response wave.
+            unmatchedTokenUsages.push(usage);
+          }
           lastUsage = usage;
+          if (cumulativeTokenTotal !== undefined) lastCumulativeTokenTotal = cumulativeTokenTotal;
+          markActivity(timestamp);
         }
         continue;
       }
@@ -339,7 +404,7 @@ function extractCodexTurn(
         const message = transcriptInputMessage('user', payload.content);
         if (message) {
           inputMessages.push(message);
-          appendPrompt(message.parts[0]?.content);
+          appendPrompt(extractMessageText(payload.content));
           sawSubmittedUserMessage = true;
           markActivity(timestamp);
         }
@@ -362,10 +427,19 @@ function extractCodexTurn(
           step.reasoning.push(message);
         }
       } else if (role) {
-        const message = transcriptInputMessage(role, payload.content);
+        // Input entry: user / non-assistant roles → gen_ai.input.messages
+        const message = transcriptInputMessage(
+          role,
+          payload.content,
+          multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
+          timestamp,
+          source.startOffset,
+        );
         if (message) {
           inputMessages.push(message);
-          if (role === 'user') appendPrompt(message.parts[0]?.content);
+          if (role === 'user') {
+            appendPrompt(extractMessageText(payload.content));
+          }
         }
         markActivity(timestamp);
       }
@@ -414,7 +488,14 @@ function extractCodexTurn(
       continue;
     }
 
-    const toolOutput = transcriptToolOutput(itemType, payload);
+    // tool result → gen_ai.tool.call.result
+    const toolOutput = transcriptToolOutput(
+      itemType,
+      payload,
+      multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
+      timestamp,
+      source.startOffset,
+    );
     if (!toolOutput) continue;
     const envelope = toolSteps.get(toolOutput.callId);
     if (!envelope) continue;
@@ -488,11 +569,16 @@ function extractCodexTurn(
   const committedEnvelopes = sawTerminal
     ? stepEnvelopes
     : leadingIncrementallyCommittableSteps(stepEnvelopes);
+  const committedTail = committedEnvelopes.at(-1);
   return {
     turn,
     committedStepCount: committedEnvelopes.length,
     committedStepRanges: committedEnvelopes.map(envelope => ({ ...envelope.sourceRange })),
-    consumedEndOffset: committedEnvelopes.at(-1)?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+    consumedEndOffset: committedTail?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+    ...(committedTail ? { nextStepStartedAtMs: committedTail.step.completedAtMs } : {}),
+    ...(committedTail?.lastCumulativeTokenTotal !== undefined
+      ? { lastCumulativeTokenTotal: committedTail.lastCumulativeTokenTotal }
+      : {}),
   };
 }
 
@@ -557,6 +643,9 @@ function transcriptToolCall(
 function transcriptToolOutput(
   itemType: string | undefined,
   payload: Record<string, unknown>,
+  blobToUri: BlobToUriFn | undefined,
+  timestampMs: number,
+  recordOffset?: number,
 ): { callId: string; output?: JsonValue } | null {
   if (itemType !== 'function_call_output' && itemType !== 'custom_tool_call_output' && itemType !== 'tool_search_output') return null;
   const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
@@ -570,6 +659,11 @@ function transcriptToolOutput(
         ...(payload.tools !== undefined ? { tools: parseMaybeJson(payload.tools) } : {}),
       }),
     };
+  }
+  // Tool results may include input_image parts.
+  if (Array.isArray(payload.output)) {
+    const parts = extractMessageParts(payload.output, blobToUri, timestampMs, recordOffset);
+    return { callId, output: parts as unknown as JsonValue };
   }
   return { callId, output: toJsonValue(parseMaybeJson(payload.output)) };
 }
@@ -589,9 +683,118 @@ function normalizeToolInput(name: string, value: unknown): JsonValue | undefined
   return input;
 }
 
-function transcriptInputMessage(role: string, content: unknown): { role: string; parts: Array<{ type: 'text'; content: string }> } | null {
-  const text = extractMessageText(content);
-  return text ? { role, parts: [{ type: 'text', content: text }] } : null;
+type TranscriptMessagePart =
+  | { type: 'text'; content: string }
+  | { type: 'uri'; mime_type: string; modality: 'image'; uri: string };
+
+/** Codex content blocks → GenAI parts (text + uri). */
+function transcriptInputMessage(
+  role: string,
+  content: unknown,
+  blobToUri?: BlobToUriFn,
+  timestampMs = 0,
+  recordOffset?: number,
+): { role: string; parts: TranscriptMessagePart[] } | null {
+  const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
+  return parts.length > 0 ? { role, parts } : null;
+}
+
+function extractMessageParts(
+  content: unknown,
+  blobToUri: BlobToUriFn | undefined,
+  timestampMs: number,
+  recordOffset?: number,
+): TranscriptMessagePart[] {
+  if (typeof content === 'string' && content) {
+    return [{ type: 'text', content }];
+  }
+  if (!Array.isArray(content)) return [];
+
+  const parts: TranscriptMessagePart[] = [];
+  let multimodalCount = 0;
+  let hasUriPart = false;
+  for (let partIndex = 0; partIndex < content.length; partIndex++) {
+    const item = content[partIndex];
+    if (typeof item === 'string' && item) {
+      parts.push({ type: 'text', content: item });
+      continue;
+    }
+    const record = asRecord(item);
+    if (!record) continue;
+    const type = stringValue(record.type);
+
+    if (type === 'input_text' || type === 'text' || type === 'output_text') {
+      const text = stringValue(record.text);
+      if (text) parts.push({ type: 'text', content: text });
+      continue;
+    }
+
+    if (type === 'input_image') {
+      if (!blobToUri) continue;
+      if (multimodalCount >= MAX_MULTIMODAL_PARTS) continue;
+      // Only inline data URLs (Codex persists images as base64).
+      // Local paths / remote URLs are intentionally ignored — never emit file://.
+      const url = stringValue(record.image_url) ?? stringValue(record.url) ?? '';
+      const dataMatch = url.match(/^data:([^;]+);base64,(.+)$/s);
+      if (!dataMatch?.[2]) continue;
+      const result = blobToUri({
+        content: dataMatch[2],
+        mime_type: dataMatch[1] || 'image/unknown',
+        modality: 'image',
+        time_unix_ms: Math.max(0, timestampMs),
+        ...(typeof recordOffset === 'number' ? { reuseKey: `${recordOffset}:${partIndex}` } : {}),
+      });
+      if (!result) continue;
+      multimodalCount++;
+      hasUriPart = true;
+      parts.push({
+        type: 'uri',
+        mime_type: result.mime_type,
+        modality: 'image',
+        uri: result.uri,
+      });
+    }
+  }
+  return hasUriPart ? collapseCodexImageWrappers(parts) : parts;
+}
+
+/**
+ * Codex wraps each inline image as three content blocks:
+ *   input_text `<image …>` + input_image + input_text `</image>`
+ * After uri conversion, drop only that exact wrapper pair and keep the uri.
+ * Non-matching text (user prompt, files-mentioned, malformed wrappers) is left alone.
+ */
+function collapseCodexImageWrappers(parts: TranscriptMessagePart[]): TranscriptMessagePart[] {
+  const out: TranscriptMessagePart[] = [];
+  let i = 0;
+  while (i < parts.length) {
+    const open = parts[i];
+    const mid = parts[i + 1];
+    const close = parts[i + 2];
+    if (
+      open?.type === 'text'
+      && mid?.type === 'uri'
+      && mid.modality === 'image'
+      && close?.type === 'text'
+      && isCodexImageOpenTag(open.content)
+      && isCodexImageCloseTag(close.content)
+    ) {
+      out.push(mid);
+      i += 3;
+      continue;
+    }
+    out.push(open);
+    i += 1;
+  }
+  return out;
+}
+
+function isCodexImageOpenTag(text: string): boolean {
+  return /^<image\b[^>]*>\s*$/.test(text.trim());
+}
+
+function isCodexImageCloseTag(text: string): boolean {
+  return /^<\/image>\s*$/.test(text.trim());
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -615,6 +818,8 @@ function extractMessageText(content: unknown): string | undefined {
   const parts = content.flatMap(item => {
     if (typeof item === 'string') return [item];
     const record = asRecord(item);
+    const type = stringValue(record?.type);
+    if (type === 'input_image' || type === 'image_url') return [];
     return stringValue(record?.text) ? [stringValue(record?.text)!] : [];
   });
   return parts.length > 0 ? parts.join('\n') : undefined;
@@ -665,6 +870,12 @@ function extractLastTokenUsage(value: unknown): CodexTranscriptUsage | undefined
     totalTokens: totalTokens && totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
   };
+}
+
+function extractCumulativeTokenTotal(value: unknown): number | undefined {
+  const info = asRecord(value);
+  const totalUsage = asRecord(info?.total_token_usage);
+  return numberValue(totalUsage?.total_tokens);
 }
 
 function numberValue(value: unknown): number | undefined {

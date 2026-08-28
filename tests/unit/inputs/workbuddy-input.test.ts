@@ -116,13 +116,15 @@ describe('WorkBuddy audit-event builder', () => {
     expect(responses[0]['agent.workbuddy.usage.credit']).toBe(0.5);
     expect((responses[0]['gen_ai.output.messages'] as any)[0].parts.map((part: any) => part.type))
       .toEqual(['reasoning', 'text', 'tool_call', 'tool_call']);
-    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(2);
+    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(3);
     expect((requests[1]['gen_ai.input.messages_delta'] as any[]).map(message => message.role))
-      .toEqual(['tool', 'tool']);
-    expect((requests[1]['gen_ai.input.messages_delta'] as any[])
-      .map(message => message.parts[0].id))
+      .toEqual(['assistant', 'tool', 'tool']);
+    const assistantCallParts = (requests[1]['gen_ai.input.messages_delta'] as any[])
+      .find(message => message.role === 'assistant').parts;
+    expect(assistantCallParts.map((part: any) => part.id))
       .toEqual(['call-synthetic-a', 'call-synthetic-b']);
     const toolResponseParts = (requests[1]['gen_ai.input.messages_delta'] as any[])
+      .filter(message => message.role === 'tool')
       .map(message => message.parts[0]);
     expect(toolResponseParts.map(part => part.response)).toEqual([
       { ok: true, value: 'SYNTHETIC_RESULT_A' },
@@ -284,8 +286,9 @@ describe('WorkBuddy audit-event builder', () => {
     const nextRequest = entries.find(entry =>
       entry['event.name'] === 'llm.request'
       && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
-    expect((nextRequest?.['gen_ai.input.messages_delta'] as any[]))
-      .toHaveLength(1);
+    const nextDelta = nextRequest?.['gen_ai.input.messages_delta'] as any[];
+    expect(nextDelta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(nextDelta[0].parts.map((part: any) => part.id)).toEqual(['call-synthetic-b']);
   });
 
   it('emits a standard null tool response when WorkBuddy has no usable output', async () => {
@@ -298,7 +301,7 @@ describe('WorkBuddy audit-event builder', () => {
       entry['event.name'] === 'llm.request'
       && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
     const responsePart = (nextRequest?.['gen_ai.input.messages_delta'] as any[])
-      .find(message => message.parts[0].id === 'call-synthetic-a')
+      .find(message => message.role === 'tool' && message.parts[0].id === 'call-synthetic-a')
       ?.parts[0];
 
     expect(responsePart).toEqual({
@@ -502,9 +505,16 @@ describe('WorkBuddy audit-event builder', () => {
       expect(toolDurations).toEqual([100_000_000n, 0n]);
 
       const secondInput = JSON.parse(String(llmSpans[1].attributes['gen_ai.input.messages']));
+      expect(secondInput.map((message: any) => message.role)).toEqual([
+        'user', 'assistant', 'tool', 'tool',
+      ]);
+      const assistantCallIds = secondInput
+        .find((message: any) => message.role === 'assistant').parts
+        .map((part: any) => part.id);
       const responseParts = secondInput
         .filter((message: any) => message.role === 'tool')
         .flatMap((message: any) => message.parts);
+      expect(responseParts.map((part: any) => part.id)).toEqual(assistantCallIds);
       expect(responseParts.map((part: any) => part.response)).toEqual([
         { ok: true, value: 'SYNTHETIC_RESULT_A' },
         { ok: true, value: 'SYNTHETIC_RESULT_B' },

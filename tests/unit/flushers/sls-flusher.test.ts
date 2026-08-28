@@ -236,6 +236,35 @@ describe('SlsFlusher', () => {
     });
   });
 
+  describe('endpoint counters follow the flush outcome', () => {
+    it('counts a written batch as bytes out', async () => {
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(2);
+      expect(counter.outBytes).toBeGreaterThan(0);
+      expect(counter.outFailed).toBe(0);
+    });
+
+    it('bills a failed batch as failed, not as bytes out', async () => {
+      // The send path persists and returns normally, so only the outcome tells the
+      // counters this batch never landed. Non-retryable, so no backoff to advance.
+      mockPostLogStoreLogs.mockRejectedValue(new Error('invalid request'));
+
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(0);
+      expect(counter.outBytes).toBe(0);
+      expect(counter.outFailed).toBe(2);
+      expect(counter.lastFlushTime).toBe('');
+    });
+  });
+
   describe('shutdown (T016)', () => {
     it('stops timer and executes final flush', async () => {
       await flusher.start();

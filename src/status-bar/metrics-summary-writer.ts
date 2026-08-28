@@ -159,12 +159,17 @@ export class MetricsSummaryWriter {
   private readonly currentDayStatePath: string;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
-  private isRefreshing = false;
+  private refreshPromise: Promise<void> | null = null;
+  private stopped = false;
 
-  constructor(dataDir: string, config: StatusBarConfig) {
+  constructor(
+    dataDir: string,
+    config: StatusBarConfig,
+    outputDir: string = path.join(dataDir, 'logs', 'output'),
+  ) {
     this.dataDir = dataDir;
     this.config = config;
-    this.outputDir = path.join(dataDir, 'logs', 'output');
+    this.outputDir = outputDir;
     this.summaryPath = path.join(dataDir, 'logs', 'metrics-summary.json');
     this.digestPath = path.join(dataDir, 'cache', 'metrics-daily-digest.json');
     this.scanStatePath = path.join(dataDir, 'cache', 'metrics-scan-state.json');
@@ -172,11 +177,7 @@ export class MetricsSummaryWriter {
   }
 
   start(): void {
-    if (!this.config.enabled) {
-      logger.info('metrics summary writer disabled');
-      return;
-    }
-
+    this.stopped = false;
     this.startupTimer = setTimeout(() => {
       this.startupTimer = null;
       void this.refresh();
@@ -188,10 +189,12 @@ export class MetricsSummaryWriter {
 
     logger.info('metrics summary writer scheduled', {
       intervalMs: this.config.metricsSummaryIntervalMs,
+      outputDir: this.outputDir,
     });
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.startupTimer) {
       clearTimeout(this.startupTimer);
       this.startupTimer = null;
@@ -200,19 +203,21 @@ export class MetricsSummaryWriter {
       clearInterval(this.intervalTimer);
       this.intervalTimer = null;
     }
+    await this.refreshPromise;
     logger.info('metrics summary writer stopped');
   }
 
   async refresh(): Promise<void> {
-    if (this.isRefreshing) return;
-    this.isRefreshing = true;
-    try {
-      await this.aggregate();
-    } catch (err) {
-      logger.warn('metrics summary refresh failed', { error: String(err) });
-    } finally {
-      this.isRefreshing = false;
-    }
+    if (this.stopped) return;
+    if (this.refreshPromise) return this.refreshPromise;
+    this.refreshPromise = this.aggregate()
+      .catch(err => {
+        logger.warn('metrics summary refresh failed', { error: String(err) });
+      })
+      .finally(() => {
+        this.refreshPromise = null;
+      });
+    return this.refreshPromise;
   }
 
   private async aggregate(): Promise<void> {

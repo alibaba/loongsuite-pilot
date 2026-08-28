@@ -23,6 +23,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
+  "dashboard": { "port": 8765 },
   "serviceName": "my-agent-service"
 }
 ```
@@ -34,6 +35,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
+| `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
 | `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
 
@@ -69,11 +71,66 @@ SLS destinations may use WebTracking, AK/SK, or API Key mode. API Key mode store
 
 Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same SLS destination. Use [SLS Output](sls-output.md) for full mode examples.
 
+## Multimodal Object Storage
+
+When Pilot should convert inline images in agent messages from base64 into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; see [Multimodal Collection](multimodal.md).
+
+### OSS
+
+```json
+{
+  "multimodal": {
+    "uploader": "oss",
+    "storageBasePath": "oss://your-bucket/pilot-mm",
+    "oss": {
+      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| Setting | Description |
+|---------|-------------|
+| `multimodal.uploader` | `oss` or `sls`. |
+| `multimodal.storageBasePath` | Required for OSS; must start with `oss://`, for example `oss://bucket/prefix`. |
+| `multimodal.oss.endpoint` | Standard regional endpoint (accelerate endpoints are not supported). |
+| `multimodal.oss.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
+
+### SLS PutObject
+
+SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flusher block. `storageBasePath` is derived as `sls://{project}/{logstore}` and does not need to be set by hand.
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| Setting | Description |
+|---------|-------------|
+| `multimodal.sls.endpoint` | SLS endpoint. |
+| `multimodal.sls.project` | SLS project. |
+| `multimodal.sls.logstore` | Logstore used for multimodal objects; defaults to `logstore-multimodal`. |
+| `multimodal.sls.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
+
+If global multimodal config is missing or invalid, Pilot fails open: text collection continues, and blob→uri conversion is skipped.
+
 ## Configuration Topics
 
 | Task | Guide |
 |------|-------|
-| Choose which agents to collect and whether message content is captured | [Agent Configuration](agents.md) |
+| Choose which agents to collect and whether message content / multimodal capture runs | [Agent Configuration](agents.md), [Multimodal Collection](multimodal.md) |
 | Write normalized events to local JSONL files | [Local JSONL Output](local-jsonl-output.md) |
 | Report logs to Alibaba Cloud SLS | [SLS Output](sls-output.md) |
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |

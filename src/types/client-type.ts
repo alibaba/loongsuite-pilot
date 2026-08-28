@@ -41,11 +41,13 @@ export enum ClientType {
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
+  GrokBuildHook = 'grok-build',
   OpenCode = 'opencode',
   ZCode = 'zcode',
   MimoCode = 'mimo-code',
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
+  Dsh = 'dsh',
 
 }
 

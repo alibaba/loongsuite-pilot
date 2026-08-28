@@ -330,6 +330,39 @@ describe('Updater', () => {
       );
     });
 
+    it('runs the staged package postinstall, pointed at this install data dir', async () => {
+      // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
+      // plugins}, so this call is also how an install broken by the Windows fs.cpSync
+      // fail-fast heals itself -- the trees get rebuilt on the next auto-upgrade with no
+      // reinstall. Nothing else covered it: the other deploy tests stub it absent, so
+      // deleting the call left every test green.
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      const call = mockExecFile.mock.calls.find((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(call, 'postinstall.js was never executed').toBeTruthy();
+      // The NEW package's copy, run out of the staging dir: the point is to install the
+      // assets that shipped with the version being activated.
+      expect(String((call![1] as string[])[0])).toContain('.candidate');
+      // And told which tree to fill. Unset, postinstall falls back to
+      // $HOME/.loongsuite-pilot, which is the wrong one for a custom data dir.
+      const env = (call![2] as { env?: Record<string, string> }).env ?? {};
+      expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
+    });
+
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
       const expOs = process.platform === 'win32' ? 'win' : process.platform;
       const expArch = process.arch;
@@ -782,7 +815,7 @@ describe('Updater', () => {
       expect(rmCalls.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('does not start monitor when monitor was not already running', async () => {
+    it('restarts only the collector because the dashboard shares its lifecycle', async () => {
       setupForDownload();
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
@@ -791,35 +824,7 @@ describe('Updater', () => {
         ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
       );
       expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor', 'start']);
-    });
-
-    it('restarts monitor after update when monitor was already running', async () => {
-      setupForDownload();
-      const realKill = process.kill;
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
-        if (pid === 12345 && signal === 0) return true;
-        throw new Error('not running');
-      }) as typeof process.kill);
-      mockFsReadFile.mockImplementation((filePath: string) => {
-        if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
-        if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
-        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
-        return Promise.reject(new Error('ENOENT'));
-      });
-
-      const updater = new Updater(makeConfig(), tmpDir);
-      await updater.check();
-
-      const loongsuitePilotCalls = mockExecFile.mock.calls
-        .filter(([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'))
-        .map(([, args]) => args);
-      expect(loongsuitePilotCalls).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'stop']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'start']);
-
-      killSpy.mockRestore();
-      process.kill = realKill;
+      expect(loongsuitePilotCalls.map(([, args]) => args).flat()).not.toContain('monitor');
     });
   });
 

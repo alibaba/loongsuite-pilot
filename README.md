@@ -9,7 +9,7 @@ LoongSuite Pilot is a local telemetry collector for AI coding agents. It discove
 <p align="center">
   <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot local dashboard" width="880">
   <br>
-  <em>Local dashboard — multi-agent collection status, token usage, and reporting health at a glance.</em>
+  <em>Built-in local dashboard — multi-agent token usage, sessions, requests, tools, models, providers, and repository activity at a glance.</em>
 </p>
 
 ## Why LoongSuite Pilot?
@@ -34,7 +34,7 @@ Pilot is designed to answer practical questions:
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
 | Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
-| Local operations         | Provides service status, restart, rollback, and optional local dashboard commands. |
+| Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
 ## Supported Agents
@@ -46,6 +46,8 @@ Pilot is designed to answer practical questions:
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
+| DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
+| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
@@ -59,10 +61,16 @@ Pilot is designed to answer practical questions:
 | Qoder Work    | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 
 OpenClaw integration requires OpenClaw 2026.5.12 or later.
+
+DeepSeek Harness (`dsh`) loads Pilot's observability plugin from its user-level
+`cordis.patch.yml`. The integration captures native LLM, reasoning, tool, token,
+and time-to-first-token events. See [Agent Configuration](docs/agents.md#deepseek-harness-collection-and-lifecycle)
+for activation, source-log, disable, and uninstall behavior.
 
 ### Documented Windows Agent Support
 
@@ -144,7 +152,8 @@ Link collected agent spans to an **upstream** trace so each turn's span tree rep
 | Setting | Values | Default |
 | ------- | ------ | ------- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate the first-turn upstream context to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
 
 When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
@@ -152,7 +161,7 @@ When enabled, the upstream `traceparent` reaches Pilot via one of two schemes an
 - **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
 - **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
 
-For Claude Code, enabling both upstream linking and `propagateToTools` also passes the first turn's context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. The downstream CLI must read these environment variables and configure its own trace exporter. This initial scope is fail-open and does not cover subagents, PowerShell, MCP tools, later turns, or resumed sessions with a newly supplied context.
+For Claude Code, enabling both `upstreamLink.enabled` and `propagateToTools` passes context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. Optionally enable `generateTraceWhenMissing` so turns without upstream context generate and propagate a local trace. Set `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` on the Claude Code process to have Pilot map it to standard `OTEL_RESOURCE_ATTRIBUTES` for the downstream CLI. Prefer `config.json` for the three `upstreamLink` switches: environment variables affect only processes that inherit them, and `loongsuite-pilot restart` alone does not change an already-running Claude Code hook environment. The downstream CLI must extract Trace Context and configure its own exporter. This capability is fail-open and currently does not cover ACP-only downstream trace propagation, subagents, PowerShell, MCP tools, or non-Bash tools.
 
 
 ## Output Data
@@ -182,13 +191,9 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-Optional local dashboard:
-
-```bash
-loongsuite-pilot monitor start
-```
-
-Then open `http://127.0.0.1:8765/`.
+The local dashboard starts and stops with the collector. Open
+`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
+collector-owned `logs/metrics-summary.json` file directly.
 
 macOS menu bar app:
 

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from './base-input.js';
@@ -73,7 +74,22 @@ export abstract class BaseSessionInput extends BaseInput {
     }
     if (stat.size <= offset) return [];
 
-    const handle = await fs.open(filePath, 'r');
+    let handle: FileHandle;
+    try {
+      handle = await fs.open(filePath, 'r');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return []; // rotated away between discovery and open
+      if (code === 'EACCES' || code === 'EPERM') {
+        // Almost always an ownership mismatch: a process running as a different
+        // uid (commonly root) loaded the plugin and wrote this file 0600. One
+        // unreadable file must not abort the whole cycle — diagnose it once and
+        // keep collecting the remaining files.
+        await this.diagnoseUnreadablePath(filePath, 'event file');
+        return [];
+      }
+      throw err;
+    }
     try {
       const buf = Buffer.alloc(stat.size - offset);
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);

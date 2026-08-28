@@ -5,6 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../../assets/hooks/shared/resource-context.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/claude-code-hook-processor.mjs');
@@ -182,19 +186,59 @@ function parentTranscriptWithBackgroundAgents(sessionId, agents) {
   ]);
 }
 
-function enableToolPropagation() {
+function enableToolPropagation({ generateTraceWhenMissing = false } = {}) {
   fs.writeFileSync(
     path.join(DATA_DIR, 'config.json'),
     JSON.stringify({
       upstreamLink: {
         enabled: true,
         propagateToTools: true,
+        generateTraceWhenMissing,
       },
     }),
   );
 }
 
 describe('claude-code-hook-processor v2 端到端', () => {
+  test('accepts invocation-scoped GenAI identity from env', () => {
+    const transcriptPath = writeTranscript('native-session', [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:32.000Z',
+        message: { content: [{ type: 'text', text: 'hello' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:33.000Z',
+        message: {
+          id: 'msg_identity',
+          content: [{ type: 'text', text: 'hi' }],
+          usage: { input_tokens: 10, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    const result = runHook('stop', {
+      session_id: 'native-session',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(result.status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).toBe('native-session');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
+  });
+
   test('PreToolUse 注入 per-tool traceparent，Stop 复用其 span id', () => {
     enableToolPropagation();
     const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
@@ -265,6 +309,81 @@ describe('claude-code-hook-processor v2 端到端', () => {
       tool_input: { command: 'my-cli --again' },
     }, { TRACEPARENT: traceparent });
     expect(later.stdout.trim()).toBe('{}');
+  });
+
+  test('没有上游时按 hook prompt 生成 trace，并在 transcript 缺 promptId 时保持一致', () => {
+    enableToolPropagation({ generateTraceWhenMissing: true });
+    const resourceAttributes = "team=O'Reilly,deployment.environment.name=prod";
+
+    const pre = runHook('pre-tool-use', {
+      session_id: 's-local',
+      prompt_id: 'prompt-local-1',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-local-1',
+      tool_input: { command: 'my-cli --local', timeout: 5000 },
+    }, {
+      LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES: resourceAttributes,
+    });
+
+    expect(pre.status).toBe(0);
+    const updated = JSON.parse(pre.stdout.trim()).hookSpecificOutput.updatedInput;
+    const injected = /TRACEPARENT='00-([0-9a-f]{32})-([0-9a-f]{16})-01'/.exec(updated.command);
+    expect(injected).not.toBeNull();
+    expect(updated.command).toContain(
+      "export OTEL_RESOURCE_ATTRIBUTES='team=O'\\''Reilly,deployment.environment.name=prod'",
+    );
+    const localTraceId = injected[1];
+    const reservedToolSpanId = injected[2];
+
+    const transcriptPath = writeTranscript('s-local', [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'run local cli' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg-local-1', content: [{ type: 'tool_use', id: 'tu-local-1', name: 'Bash', input: { command: 'my-cli --local' } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:49.200Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-local-1', content: 'done' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:52.000Z', message: { id: 'msg-local-2', content: [{ type: 'text', text: 'complete' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
+    ]);
+    const stop = runHook('stop', {
+      session_id: 's-local',
+      prompt_id: 'prompt-local-1',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(stop.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(new Set(records.map((record) => record.trace_id))).toEqual(new Set([localTraceId]));
+    const toolCall = records.find((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.call.id'] === 'tu-local-1');
+    expect(toolCall.span_id).toBe(reservedToolSpanId);
+
+    const later = runHook('pre-tool-use', {
+      session_id: 's-local',
+      prompt_id: 'prompt-local-2',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-local-2',
+      tool_input: { command: 'my-cli --later' },
+    });
+    const laterCommand = JSON.parse(later.stdout.trim()).hookSpecificOutput.updatedInput.command;
+    const laterInjected = /TRACEPARENT='00-([0-9a-f]{32})-([0-9a-f]{16})-01'/.exec(laterCommand);
+    expect(laterInjected).not.toBeNull();
+    expect(laterInjected[1]).not.toBe(localTraceId);
+  });
+
+  test('resource attributes can propagate without upstream or local trace generation', () => {
+    enableToolPropagation();
+    const pre = runHook('pre-tool-use', {
+      session_id: 's-resource-only',
+      prompt_id: 'prompt-resource-only',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-resource-only',
+      tool_input: { command: 'my-cli' },
+    }, {
+      LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES: 'team=infra',
+    });
+
+    const command = JSON.parse(pre.stdout.trim()).hookSpecificOutput.updatedInput.command;
+    expect(command).toContain("export OTEL_RESOURCE_ATTRIBUTES='team=infra'");
+    expect(command).not.toContain('TRACEPARENT');
   });
 
   test('PreToolUse 默认关闭，并跳过子 Agent Bash', () => {

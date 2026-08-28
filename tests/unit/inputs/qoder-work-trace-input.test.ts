@@ -5,7 +5,9 @@ import * as os from 'node:os';
 import { CollectionMethod, ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkTraceInput } from '../../../src/inputs/qoder-work-trace/qoder-work-trace-input.js';
+import { applyQoderWorkStepTiming } from '../../../src/flushers/otlp-trace-flusher.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 describe('QoderWorkTraceInput', () => {
   let tmpRoot: string;
@@ -70,8 +72,8 @@ describe('QoderWorkTraceInput', () => {
   function segTurnStarted(turnId: string, isSubagent = false, ts = '2026-06-16T10:00:00.000Z') {
     return { ts, type: 'turn.started', turn_id: turnId, data: { is_subagent: isSubagent } };
   }
-  function segModelStart(turnId: string, requestId: string, ts: string, model = 'qwork-ultimate') {
-    return { ts, type: 'model.request.started', turn_id: turnId, request_id: requestId, data: { model } };
+  function segModelStart(turnId: string, requestId: string, ts: string, model = 'qwork-ultimate', loopId?: string) {
+    return { ts, type: 'model.request.started', turn_id: turnId, request_id: requestId, loop_id: loopId, data: { model } };
   }
   function segModelEnd(
     turnId: string,
@@ -79,8 +81,19 @@ describe('QoderWorkTraceInput', () => {
     ts: string,
     model = 'qwork-ultimate',
     usage: Record<string, number> = {},
+    loopId?: string,
   ) {
-    return { ts, type: 'model.response.completed', turn_id: turnId, request_id: requestId, data: { model, ...usage } };
+    return { ts, type: 'model.response.completed', turn_id: turnId, request_id: requestId, loop_id: loopId, data: { model, ...usage } };
+  }
+  function segModelAttemptFailed(turnId: string, requestId: string, ts: string, loopId: string) {
+    return {
+      ts,
+      type: 'model.request.attempt_failed',
+      turn_id: turnId,
+      request_id: requestId,
+      loop_id: loopId,
+      data: { attempt_had_payload: false, stream_event_count: 0 },
+    };
   }
   function segToolRequested(turnId: string, toolCallId: string, ts: string, toolName = 'TodoWrite') {
     return { ts, type: 'tool.requested', turn_id: turnId, tool_call_id: toolCallId, data: { tool_name: toolName, args: {} } };
@@ -88,8 +101,30 @@ describe('QoderWorkTraceInput', () => {
   function segToolFinished(turnId: string, toolCallId: string, ts: string, toolName = 'TodoWrite') {
     return { ts, type: 'tool.execution.finished', turn_id: turnId, tool_call_id: toolCallId, data: { tool_name: toolName, status: 'success' } };
   }
+  function segIteration(turnId: string, loopId: string, requestIndex: number, type: 'started' | 'finished', ts: string) {
+    return { ts, type: `loop.iteration.${type}`, turn_id: turnId, loop_id: loopId, data: { request_index: requestIndex } };
+  }
+  function segToolHook(
+    sessionId: string,
+    toolCallId: string,
+    hookEventName: 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure',
+    source: 'runtime' | 'user' | 'plugins',
+    ts: string,
+  ) {
+    return {
+      ts,
+      type: 'hook.started',
+      turn_id: sessionId,
+      tool_call_id: toolCallId,
+      data: { hook_event_name: hookEventName, source },
+    };
+  }
   function nano(iso: string) {
     return String(BigInt(Date.parse(iso)) * 1_000_000n);
+  }
+
+  function toNano(hrTime: [number, number]) {
+    return String(BigInt(hrTime[0]) * 1_000_000_000n + BigInt(hrTime[1]));
   }
 
   function sdkMessageStart(sessionId: string, messageId: string, iso: string) {
@@ -149,6 +184,7 @@ describe('QoderWorkTraceInput', () => {
     expect(entries.length).toBe(1);
     expect(entries[0].trace_id).toBeDefined();
     expect((entries[0].trace_id as string).length).toBe(32);
+    expect(entries[0]['workspace.path']).toBe(TEST_CWD);
   });
 
   it('resumes from offset on second poll', async () => {
@@ -664,6 +700,249 @@ describe('QoderWorkTraceInput', () => {
     expect(s3Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:05.000Z')) * 1_000_000n));
   });
 
+  it('pairs a retried logical LLM by loop_id when request_id changes', async () => {
+    const sessionId = 'sess-retry-loop';
+    const turnId = 'turn-retry-loop';
+    const loopId = `${turnId}:1`;
+    const hookFile = path.join(hookLogDir, todayFileName());
+    await fs.writeFile(hookFile, [
+      buildHookEntry({
+        'event.id': 'retry-req',
+        'event.name': 'llm.request' as any,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+      buildHookEntry({
+        'event.id': 'retry-resp',
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSegments(sessionId, 'retry.jsonl', [
+      segIteration(turnId, loopId, 1, 'started', '2026-08-25T11:33:40.419+08:00'),
+      segModelStart(turnId, 'request-a', '2026-08-25T11:33:40.421+08:00', 'initial-model', loopId),
+      segModelAttemptFailed(turnId, 'request-a', '2026-08-25T11:33:41.722+08:00', loopId),
+      segModelEnd(turnId, 'request-b', '2026-08-25T11:33:57.690+08:00', 'final-model', {
+        input_tokens: 123,
+        output_tokens: 45,
+      }, loopId),
+      segIteration(turnId, loopId, 1, 'finished', '2026-08-25T11:34:01.320+08:00'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const request = entries.find(entry => entry['event.id'] === 'retry-req')!;
+    const response = entries.find(entry => entry['event.id'] === 'retry-resp')!;
+    expect(request.time_unix_nano).toBe(nano('2026-08-25T11:33:40.421+08:00'));
+    expect(request['agent.qoderwork.step.start_time_unix_nano']).toBe(nano('2026-08-25T11:33:40.419+08:00'));
+    expect(request['agent.qoderwork.step.end_time_unix_nano']).toBe(nano('2026-08-25T11:34:01.320+08:00'));
+    expect(response.time_unix_nano).toBe(nano('2026-08-25T11:33:57.690+08:00'));
+    expect(response['gen_ai.response.model']).toBe('final-model');
+    expect(response['gen_ai.usage.input_tokens']).toBe(123);
+    expect(response['gen_ai.usage.output_tokens']).toBe(45);
+  });
+
+  it('keeps ten transcript steps aligned when iterations 1 and 3 change request_id', async () => {
+    const sessionId = 'sess-ten-retry-loops';
+    const turnId = 'turn-ten-retry-loops';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const hookEntries: AgentActivityEntry[] = [];
+    const segmentEvents: object[] = [];
+    const baseMs = Date.parse('2026-08-25T10:00:00.000Z');
+
+    for (let i = 1; i <= 10; i++) {
+      hookEntries.push(
+        buildHookEntry({
+          'event.id': `ten-s${i}-req`,
+          'event.name': 'llm.request' as any,
+          'gen_ai.session.id': sessionId,
+          'gen_ai.turn.id': turnId,
+          'gen_ai.step.id': `${turnId}:s${i}`,
+        }),
+        buildHookEntry({
+          'event.id': `ten-s${i}-resp`,
+          'gen_ai.session.id': sessionId,
+          'gen_ai.turn.id': turnId,
+          'gen_ai.step.id': `${turnId}:s${i}`,
+        }),
+      );
+      const loopId = `${turnId}:${i}`;
+      const start = new Date(baseMs + i * 10_000).toISOString();
+      const end = new Date(baseMs + i * 10_000 + 5_000).toISOString();
+      segmentEvents.push(
+        segIteration(turnId, loopId, i, 'started', new Date(baseMs + i * 10_000 - 1).toISOString()),
+        segModelStart(turnId, `request-${i}-a`, start, `model-${i}`, loopId),
+      );
+      if (i === 1 || i === 3) {
+        segmentEvents.push(segModelAttemptFailed(
+          turnId,
+          `request-${i}-a`,
+          new Date(baseMs + i * 10_000 + 1_000).toISOString(),
+          loopId,
+        ));
+      }
+      segmentEvents.push(
+        segModelEnd(
+          turnId,
+          i === 1 || i === 3 ? `request-${i}-b` : `request-${i}-a`,
+          end,
+          `model-${i}`,
+          {},
+          loopId,
+        ),
+        segIteration(turnId, loopId, i, 'finished', new Date(baseMs + i * 10_000 + 5_001).toISOString()),
+      );
+    }
+    await fs.writeFile(hookFile, hookEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    // Write complete iterations in reverse order to prove requestIndex ordering
+    // and direct sN ↔ :N matching do not depend on file event order.
+    // Iterations without a retry have four records, so use an explicit grouping.
+    const byLoop = new Map<string, object[]>();
+    for (const event of segmentEvents as Array<{ loop_id?: string }>) {
+      const group = byLoop.get(event.loop_id!) ?? [];
+      group.push(event);
+      byLoop.set(event.loop_id!, group);
+    }
+    await writeSegments(sessionId, 'ten.jsonl', [...byLoop.values()].reverse().flat());
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    for (let i = 1; i <= 10; i++) {
+      expect(entries.find(entry => entry['event.id'] === `ten-s${i}-req`)!.time_unix_nano)
+        .toBe(String(BigInt(baseMs + i * 10_000) * 1_000_000n));
+      expect(entries.find(entry => entry['event.id'] === `ten-s${i}-resp`)!.time_unix_nano)
+        .toBe(String(BigInt(baseMs + i * 10_000 + 5_000) * 1_000_000n));
+    }
+  });
+
+  it('does not shift a later indexed pair into an interrupted transcript step', async () => {
+    const sessionId = 'sess-interrupted-loop';
+    const turnId = 'turn-interrupted-loop';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const hookEntries: AgentActivityEntry[] = [];
+    for (let i = 1; i <= 2; i++) {
+      hookEntries.push(
+        buildHookEntry({
+          'event.id': `interrupted-s${i}-req`,
+          'event.name': 'llm.request' as any,
+          'gen_ai.session.id': sessionId,
+          'gen_ai.turn.id': turnId,
+          'gen_ai.step.id': `${turnId}:s${i}`,
+          time_unix_nano: String(1_000_000_000_000_000_000n + BigInt(i)),
+        }),
+        buildHookEntry({
+          'event.id': `interrupted-s${i}-resp`,
+          'gen_ai.session.id': sessionId,
+          'gen_ai.turn.id': turnId,
+          'gen_ai.step.id': `${turnId}:s${i}`,
+          time_unix_nano: String(1_000_000_000_100_000_000n + BigInt(i)),
+        }),
+      );
+    }
+    await fs.writeFile(hookFile, hookEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSegments(sessionId, 'interrupted.jsonl', [
+      segIteration(turnId, `${turnId}:1`, 1, 'started', '2026-06-16T10:00:00.000Z'),
+      segModelStart(turnId, 'interrupted-request', '2026-06-16T10:00:00.001Z', 'model-1', `${turnId}:1`),
+      segIteration(turnId, `${turnId}:2`, 2, 'started', '2026-06-16T10:00:10.000Z'),
+      segModelStart(turnId, 'complete-request', '2026-06-16T10:00:10.001Z', 'model-2', `${turnId}:2`),
+      segModelEnd(turnId, 'complete-request', '2026-06-16T10:00:15.000Z', 'model-2', {}, `${turnId}:2`),
+      segIteration(turnId, `${turnId}:2`, 2, 'finished', '2026-06-16T10:00:15.001Z'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.find(entry => entry['event.id'] === 'interrupted-s1-req')!.time_unix_nano)
+      .toBe('1000000000000000001');
+    expect(entries.find(entry => entry['event.id'] === 'interrupted-s2-req')!.time_unix_nano)
+      .toBe(nano('2026-06-16T10:00:10.001Z'));
+    expect(entries.find(entry => entry['event.id'] === 'interrupted-s2-resp')!.time_unix_nano)
+      .toBe(nano('2026-06-16T10:00:15.000Z'));
+  });
+
+  it('pairs model start and completion across segment files by loop_id', async () => {
+    const sessionId = 'sess-cross-file-loop';
+    const turnId = 'turn-cross-file-loop';
+    const loopId = `${turnId}:1`;
+    const hookFile = path.join(hookLogDir, todayFileName());
+    await fs.writeFile(hookFile, [
+      buildHookEntry({
+        'event.id': 'cross-file-req',
+        'event.name': 'llm.request' as any,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+      buildHookEntry({
+        'event.id': 'cross-file-resp',
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSegments(sessionId, '001.jsonl', [
+      segIteration(turnId, loopId, 1, 'started', '2026-06-16T10:00:00.000Z'),
+      segModelStart(turnId, 'cross-file-a', '2026-06-16T10:00:00.010Z', 'first-model', loopId),
+      segModelAttemptFailed(turnId, 'cross-file-a', '2026-06-16T10:00:01.000Z', loopId),
+    ]);
+    await writeSegments(sessionId, '002.jsonl', [
+      segModelEnd(turnId, 'cross-file-b', '2026-06-16T10:00:05.000Z', 'final-model', {}, loopId),
+      segIteration(turnId, loopId, 1, 'finished', '2026-06-16T10:00:05.010Z'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.find(entry => entry['event.id'] === 'cross-file-req')!.time_unix_nano)
+      .toBe(nano('2026-06-16T10:00:00.010Z'));
+    expect(entries.find(entry => entry['event.id'] === 'cross-file-resp')!['gen_ai.response.model'])
+      .toBe('final-model');
+  });
+
+  it('uses iteration start when a completed loop has no model.request.started', async () => {
+    const sessionId = 'sess-missing-model-start';
+    const turnId = 'turn-missing-model-start';
+    const loopId = `${turnId}:1`;
+    const hookFile = path.join(hookLogDir, todayFileName());
+    await fs.writeFile(hookFile, [
+      buildHookEntry({
+        'event.id': 'missing-start-req',
+        'event.name': 'llm.request' as any,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+      buildHookEntry({
+        'event.id': 'missing-start-resp',
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s1`,
+      }),
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSegments(sessionId, 'missing-start.jsonl', [
+      segIteration(turnId, loopId, 1, 'started', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'completed-only', '2026-06-16T10:00:05.000Z', 'fallback-model', {}, loopId),
+      segIteration(turnId, loopId, 1, 'finished', '2026-06-16T10:00:05.010Z'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.find(entry => entry['event.id'] === 'missing-start-req')!.time_unix_nano)
+      .toBe(nano('2026-06-16T10:00:00.000Z'));
+    expect(entries.find(entry => entry['event.id'] === 'missing-start-resp')!.time_unix_nano)
+      .toBe(nano('2026-06-16T10:00:05.000Z'));
+  });
+
   it('matches segment timing by turn id and uses segment tool timing without consuming background pairs', async () => {
     const sessionId = 'sess-background-pair';
     const turnId = 'prompt-real-turn';
@@ -739,12 +1018,23 @@ describe('QoderWorkTraceInput', () => {
     await writeSegments(sessionId, 'run1.jsonl', [
       segModelStart('qoderwork-memory-sink-fork-qoderwork-memory-sink', 'memory-1', '2026-06-18T09:39:42.866+08:00'),
       segModelEnd('qoderwork-memory-sink-fork-qoderwork-memory-sink', 'memory-1', '2026-06-18T09:39:50.736+08:00'),
-      segModelStart(turnId, 'real-1', '2026-06-18T10:37:43.032+08:00'),
+      segIteration(turnId, `${turnId}:1`, 1, 'started', '2026-06-18T10:37:43.000+08:00'),
+      segModelStart(turnId, 'real-1', '2026-06-18T10:37:43.032+08:00', 'qwork-ultimate', `${turnId}:1`),
       segToolRequested(turnId, toolCallId, '2026-06-18T10:38:05.093+08:00'),
-      segModelEnd(turnId, 'real-1', '2026-06-18T10:38:05.168+08:00'),
+      segModelEnd(turnId, 'real-1', '2026-06-18T10:38:05.168+08:00', 'qwork-ultimate', {}, `${turnId}:1`),
+      // The earlier user/plugin timestamps must not beat the runtime source.
+      segToolHook(sessionId, toolCallId, 'PreToolUse', 'user', '2026-06-18T10:38:05.180+08:00'),
+      segToolHook(sessionId, toolCallId, 'PreToolUse', 'plugins', '2026-06-18T10:38:05.190+08:00'),
+      segToolHook(sessionId, toolCallId, 'PreToolUse', 'runtime', '2026-06-18T10:38:05.200+08:00'),
+      // Without runtime PostToolUse, prefer user over an earlier plugin hook.
+      segToolHook(sessionId, toolCallId, 'PostToolUse', 'plugins', '2026-06-18T10:38:06.400+08:00'),
+      segToolHook(sessionId, toolCallId, 'PostToolUse', 'user', '2026-06-18T10:38:06.500+08:00'),
       segToolFinished(turnId, toolCallId, '2026-06-18T10:38:06.616+08:00'),
-      segModelStart(turnId, 'real-2', '2026-06-18T10:38:06.840+08:00'),
-      segModelEnd(turnId, 'real-2', '2026-06-18T10:38:11.107+08:00'),
+      segIteration(turnId, `${turnId}:1`, 1, 'finished', '2026-06-18T10:38:06.700+08:00'),
+      segIteration(turnId, `${turnId}:2`, 2, 'started', '2026-06-18T10:38:06.800+08:00'),
+      segModelStart(turnId, 'real-2', '2026-06-18T10:38:06.840+08:00', 'qwork-ultimate', `${turnId}:2`),
+      segModelEnd(turnId, 'real-2', '2026-06-18T10:38:11.107+08:00', 'qwork-ultimate', {}, `${turnId}:2`),
+      segIteration(turnId, `${turnId}:2`, 2, 'finished', '2026-06-18T10:38:11.200+08:00'),
     ]);
 
     const input = makeInput();
@@ -752,11 +1042,34 @@ describe('QoderWorkTraceInput', () => {
     await input.stop();
 
     expect(entries.find(e => e['event.id'] === 's1-req')!.time_unix_nano).toBe(nano('2026-06-18T10:37:43.032+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-req')!['agent.qoderwork.step.start_time_unix_nano'])
+      .toBe(nano('2026-06-18T10:37:43.000+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-req')!['agent.qoderwork.step.end_time_unix_nano'])
+      .toBe(nano('2026-06-18T10:38:06.700+08:00'));
     expect(entries.find(e => e['event.id'] === 's1-resp')!.time_unix_nano).toBe(nano('2026-06-18T10:38:05.168+08:00'));
-    expect(entries.find(e => e['event.id'] === 's1-tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:38:05.093+08:00'));
-    expect(entries.find(e => e['event.id'] === 's1-tool-result')!.time_unix_nano).toBe(nano('2026-06-18T10:38:06.616+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:38:05.200+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-tool-result')!.time_unix_nano).toBe(nano('2026-06-18T10:38:06.500+08:00'));
     expect(entries.find(e => e['event.id'] === 's2-req')!.time_unix_nano).toBe(nano('2026-06-18T10:38:06.840+08:00'));
     expect(entries.find(e => e['event.id'] === 's2-resp')!.time_unix_nano).toBe(nano('2026-06-18T10:38:11.107+08:00'));
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    try {
+      const converted = await convertEventLogToReadableSpans(entries as any[]);
+      applyQoderWorkStepTiming(entries, converted.spans as any[]);
+      const steps = converted.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'STEP')
+        .sort((left, right) => left.startTime[0] - right.startTime[0]
+          || left.startTime[1] - right.startTime[1]);
+      expect(steps).toHaveLength(2);
+      expect(toNano(steps[0].startTime)).toBe(nano('2026-06-18T10:37:43.000+08:00'));
+      expect(toNano(steps[0].endTime)).toBe(nano('2026-06-18T10:38:06.700+08:00'));
+      expect(toNano(steps[1].startTime)).toBe(nano('2026-06-18T10:38:06.800+08:00'));
+      expect(toNano(steps[1].endTime)).toBe(nano('2026-06-18T10:38:11.200+08:00'));
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+    }
   });
 
   it('retains segment tool timing when tool.call and tool.result arrive in separate batches', async () => {
@@ -810,7 +1123,9 @@ describe('QoderWorkTraceInput', () => {
 
     const input = makeInput();
     const firstBatch = await startAndCollect(input);
-    expect(firstBatch.find(e => e['event.id'] === 'tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:00:05.050+08:00'));
+    // No PreToolUse event: tool start falls back to model.response.completed,
+    // not the earlier tool.requested notification.
+    expect(firstBatch.find(e => e['event.id'] === 'tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:00:05.200+08:00'));
 
     await fs.appendFile(hookFile, JSON.stringify(toolResult) + '\n');
     const secondBatch = await triggerCycle(input);
@@ -850,7 +1165,7 @@ describe('QoderWorkTraceInput', () => {
     expect(respOut.time_unix_nano).toBe('1700001000000000000');
   });
 
-  it('keeps hook tool.call timestamp when segments have no tool.requested event', async () => {
+  it('uses model.response.completed when segments have no PreToolUse event', async () => {
     const sessionId = 'sess-tc';
     const hookFile = path.join(hookLogDir, todayFileName());
 
@@ -876,6 +1191,7 @@ describe('QoderWorkTraceInput', () => {
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': 'turn-tc',
       'gen_ai.step.id': 'turn-tc:s1',
+      'gen_ai.tool.call.id': 'tool-no-pre',
       time_unix_nano: '999999999999000000',
     });
     await fs.writeFile(hookFile, [JSON.stringify(req), JSON.stringify(resp), JSON.stringify(toolCall)].join('\n') + '\n');
@@ -891,7 +1207,7 @@ describe('QoderWorkTraceInput', () => {
     await input.stop();
 
     const tcOut = entries.find(e => e['event.id'] === 'tc')!;
-    expect(tcOut.time_unix_nano).toBe('999999999999000000');
+    expect(tcOut.time_unix_nano).toBe(nano('2026-06-16T10:00:05.000Z'));
   });
 
   // fixture 来源: qoderwork-runtime-wrapper.mjs 写出的 qoderwork-intercept.jsonl

@@ -50,14 +50,47 @@ export interface EndpointCounter {
   inEntries: number;
   inBytes: number;
   outEntries: number;
+  /**
+   * Bytes actually written out to this endpoint, i.e. what a billing view
+   * charges for. Counted per endpoint, so a log fanned out to two endpoints is
+   * counted twice — that is the point, the write happened twice.
+   */
+  outBytes: number;
+  /** Entries whose send failed after retries, i.e. persisted instead of written. */
   outFailed: number;
   totalDelayMs: number;
   lastFlushTime: string;
   startTime: string;
   mode: string;
-  endpoint: string;
   project: string;
   logstore: string;
+}
+
+/**
+ * What one endpoint's flush actually achieved. The send paths swallow their
+ * failures on purpose (persist + alarm, never propagate), so promise settlement
+ * says nothing about whether the bytes landed — the counters have to be driven
+ * by this instead, or a dead backend still reports a full out_bytes.
+ *
+ * Webtracking splits a batch into several requests, so a flush can be partly
+ * successful: the counts are per-entry, not per-batch.
+ */
+interface FlushOutcome {
+  sentEntries: number;
+  sentBytes: number;
+  failedEntries: number;
+}
+
+function sumByteSize(logs: QueuedLog[]): number {
+  return logs.reduce((sum, log) => sum + log.byteSize, 0);
+}
+
+function flushSucceeded(logs: QueuedLog[]): FlushOutcome {
+  return { sentEntries: logs.length, sentBytes: sumByteSize(logs), failedEntries: 0 };
+}
+
+function flushFailed(logs: QueuedLog[]): FlushOutcome {
+  return { sentEntries: 0, sentBytes: 0, failedEntries: logs.length };
 }
 
 const MAX_BACKOFF_MS = 60_000;
@@ -120,9 +153,9 @@ export class SlsFlusher extends BaseFlusher {
 
     for (const ep of config.endpoints) {
       this.endpointCounters.set(ep.name, {
-        inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
+        inEntries: 0, inBytes: 0, outEntries: 0, outBytes: 0, outFailed: 0,
         totalDelayMs: 0, lastFlushTime: '', startTime: '',
-        mode: ep.mode, endpoint: ep.endpoint, project: ep.project, logstore: ep.logstore,
+        mode: ep.mode, project: ep.project, logstore: ep.logstore,
       });
     }
   }
@@ -196,11 +229,17 @@ export class SlsFlusher extends BaseFlusher {
           const counter = this.endpointCounters.get(endpoint.name);
           const startMs = Date.now();
           const send = this.flushEndpoint(endpoint, logs);
-          return send.then(() => {
+          return send.then(outcome => {
             if (counter) {
-              counter.outEntries += logs.length;
+              // Driven by the outcome, not by the promise resolving: the send
+              // paths return normally after persisting a failed batch, so
+              // counting here on resolution alone would bill every dropped
+              // batch as written and leave failed_entries at zero.
+              counter.outEntries += outcome.sentEntries;
+              counter.outBytes += outcome.sentBytes;
+              counter.outFailed += outcome.failedEntries;
               counter.totalDelayMs += Date.now() - startMs;
-              counter.lastFlushTime = formatTime(new Date());
+              if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
             }
           }).catch(err => {
             if (counter) {
@@ -257,7 +296,7 @@ export class SlsFlusher extends BaseFlusher {
     return tags;
   }
 
-  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
     if (endpoint.mode === 'ak') return this.flushViaAk(endpoint, logs);
     if (endpoint.mode === 'apiKey') return this.flushViaApiKey(endpoint, logs);
     return this.flushViaWebtracking(endpoint, logs);
@@ -277,7 +316,7 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
     const agentType = logs[0]?.agentType;
@@ -306,7 +345,7 @@ export class SlsFlusher extends BaseFlusher {
           logstore: endpoint.logstore,
           count: logs.length,
         });
-        return;
+        return flushSucceeded(logs);
       } catch (err) {
         lastErr = err;
         if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
@@ -340,19 +379,25 @@ export class SlsFlusher extends BaseFlusher {
     await this.persistFailedLogs(
       endpoint,
       logs.length,
-      logs.reduce((sum, log) => sum + log.byteSize, 0),
+      sumByteSize(logs),
       lastErr,
     );
+    return flushFailed(logs);
   }
 
-  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
-    const chunks = this.splitForWebtracking(logs);
-    for (const chunk of chunks) {
-      await this.postWebtracking(endpoint, chunk);
+  /** One batch, several requests: sum the per-chunk outcomes so a partial send counts as partial. */
+  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+    const total: FlushOutcome = { sentEntries: 0, sentBytes: 0, failedEntries: 0 };
+    for (const chunk of this.splitForWebtracking(logs)) {
+      const outcome = await this.postWebtracking(endpoint, chunk);
+      total.sentEntries += outcome.sentEntries;
+      total.sentBytes += outcome.sentBytes;
+      total.failedEntries += outcome.failedEntries;
     }
+    return total;
   }
 
-  private async flushViaApiKey(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async flushViaApiKey(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
     const agentType = logs[0]?.agentType;
@@ -387,7 +432,7 @@ export class SlsFlusher extends BaseFlusher {
           logstore: endpoint.logstore,
           count: logs.length,
         });
-        return;
+        return flushSucceeded(logs);
       } catch (err) {
         lastErr = err;
         if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
@@ -421,9 +466,10 @@ export class SlsFlusher extends BaseFlusher {
     await this.persistFailedLogs(
       endpoint,
       logs.length,
-      logs.reduce((sum, log) => sum + log.byteSize, 0),
+      sumByteSize(logs),
       lastErr,
     );
+    return flushFailed(logs);
   }
 
   private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
@@ -452,7 +498,7 @@ export class SlsFlusher extends BaseFlusher {
     return chunks;
   }
 
-  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const agentType = logs[0]?.agentType;
     const body = {
@@ -500,7 +546,7 @@ export class SlsFlusher extends BaseFlusher {
             logstore: endpoint.logstore,
             count: logs.length,
           });
-          return;
+          return flushSucceeded(logs);
         }
       } catch (err) {
         lastErr = err;
@@ -535,6 +581,7 @@ export class SlsFlusher extends BaseFlusher {
       );
     }
     await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
+    return flushFailed(logs);
   }
 
   private async persistFailedLogs(

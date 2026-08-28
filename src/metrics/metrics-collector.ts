@@ -19,6 +19,7 @@ export interface L1Metrics {
   hostname: string;
   ip: string;
   instance_id: string;
+  run_id: string;
   user_id: string;
   pid: number;
   cpu: string;
@@ -26,23 +27,44 @@ export interface L1Metrics {
   mem_heap: string;
   start_time: string;
   capture_message_disabled_agents: string;
-  project: string;
+  projects: string;
   cms_workspace: string;
   metric_json: {
-    input_count: string;
-    active_input_count: string;
+    // Agent-dimensioned, not input-dimensioned: how many agents this host has
+    // installed, and how many of those have ever produced data in this run.
+    agent_count: string;
+    active_agent_count: string;
     open_fd: string;
-    send_entries_ps: string;
-    received_bytes_ps: string;
-    send_entries_total: string;
-    received_bytes_total: string;
-  };
-  flusher_runner: {
-    in_entries_total: string;
-    in_bytes_total: string;
-    out_entries_total: string;
-    out_failed_entries_total: string;
-    last_flush_time: string;
+    /** Length of the window the flow values below cover. */
+    window_ms: string;
+    // The instance's whole-process volume, not one leg of it. This pair is what
+    // a billing view aggregates, so read the asymmetry deliberately:
+    //
+    //   in_*  = what this pilot ingested — events collected from the installed
+    //           agents, sized on the normalized entry before masking. Counted
+    //           once per event no matter how many backends it later reaches.
+    //   out_* = what this pilot actually wrote to its backends, summed over
+    //           every destination (the pilot_pipeline flusher rows carry the
+    //           per-destination split). One event fanned out to two endpoints
+    //           counts twice here, because two writes happened.
+    //
+    // So out_events > in_events is normal under fan-out, and the two sides count
+    // different units (agent events vs. SLS entries / OTLP spans). Both are
+    // per-window values, drained on every report — SUM them over a time range,
+    // never diff them.
+    //
+    // out_bytes is deliberately mixed-basis: it sums measured SLS payload bytes
+    // with estimated OTLP span bytes, because the instance total has to cover
+    // every destination. For a number that is only real bytes, sum out_bytes over
+    // the flusher rows with bytes_basis = 'measured' instead.
+    in_events: string;
+    in_bytes: string;
+    out_events: string;
+    out_bytes: string;
+    in_events_ps: string;
+    in_bytes_ps: string;
+    out_events_ps: string;
+    out_bytes_ps: string;
   };
   init_type: string;
   rollback_available: string;
@@ -54,81 +76,176 @@ export interface L1Metrics {
   __time__: number;
 }
 
-export interface AlarmMetrics {
-  category: 'alarm';
-  input_name: string;
+/**
+ * Fields every L2 row carries, whatever its type. Repeating the identity on each
+ * row is what lets the three types be queried independently — filter on `type`
+ * and group by host or agent, with no join back to another topic.
+ */
+interface L2Identity {
+  hostname: string;
+  ip: string;
   instance_id: string;
-  source_ip: string;
+  run_id: string;
   user_id: string;
-  succeed_events: string;
-  failed_events: string;
-  input_idle_minutes: string;
+  /** Length of the window every flow value in this row covers. */
+  window_ms: string;
   __time__: number;
 }
 
-export interface InputMetrics {
-  category: 'input';
-  label: {
-    input_name: string;
-    input_type: string;
-  };
-  user_id: string;
-  in_events_total: string;
-  in_size_bytes: string;
-  out_events_total: string;
-  out_failed_events_total: string;
+/**
+ * One row per agent that is installed (has a running input) or carried data this
+ * window — zeros included. Reporting the installed-but-silent ones is what makes
+ * `idle_minutes` answerable: the agent an idle alarm cares about is by definition
+ * the one with no traffic, and a traffic-gated row can never describe it. It
+ * stays cheap because discovery only starts an input once it has detected the
+ * agent on this host, so this is a handful of rows per cycle, not one per agent
+ * the build knows about.
+ *
+ * Ingress only, by design. Egress cannot be attributed to an agent — the
+ * flushers batch and fan out across all of them — so it lives on the flusher
+ * rows. How many inputs back the agent is likewise not reported: several inputs
+ * can serve one agent (qoder owns sqlite/trace/cli-hook/cli-session), which is a
+ * collection detail, not an agent-dimensioned metric.
+ */
+export interface AgentFlowMetrics extends L2Identity {
+  type: 'agent';
+  agent: string;
+  in_events: string;
+  in_bytes: string;
+  /** Events this agent produced that the dispatch to the flushers rejected. */
+  failed_events: string;
+  /** State, not a window value. -1 when the agent has never been active. */
+  idle_minutes: string;
   last_poll_time: string;
   start_time: string;
-  __time__: number;
 }
 
-export interface FlusherMetrics {
-  category: 'flusher';
-  label: {
-    flusher_name: string;
-    endpoint_name: string;
-    project: string;
-    logstore: string;
-    mode: string;
-  };
-  user_id: string;
-  in_entries_total: string;
-  in_size_bytes: string;
-  out_entries_total: string;
-  out_failed_entries_total: string;
+/**
+ * One row per destination, not per backend family: two SLS logstores are two
+ * rows, and a billing view can attribute every byte to the project and logstore
+ * it was written to. Emitted for every configured destination even at zero
+ * traffic, so "configured but silent" is visible rather than absent.
+ *
+ * The entry / byte / delay values are per-window, so average flush latency for
+ * the window is total_delay_ms / (out_entries + failed_entries) — both flushers
+ * add elapsed time on the failure path too.
+ */
+export interface FlusherFlowMetrics extends L2Identity {
+  type: 'flusher';
+  /** Backend family: sls, cms or otlp. */
+  flusher: string;
+  /**
+   * Where the bytes landed in SLS. Populated for sls and cms rows (a CMS
+   * destination resolves to an ARMS project and its fixed trace logstore), empty
+   * for a plain OTLP backend whose storage is not ours to name. `mode` is the SLS
+   * transport and stays empty for both OTLP families.
+   */
+  project: string;
+  logstore: string;
+  mode: string;
+  /** SLS log entries or OTLP spans, depending on the flusher. */
+  in_entries: string;
+  in_bytes: string;
+  out_entries: string;
+  /**
+   * Bytes actually written to this destination in the window — the billable
+   * half of the pair, and the per-destination split of L1's
+   * metric_json.out_bytes. Read it together with `bytes_basis`.
+   */
+  out_bytes: string;
+  /**
+   * How in_bytes / out_bytes were obtained: 'measured' is the serialized payload
+   * size (SLS), 'estimated' is a per-span heuristic (OTLP/CMS, where the exporter
+   * never hands back a wire size). Published so a byte comparison across rows can
+   * refuse to mix the two — an estimated row is good for trends, not for billing.
+   */
+  bytes_basis: BytesBasis;
+  failed_entries: string;
   total_delay_ms: string;
   last_flush_time: string;
   start_time: string;
-  __time__: number;
+}
+
+/**
+ * One reporting cycle's L2 output: ingress per agent, egress per destination.
+ * No instance-total row — it would be the exact sum of these rows over one
+ * window, which the query engine can do, and L1's metric_json already carries
+ * the same four axes plus agent_count for the instance.
+ */
+export interface L2Metrics {
+  agents: AgentFlowMetrics[];
+  flushers: FlusherFlowMetrics[];
 }
 
 export interface FlusherStats {
   inEntries: number;
   inBytes: number;
   outEntries: number;
+  outBytes: number;
   outFailed: number;
   totalDelayMs: number;
   lastFlushTime: string;
   startTime: string;
 }
 
+/**
+ * What the reporting needs from an input counter. The counter also tracks the
+ * dispatch handoff (outEvents / outBytes); nothing reads it here, because for a
+ * successful batch it equals the ingress byte for byte and real egress is
+ * measured at the flushers.
+ */
 export interface InputStats {
   inEvents: number;
   inBytes: number;
-  outEvents: number;
   outFailed: number;
   lastPollTime: string;
   startTime: string;
 }
 
+/** Backend family a destination belongs to. */
+export type FlusherKind = 'sls' | 'cms' | 'otlp';
+
+/**
+ * Where a destination's byte counts come from. SLS serializes the payload itself
+ * and counts real bytes ('measured'); the OTLP exporter owns the encoding and
+ * never reports a wire size, so those rows carry a per-span estimate
+ * ('estimated'). Reported per row so the two are never silently added up.
+ */
+export type BytesBasis = 'measured' | 'estimated';
+
+/**
+ * One write destination and what it has written. project / logstore are filled
+ * for sls and cms and empty for a plain OTLP backend, and `mode` is SLS-only.
+ */
+export interface FlusherEndpointStats extends FlusherStats {
+  kind: FlusherKind;
+  project: string;
+  logstore: string;
+  mode: string;
+  bytesBasis: BytesBasis;
+}
+
 export interface DataflowSnapshot {
-  sendEntriesTotal: number;
-  receivedBytesTotal: number;
-  inputCount: number;
-  activeInputCount: number;
-  flusherRunner: FlusherStats;
-  inputs: Map<string, InputStats & { type: string }>;
-  flushers: Map<string, FlusherStats & { flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>;
+  /**
+   * Instance ingress, summed over the inputs. There is no matching egress total:
+   * what the instance actually wrote is the flusher side, so both levels take
+   * out_* from `flushers` and nothing has to keep two answers in sync.
+   */
+  inEventsTotal: number;
+  inBytesTotal: number;
+  /**
+   * Keyed by input id. Inputs are the collection mechanism, not a reported
+   * dimension: `agent` is the owning agent (several inputs map to one agent) and
+   * everything reported is rolled up by it. `running` means discovery detected
+   * the agent on this host and started collecting, i.e. the agent is installed.
+   */
+  inputs: Map<string, InputStats & { type: string; agent: string; running: boolean }>;
+  /**
+   * Keyed by destination id (`kind:name`), one entry per destination rather
+   * than one per family: billing attributes bytes to a project and logstore, and
+   * a merged family bucket cannot answer that.
+   */
+  flushers: Map<string, FlusherEndpointStats>;
   inputIdleMinutes: Map<string, number>;
 }
 
@@ -149,6 +266,100 @@ export interface InfraHealthSnapshot {
   updaterConsecutiveFailures: number;
 }
 
+/** Ingress axes tracked per input. */
+interface FlowTotals {
+  inEvents: number;
+  inBytes: number;
+  outFailed: number;
+}
+
+/**
+ * L1's four axes. The two halves come from opposite ends of the pipeline —
+ * ingress from the inputs, egress from the flushers — which is what makes the
+ * pair describe the instance rather than one leg of it.
+ */
+interface InstanceFlow {
+  inEvents: number;
+  inBytes: number;
+  outEvents: number;
+  outBytes: number;
+}
+
+/** Egress axes tracked per destination. */
+interface FlusherTotals {
+  inEntries: number;
+  inBytes: number;
+  outEntries: number;
+  outBytes: number;
+  outFailed: number;
+  totalDelayMs: number;
+}
+
+function zeroFlowTotals(): FlowTotals {
+  return { inEvents: 0, inBytes: 0, outFailed: 0 };
+}
+
+function zeroFlusherTotals(): FlusherTotals {
+  return { inEntries: 0, inBytes: 0, outEntries: 0, outBytes: 0, outFailed: 0, totalDelayMs: 0 };
+}
+
+/** L1's egress: every write this instance made, across all destinations. */
+function sumFlusherEgress(snapshot: DataflowSnapshot): { events: number; bytes: number } {
+  let events = 0;
+  let bytes = 0;
+  for (const stats of snapshot.flushers.values()) {
+    events += stats.outEntries;
+    bytes += stats.outBytes;
+  }
+  return { events, bytes };
+}
+
+/**
+ * Window value for one axis: current cumulative reading minus what was already
+ * reported. Clamped at 0 so a counter that somehow goes backwards (an endpoint
+ * dropping out of a merged sink bucket, say) reports no traffic instead of a
+ * negative spike.
+ */
+function delta(current: number, baseline: number): number {
+  return Math.max(0, current - baseline);
+}
+
+/**
+ * Everything is reported per agent, so every input resolves to one agent key.
+ * The snapshot already resolves `agent` (map, else the input's agentType, else
+ * its id); the id fallback here is only for a hand-built snapshot. Deliberately
+ * never `type` — that is the collection method, not an agent.
+ */
+function agentKeyOf(inputId: string, stats: { agent: string }): string {
+  return stats.agent || inputId;
+}
+
+/**
+ * The agent-dimensioned pair both levels report, computed the same way so the
+ * two topics can never disagree:
+ *
+ * - installed: agents with at least one running input. Discovery only starts an
+ *   input after it detects the agent on this host, so running == installed.
+ * - active: installed agents that have collected at least once in this run
+ *   (idle_minutes >= 0). State, not a window value — an installed agent that
+ *   simply sees no traffic this window stays active, and `active <= installed`
+ *   always holds.
+ *
+ * Inputs never surface on their own: several of them can back one agent (qoder
+ * owns sqlite/trace/cli-hook/cli-session), which is an internal detail.
+ */
+function countAgents(snapshot: DataflowSnapshot): { installed: number; active: number } {
+  const installed = new Set<string>();
+  const active = new Set<string>();
+  for (const [inputId, stats] of snapshot.inputs) {
+    if (!stats.running) continue;
+    const agent = agentKeyOf(inputId, stats);
+    installed.add(agent);
+    if ((snapshot.inputIdleMinutes.get(inputId) ?? -1) >= 0) active.add(agent);
+  }
+  return { installed: installed.size, active: active.size };
+}
+
 export class MetricsCollector {
   private readonly version: string;
   private readonly userId: string;
@@ -157,10 +368,13 @@ export class MetricsCollector {
   private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
+  private readonly autoUpdateEnabled: boolean;
   private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
+  private readonly runId: string;
+  private readonly hostname: string;
   private readonly localIp: string;
   private readonly initType: string;
 
@@ -168,14 +382,25 @@ export class MetricsCollector {
   private lastCpuTime = 0;
   private lastCollectTime = 0;
   private isFirstCpuSample = true;
-  // null until the first L1 sample seeds the baseline; until then rates are reported as 0
-  private prevSendEntries: number | null = null;
-  private prevReceivedBytes: number | null = null;
+  /**
+   * Reported values are per-window deltas, so every flow counter needs a
+   * "already reported up to here" baseline. The underlying input / flusher
+   * counters stay monotonic (they are the source of truth and are read by other
+   * code); subtracting a baseline here is what makes a reported row drain.
+   *
+   * L1 and L2 run on independent timers over the same snapshot, so they must
+   * keep separate baselines — a shared one would let whichever fires first
+   * swallow the other's window.
+   */
+  private l1Baseline: InstanceFlow = { inEvents: 0, inBytes: 0, outEvents: 0, outBytes: 0 };
+  private l2InputBaseline: Map<string, FlowTotals> = new Map();
+  private l2FlusherBaseline: Map<string, FlusherTotals> = new Map();
+  private l2LastCollectTime = 0;
   private l1CycleCount = 0;
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -183,12 +408,25 @@ export class MetricsCollector {
     this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
+    // Omitted means "an updater is expected", the host default. Only a caller that knows
+    // otherwise — the orchestrator, reading the resolved config — passes false.
+    this.autoUpdateEnabled = opts.autoUpdateEnabled ?? true;
     this.updaterLiveness = opts.updaterLiveness
       ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
-    this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
+    this.hostname = os.hostname();
+    // Stable install identity: restart- and IP-invariant, independently derivable
+    // by any process on the host. Includes dataDir so multiple installs on one
+    // machine (e.g. several OS users, each with their own ~/.loongsuite-pilot) do
+    // not collide when hostname and configured userId coincide. dataDir is
+    // base64url-encoded (not plaintext) but remains reversible: strip the
+    // `${hostname}_${userId}_` prefix and base64url-decode to recover the path.
+    const dataDirEncoded = Buffer.from(opts.dataDir, 'utf8').toString('base64url');
+    this.instanceId = `${this.hostname}_${opts.userId}_${dataDirEncoded}`;
+    // Per-incarnation id: distinguishes runs / detects restarts.
+    this.runId = `${this.instanceId}_${this.startTimestamp}`;
     this.initType = readInitType(opts.dataDir);
   }
 
@@ -201,25 +439,37 @@ export class MetricsCollector {
     const cpuPercent = this.calcCpuPercent(now);
     const mem = process.memoryUsage();
 
-    // First sample: seed the baseline and report 0 rates rather than dividing
-    // a full cumulative count by a near-zero elapsed window.
-    let entriesPs = '0.0';
-    let bytesPs = '0.0';
-    if (this.prevSendEntries === null || this.prevReceivedBytes === null) {
-      this.prevSendEntries = snapshot.sendEntriesTotal;
-      this.prevReceivedBytes = snapshot.receivedBytesTotal;
-    } else {
-      const elapsedSec = Math.max((now - this.lastCollectTime) / 1000, 0.001);
-      const entriesDelta = snapshot.sendEntriesTotal - this.prevSendEntries;
-      const bytesDelta = snapshot.receivedBytesTotal - this.prevReceivedBytes;
-      entriesPs = (entriesDelta / elapsedSec).toFixed(1);
-      bytesPs = (bytesDelta / elapsedSec).toFixed(1);
-      this.prevSendEntries = snapshot.sendEntriesTotal;
-      this.prevReceivedBytes = snapshot.receivedBytesTotal;
-    }
+    // Drain: report what flowed since the previous L1 row, then move the
+    // baseline up. The window opens at process start for the very first row.
+    // Ingress is the input side, egress the flusher side — deliberately not the
+    // input-side dispatch count, which only says "handed to the fan-out" and is
+    // byte-identical to ingress.
+    const egress = sumFlusherEgress(snapshot);
+    const cumulative: InstanceFlow = {
+      inEvents: snapshot.inEventsTotal,
+      inBytes: snapshot.inBytesTotal,
+      outEvents: egress.events,
+      outBytes: egress.bytes,
+    };
+    const flow = {
+      inEvents: delta(cumulative.inEvents, this.l1Baseline.inEvents),
+      inBytes: delta(cumulative.inBytes, this.l1Baseline.inBytes),
+      outEvents: delta(cumulative.outEvents, this.l1Baseline.outEvents),
+      outBytes: delta(cumulative.outBytes, this.l1Baseline.outBytes),
+    };
+    this.l1Baseline = cumulative;
 
+    const hasPriorRow = this.lastCollectTime !== 0;
+    const windowMs = Math.max(0, now - (this.lastCollectTime || this.startTimestamp * 1000));
+    const elapsedSec = Math.max(windowMs / 1000, 0.001);
     this.lastCollectTime = now;
+    // The first row is emitted right at startup, so its window is a few
+    // milliseconds wide — dividing by it turns any pre-existing count into a
+    // meaningless spike. Report the values, leave the rates at 0; window_ms is
+    // published so a consumer that wants its own rate can compute one.
+    const rate = (value: number): string => (hasPriorRow ? (value / elapsedSec).toFixed(1) : '0.0');
 
+    const agents = countAgents(snapshot);
     const health = this.collectInfraHealth();
 
     return {
@@ -228,6 +478,7 @@ export class MetricsCollector {
       hostname: os.hostname(),
       ip: this.localIp,
       instance_id: this.instanceId,
+      run_id: this.runId,
       user_id: this.userId,
       pid: process.pid,
       cpu: String(cpuPercent),
@@ -235,23 +486,21 @@ export class MetricsCollector {
       mem_heap: String(Math.round(mem.heapUsed / 1024 / 1024)),
       start_time: this.startTime,
       capture_message_disabled_agents: this.buildCaptureMessageDisabledAgents(),
-      project: this.buildProject(),
+      projects: this.buildProjects(),
       cms_workspace: this.buildCmsWorkspace(),
       metric_json: {
-        input_count: String(snapshot.inputCount),
-        active_input_count: String(snapshot.activeInputCount),
+        agent_count: String(agents.installed),
+        active_agent_count: String(agents.active),
         open_fd: String(getOpenFdCount()),
-        send_entries_ps: entriesPs,
-        received_bytes_ps: bytesPs,
-        send_entries_total: String(snapshot.sendEntriesTotal),
-        received_bytes_total: String(snapshot.receivedBytesTotal),
-      },
-      flusher_runner: {
-        in_entries_total: String(snapshot.flusherRunner.inEntries),
-        in_bytes_total: String(snapshot.flusherRunner.inBytes),
-        out_entries_total: String(snapshot.flusherRunner.outEntries),
-        out_failed_entries_total: String(snapshot.flusherRunner.outFailed),
-        last_flush_time: snapshot.flusherRunner.lastFlushTime,
+        window_ms: String(windowMs),
+        in_events: String(flow.inEvents),
+        in_bytes: String(flow.inBytes),
+        out_events: String(flow.outEvents),
+        out_bytes: String(flow.outBytes),
+        in_events_ps: rate(flow.inEvents),
+        in_bytes_ps: rate(flow.inBytes),
+        out_events_ps: rate(flow.outEvents),
+        out_bytes_ps: rate(flow.outBytes),
       },
       init_type: this.initType,
       rollback_available: String(health.rollbackAvailable),
@@ -264,80 +513,149 @@ export class MetricsCollector {
     };
   }
 
-  collectL2Inputs(snapshot: DataflowSnapshot): InputMetrics[] {
-    const now = Math.floor(Date.now() / 1000);
-    const results: InputMetrics[] = [];
+  /**
+   * One cycle of L2: a row per agent that carried data, a row per write
+   * destination. Both sides are produced by a single call so they share one drain
+   * and one window — collecting them separately would let whichever ran first
+   * swallow the other's traffic, and ingress and egress would then describe
+   * different windows.
+   *
+   * Returns null when there is nothing on either side, so a freshly started
+   * instance with no agents and no destinations ships nothing at all.
+   */
+  collectL2(snapshot: DataflowSnapshot): L2Metrics | null {
+    const now = Date.now();
+    const windowMs = Math.max(0, now - (this.l2LastCollectTime || this.startTimestamp * 1000));
+    const identity = {
+      hostname: os.hostname(),
+      ip: this.localIp,
+      instance_id: this.instanceId,
+      run_id: this.runId,
+      user_id: this.userId,
+      window_ms: String(windowMs),
+      __time__: Math.floor(now / 1000),
+    };
 
-    for (const [name, stats] of snapshot.inputs) {
-      results.push({
-        category: 'input',
-        label: {
-          input_name: name,
-          input_type: stats.type,
-        },
-        user_id: this.userId,
-        in_events_total: String(stats.inEvents),
-        in_size_bytes: String(stats.inBytes),
-        out_events_total: String(stats.outEvents),
-        out_failed_events_total: String(stats.outFailed),
-        last_poll_time: stats.lastPollTime,
-        start_time: stats.startTime,
-        __time__: now,
-      });
-    }
-    return results;
+    const agentRows = this.collectAgentRows(snapshot, identity);
+    const flusherRows = this.collectFlusherRows(snapshot, identity);
+    // The row builders already drained the counters, so the window is spent
+    // whether or not there is anything to ship.
+    this.l2LastCollectTime = now;
+
+    if (agentRows.length === 0 && flusherRows.length === 0) return null;
+
+    return { agents: agentRows, flushers: flusherRows };
   }
 
-  collectL2Flushers(snapshot: DataflowSnapshot): FlusherMetrics[] {
-    const now = Math.floor(Date.now() / 1000);
-    const results: FlusherMetrics[] = [];
+  /**
+   * Several inputs belong to one agent (qoder alone owns sqlite/trace/cli-hook/
+   * cli-session), so counters are summed per agent. idle_minutes takes the
+   * freshest (smallest non-negative) of the agent's inputs: the agent is only
+   * as idle as its most recently active listener.
+   *
+   * An agent gets a row when it carried something in the window or when it is
+   * installed (at least one running input) — an all-zero row for an installed
+   * agent is the idle signal, not noise. Registered-but-never-started inputs
+   * (every build registers one per agent it knows about) stay unreported.
+   */
+  private collectAgentRows(snapshot: DataflowSnapshot, identity: L2Identity): AgentFlowMetrics[] {
+    const byAgent = new Map<string, { events: number; bytes: number; failed: number; idle: number; lastPoll: string; start: string }>();
 
-    for (const [epName, stats] of snapshot.flushers) {
-      results.push({
-        category: 'flusher',
-        label: {
-          flusher_name: stats.flusherName,
-          endpoint_name: stats.endpoint,
-          project: stats.project,
-          logstore: stats.logstore,
-          mode: stats.mode,
-        },
-        user_id: this.userId,
-        in_entries_total: String(stats.inEntries),
-        in_size_bytes: String(stats.inBytes),
-        out_entries_total: String(stats.outEntries),
-        out_failed_entries_total: String(stats.outFailed),
-        total_delay_ms: String(stats.totalDelayMs),
+    for (const [inputId, stats] of snapshot.inputs) {
+      // Drain per input, not per agent: an input registered mid-run (agent
+      // discovery) has no baseline yet and must contribute everything it holds.
+      // Drained unconditionally, before the traffic check — otherwise a stopped
+      // input's stale counts would resurface the next time it starts.
+      const base = this.l2InputBaseline.get(inputId) ?? zeroFlowTotals();
+      const flow = {
+        events: delta(stats.inEvents, base.inEvents),
+        bytes: delta(stats.inBytes, base.inBytes),
+        failed: delta(stats.outFailed, base.outFailed),
+      };
+      this.l2InputBaseline.set(inputId, {
+        inEvents: stats.inEvents,
+        inBytes: stats.inBytes,
+        outFailed: stats.outFailed,
+      });
+
+      // A running input reports every cycle, traffic or not: idle_minutes is a
+      // statement about silence, so the agent that has gone quiet — the one an
+      // idle alarm is about — must still produce a row. An input discovery
+      // stopped mid-window reports only what it collected while running, and a
+      // stopped-and-silent one drops out entirely (its agent is gone, not idle).
+      if (flow.events === 0 && flow.failed === 0 && !stats.running) continue;
+
+      const agent = agentKeyOf(inputId, stats);
+      let acc = byAgent.get(agent);
+      if (!acc) {
+        acc = { events: 0, bytes: 0, failed: 0, idle: -1, lastPoll: '', start: '' };
+        byAgent.set(agent, acc);
+      }
+      acc.events += flow.events;
+      acc.bytes += flow.bytes;
+      acc.failed += flow.failed;
+
+      // Folded from the former pilot_alarm_metric topic. -1 means never active.
+      const idle = snapshot.inputIdleMinutes.get(inputId) ?? -1;
+      if (idle >= 0 && (acc.idle < 0 || idle < acc.idle)) acc.idle = idle;
+      if (stats.lastPollTime > acc.lastPoll) acc.lastPoll = stats.lastPollTime;
+      if (!acc.start || (stats.startTime && stats.startTime < acc.start)) acc.start = stats.startTime;
+    }
+
+    const rows: AgentFlowMetrics[] = [];
+    for (const [agent, acc] of byAgent) {
+      rows.push({
+        type: 'agent',
+        ...identity,
+        agent,
+        in_events: String(acc.events),
+        in_bytes: String(acc.bytes),
+        failed_events: String(acc.failed),
+        idle_minutes: String(acc.idle),
+        last_poll_time: acc.lastPoll,
+        start_time: acc.start,
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * One row per destination, drained against that destination's own baseline.
+   * Emitted whatever the traffic: destinations are configured, few, and a silent
+   * one is a finding — unlike a silent agent, whose absence is the normal case.
+   * last_flush_time / start_time stay as-is; they describe state, not the window.
+   */
+  private collectFlusherRows(snapshot: DataflowSnapshot, identity: L2Identity): FlusherFlowMetrics[] {
+    const rows: FlusherFlowMetrics[] = [];
+    for (const [id, stats] of snapshot.flushers) {
+      const base = this.l2FlusherBaseline.get(id) ?? zeroFlusherTotals();
+      rows.push({
+        type: 'flusher',
+        ...identity,
+        flusher: stats.kind,
+        project: stats.project,
+        logstore: stats.logstore,
+        mode: stats.mode,
+        bytes_basis: stats.bytesBasis,
+        in_entries: String(delta(stats.inEntries, base.inEntries)),
+        in_bytes: String(delta(stats.inBytes, base.inBytes)),
+        out_entries: String(delta(stats.outEntries, base.outEntries)),
+        out_bytes: String(delta(stats.outBytes, base.outBytes)),
+        failed_entries: String(delta(stats.outFailed, base.outFailed)),
+        total_delay_ms: String(delta(stats.totalDelayMs, base.totalDelayMs)),
         last_flush_time: stats.lastFlushTime,
         start_time: stats.startTime,
-        __time__: now,
+      });
+      this.l2FlusherBaseline.set(id, {
+        inEntries: stats.inEntries,
+        inBytes: stats.inBytes,
+        outEntries: stats.outEntries,
+        outBytes: stats.outBytes,
+        outFailed: stats.outFailed,
+        totalDelayMs: stats.totalDelayMs,
       });
     }
-    return results;
-  }
-
-  // Per-input health row. Global flusher stats (outFailed / latency) intentionally
-  // live in collectL2Flushers — emitting them here would smear a single failing
-  // endpoint across every input row and mislead downstream consumers.
-  collectL2Alarms(snapshot: DataflowSnapshot): AlarmMetrics[] {
-    const now = Math.floor(Date.now() / 1000);
-    const results: AlarmMetrics[] = [];
-
-    for (const [name, stats] of snapshot.inputs) {
-      const idleMinutes = snapshot.inputIdleMinutes.get(name) ?? -1;
-      results.push({
-        category: 'alarm',
-        input_name: name,
-        instance_id: this.instanceId,
-        source_ip: this.localIp,
-        user_id: this.userId,
-        succeed_events: String(stats.outEvents),
-        failed_events: String(stats.outFailed),
-        input_idle_minutes: String(idleMinutes),
-        __time__: now,
-      });
-    }
-    return results;
+    return rows;
   }
 
   private buildCaptureMessageDisabledAgents(): string {
@@ -349,7 +667,7 @@ export class MetricsCollector {
     return disabled.join(' ');
   }
 
-  private buildProject(): string {
+  private buildProjects(): string {
     const seen = new Set<string>();
     for (const ep of this.slsEndpoints) {
       if (ep.project) seen.add(ep.project);
@@ -364,8 +682,14 @@ export class MetricsCollector {
   private collectInfraHealth(): InfraHealthSnapshot {
     this.l1CycleCount++;
 
+    // `true` here means "nothing to report", which is also what the first two cycles
+    // report while the updater is still coming up. With auto-update disabled there is no
+    // updater to come up at all — nothing registers a service for it and the updater
+    // process exits immediately on a disabled config — so probing its pid would report a
+    // permanent failure and UPDATER_NOT_RUNNING_ALARM would fire ~30min into every such
+    // install's life, about a process nobody asked for.
     let updaterPidAlive = true;
-    if (this.l1CycleCount > 2) {
+    if (this.autoUpdateEnabled && this.l1CycleCount > 2) {
       updaterPidAlive = this.updaterLiveness(
         path.join(this.dataDir, 'loongsuite-pilot-updater.pid'),
       ).running;

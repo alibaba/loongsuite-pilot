@@ -52,6 +52,7 @@ import {
   buildBashUpdatedInput,
   consumeToolContext,
   markToolPropagationConsumed,
+  readTurnContext,
   reserveToolContext,
 } from './claude-code/tool-context.mjs';
 import {
@@ -76,7 +77,10 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   : {};
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
-const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
+  agentId: AGENT_ID,
+  allowInvocationIdentity: true,
+});
 // Retain recent completion tombstones to ignore delayed duplicate SubagentStop
 // events while keeping the persisted session state bounded.
 const FINALIZED_SUBAGENT_LIMIT = 128;
@@ -309,11 +313,16 @@ function cmdPreToolUse() {
   const context = reserveToolContext({
     dataDir: pilotDataDir(),
     sessionId,
+    promptId: typeof event.prompt_id === 'string' ? event.prompt_id : '',
     toolUseId,
     traceparent: process.env.TRACEPARENT,
     tracestate: process.env.TRACESTATE,
+    generateTraceWhenMissing: runtimeConfig.upstreamLink.generateTraceWhenMissing === true,
   });
-  const updatedInput = buildBashUpdatedInput(event.tool_input, context);
+  const updatedInput = buildBashUpdatedInput(event.tool_input, {
+    ...(context || {}),
+    resourceAttributes: process.env.LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES,
+  });
   if (!updatedInput) return;
 
   emittedHookResponse = true;
@@ -457,7 +466,11 @@ async function cmdStop() {
     saveState(sessionId, state);
 
     try {
-      await exportSession(state, event.stop_reason || 'end_turn');
+      await exportSession(
+        state,
+        event.stop_reason || 'end_turn',
+        typeof event.prompt_id === 'string' ? event.prompt_id : '',
+      );
       if (typeof state._next_transcript_offset === 'number') {
         state.transcript_offset = state._next_transcript_offset;
         delete state._next_transcript_offset;
@@ -681,7 +694,7 @@ async function finalizePendingSubagentTurns(state) {
 
 // ─── Stop 主导出流程 ───
 
-async function exportSession(state, stopReason) {
+async function exportSession(state, stopReason, stopPromptId = '') {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const sessionId = state.session_id || 'unknown';
 
@@ -738,6 +751,15 @@ async function exportSession(state, stopReason) {
     turnsToExport = parseResult.turns.slice(-1);
   }
 
+  // Some Claude transcript versions omit promptId even though Stop carries it.
+  // Use the hook value only for an unambiguous single-turn parse; applying one
+  // Stop prompt id across multiple recovered turns could link the wrong turn.
+  const promptIdFallback = parseResult.turns.length === 1
+    && turnsToExport.length === 1
+    && !turnsToExport[0].promptId
+    ? stopPromptId
+    : '';
+
   const cwd = state.cwd || undefined;
 
   // Load per-session intercept data once; buildTurnRecords looks up by
@@ -759,6 +781,7 @@ async function exportSession(state, stopReason) {
       turnStopReason,
       cwd,
       intercept,
+      promptIdFallback,
     );
     logHash = hash;
     if (turnMerged) {
@@ -825,7 +848,17 @@ async function exportSession(state, stopReason) {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd, intercept) {
+function buildTurnRecords(
+  turn,
+  turnIndex,
+  sessionId,
+  prevHash,
+  userId,
+  turnStopReason,
+  cwd,
+  intercept,
+  promptIdFallback = '',
+) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
@@ -836,7 +869,12 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // intercept files after JSONL is flushed.
   const mergedResponseIds = new Set();
 
-  const traceId = generateTraceId();
+  const turnContext = readTurnContext(
+    pilotDataDir(),
+    sessionId,
+    turn.promptId || promptIdFallback,
+  );
+  const traceId = turnContext?.traceId || generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
 

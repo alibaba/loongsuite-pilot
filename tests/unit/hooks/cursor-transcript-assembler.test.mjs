@@ -177,6 +177,23 @@ describe('buildCursorRecordsFromTranscript', () => {
     expect(result).toBeNull();
   });
 
+  it('preserves Cursor CLI identity and cwd on the Windows transcript path', () => {
+    const transcriptPath = simpleTranscript('inspect', 'done');
+    const records = buildCursorRecordsFromTranscript(
+      transcriptPath,
+      [
+        makePromptEvent({ cwd: 'C:\\Users\\alice\\project' }),
+        makeResponseEvent({ text: 'done' }),
+        makeStopEvent(),
+      ],
+      { stopConversationId: 'conv-abc', variant: 'cursor-cli' },
+    );
+
+    expect(records).not.toBeNull();
+    expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli')).toBe(true);
+    expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project')).toBe(true);
+  });
+
   describe('simple turn (no tool calls)', () => {
     let records;
     let transcriptPath;
@@ -211,6 +228,16 @@ describe('buildCursorRecordsFromTranscript', () => {
       const req = records[1];
       expect(req['event.name']).toBe('llm.request');
       expect(req['gen_ai.step.id']).toMatch(/:s1$/);
+    });
+
+    it('llm.request emits the user message as both delta and full input', () => {
+      const req = records[1];
+      const expected = [
+        { role: 'user', parts: [{ type: 'text', content: '你好' }] },
+      ];
+
+      expect(req['gen_ai.input.messages_delta']).toEqual(expected);
+      expect(req['gen_ai.input.messages']).toEqual(expected);
     });
 
     it('llm.request and llm.response share the same response.id', () => {
@@ -317,6 +344,39 @@ describe('buildCursorRecordsFromTranscript', () => {
       expect(s1Resp['gen_ai.usage.output_tokens']).toBe(0);
     });
 
+    it('step 2 input preserves the assistant tool call before its matching result', () => {
+      const messages = records[5]['gen_ai.input.messages'];
+      expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+      expect(messages[1].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'tool-ws-001',
+        name: 'WebSearch',
+        arguments: { query: '上海天气' },
+      });
+      expect(messages[2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'tool-ws-001',
+        response: '',
+      });
+    });
+
+    it('step 2 input delta contains only the new assistant call and tool result', () => {
+      const delta = records[5]['gen_ai.input.messages_delta'];
+
+      expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+      expect(delta[0].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'tool-ws-001',
+        name: 'WebSearch',
+        arguments: { query: '上海天气' },
+      });
+      expect(delta[1].parts[0]).toEqual({
+        type: 'tool_call_response',
+        id: 'tool-ws-001',
+        response: '',
+      });
+    });
+
     it('step 2 llm.response has correct final text', () => {
       const s2Resp = records[6];
       expect(s2Resp['gen_ai.step.id']).toMatch(/:s2$/);
@@ -418,6 +478,31 @@ describe('buildCursorRecordsFromTranscript', () => {
       );
       const req = records.find(r => r['event.name'] === 'llm.request' && r['gen_ai.step.id']);
       expect(req['gen_ai.request.model']).toBe('claude-3-5-sonnet');
+    });
+  });
+
+  describe('content capture policy', () => {
+    it('removes both delta and full input when message capture is disabled', () => {
+      const transcriptPath = simpleTranscript('private prompt', 'private response');
+      const records = buildCursorRecordsFromTranscript(
+        transcriptPath,
+        [
+          makePromptEvent({ prompt: 'private prompt' }),
+          makeResponseEvent({ text: 'private response' }),
+          makeStopEvent(),
+        ],
+        {
+          stopConversationId: 'conv-abc',
+          runtimeConfig: {
+            agents: { cursor: { captureMessageContent: false } },
+          },
+        },
+      );
+
+      for (const record of records) {
+        expect(record['gen_ai.input.messages_delta']).toBeUndefined();
+        expect(record['gen_ai.input.messages']).toBeUndefined();
+      }
     });
   });
 

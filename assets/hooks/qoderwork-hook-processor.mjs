@@ -233,9 +233,9 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   const userText = userRow ? extractText(userRow) : '';
   const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
-  let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+  let prevToolCalls = []; // tool calls from previous step, for building assistant + tool_result delta
+  let prevAssistantOutputParts = []; // exact assistant output from previous step
   let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
-
   let stepCounter = 0;
   for (const group of llmGroups) {
     stepCounter++;
@@ -243,22 +243,42 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
     // Build input.messages_delta for this step's llm.request:
     // - Step 1: user prompt
-    // - Step N>1: previous step's tool results
+    // - Step N>1: previous assistant tool calls + their tool results
     let inputDelta;
     if (stepCounter === 1 && userText) {
       inputDelta = [{ role: 'user', parts: [{ type: 'text', content: userText }] }];
     } else if (prevToolCalls.length > 0) {
-      const toolParts = [];
-      for (const tc of prevToolCalls) {
-        const matchingResult = toolResultsByUseId.get(tc.id);
-        if (matchingResult) {
-          const resultBlock = matchingResult.block;
-          const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
-          toolParts.push({ type: 'tool_call_response', id: tc.id, response: resultText });
-        }
-      }
-      if (toolParts.length > 0) {
-        inputDelta = [{ role: 'tool', parts: toolParts }];
+      // As in Codex, only completed calls enter the next model input. Use the
+      // same set for both messages so every assistant tool_call has exactly one
+      // matching tool response.
+      const completedToolCalls = prevToolCalls
+        .map(tc => ({ tc, result: toolResultsByUseId.get(tc.id) }))
+        .filter(item => item.result);
+      if (completedToolCalls.length > 0) {
+        const completedToolCallIds = new Set(completedToolCalls.map(({ tc }) => tc.id));
+        inputDelta = [
+          {
+            role: 'assistant',
+            // The next model receives the complete previous assistant message,
+            // including reasoning/text that preceded its tool calls. Filter only
+            // incomplete tool calls so every retained call has one tool response.
+            parts: prevAssistantOutputParts.filter(part =>
+              part.type !== 'tool_call' || completedToolCallIds.has(part.id)),
+          },
+          ...completedToolCalls.map(({ tc, result }) => {
+            const content = result.block?.content;
+            return {
+              role: 'tool',
+              // Keep one tool response per message. This preserves the 1:1
+              // call/result boundary for parallel tool calls in OTLP input messages.
+              parts: [{
+                type: 'tool_call_response',
+                id: tc.id,
+                response: typeof content === 'string' ? content : JSON.stringify(content),
+              }],
+            };
+          }),
+        ];
       }
     }
 
@@ -268,25 +288,20 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
-    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const assistantOutput = extractAssistantOutput(group);
+    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
-    prevToolCalls = [];
+    prevToolCalls = assistantOutput.toolCalls;
+    prevAssistantOutputParts = assistantOutput.outputParts;
     let lastToolResultTsInStep = undefined;
-    for (const row of group) {
-      const msg = row.message || {};
-      const content = Array.isArray(msg.content) ? msg.content : [];
-      for (const b of content) {
-        if (b.type === 'tool_use') {
-          prevToolCalls.push({ id: b.id, name: b.name });
-          // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
-          const matchingResult = toolResultsByUseId.get(b.id);
-          if (matchingResult?.row.timestamp) {
-            const nano = timestampToUnixNanos(matchingResult.row.timestamp);
-            if (nano) lastToolResultTsInStep = nano;
-          }
-        }
+    for (const toolCall of prevToolCalls) {
+      // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
+      const matchingResult = toolResultsByUseId.get(toolCall.id);
+      if (matchingResult?.row.timestamp) {
+        const nano = timestampToUnixNanos(matchingResult.row.timestamp);
+        if (nano) lastToolResultTsInStep = nano;
       }
     }
     if (lastToolResultTsInStep) {
@@ -353,25 +368,7 @@ function groupAssistantRowsByToolResults(turnRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
-  const records = [];
-  const firstRow = group[0];
-  const lastRow = group[group.length - 1];
-
-  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
-  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
-  const thinkingRow = group.find(r => {
-    const content = Array.isArray(r.message?.content) ? r.message.content : [];
-    const firstType = content[0]?.type;
-    return firstType === 'thinking' || r.content_type === 'thinking';
-  });
-  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
-
-  // Prefer message.id (chatcmpl-xxx, matches qoderwork-intercept.jsonl) for direct token matching.
-  // Fall back to parentUuid for backward compat with older QoderWork versions.
-  const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
-
-  // Build merged output parts
+function extractAssistantOutput(group) {
   const outputParts = [];
   const toolCalls = [];
 
@@ -397,18 +394,42 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
     }
   }
 
-  const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
+  return { outputParts, toolCalls };
+}
+
+function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+  const records = [];
+  const firstRow = group[0];
+  const lastRow = group[group.length - 1];
+
+  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
+  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
+  const thinkingRow = group.find(r => {
+    const content = Array.isArray(r.message?.content) ? r.message.content : [];
+    const firstType = content[0]?.type;
+    return firstType === 'thinking' || r.content_type === 'thinking';
+  });
+  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
+
+  // Prefer message.id (chatcmpl-xxx, matches qoderwork-intercept.jsonl) for direct token matching.
+  // Fall back to parentUuid for backward compat with older QoderWork versions.
+  const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
+
+  const { outputParts, toolCalls } = assistantOutput;
+
+  // QoderWork uses the provider-specific `end_turn` sentinel in its raw
+  // transcript. Emit the standard finish reason expected by downstream GenAI
+  // consumers while keeping tool-producing responses distinguishable.
+  const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
 
   // llm.request for this step.
   //
-  // Field choice: gen_ai.input.messages_delta (incremental, NOT full).
-  //
   // Each step's delta contains only the NEW content since the previous step:
   //   - Step 1: user prompt
-  //   - Step N>1: previous step's tool_results
-  // The converter (@loongsuite/otel-util-genai) accumulates deltas across
-  // steps to reconstruct the full context window for each LLM span, which
-  // is the correct behaviour.
+  //   - Step N>1: previous assistant tool_calls followed by tool_results
+  // The converter accumulates these deltas into the full input context carried
+  // by each OTLP LLM span. Keep the Hook event incremental so existing event-log
+  // consumers do not receive a second, duplicated representation of history.
   const llmRequestFields = {
     ...turnMetadata,
     'event.name': 'llm.request',
@@ -574,6 +595,6 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   return sandboxCwd;
 }
 
-export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, splitIntoTurns };
+export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, processTranscript, splitIntoTurns };
 
 main().catch(() => { /* fail-open */ });

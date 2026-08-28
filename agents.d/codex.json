@@ -8,7 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
-    "events": ["SessionStart", "UserPromptSubmit", "Stop"],
+    "events": ["SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop"],
     "retiredEvents": ["PreToolUse", "PostToolUse", "PostToolUseFailure"],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
     "format": "nested",

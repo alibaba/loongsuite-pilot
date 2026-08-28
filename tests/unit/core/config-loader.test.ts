@@ -36,6 +36,23 @@ describe('ConfigLoader', () => {
   });
 
   describe('three-layer priority (T025)', () => {
+    it.each([
+      [undefined, 8765],
+      [1, 1],
+      [8765, 8765],
+      [65535, 65535],
+      [0, 8765],
+      [65536, 8765],
+      [-1, 8765],
+      [1.5, 8765],
+      ['9000', 8765],
+      [Number.NaN, 8765],
+    ])('validates dashboard.port=%s as %s', async (port, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(port === undefined ? {} : { dashboard: { port } });
+      const config = await loadConfig();
+      expect(config.dashboard.port).toBe(expected);
+    });
+
     it('env vars override config file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',
@@ -267,6 +284,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -508,6 +526,244 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.agents).toEqual({});
+    });
+
+    it('parses per-agent multimodal nested config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+          cursor: { captureMessageContent: true },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex).toEqual({
+        captureMessageContent: true,
+        multimodal: { uploadMode: 'both' },
+      });
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+    });
+
+    it('defaults agent multimodal uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: {},
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'none',
+      });
+    });
+
+    it('keeps multimodal config for any agent id (runtime capability gate applies later)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'both' },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.cursor.multimodal).toEqual({
+        uploadMode: 'both',
+      });
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'both',
+      });
+    });
+  });
+
+  describe('multimodal infra config', () => {
+    it('is undefined when multimodal block is absent', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({});
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('loads oss infra without uploadMode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 'oss://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        uploader: 'oss',
+        storageBasePath: 'oss://bucket/mm',
+        oss: {
+          endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      });
+    });
+
+    it('derives sls storageBasePath from project/logstore', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        uploader: 'sls',
+        storageBasePath: 'sls://my-project/logstore-multimodal',
+        sls: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'my-project',
+          logstore: 'logstore-multimodal',
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      });
+    });
+
+    it('disables multimodal when uploader is invalid', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: { uploader: 's3' },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is not oss://', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 's3://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'oss',
+          storageBasePath: 'oss://bucket/mm',
+          oss: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            accessKeyId: 'ak',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            accessKeyId: 'ak',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls project is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          uploader: 'sls',
+          sls: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('falls back unknown agent uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'unknown' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
+    });
+
+    it('accepts input, output, and tool uploadMode values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'input' },
+          },
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'tool' },
+          },
+          'claude-code': {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'output' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'tool' });
+      expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
     });
   });
 
@@ -1167,9 +1423,13 @@ describe('ConfigLoader', () => {
   describe('upstreamLink config', () => {
     it('is disabled by default', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
       expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
 
@@ -1192,6 +1452,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
       config = await loadConfig();
       expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables local trace generation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, generateTraceWhenMissing: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
     });
 
     it('treats an empty-string enable env as unset (not "true")', async () => {

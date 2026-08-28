@@ -16,7 +16,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Token 用量 | 当源 Agent 暴露数据时，采集输入、输出、缓存读取和缓存写入 token。 |
 | 工具活动 | 采集工具名称、参数、结果、耗时和错误信息。 |
 | 隐私控制 | 支持按 Agent 关闭消息内容采集，并在输出前脱敏密钥。 |
-| 本地运维 | 管理后台服务、查看状态、启动可选 Dashboard，并支持版本回滚。 |
+| 本地运维 | 管理后台服务、查看状态、使用内置本地 Dashboard，并支持版本回滚。 |
 
 ## 支持的 Agent
 
@@ -26,6 +26,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
@@ -39,6 +40,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 

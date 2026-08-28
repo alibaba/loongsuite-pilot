@@ -23,6 +23,7 @@ Pilot 按以下顺序解析配置：
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
+  "dashboard": { "port": 8765 },
   "serviceName": "my-agent-service"
 }
 ```
@@ -34,6 +35,7 @@ Pilot 按以下顺序解析配置：
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
+| `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
 
@@ -69,11 +71,66 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 同一个 SLS 目标里不要同时配置 `apiKey` 和 `accessKeyId` / `accessKeySecret`。完整模式示例见 [SLS 输出](sls-output.md)。
 
+## 多模态对象存储
+
+当需要把 Codex 等 Agent 消息中的图片从 base64 转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制，见 [多模态采集](multimodal.md)。
+
+### OSS
+
+```json
+{
+  "multimodal": {
+    "uploader": "oss",
+    "storageBasePath": "oss://your-bucket/pilot-mm",
+    "oss": {
+      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `multimodal.uploader` | `oss` 或 `sls`。 |
+| `multimodal.storageBasePath` | OSS 必填，须以 `oss://` 开头，形如 `oss://bucket/prefix`。 |
+| `multimodal.oss.endpoint` | 标准区域 Endpoint（不支持 accelerate）。 |
+| `multimodal.oss.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+
+### SLS PutObject
+
+SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一配置块。`storageBasePath` 由 `project` / `logstore` 推导为 `sls://{project}/{logstore}`，无需手写。
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `multimodal.sls.endpoint` | SLS Endpoint。 |
+| `multimodal.sls.project` | SLS Project。 |
+| `multimodal.sls.logstore` | 用于存放多模态对象的 Logstore；缺省为 `logstore-multimodal`。 |
+| `multimodal.sls.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+
+全局多模态配置缺失或非法时，Pilot 会 fail-open：进程继续采集文本，但不做 blob→uri 转换。
+
 ## 配置主题
 
 | 任务 | 文档 |
 |------|------|
-| 选择采集哪些 Agent，是否采集消息内容 | [Agent 配置](agents.md) |
+| 选择采集哪些 Agent，是否采集消息内容 / 多模态 | [Agent 配置](agents.md)、[多模态采集](multimodal.md) |
 | 写入本地 JSONL 文件 | [本地 JSONL 输出](local-jsonl-output.md) |
 | 上报日志到阿里云 SLS | [SLS 输出](sls-output.md) |
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |

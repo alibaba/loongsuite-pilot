@@ -176,6 +176,24 @@ describe('buildInputMessagesDelta', () => {
     ]);
   });
 
+  test('assistant record → role=assistant with tool_call parts', () => {
+    const records = [
+      {
+        uuid: 'a1', type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call_abc', name: 'Bash', args: { cmd: 'ls' } } }],
+        },
+      },
+    ];
+    expect(buildInputMessagesDelta(records)).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'tool_call', id: 'call_abc', name: 'Bash', arguments: { cmd: 'ls' } }],
+      },
+    ]);
+  });
+
   test('tool_result record → role=tool with tool_call_response part (id from toolCallResult.callId)', () => {
     const records = [
       {

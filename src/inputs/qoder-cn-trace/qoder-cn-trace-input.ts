@@ -249,7 +249,7 @@ export class QoderCnTraceInput extends BaseInput {
   private async transformRecord(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCn);
     if (canonicalEntry) {
-      await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qodercn');
+      await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder-cn');
       return canonicalEntry;
     }
     return null;

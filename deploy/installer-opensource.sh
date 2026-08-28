@@ -890,15 +890,39 @@ deploy_package() {
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
-    if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js || {
-            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+    if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
+        # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
+        # --data-dir would otherwise put hooks/skills/plugins in the default tree while
+        # the config lives elsewhere.
+        # Captured because two of the three failure modes are only in the output: a per-tree
+        # failure and a thrown main() both exit 0 on purpose (a non-zero exit would abort the
+        # npm install fallback above), announcing themselves as "N failed asset tree(s)" and
+        # "Post-install failed: <reason>" instead. 2>&1 because both go to stderr.
+        postinstall_exit=0
+        postinstall_out="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+            "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" 2>&1)" || postinstall_exit=$?
+        # `if`, not `[ -n ... ] && printf`: under set -e the latter aborts the function when
+        # the output is empty.
+        if [ -n "$postinstall_out" ]; then
+            printf '%s\n' "$postinstall_out"
+        fi
+        if [ "$postinstall_exit" -ne 0 ]; then
+            msg "    ❌ Hook 脚本部署失败 (exit=$postinstall_exit)，hooks/plugins 缺失" \
+                "    ❌ Hook script deployment failed (exit=$postinstall_exit); hooks/plugins are missing"
             return 1
-        }
+        fi
+        if printf '%s' "$postinstall_out" | grep -qE "failed asset tree|Post-install failed"; then
+            msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" \
+                "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
+            return 1
+        fi
+        msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+        msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
+            "    If using Codex desktop app, please manually trust hooks on first launch"
+    else
+        msg "    ⚠️ postinstall.js 未找到，跳过 Hook 部署" \
+            "    ⚠️ postinstall.js not found, skipping hook deployment"
     fi
-    msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-        "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 
     # Write current pointer only after all deploy steps succeed
@@ -970,6 +994,10 @@ const config = {
   enabled: true,
   dataDir: '$DATA_DIR',
 };
+if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
+  config.dashboard = {};
+}
+if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
   config.userId = config['user.id'];
@@ -1845,7 +1873,13 @@ cmd_install() {
     select_agents
     prompt_user_id
     confirm_config_overwrite
-    deploy_package "$INSTALL_SRC"
+    # set -e would end the install here anyway; saying why beats an exit code on its own.
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
+            "❌ Install aborted: hook script deployment failed; check the output above and retry"
+        exit 1
+    fi
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
@@ -2125,6 +2159,128 @@ try {
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
         fi
     done
+}
+
+# Grok Build uses a dedicated Pilot-owned hook file. Match the stable entry
+# script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
+# installations uninstall correctly, while unrelated hooks in the file remain.
+remove_grok_build_hook_config() {
+    local cfg="$HOME/.grok/hooks/loongsuite-pilot.json"
+    [ -f "$cfg" ] || return 0
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (Node.js unavailable; remove the Grok Build Pilot hook manually)"
+        return 0
+    fi
+
+    local result
+    result="$(node -e '
+const fs = require("fs");
+const cfg = process.argv[1];
+const owned = value => typeof value === "string"
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      if (owned(entry && entry.command)) { changed = true; continue; }
+      if (entry && Array.isArray(entry.hooks)) {
+        const nested = entry.hooks.filter(hook => !owned(hook && hook.command));
+        if (nested.length !== entry.hooks.length) changed = true;
+        if (entry.hooks.length > 0 && nested.length === 0) continue;
+        kept.push({ ...entry, hooks: nested });
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (Object.keys(hooks).length === 0) delete data.hooks;
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(cfg);
+  } else {
+    const tmp = `${cfg}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  }
+  process.stdout.write("cleaned");
+} catch (error) {
+  process.stderr.write(error.message); process.exit(1);
+}
+' "$cfg" 2>/dev/null || true)"
+
+    if [ "$result" = "cleaned" ] || [ "$result" = "nochange" ]; then
+        msg "    ✅ 已清理: ~/.grok/hooks/loongsuite-pilot.json" \
+            "    ✅ Cleaned: ~/.grok/hooks/loongsuite-pilot.json"
+    else
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (需手动清理)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (manual cleanup needed)"
+    fi
+}
+
+# ============================================================
+# Remove the Pilot-owned DeepSeek Harness YAML patch before plugin assets.
+# The same helper is invoked by the PowerShell installer.
+# ============================================================
+remove_dsh_yaml_patch() {
+    local plugin_dir="$DATA_DIR/plugins/dsh"
+    local cleanup_script="$plugin_dir/cleanup.mjs"
+    local node_bin=""
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        msg "    ❌ 无可用 Node.js，无法安全清理 DSH YAML patch" \
+            "    ❌ No usable Node.js; cannot safely remove the DSH YAML patch"
+        return 1
+    fi
+
+    # DSH_HOME may differ between install and uninstall. Prefer the exact path
+    # recorded when Pilot deployed the block, then fall back for legacy state.
+    local dsh_home="${DSH_HOME:-$HOME/.dsh}"
+    local patch_path="$dsh_home/cordis.patch.yml"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if [ -f "$state_file" ]; then
+        local persisted_patch
+        persisted_patch=$("$node_bin" -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.dsh?.dshPatchPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted_patch" ]; then patch_path="$persisted_patch"; fi
+    fi
+
+    if [ ! -f "$cleanup_script" ]; then
+        if [ -f "$patch_path" ] && grep -Fq '# BEGIN PILOT-OBSERVABILITY-MANAGED' "$patch_path"; then
+            msg "    ❌ DSH 清理脚本缺失，拒绝删除仍被 YAML 引用的插件资产" \
+                "    ❌ DSH cleanup helper is missing; refusing to remove plugin assets still referenced by YAML"
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! "$node_bin" "$cleanup_script" --patch "$patch_path" --plugin-dir "$plugin_dir"; then
+        msg "    ❌ DSH YAML patch 清理失败；卸载已停止，Pilot 资产保持不变" \
+            "    ❌ DSH YAML patch cleanup failed; uninstall stopped and Pilot assets were preserved"
+        return 1
+    fi
+    msg "    ✅ 已清理 DSH YAML patch" "    ✅ Cleaned DSH YAML patch"
 }
 
 # ============================================================
@@ -2630,6 +2786,12 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
+    msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
+    if ! remove_dsh_yaml_patch; then
+        return 1
+    fi
+    echo ""
+
     # Read the persisted target before the data/install directory is removed.
     msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     remove_hermes_plugin
@@ -2642,6 +2804,7 @@ cmd_uninstall() {
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
+    remove_grok_build_hook_config
     remove_qodercli_token_intercept
     remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept

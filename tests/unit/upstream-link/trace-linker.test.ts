@@ -88,6 +88,13 @@ describe('TraceLinker', () => {
     const other = otherEvent('t1', 'first');
     await linker().stamp([other]);
     expect(other.trace_id).toBe(UP_TRACE); // turn wins
+
+    // The lower-priority environment context still expires with the first
+    // turn and must not reappear if the collector restarts before turn two.
+    const localTrace = 'keeplocaltrace000000000000000000';
+    const later = otherEvent('t2', 'later', localTrace);
+    await linker().stamp([later]);
+    expect(later.trace_id).toBe(localTrace);
   });
 
   it('falls back to session-level on first turn when no turn record matches', async () => {
@@ -107,6 +114,19 @@ describe('TraceLinker', () => {
     await tl.stamp([t2]);
     expect(t1.trace_id).toBe(SESS_TRACE);
     expect(t2.trace_id).toBe('keeplocaltrace000000000000000000'); // unchanged
+  });
+
+  it('does not reapply session-level context after a collector restart', async () => {
+    writeSession(TP_SESS);
+    const t1 = otherEvent('t1', 'q1');
+    await linker().stamp([t1]);
+    expect(t1.trace_id).toBe(SESS_TRACE);
+
+    const localTrace = 'keeplocaltrace000000000000000000';
+    const t2 = otherEvent('t2', 'q2', localTrace);
+    await linker().stamp([t2]);
+    expect(t2.trace_id).toBe(localTrace);
+    expect(t2.parent_span_id).toBeUndefined();
   });
 
   it('overrides an existing (native) trace_id on hit', async () => {

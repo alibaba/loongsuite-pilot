@@ -103,8 +103,10 @@ function Resolve-NodeBin {
     }
     $pinFile = Join-Path $dataDir "node-bin"
     if (Test-Path -LiteralPath $pinFile) {
-        $pinContent = Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue
-        $pinned = Convert-NodePath ([string]$pinContent)
+        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+        # defaults Get-Content to ANSI, which turns it into "??".
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath (([string]$pinContent).Trim([char]0xFEFF))
         if (Test-NodeSuitable $pinned) { return $pinned }
     }
 

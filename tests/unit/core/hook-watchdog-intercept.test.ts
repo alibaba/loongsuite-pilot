@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   HookWatchdog,
+  parseWindowsUserEnv,
   stripMarkerBlock,
   type InterceptCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
@@ -105,6 +106,22 @@ describe('HookWatchdog intercept targets', () => {
     expect(target.repair).toHaveBeenCalled();
     // repair failed but watchdog didn't throw
     expect(result.repaired).toBe(0);
+  });
+
+  it('does not apply cooldown or daily budget after repair throws', async () => {
+    const repair = vi.fn().mockRejectedValue(new Error('transient target disappeared'));
+    const target = makeTarget({
+      check: vi.fn().mockResolvedValue(false),
+      repair,
+    });
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+
+    const first = await wd.runCheck();
+    const second = await wd.runCheck();
+
+    expect(first.repaired).toBe(0);
+    expect(second.repaired).toBe(0);
+    expect(repair).toHaveBeenCalledTimes(2);
   });
 
   it('handles multiple intercept targets independently', async () => {
@@ -286,6 +303,55 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
       expect(installer).toContain(def.plistLabel);
       for (const appName of def.appNames) expect(installer).toContain(appName);
     }
+  });
+
+  it('keeps independent Windows runtime targets for QwenWorkCN and QoderWork', () => {
+    const defs = HookWatchdog.winRuntimeInterceptDefs();
+    expect(defs).toHaveLength(2);
+    expect(defs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qwen-work-cn'],
+      }),
+      expect.objectContaining({
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+      }),
+    ]));
+  });
+
+  it.each(['REG_SZ', 'REG_EXPAND_SZ'])('parses a Windows %s User environment value', (registryType) => {
+    const output = [
+      '',
+      'HKEY_CURRENT_USER\\Environment',
+      `    QW_QODER_WORKER_RUNTIME_PATH    ${registryType}    C:\\Pilot Data\\hooks\\qoderwork-runtime-wrapper.mjs`,
+      '',
+    ].join('\r\n');
+    expect(parseWindowsUserEnv(output, 'QW_QODER_WORKER_RUNTIME_PATH')).toBe(
+      'C:\\Pilot Data\\hooks\\qoderwork-runtime-wrapper.mjs',
+    );
+  });
+
+  it('returns an empty value when the Windows User environment override is absent', () => {
+    expect(parseWindowsUserEnv('', 'QW_QODER_WORKER_RUNTIME_PATH')).toBe('');
+    expect(parseWindowsUserEnv(
+      '    UNRELATED_RUNTIME_PATH    REG_SZ    C:\\vendor\\runtime.mjs',
+      'QW_QODER_WORKER_RUNTIME_PATH',
+    )).toBe('');
+  });
+
+  it('keeps Windows runtime cleanup failures observable', () => {
+    const source = readFileSync(resolve('src/core/hook-watchdog.ts'), 'utf-8');
+    const windowsSection = source.slice(
+      source.indexOf('// ── QoderWork-family Windows User env vars'),
+      source.indexOf('// ── Shell rc intercept targets'),
+    );
+    expect(windowsSection).toContain("logger.debug('windows runtime override cleanup failed'");
+    expect(windowsSection).toContain("reason: 'wrapper-missing'");
+    expect(windowsSection).toContain("reason: 'app-missing'");
+    expect(windowsSection).not.toContain('cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch');
   });
 
   it('defaults every target to enabled when no gate is passed', () => {

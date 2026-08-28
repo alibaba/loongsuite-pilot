@@ -26,6 +26,7 @@ const allowMissing = process.argv.includes('--allow-missing');
 const requestedExitCode = Number.parseInt(option('--exit-code') ?? '0', 10);
 const traceparent = process.env.TRACEPARENT ?? null;
 const tracestate = process.env.TRACESTATE ?? null;
+const resourceAttributes = process.env.OTEL_RESOURCE_ATTRIBUTES ?? null;
 const match = typeof traceparent === 'string' ? TRACEPARENT_RE.exec(traceparent.trim()) : null;
 const valid = Boolean(
   match
@@ -36,6 +37,7 @@ const valid = Boolean(
 const result = {
   traceparent,
   tracestate,
+  resourceAttributes,
   valid,
   traceId: valid ? match[1].toLowerCase() : null,
   parentSpanId: valid ? match[2].toLowerCase() : null,

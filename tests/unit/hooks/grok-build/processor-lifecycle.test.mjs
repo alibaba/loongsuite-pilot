@@ -1,0 +1,492 @@
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+const PROCESSOR = path.join(ROOT, 'assets/hooks/grok-build-hook-processor.mjs');
+const FIXTURES = path.join(ROOT, 'tests/unit/hooks/grok-build/fixtures');
+
+let tempRoot;
+let dataDir;
+let grokHome;
+let sessionDir;
+let chatPath;
+let updatesPath;
+let unifiedPath;
+
+function useSession(sessionId, copyFixtures = true) {
+  sessionDir = path.join(grokHome, 'sessions', encodeURIComponent('/workspace'), sessionId);
+  fs.mkdirSync(sessionDir, { recursive: true });
+  chatPath = path.join(sessionDir, 'chat_history.jsonl');
+  updatesPath = path.join(sessionDir, 'updates.jsonl');
+  if (copyFixtures) {
+    fs.copyFileSync(path.join(FIXTURES, 'chat_history.redacted-real.jsonl'), chatPath);
+    fs.copyFileSync(path.join(FIXTURES, 'updates.redacted-real.jsonl'), updatesPath);
+  }
+}
+
+beforeEach(() => {
+  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-processor-'));
+  dataDir = path.join(tempRoot, 'pilot data');
+  grokHome = path.join(tempRoot, 'grok-home');
+  fs.mkdirSync(dataDir, { recursive: true });
+  useSession('session-redacted');
+  unifiedPath = path.join(tempRoot, 'unified.jsonl');
+  fs.copyFileSync(path.join(FIXTURES, 'unified.redacted-real.jsonl'), unifiedPath);
+});
+
+afterEach(() => {
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+});
+
+function runHook(subcommand, payload, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    HOME: tempRoot,
+    GROK_HOME: grokHome,
+    LOONGSUITE_PILOT_DATA_DIR: dataDir,
+    GROK_UNIFIED_LOG_PATH: unifiedPath,
+    ...extraEnv,
+  };
+  delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  return spawnSync(process.execPath, [PROCESSOR, subcommand], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+    env,
+    timeout: 10_000,
+  });
+}
+
+function runHookAsync(subcommand, payload) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [PROCESSOR, subcommand], {
+      env: {
+        ...process.env,
+        HOME: tempRoot,
+        GROK_HOME: grokHome,
+        LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        GROK_UNIFIED_LOG_PATH: unifiedPath,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', status => resolve({ status, stderr }));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+function records() {
+  const dir = path.join(dataDir, 'logs', 'grok-build');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(name => name.endsWith('.jsonl'))
+    .flatMap(name => fs.readFileSync(path.join(dir, name), 'utf8').trim().split('\n'))
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
+const basePayload = {
+  session_id: 'session-redacted',
+  prompt_id: 'prompt-redacted',
+  transcript_path: '',
+  cwd: '/workspace',
+  timestamp: '2026-07-29T03:48:59.000Z',
+};
+
+describe('Grok Build hook lifecycle', () => {
+  test('accepts the current Grok camelCase hook envelope', () => {
+    const result = runHook('stop', {
+      hookEventName: 'stop',
+      sessionId: 'session-redacted',
+      promptId: 'prompt-redacted',
+      transcriptPath: updatesPath,
+      workspaceRoot: '/workspace',
+      cwd: '/workspace',
+      timestamp: '2026-07-29T03:48:59.000Z',
+      reason: 'end_turn',
+      lastAssistantMessage: 'fixture assistant output',
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const emitted = records();
+    expect(emitted).toHaveLength(8);
+    expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted']));
+  });
+
+  test('exports exactly one deterministic current turn across prompt, stop, session end, and shutdown', () => {
+    const payload = { ...basePayload, transcript_path: updatesPath };
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    expect(records()).toEqual([]);
+
+    const stopped = runHook('stop', { ...payload, stop_reason: 'end_turn' });
+    expect(stopped.status).toBe(0);
+    expect(stopped.stdout.trim()).toBe('{}');
+    const first = records();
+    expect(first.map(record => record['event.name'])).toEqual([
+      'other',
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.result',
+      'tool.call',
+      'tool.result',
+      'other',
+    ]);
+    expect(new Set(first.map(record => record.trace_id)).size).toBe(1);
+    expect(new Set(first.map(record => record['event.id'])).size).toBe(first.length);
+    expect(first.filter(record => record['gen_ai.system_instructions'])).toHaveLength(1);
+    expect(first.find(record => record['gen_ai.tool.call.id'] === 'tool-a'
+      && record['event.name'] === 'tool.result')).toMatchObject({
+      'tool.result.status': 'failure',
+      'gen_ai.tool.call.duration': 125,
+      'error.type': 'ToolError',
+    });
+    expect(first.find(record => record['gen_ai.tool.call.id'] === 'tool-b'
+      && record['event.name'] === 'tool.result'))
+      .not.toHaveProperty('gen_ai.tool.call.duration');
+
+    expect(runHook('stop', { ...payload, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(runHook('session_end', payload).status).toBe(0);
+    expect(runHook('stop', { ...payload, stop_reason: 'shutdown' }).status).toBe(0);
+    expect(records()).toEqual(first);
+    expect(fs.existsSync(path.join(dataDir, 'state', 'grok-build', 'sessions'))).toBe(true);
+  });
+
+  test('SessionEnd exports the completed current turn after a shutdown Stop no-op', () => {
+    const payload = { ...basePayload, transcript_path: updatesPath };
+    const chatFixture = fs.readFileSync(chatPath, 'utf8');
+    const updatesFixture = fs.readFileSync(updatesPath, 'utf8');
+    fs.writeFileSync(chatPath, '');
+    fs.writeFileSync(updatesPath, '');
+
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    fs.writeFileSync(chatPath, chatFixture);
+    fs.writeFileSync(updatesPath, updatesFixture);
+
+    expect(runHook('stop', { ...payload, stop_reason: 'shutdown' }).status).toBe(0);
+    expect(records()).toEqual([]);
+    expect(runHook('session_end', payload).status).toBe(0);
+
+    const emitted = records();
+    expect(emitted.length).toBeGreaterThan(0);
+    expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted']));
+    expect(runHook('stop', { ...payload, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(records()).toEqual(emitted);
+  });
+
+  test('SessionEnd recovers only its completed turn after both transcript rails are atomically replaced', () => {
+    const payload = { ...basePayload, transcript_path: updatesPath };
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    expect(runHook('stop', { ...payload, stop_reason: 'end_turn' }).status).toBe(0);
+    const beforeRewrite = records();
+    expect(new Set(beforeRewrite.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted']));
+
+    const rewrittenChat = [
+      { type: 'system', content: 'rewritten system prompt' },
+      { type: 'user', prompt_index: 7, content: '<user_query>do not replay</user_query>', timestamp: '2026-07-29T03:49:01.000Z' },
+      { type: 'assistant', content: 'historical response', model_id: 'grok', timestamp: '2026-07-29T03:49:01.100Z' },
+      { type: 'user', prompt_index: 8, content: '<user_query>recover this turn</user_query>', timestamp: '2026-07-29T03:49:02.000Z' },
+      { type: 'assistant', content: 'recovered response', model_id: 'grok', timestamp: '2026-07-29T03:49:02.100Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n';
+    const rewrittenUpdates = [
+      {
+        timestamp: 1785296941,
+        params: {
+          _meta: { promptId: 'prompt-rewritten-history', agentTimestampMs: 1785296941100 },
+          update: {
+            sessionUpdate: 'turn_completed',
+            stopReason: 'end_turn',
+            _meta: { promptIndex: 7 },
+          },
+        },
+      },
+      {
+        timestamp: 1785296942,
+        params: {
+          _meta: { promptId: 'prompt-rewritten-current', agentTimestampMs: 1785296942100 },
+          update: {
+            sessionUpdate: 'turn_completed',
+            stopReason: 'end_turn',
+            _meta: { promptIndex: 8 },
+          },
+        },
+      },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n';
+    fs.writeFileSync(`${chatPath}.replacement`, rewrittenChat);
+    fs.renameSync(`${chatPath}.replacement`, chatPath);
+    fs.writeFileSync(`${updatesPath}.replacement`, rewrittenUpdates);
+    fs.renameSync(`${updatesPath}.replacement`, updatesPath);
+    fs.writeFileSync(unifiedPath, '');
+
+    const currentPayload = {
+      ...payload,
+      prompt_id: 'prompt-rewritten-current',
+      timestamp: '2026-07-29T03:49:03.000Z',
+    };
+    expect(runHook('stop', { ...currentPayload, stop_reason: 'shutdown' }).status).toBe(0);
+    expect(records()).toEqual(beforeRewrite);
+    expect(runHook('session_end', currentPayload).status).toBe(0);
+
+    const afterSessionEnd = records();
+    expect(new Set(afterSessionEnd.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-redacted', 'prompt-rewritten-current']));
+    const recovered = afterSessionEnd
+      .filter(record => record['gen_ai.turn.id'] === 'prompt-rewritten-current');
+    expect(recovered.length).toBeGreaterThan(0);
+    expect(JSON.stringify(recovered)).toContain('recover this turn');
+    expect(JSON.stringify(afterSessionEnd)).not.toContain('do not replay');
+
+    expect(runHook('stop', { ...currentPayload, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(records()).toEqual(afterSessionEnd);
+  });
+
+  test('rejects transcript paths outside the matching native Grok session directory', () => {
+    const outsideDir = path.join(tempRoot, 'outside-session');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    const outsideUpdates = path.join(outsideDir, 'updates.jsonl');
+    fs.copyFileSync(path.join(FIXTURES, 'updates.redacted-real.jsonl'), outsideUpdates);
+    fs.copyFileSync(
+      path.join(FIXTURES, 'chat_history.redacted-real.jsonl'),
+      path.join(outsideDir, 'chat_history.jsonl'),
+    );
+
+    const result = runHook('stop', {
+      ...basePayload,
+      transcript_path: outsideUpdates,
+      stop_reason: 'end_turn',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(records()).toEqual([]);
+    const stateDir = path.join(dataDir, 'state', 'grok-build', 'sessions');
+    const persisted = fs.existsSync(stateDir)
+      ? fs.readdirSync(stateDir)
+        .filter(name => name.endsWith('.json'))
+        .map(name => fs.readFileSync(path.join(stateDir, name), 'utf8'))
+        .join('\n')
+      : '';
+    expect(persisted).not.toContain(outsideUpdates);
+  });
+
+  test('classifies StopFailure and emits an LLM attempt only with a real inference start', () => {
+    const sid = 'session-failure';
+    useSession(sid);
+    fs.writeFileSync(chatPath, [
+      { type: 'system', content: 'system' },
+      { type: 'user', prompt_index: 0, content: '<user_query>fail</user_query>', timestamp: '2026-07-29T03:48:52.600Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296932,
+      params: {
+        _meta: { promptId: 'prompt-failure', agentTimestampMs: 1785296932600, turnStartMs: 1785296932600 },
+        update: { sessionUpdate: 'user_message_chunk', _meta: { promptIndex: 0 } },
+      },
+    }) + '\n');
+    fs.writeFileSync(unifiedPath, JSON.stringify({
+      ts: '2026-07-29T03:48:52.700Z',
+      sid,
+      msg: 'shell.turn.inference_start',
+      ctx: { loop_index: 1 },
+    }) + '\n');
+    const result = runHook('stop_failure', {
+      session_id: sid,
+      prompt_id: 'prompt-failure',
+      transcript_path: updatesPath,
+      error: 'HTTP 429 contained private upstream detail',
+      timestamp: '2026-07-29T03:48:53.000Z',
+    });
+    expect(result.status).toBe(0);
+    const emitted = records();
+    expect(emitted.filter(record => record['event.name'] === 'llm.request')).toHaveLength(1);
+    expect(emitted.find(record => record['event.name'] === 'llm.response')).toMatchObject({
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'rate_limit',
+      'error.message': 'model request failed',
+    });
+    expect(JSON.stringify(emitted)).not.toContain('private upstream detail');
+
+    dataDir = path.join(tempRoot, 'pilot-no-attempt');
+    fs.mkdirSync(dataDir, { recursive: true });
+    useSession('session-no-attempt', false);
+    fs.writeFileSync(chatPath, [
+      { type: 'system', content: 'system' },
+      { type: 'user', prompt_index: 0, content: '<user_query>fail</user_query>', timestamp: '2026-07-29T03:48:52.600Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296932,
+      params: {
+        _meta: { promptId: 'prompt-failure', agentTimestampMs: 1785296932600, turnStartMs: 1785296932600 },
+        update: { sessionUpdate: 'user_message_chunk', _meta: { promptIndex: 0 } },
+      },
+    }) + '\n');
+    fs.writeFileSync(unifiedPath, '');
+    expect(runHook('stop_failure', {
+      session_id: 'session-no-attempt',
+      prompt_id: 'prompt-failure',
+      transcript_path: updatesPath,
+      error_type: 'network',
+      timestamp: '2026-07-29T03:48:53.000Z',
+    }).status).toBe(0);
+    expect(records().filter(record => record['event.name'].startsWith('llm.'))).toHaveLength(0);
+    expect(records().filter(record => record['event.name'] === 'other')).toHaveLength(2);
+  });
+
+  test('captureMessageContent=false removes every prompt, system, argument, and result field', () => {
+    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+      agents: { 'grok-build': { captureMessageContent: false } },
+    }));
+    const result = runHook('stop', {
+      ...basePayload,
+      transcript_path: updatesPath,
+      stop_reason: 'end_turn',
+    });
+    expect(result.status).toBe(0);
+    const emitted = records();
+    for (const forbidden of [
+      'gen_ai.input.messages',
+      'gen_ai.input.messages_delta',
+      'gen_ai.output.messages',
+      'gen_ai.system_instructions',
+      'gen_ai.tool.call.arguments',
+      'gen_ai.tool.call.result',
+    ]) {
+      expect(emitted.every(record => !Object.hasOwn(record, forbidden))).toBe(true);
+    }
+    const serialized = JSON.stringify(emitted);
+    expect(serialized).not.toContain('Read two files');
+    expect(serialized).not.toContain('license text');
+  });
+
+  test('UPS does not borrow an unrelated historical chat turn without correlation evidence', () => {
+    const sid = 'session-no-chat-correlation';
+    useSession(sid, false);
+    fs.writeFileSync(chatPath, '');
+    fs.writeFileSync(updatesPath, '');
+    fs.writeFileSync(unifiedPath, '');
+    const payload = {
+      session_id: sid,
+      prompt_id: 'prompt-current',
+      transcript_path: updatesPath,
+      cwd: '/workspace',
+      timestamp: '2026-07-29T03:49:00.000Z',
+    };
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+
+    fs.writeFileSync(chatPath, [
+      { type: 'user', prompt_index: 0, content: '<user_query>historical secret</user_query>' },
+      { type: 'assistant', content: 'historical answer', model_id: 'grok' },
+      { type: 'user', prompt_index: 1, content: '<user_query>cancelled target</user_query>' },
+      { type: 'assistant', content: 'target partial', model_id: 'grok' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296940,
+      params: {
+        _meta: { agentTimestampMs: 1785296940000 },
+        update: {
+          sessionUpdate: 'turn_completed',
+          promptId: 'prompt-cancelled',
+          stopReason: 'cancelled',
+        },
+      },
+    }) + '\n');
+
+    expect(runHook('user_prompt_submit', payload).status).toBe(0);
+    const emitted = records();
+    expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
+      .toEqual(new Set(['prompt-cancelled']));
+    expect(emitted.filter(record => record['event.name'].startsWith('llm.'))).toHaveLength(0);
+    expect(JSON.stringify(emitted)).not.toContain('historical secret');
+    expect(JSON.stringify(emitted)).not.toContain('historical answer');
+  });
+
+  test('delays cancelled-turn export until the next prompt and deduplicates concurrent terminal hooks', async () => {
+    const sid = 'session-delayed-cancel';
+    useSession(sid, false);
+    fs.writeFileSync(chatPath, '');
+    fs.writeFileSync(updatesPath, '');
+    const firstPrompt = {
+      session_id: sid,
+      prompt_id: 'prompt-1',
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T03:48:52.600Z',
+    };
+    expect(runHook('user_prompt_submit', firstPrompt).status).toBe(0);
+
+    fs.writeFileSync(chatPath, [
+      { type: 'user', prompt_index: 0, content: '<user_query>cancel me</user_query>', timestamp: '2026-07-29T03:48:52.600Z' },
+      { type: 'assistant', content: 'partial', model_id: 'grok', timestamp: '2026-07-29T03:48:53.000Z' },
+      { type: 'user', prompt_index: 1, content: '<user_query>next</user_query>', timestamp: '2026-07-29T03:48:54.100Z' },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n');
+    fs.writeFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296934,
+      params: {
+        _meta: { agentTimestampMs: 1785296934000 },
+        update: {
+          sessionUpdate: 'turn_completed',
+          prompt_id: 'prompt-1',
+          stop_reason: 'cancelled',
+        },
+      },
+    }) + '\n');
+
+    expect(runHook('user_prompt_submit', {
+      ...firstPrompt,
+      prompt_id: 'prompt-2',
+      timestamp: '2026-07-29T03:48:54.100Z',
+    }).status).toBe(0);
+    const cancelled = records();
+    expect(new Set(cancelled.map(item => item['gen_ai.turn.id']))).toEqual(new Set(['prompt-1']));
+    expect(cancelled.at(-1)['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+
+    fs.appendFileSync(chatPath, JSON.stringify({
+      type: 'assistant',
+      content: 'second turn answer',
+      model_id: 'grok',
+      timestamp: '2026-07-29T03:48:54.200Z',
+    }) + '\n');
+    fs.appendFileSync(updatesPath, JSON.stringify({
+      timestamp: 1785296935,
+      params: {
+        _meta: { agentTimestampMs: 1785296935000 },
+        update: {
+          sessionUpdate: 'turn_completed',
+          prompt_id: 'prompt-2',
+          stop_reason: 'end_turn',
+        },
+      },
+    }) + '\n');
+    expect(runHook('stop', {
+      ...firstPrompt,
+      prompt_id: 'prompt-2',
+      stop_reason: 'end_turn',
+      timestamp: '2026-07-29T03:48:55.000Z',
+    }).status).toBe(0);
+    const afterSecondTurn = records();
+    const secondTurn = afterSecondTurn.filter(item => item['gen_ai.turn.id'] === 'prompt-2');
+    expect(secondTurn.length).toBeGreaterThan(0);
+    expect(JSON.stringify(secondTurn)).toContain('next');
+
+    const terminalPayload = {
+      session_id: sid,
+      prompt_id: 'prompt-1',
+      transcript_path: updatesPath,
+      stop_reason: 'end_turn',
+      timestamp: '2026-07-29T03:48:55.000Z',
+    };
+    const [stop, sessionEnd] = await Promise.all([
+      runHookAsync('stop', terminalPayload),
+      runHookAsync('session_end', terminalPayload),
+    ]);
+    expect(stop.status, stop.stderr).toBe(0);
+    expect(sessionEnd.status, sessionEnd.stderr).toBe(0);
+    expect(records()).toEqual(afterSecondTurn);
+  });
+});

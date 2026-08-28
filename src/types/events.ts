@@ -57,11 +57,15 @@ export interface AgentActivityEntry {
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
   'gen_ai.agent.name'?: string;
+  'gen_ai.agent.description'?: string;
+  'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
   'gen_ai.response.finish_reasons'?: string[];
+  /** Request-to-first-native-output latency in nanoseconds. */
+  'gen_ai.response.time_to_first_token'?: number;
   'gen_ai.usage.input_tokens'?: number;
   'gen_ai.usage.output_tokens'?: number;
   'gen_ai.usage.cache_read.input_tokens'?: number;
@@ -75,6 +79,7 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages_hash'?: string;
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;
+  'gen_ai.input.multimodal_metadata'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
@@ -84,6 +89,10 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.duration'?: number;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
+  /** Grok execution evidence used to associate a tool declaration with its result. */
+  'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';
+  /** Grok clock selected for the event after transcript/updates/unified fusion. */
+  'loongsuite.grok.timing.source'?: 'unified' | 'updates' | 'hook';
   'gen_ai.skill.name'?: string;
   'gen_ai.skill.id'?: string;
   'gen_ai.skill.description'?: string;

@@ -19,6 +19,7 @@ import {
   toJsonValue,
   parseMaybeJson,
 } from '../agent-event-normalizer.mjs';
+import { cursorWorkspaceFields, resolveWorkspacePath } from './workspace-context.mjs';
 
 // ─── Public API ───
 
@@ -80,6 +81,7 @@ export function assembleTurn(journalEvents, options = {}) {
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
+  const workspacePath = resolveWorkspacePath(parentEvents);
 
   const baseFields = {
     trace_id: traceId,
@@ -87,6 +89,7 @@ export function assembleTurn(journalEvents, options = {}) {
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': variant,
     'user.id': userId,
+    ...cursorWorkspaceFields(variant, workspacePath),
   };
 
   const records = [];
@@ -191,8 +194,10 @@ export function assembleTurn(journalEvents, options = {}) {
   for (const link of childLinks) {
     const { childConvId, childEvents, parentToolCallId } = link;
     const childConvShort = childConvId.slice(0, 8);
+    const childWorkspacePath = resolveWorkspacePath(childEvents) || workspacePath;
     const childBaseFields = {
       ...baseFields,
+      ...cursorWorkspaceFields(variant, childWorkspacePath),
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.depth': 1,
       'gen_ai.agent.id': childConvId,
@@ -265,6 +270,7 @@ function buildParentSteps(events, ctx) {
   let currentStepId = null;
   let currentStepHasTools = false;
   let currentLlmResponse = null;
+  let previousAssistantToolMessage = null;
   let previousToolResults = [];
   // Track last event timestamp for computing next step's LLM start time
   let lastStepEndTs = ctx.promptEventTs; // first step starts at prompt time
@@ -390,6 +396,7 @@ function buildParentSteps(events, ctx) {
     if (!currentLlmResponse) return;
     const toolCalls = stepToolCalls.get(currentStepId);
     appendToolCallParts(currentLlmResponse, toolCalls);
+    previousAssistantToolMessage = toolCallsToMessage(toolCalls);
     applyToolCallResponseTiming(currentLlmResponse, toolCalls);
 
     // Guard: if LLM request start >= response end (buffered-tool scenario),
@@ -457,7 +464,13 @@ function buildParentSteps(events, ctx) {
     //   s1: user prompt (if any) — already pre-seeded in cumulative.
     //   s2+: tool results from previous step — append to cumulative.
     const latestResultEndTs = latestToolResultEndTs(previousToolResults);
-    const deltaMessages = buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages);
+    const deltaMessages = buildDeltaMessages(
+      isFirst,
+      userPrompt,
+      previousAssistantToolMessage,
+      previousToolResults,
+      cumulativeInputMessages,
+    );
 
     const requestStart = llmRequestStartTime(ev, lastStepEndTs);
     const { timestamp: reqTs, source: reqTsSource } = clampRequestStartToToolResults(
@@ -470,6 +483,7 @@ function buildParentSteps(events, ctx) {
       cumulativeInputMessages,
       reqTsSource,
     ));
+    previousAssistantToolMessage = null;
     previousToolResults = [];
   }
 
@@ -483,7 +497,14 @@ function buildParentSteps(events, ctx) {
     currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
     stepToolCalls.set(currentStepId, []);
 
-    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+    const deltaMessages = buildDeltaMessages(
+      isFirstStep,
+      ctx.userPrompt,
+      previousAssistantToolMessage,
+      previousToolResults,
+      cumulativeInputMessages,
+    );
+    previousAssistantToolMessage = null;
     previousToolResults = [];
 
     records.push(buildLlmRequestWithTs(
@@ -683,12 +704,19 @@ function toolResultsToMessage(toolResults) {
  * Build per-step delta messages and update cumulative input.
  *
  * - isFirst step: delta includes the user prompt (already pre-seeded in cumulative).
- * - s2+ steps: delta includes a tool-role message from the previous step's results,
- *   which is also appended to cumulativeInputMessages.
+ * - s2+ steps: delta includes the previous assistant tool-call message followed
+ *   by the tool-role message containing its results. Both are appended to the
+ *   cumulative input in source order.
  *
  * Callers are responsible for resetting previousToolResults after this call.
  */
-function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages) {
+function buildDeltaMessages(
+  isFirst,
+  userPrompt,
+  previousAssistantToolMessage,
+  previousToolResults,
+  cumulativeInputMessages,
+) {
   const deltaMessages = [];
   if (isFirst && userPrompt) {
     deltaMessages.push({
@@ -697,6 +725,11 @@ function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulative
     });
   }
   if (previousToolResults.length > 0) {
+    if (previousAssistantToolMessage) {
+      const assistantMessage = cloneMessages([previousAssistantToolMessage])[0];
+      deltaMessages.push(assistantMessage);
+      cumulativeInputMessages.push(cloneMessages([assistantMessage])[0]);
+    }
     const toolMessage = toolResultsToMessage(previousToolResults);
     deltaMessages.push(toolMessage);
     cumulativeInputMessages.push({ ...toolMessage, parts: [...toolMessage.parts] });
@@ -839,6 +872,19 @@ function appendToolCallParts(llmResponse, toolCalls) {
       arguments: parseMaybeJson(tc.toolInput),
     });
   }
+}
+
+function toolCallsToMessage(toolCalls) {
+  if (!toolCalls || toolCalls.length === 0) return null;
+  return {
+    role: 'assistant',
+    parts: toolCalls.map(tc => ({
+      type: 'tool_call',
+      id: tc.toolUseId || null,
+      name: tc.toolName,
+      arguments: parseMaybeJson(tc.toolInput),
+    })),
+  };
 }
 
 function applyToolCallResponseTiming(llmResponse, toolCalls) {

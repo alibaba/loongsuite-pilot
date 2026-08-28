@@ -40,6 +40,7 @@ export interface MetricsWriterOptions {
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
+  autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
 }
 
@@ -48,6 +49,7 @@ export class MetricsWriter {
   private readonly collector: MetricsCollector;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
+  private l2WritePromise: Promise<void> | null = null;
   private l1Timer: ReturnType<typeof setInterval> | null = null;
   private l2Timer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
@@ -70,6 +72,7 @@ export class MetricsWriter {
       canaryPolicy: opts.canaryPolicy,
       slsEndpoints: opts.slsEndpoints,
       cmsWorkspace: opts.cmsWorkspace,
+      autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
     });
     this.getSnapshot = opts.getSnapshot;
@@ -90,6 +93,9 @@ export class MetricsWriter {
     }
 
     await this.writeL1();
+    // Prime L2 too: without it a run shorter than L2_INTERVAL_MS reports a healthy
+    // heartbeat and no pipeline data at all.
+    void this.writeL2();
     logger.info('metrics-writer started');
   }
 
@@ -116,15 +122,18 @@ export class MetricsWriter {
     try {
       const snapshot = this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
-      const filePath = path.join(this.logsDir, 'pilot-metrics.jsonl');
-      await appendLine(filePath, JSON.stringify(metrics));
 
       this.checkThresholds(metrics);
       this.checkUserId();
       this.checkStartupMode(metrics);
       this.checkInfraHealth();
+      // Report before the local append: collectL1 already drained its counters, so
+      // a failing disk write must not be what costs us the window.
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
+
+      const filePath = path.join(this.logsDir, 'pilot-metrics.jsonl');
+      await appendLine(filePath, JSON.stringify(metrics));
     } catch (err) {
       logger.warn('L1 metrics write failed', { error: String(err) });
     }
@@ -323,40 +332,41 @@ export class MetricsWriter {
     }
   }
 
-  private async writeL2(): Promise<void> {
+  /**
+   * Collapses overlapping cycles into the in-flight one. collectL2 drains its
+   * counters, so two concurrent collects would split one window across two sets
+   * of rows — which is exactly what the priming write in start() would do
+   * against the first timer tick or the final flush in stop().
+   */
+  private writeL2(): Promise<void> {
+    if (this.l2WritePromise) return this.l2WritePromise;
+
+    this.l2WritePromise = this.collectAndWriteL2()
+      .finally(() => {
+        this.l2WritePromise = null;
+      });
+    return this.l2WritePromise;
+  }
+
+  private async collectAndWriteL2(): Promise<void> {
     try {
       const snapshot = this.getSnapshot();
 
-      const inputMetrics = this.collector.collectL2Inputs(snapshot);
-      if (inputMetrics.length > 0) {
-        const inputPath = path.join(this.logsDir, 'pilot-input-metrics.jsonl');
-        for (const m of inputMetrics) {
-          await appendLine(inputPath, JSON.stringify(m));
-        }
-        for (const m of inputMetrics) {
-          sendStatus('pilot_input_detail', flattenToStrings(m));
-        }
-      }
+      // One cycle, two row types on the same topic: a row per agent that carried
+      // data, a row per write destination. They share one window and one drain, so
+      // they must ship together — telling them apart is what `type` is for.
+      const l2 = this.collector.collectL2(snapshot);
+      if (l2) {
+        // Same as L1: the collect drained the counters, so send first and let the
+        // local mirror be the thing that can fail.
+        for (const row of l2.agents) sendStatus('pilot_pipeline', flattenToStrings(row));
+        for (const row of l2.flushers) sendStatus('pilot_pipeline', flattenToStrings(row));
 
-      const flusherMetrics = this.collector.collectL2Flushers(snapshot);
-      if (flusherMetrics.length > 0) {
-        const flusherPath = path.join(this.logsDir, 'pilot-flusher-metrics.jsonl');
-        for (const m of flusherMetrics) {
-          await appendLine(flusherPath, JSON.stringify(m));
+        for (const row of l2.agents) {
+          await appendLine(path.join(this.logsDir, 'pilot-agent-metrics.jsonl'), JSON.stringify(row));
         }
-        for (const m of flusherMetrics) {
-          sendStatus('pilot_flusher_detail', flattenToStrings(m));
-        }
-      }
-
-      const alarmMetrics = this.collector.collectL2Alarms(snapshot);
-      if (alarmMetrics.length > 0) {
-        const alarmPath = path.join(this.logsDir, 'pilot-alarm-metrics.jsonl');
-        for (const m of alarmMetrics) {
-          await appendLine(alarmPath, JSON.stringify(m));
-        }
-        for (const m of alarmMetrics) {
-          sendStatus('pilot_alarm_metric', flattenToStrings(m));
+        for (const row of l2.flushers) {
+          await appendLine(path.join(this.logsDir, 'pilot-flusher-metrics.jsonl'), JSON.stringify(row));
         }
       }
     } catch (err) {

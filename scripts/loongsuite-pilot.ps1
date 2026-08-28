@@ -7,6 +7,7 @@
 #   loongsuite-pilot restart
 #   loongsuite-pilot status
 #   loongsuite-pilot info
+#   loongsuite-pilot token-usage
 #   loongsuite-pilot rollback
 #   loongsuite-pilot worker connect|list|status|disconnect|delete
 #   loongsuite-pilot help
@@ -57,16 +58,59 @@ $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 
+# >>> pilot-account-identity >>>
+# Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
+# stdout is decoded with [Console]::OutputEncoding -- the console codepage, 437 on an
+# en-US box -- so `whoami` returns "host\??" for a non-ASCII account name: every
+# character the codepage cannot represent arrives as a literal U+003F, measured on a
+# C:\Users\<CJK name> profile. That corrupted string used to reach
+# New-ScheduledTaskPrincipal -UserId, where Task Scheduler rejected the registration
+# with "No mapping between account names and security IDs was done" (HRESULT
+# 0x80131500), so such a user never got an autostart task at all; it also collapsed
+# every non-ASCII account to the same "___" task-name tag.
+#
+# The environment variables carry the real UTF-16 string and are CLM-safe, unlike
+# [Security.Principal.WindowsIdentity]::GetCurrent() (CLM: "Method invocation is
+# supported only on core types") and unlike [Environment]::UserName. USERDOMAIN is not
+# always an account domain: under some logon providers (OpenSSH sshd among them) it is
+# the literal "WORKGROUP", which maps to no SID either, so fall back to the machine
+# name -- which is also what whoami prints for a local account, keeping the tag below
+# byte-identical for ASCII users who upgrade in place.
+function Get-PilotAccountName {
+    $user = [string]$env:USERNAME
+    if (-not $user) { return "" }
+    $domain = [string]$env:USERDOMAIN
+    if ((-not $domain) -or ($domain -eq "WORKGROUP")) { $domain = [string]$env:COMPUTERNAME }
+    if ($domain) { return ($domain + "\" + $user) }
+    return $user
+}
+
 # Task names are per-user: multiple users can run on one machine, each with their
 # own data dir under %USERPROFILE%. A global task name would collide -- the second
 # user cannot delete or overwrite the first user's task (Access is denied), so it
 # would fail with "already exists" and drop to the background fallback. The shared
 # \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
-# Tag from whoami (DOMAIN\user) -- the same identity used for the task principal --
-# not $env:USERNAME (bare SAM name): two same-named accounts from different domains
-# (CORP\alice vs DEV\alice) would otherwise share one task name and re-introduce the
-# cross-user "already exists" collision this scoping is meant to prevent.
-$USER_TAG = ((whoami) -replace '[^A-Za-z0-9._-]', '_')
+# Tag from the full DOMAIN\user identity, not $env:USERNAME alone (bare SAM name):
+# two same-named accounts from different domains (CORP\alice vs DEV\alice) would
+# otherwise share one task name and re-introduce the cross-user "already exists"
+# collision this scoping is meant to prevent. Task names live in the file system, so
+# everything outside [A-Za-z0-9._-] becomes "_" -- which turns a non-ASCII account
+# name into a row of underscores that two such users on one machine would fight over,
+# hence the short deterministic digest appended in that case only. ASCII installs keep
+# the exact tag they already have, so their registered tasks stay upgradeable in place.
+function Get-PilotUserTag {
+    $name = (Get-PilotAccountName).ToLower()
+    $tag = $name -replace '[^A-Za-z0-9._-]', '_'
+    if ($name -match '[^\x20-\x7E]') {
+        $hash = 0
+        foreach ($ch in $name.ToCharArray()) { $hash = ($hash * 31 + [int]$ch) % 1000000007 }
+        $tag = $tag + "-" + $hash
+    }
+    return $tag
+}
+# <<< pilot-account-identity <<<
+
+$USER_TAG = Get-PilotUserTag
 $TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
 $TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
@@ -96,10 +140,18 @@ function Test-NodeSuitable {
     } catch { return $false }
 }
 
+# The pin file holds one absolute path to node.exe, and for a managed runtime that path
+# sits under the data dir -- i.e. under %USERPROFILE%, which can be non-ASCII. 5.1
+# defaults both Get-Content and Set-Content to the ANSI codepage, so an unqualified
+# write stored "C:\Users\??.HOST\..." and every reader then failed Test-NodeSuitable and
+# silently fell back to whatever node.exe the fallback search found first -- on a shared
+# machine that was another account's nvm install. -Encoding UTF8 always emits a BOM on
+# 5.1 (there is no utf8NoBOM), and U+FEFF is not whitespace, so .Trim() alone leaves it
+# in the path: strip it explicitly before trimming.
 function Resolve-Node {
     # 1. Pinned file
     if (Test-Path $NODE_PIN_FILE) {
-        $pinned = (Get-Content $NODE_PIN_FILE -ErrorAction SilentlyContinue).Trim()
+        $pinned = ([string](Get-Content -LiteralPath $NODE_PIN_FILE -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) {
             return $pinned
         }
@@ -108,16 +160,25 @@ function Resolve-Node {
     # 2. Fallback search
     $candidates = @()
 
-    # nvm-windows
-    if ($env:NVM_HOME -and (Test-Path $env:NVM_HOME)) {
+    # nvm-windows. Both probes below must be non-fatal. NVM_HOME is often a *machine*
+    # level variable pointing into another account's profile
+    # (C:\Users\Administrator\AppData\Local\nvm was measured), and that directory's DACL
+    # grants nothing to the current user: a bare Test-Path raises a PermissionDenied
+    # UnauthorizedAccessException record, which this file's $ErrorActionPreference = "Stop"
+    # promotes to a terminating error. Resolve-Node runs on the way into start / stop /
+    # status / restart-collector, so one unreadable third-party node manager took down
+    # every service command -- including the restart-collector the updater issues after
+    # deploying a version. The Get-ChildItem calls were already guarded; these two were
+    # not. -LiteralPath as well, because a version manager path may contain [ or ].
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME -ErrorAction SilentlyContinue)) {
         Get-ChildItem $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "node.exe" }
     }
 
-    # fnm
+    # fnm -- same unreadable-directory hazard as the nvm branch above.
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
+    if (Test-Path -LiteralPath $fnmDir -ErrorAction SilentlyContinue) {
         Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "installation\node.exe" }
@@ -137,7 +198,7 @@ function Resolve-Node {
             # Auto-heal: update pin file
             $parentDir = Split-Path $NODE_PIN_FILE
             if (-not (Test-Path $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
-            Set-Content -Path $NODE_PIN_FILE -Value $c
+            Set-Content -LiteralPath $NODE_PIN_FILE -Value $c -Encoding UTF8
             return $c
         }
     }
@@ -285,19 +346,53 @@ function Stop-PidFile {
     }
     # Force kill if still running
     try { Stop-Process -Id $pidVal -Force -ErrorAction SilentlyContinue } catch {}
-    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+
+    # Delete the file only while it still names the process we just killed. Up to ten
+    # seconds elapse in the wait loop above, and the collector task carries a five-minute
+    # repeating trigger, so a successor may already have started and written its own pid
+    # here -- unconditional removal then deleted a live daemon's pid file, after which
+    # status reported it as not running and the next start raced a second instance against
+    # it. Same rule the daemons themselves follow on shutdown (removeOwnPidFileSync in
+    # src/utils/pid-utils.ts). Re-read rather than trusting $pidVal: the point is what is
+    # on disk now, not what was there before Stop-Process.
+    $currentPid = ""
+    if (Test-Path -LiteralPath $pidFile) {
+        $currentPid = ([string](Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue)).Trim()
+    }
+    if ($currentPid -eq $pidVal) {
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Stop-OrphanProcesses {
     # $Match limits which daemons are terminated; the default kills both. Callers that
     # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
     # narrow pattern so they only reap the daemon they are about to re-launch.
+    #
+    # Both conditions below are required, and the second one is the point. The daemon
+    # names are shared by every installation on the machine: on a multi-account box each
+    # user runs their own collector and updater out of their own %USERPROFILE%, and
+    # matching on the name alone made any install / restart / stop kill all of them.
+    # Get-Process only enumerates other users' processes when the caller is elevated, so
+    # the blast radius was exactly the elevated sessions -- their victims' pid files were
+    # left pointing at dead pids, which is where the "stale single-instance lock" reports
+    # came from. $BOOTSTRAP_DIR is the directory the entry script is loaded from
+    # (New-HiddenTaskAction writes "<node>" "<$BOOTSTRAP_DIR\<name>-daemon.js>", and
+    # Cmd-Start builds the same pair), so it appears verbatim in the command line and
+    # identifies this installation and no other. It is non-empty by construction:
+    # $CACHE_DIR falls back to $DEFAULT_PILOT_DIR.
+    #
+    # .ToLower().Contains() rather than -match: the scope is a literal Windows path full
+    # of \ and possibly regex metacharacters (a user profile can contain "["), and
+    # escaping it for a regex buys nothing here. It is also a method call on [string], a
+    # core type, so it stays CLM-safe.
     param([string]$Match = "collector-daemon|updater-daemon")
+    $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
     Get-Process -Name "node" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match $Match
+                $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                ($cmdLine -match $Match) -and $cmdLine.ToLower().Contains($ownRoot)
             } catch { $false }
         } | ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -399,12 +494,23 @@ function Register-PilotTask {
         $settings,
         [string]$description
     )
-    $userId = whoami
+    $userId = Get-PilotAccountName
     $lastErr = $null
     foreach ($logonType in @("Interactive", "S4U")) {
         # Clear any task a previous attempt left behind. A failed registration can
         # still create the task entry before erroring on the principal.
+        #
+        # The delete output stays suppressed: on a fresh install there is nothing to
+        # delete and schtasks exits non-zero, so its stderr is noise (and a bare stderr
+        # line can turn terminating under $ErrorActionPreference = "Stop"). A task that
+        # SURVIVES the delete is a different story and worth a line -- it means this
+        # process has no write access to the task and the registration below is about to
+        # fail with "Access is denied" or a name collision. Without this, the only
+        # symptom was the registration error, which reads like a bug in the principal.
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
+        if (Get-TaskExists $taskName) {
+            Write-Host "   '$taskName' survived the delete; re-registration will likely be denied" -ForegroundColor Yellow
+        }
         try {
             # On-disk location of the task definition (absolute filesystem path).
             $diskPath = "$env:SystemRoot\System32\Tasks$TASK_FOLDER\$taskName"
@@ -488,7 +594,7 @@ function Install-CollectorTask {
     # -User scopes the logon trigger to the current user; without it the trigger
     # fires for ALL users, which requires admin rights and fails registration with
     # "Access is denied" (0x80070005) for standard users.
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (Get-PilotAccountName)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -529,7 +635,7 @@ function Install-UpdaterTask {
     $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "updater-launch.vbs") $nodeBin $entry
 
     # -User scopes the trigger to the current user (all-users trigger needs admin).
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (Get-PilotAccountName)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -762,16 +868,11 @@ function Cmd-RestartCollector {
     }
     Stop-PidFile $PID_FILE
 
-    # Kill orphan collector processes
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "collector-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Kill orphan collector processes. Was an inline copy of Stop-OrphanProcesses that
+    # predated the -Match parameter; it also missed the installation scope the shared
+    # helper now applies, and restart-collector is the command the updater runs on every
+    # deploy -- i.e. the one that reached other accounts most often.
+    Stop-OrphanProcesses -Match "collector-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
@@ -786,9 +887,33 @@ function Cmd-RestartCollector {
     # Restart via Task Scheduler if registered
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_COLLECTOR) {
+        # Re-register with potentially updated paths -- best-effort, and deliberately
+        # in its OWN try so a failure here can no longer skip the start below.
+        #
+        # A scheduled task grants its own principal only Read: every write ACE sits on
+        # BUILTIN\Administrators, and UAC filters that group out of the token of a
+        # -RunLevel Limited task, which is what our two daemons run as. So the updater
+        # that invokes restart-collector cannot touch its own task definition. Measured
+        # on a Medium-integrity Limited task against a task registered earlier:
+        # schtasks /Delete, Register-ScheduledTask and Register-ScheduledTask -Force all
+        # fail with "Access is denied" -- -Force is not a fix -- while
+        # Start-ScheduledTask succeeds, because starting needs no write access.
+        #
+        # Nothing is lost by skipping the re-registration: Install-CollectorTask rewrites
+        # collector-launch.vbs and reaps orphaned daemons before it reaches the
+        # registration, and the task action invokes that .vbs by a path that does not
+        # change across versions -- so the surviving registration already launches the
+        # new version. Sharing one try was the whole defect: a cosmetic re-register
+        # failure aborted before Start-ScheduledTask, and with init_type=taskscheduler
+        # the self-heal branch below is skipped, so the update ended in "Service manager
+        # failed to restart collector" + exit 1 while the collector stayed down until the
+        # task's own 5-minute watchdog trigger happened to relaunch it.
         try {
-            # Re-register with potentially updated paths
             Install-CollectorTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Write-Host "collector restarted (Task Scheduler)"
             $restarted = $true
@@ -859,15 +984,9 @@ function Cmd-RestartUpdater {
     }
     Stop-PidFile $UPDATER_PID_FILE
 
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "updater-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Second inline copy, same history and same missing scope as the one in
+    # Cmd-RestartCollector.
+    Stop-OrphanProcesses -Match "updater-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
@@ -882,8 +1001,15 @@ function Cmd-RestartUpdater {
     # Restart via Task Scheduler
     $restarted = $false
     if (Get-TaskExists $TASK_NAME_UPDATER) {
+        # Best-effort re-registration in its own try, for the same reason as in
+        # Cmd-RestartCollector above (a -RunLevel Limited task cannot rewrite its own
+        # definition; only starting it works). See the comment there.
         try {
             Install-UpdaterTask $nodeBin | Out-Null
+        } catch {
+            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        try {
             Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Start-Sleep -Seconds 1
             if (Get-TaskRunning $TASK_NAME_UPDATER) {
@@ -943,6 +1069,71 @@ function Cmd-RestartUpdater {
 # ============================================================
 # CMD: status
 # ============================================================
+function Get-DashboardPort {
+    try {
+        if (Test-Path $CONFIG_FILE) {
+            $config = Get-Content -LiteralPath $CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+            $port = $config.dashboard.port
+            if ($null -ne $port -and $port -isnot [string] -and $port -isnot [bool]) {
+                $numericPort = [double]$port
+                $integerPort = [long]$numericPort
+                if ($numericPort -eq $integerPort -and
+                    $integerPort -ge 1 -and $integerPort -le 65535) {
+                    return [int]$integerPort
+                }
+            }
+        }
+    } catch {}
+    return 8765
+}
+
+function Test-DashboardAvailable {
+    param([int]$Port)
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { return $false }
+
+    $probe = @'
+const http = require("node:http");
+const crypto = require("node:crypto");
+const path = require("node:path");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: Number(process.argv[1]),
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  const expectedInstance = crypto.createHash("sha256")
+    .update(path.resolve(process.argv[2]))
+    .digest("hex");
+  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
+    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
+  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+'@
+
+    try {
+        & $nodeBin -e $probe $Port $DATA_DIR *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
 function Cmd-Status {
     $verInfo = ""
     $versionDir = Resolve-CurrentVersion
@@ -968,6 +1159,14 @@ function Cmd-Status {
         Write-Host "loongsuite-pilot${verInfo} is not running"
         if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
             Write-Host "   collector task: running without a runtime heartbeat" -ForegroundColor Yellow
+        }
+    }
+    if ($collectorRunning) {
+        $dashboardPort = Get-DashboardPort
+        if (Test-DashboardAvailable -Port $dashboardPort) {
+            Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+        } else {
+            Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
         }
     }
 
@@ -1020,7 +1219,7 @@ function Cmd-Info {
     Write-Host "versions_dir=$VERSIONS_DIR"
 
     if (Test-Path $NODE_PIN_FILE) {
-        $pinnedNode = (Get-Content $NODE_PIN_FILE -ErrorAction SilentlyContinue).Trim()
+        $pinnedNode = ([string](Get-Content -LiteralPath $NODE_PIN_FILE -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinnedNode -and (Test-Path $pinnedNode)) {
             $nodeVer = & $pinnedNode --version 2>$null
             Write-Host "node_bin=$pinnedNode"
@@ -1174,6 +1373,65 @@ function Cmd-Log {
 }
 
 # ============================================================
+# CMD: deploy (one-shot hook/plugin deployment, for image builds)
+# ============================================================
+function Cmd-Deploy {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Deploy CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    # No collector restart afterwards -- see the shell cmd_deploy for why.
+    & $nodeBin $entry "deploy" @SubArgs
+    exit $LASTEXITCODE
+}
+
+# ============================================================
+# CMD: token-usage (foreground token usage CLI)
+# ============================================================
+function Cmd-TokenUsage {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Token usage CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    & $nodeBin $entry "token-usage" @SubArgs
+    exit $LASTEXITCODE
+}
+
+# ============================================================
 # CMD: worker (foreground local Worker management CLI)
 # ============================================================
 function Cmd-Worker {
@@ -1302,6 +1560,11 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
+    Write-Host "                    --require <ids>  comma-separated agent ids that must deploy"
+    Write-Host "                    --json           machine-readable result"
+    Write-Host "  token-usage     Show token usage TUI"
+    Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     Write-Host "  rollback        Roll back to the previous version"
@@ -1320,6 +1583,9 @@ switch ($Command.ToLower()) {
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
+    "deploy"             { Cmd-Deploy }
+    "token-usage"        { Cmd-TokenUsage }
+    "tokens"             { Cmd-TokenUsage }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }

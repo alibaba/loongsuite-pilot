@@ -118,6 +118,7 @@ export function toInternalEvent(payload) {
   // common metadata
   event.cursor_version = payload.cursor_version || undefined;
   event.user_email = payload.user_email || undefined;
+  event.cwd = payload.cwd || event.cwd || undefined;
   event.workspace_roots = payload.workspace_roots || undefined;
   event.transcript_path = payload.transcript_path || undefined;
 

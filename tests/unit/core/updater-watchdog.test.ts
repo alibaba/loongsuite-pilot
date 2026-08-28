@@ -149,6 +149,98 @@ describe('UpdaterWatchdog', () => {
     });
   });
 
+  it('uses startup grace before restarting for a missing updater process', async () => {
+    // The install sequence registers the collector task before the updater one, and
+    // start() runs its first check immediately, so this branch used to fire on every
+    // install: an alarm plus a restart-updater racing the installer. Nothing here is
+    // wrong yet at this point -- the process is simply not up.
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 60_000,
+      alarmManager: alarms,
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    // The alarm has to stay behind the grace check as well, not just the restart.
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('uses startup grace before restarting for a command mismatch', async () => {
+    // Mid-install and mid-deploy the pid file legitimately still names the outgoing
+    // version's process; inside the window that is a handover, not a broken updater.
+    await writeHeartbeat(tmpDir);
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 60_000,
+      alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: false,
+        pid: UPDATER_PID,
+        source: 'none',
+        reason: 'pid file points to mismatched process',
+        pidFileState: 'stale',
+        pidFileProcessAlive: true,
+        pidFileCommand: 'node /tmp/other.js',
+        pidFileCommandMatched: false,
+      }),
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('uses sleep/wake grace before restarting for a missing updater process', async () => {
+    // A machine that suspended for longer than one interval comes back with processes
+    // that did not survive it; the repeating task trigger brings the updater back on its
+    // own, so restarting from here only adds a race and an alarm.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'));
+    await writePid(tmpDir);
+    await writeHeartbeat(tmpDir);
+    const alarms = makeAlarmManager();
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      intervalMs: 1_000,
+      startupGraceMs: 0,
+      sleepWakeGraceMs: 5_000,
+      alarmManager: alarms,
+      updaterLiveness: (() => {
+        let first = true;
+        return () => {
+          if (first) {
+            first = false;
+            return { running: true, pid: UPDATER_PID, source: 'pid-file' as const, reason: 'ok' };
+          }
+          return { running: false, source: 'none' as const, reason: 'pid file is missing; no matching process found' };
+        };
+      })(),
+    });
+
+    expect((await wd.runCheck()).status).toBe('healthy');
+    vi.setSystemTime(new Date('2026-06-16T00:00:07Z'));
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    expect(alarms.serialize()).toEqual([]);
+  });
+
   it('reports healthy when updater PID changed but process identity matches heartbeat', async () => {
     await writeHeartbeat(tmpDir, { pid: 456 });
     const alarms = makeAlarmManager();

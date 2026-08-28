@@ -311,6 +311,39 @@ function canonicalMessages(messages) {
     .filter(Boolean);
 }
 
+function sameCanonicalMessage(left, right) {
+  return safeStringify(left) === safeStringify(right);
+}
+
+/**
+ * Return the messages appended since the previous request snapshot.
+ *
+ * Pi caps the captured request context to the most recent MAX_MESSAGES, so a
+ * later snapshot may have dropped messages from the front. Matching the
+ * longest previous-suffix/current-prefix overlap handles both ordinary append
+ * growth and that rolling window. A non-overlapping replacement (for example
+ * compaction or another extension rewriting context) is not representable as
+ * an append-only delta, so leave the field absent instead of fabricating one.
+ */
+function appendedInputMessages(previous, current, hasPreviousSnapshot) {
+  if (!hasPreviousSnapshot || previous.length === 0) return current.slice();
+  if (current.length === 0) return [];
+
+  const maxOverlap = Math.min(previous.length, current.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    const previousStart = previous.length - overlap;
+    let matches = true;
+    for (let index = 0; index < overlap; index++) {
+      if (!sameCanonicalMessage(previous[previousStart + index], current[index])) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return current.slice(overlap);
+  }
+  return undefined;
+}
+
 function canonicalOutputMessage(message) {
   const canonical = canonicalMessage(message);
   if (!canonical) return undefined;
@@ -432,7 +465,10 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     requestStartedAt: 0,
     systemPrompt: null,
     pendingUserInput: [],
+    fallbackRequestInput: [],
     userInputEmitted: false,
+    previousRequestMessages: [],
+    hasPreviousRequestSnapshot: false,
     toolStarts: new Map(),
   };
 
@@ -451,7 +487,10 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.pendingUserInput = [];
+    state.fallbackRequestInput = [];
     state.userInputEmitted = false;
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
 
@@ -464,8 +503,11 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.systemPrompt = event.systemPrompt;
-    state.pendingUserInput = promptInputMessages(event);
+    state.pendingUserInput = state.captureContent ? promptInputMessages(event) : [];
+    state.fallbackRequestInput = state.pendingUserInput.slice();
     state.userInputEmitted = false;
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
 
@@ -504,6 +546,24 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     if (state.captureContent) {
       const messages = canonicalMessages(event.messages);
       if (messages.length > 0) record['gen_ai.input.messages'] = messages;
+      if (messages.length > 0) {
+        const delta = appendedInputMessages(
+          state.previousRequestMessages,
+          messages,
+          state.hasPreviousRequestSnapshot,
+        );
+        if (delta !== undefined) record['gen_ai.input.messages_delta'] = delta;
+        state.previousRequestMessages = messages;
+        state.hasPreviousRequestSnapshot = true;
+      } else if (!state.hasPreviousRequestSnapshot && state.fallbackRequestInput.length > 0) {
+        // `context` should precede every provider request, but older/custom Pi
+        // runtimes may deliver only message_end. Preserve the user input known
+        // from before_agent_start without pretending it was a full snapshot.
+        record['gen_ai.input.messages_delta'] = state.fallbackRequestInput;
+        state.previousRequestMessages = state.fallbackRequestInput.slice();
+        state.hasPreviousRequestSnapshot = true;
+      }
+      state.fallbackRequestInput = [];
       if (state.systemPrompt) {
         record['gen_ai.system_instructions'] = [
           { type: 'text', content: truncate(state.systemPrompt) },
@@ -608,6 +668,9 @@ export function createPiTelemetryExtension(identityOptions = {}) {
 
   pi.on('session_shutdown', safeHandler('session_shutdown', async () => {
     state.pendingUserInput = [];
+    state.fallbackRequestInput = [];
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
   };

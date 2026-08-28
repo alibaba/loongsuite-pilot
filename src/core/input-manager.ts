@@ -11,10 +11,14 @@ import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
+import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
+import type { MultimodalProcessor } from '../multimodal/processor.js';
+import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
+import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 
 const logger = createLogger('InputManager');
 
@@ -25,7 +29,14 @@ export interface InputCounter {
   outFailed: number;
   lastPollTime: string;
   startTime: string;
+  /** How this input collects (CollectionMethod) — never an agent name. */
   type: string;
+  /**
+   * The agent this input collects for, straight from the input itself. Reporting
+   * rolls ingress up by agent, and this is the only source that is right for
+   * every input, mapped or not.
+   */
+  agentType: string;
   lastActiveTime: number;
 }
 
@@ -36,7 +47,8 @@ export interface InputCounter {
  *   1. Register / start / stop inputs
  *   2. Listen for 'entries' events from each input
  *   3. Enrich entries with user.id
- *   4. Forward to flusher(s) for output
+ *   4. Fill missing root-turn lifecycle boundaries
+ *   5. Forward to flusher(s) for output
  */
 export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
@@ -50,6 +62,8 @@ export class InputManager extends EventEmitter {
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
   private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
+  private multimodalProcessor: MultimodalProcessor | null = null;
+  private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -80,6 +94,15 @@ export class InputManager extends EventEmitter {
     this.traceLinker = linker;
   }
 
+  /** Process-scoped; reject replacing a different live instance. */
+  setMultimodalProcessor(processor: MultimodalProcessor): void {
+    if (this.multimodalProcessor && this.multimodalProcessor !== processor) {
+      logger.warn('multimodal processor already set; ignoring replacement');
+      return;
+    }
+    this.multimodalProcessor = processor;
+  }
+
   registerInput(input: BaseInput): void {
     if (this.inputs.has(input.id)) {
       logger.warn('input already registered', { id: input.id });
@@ -94,6 +117,7 @@ export class InputManager extends EventEmitter {
       lastPollTime: '',
       startTime: '',
       type: input.collectionMethod,
+      agentType: input.agentType,
       lastActiveTime: 0,
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
@@ -137,6 +161,14 @@ export class InputManager extends EventEmitter {
       }
     }
     await this.drainAllEntryQueues();
+    if (this.multimodalProcessor) {
+      try {
+        await this.multimodalProcessor.shutdown();
+      } catch (err) {
+        logger.warn('multimodal processor shutdown failed', { error: String(err) });
+      }
+      this.multimodalProcessor = null;
+    }
   }
 
   private async drainInputQueue(id: string): Promise<void> {
@@ -209,6 +241,15 @@ export class InputManager extends EventEmitter {
   ): Promise<void> {
     if (entries.length === 0) return;
 
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
+
     const counter = this.counters.get(inputId);
     let batchBytes = 0;
     if (counter) {
@@ -223,22 +264,31 @@ export class InputManager extends EventEmitter {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 
-    for (const entry of entries) {
-      if (this.configuredUserId) {
-        entry['user.id'] = this.configuredUserId;
-      } else if (!entry['user.id'] && this.userId) {
-        entry['user.id'] = this.userId;
-      }
-    }
-
     // Upstream trace linking: stamp trace_id / parent_span_id from correlation
-    // store so agent spans reparent under the upstream span. Fully fail-open.
+    // store while entries still carry their agent-native session id. Invocation
+    // identity is customer-facing and may replace gen_ai.session.id, but the
+    // correlation files are keyed by the native id. Fully fail-open.
     if (this.traceLinker) {
       try {
         await this.traceLinker.stamp(entries);
       } catch (err) {
         logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
       }
+    }
+
+    for (const entry of entries) {
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
+    }
+
+    // Fill-only lifecycle enrichment. It never changes record order/count or
+    // existing boundary markers, and must not block the normal output path.
+    try {
+      this.turnBoundaryProcessor.enrich(entries);
+    } catch (err) {
+      logger.warn('turn boundary enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
     }
 
     const policyAppliedEntries = entries.map(entry =>

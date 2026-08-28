@@ -70,6 +70,7 @@ describe('QoderCliInput', () => {
       'gen_ai.response.model': 'qwen-max',
       'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
       'agent.source': 'qoder-transcript-hook',
+      'agent.qoder.cwd': '/workspace/qoder-project',
     }]);
 
     expect(entries).toHaveLength(1);
@@ -83,6 +84,7 @@ describe('QoderCliInput', () => {
       'gen_ai.response.model': 'qwen-max',
       'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello' }] }],
       'agent.source': 'qoder-transcript-hook',
+      'workspace.path': '/workspace/qoder-project',
     });
   });
 

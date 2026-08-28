@@ -7,6 +7,14 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import {
+  areGrokBuildHookAssetsHealthy,
+  restoreGrokBuildHookAssets,
+} from '../deployment/grok-build-assets.js';
+import {
+  isAgentGatedEnabled as isAgentGatedEnabledIn,
+  resolvePilotDir as resolvePilotDirIn,
+} from '../deployment/deploy-command.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
@@ -45,6 +53,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
@@ -55,6 +64,7 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { ZCodeHookInput } from '../inputs/zcode-hook/zcode-hook-input.js';
 import { ZCodeRolloutInput } from '../inputs/zcode-rollout/zcode-rollout-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -63,6 +73,12 @@ import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
 import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import {
+  anyAgentMultimodalEnabled,
+  createUploader,
+  isAgentMultimodalEnabled,
+  MultimodalProcessor,
+} from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
@@ -70,8 +86,10 @@ import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
-import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
+import type { DataflowSnapshot, FlusherEndpointStats, InputStats } from '../metrics/metrics-collector.js';
+import type { OtlpEndpointCounter } from '../flushers/otlp-trace-flusher.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
+import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -92,6 +110,16 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
+  /**
+   * Listener id → the agent it belongs to, which is also the key `config.agents`
+   * gates on. Both roles are why the values are what they are and not simply the
+   * input's own `agentType`: the four qoder listeners deliberately roll up to one
+   * `qoder` agent, and renaming a value here would silently re-point a gate.
+   *
+   * A listener missing from this map is not an error — snapshot reporting falls
+   * back to the input's `agentType`. Entries exist for listeners whose agent name
+   * differs from that, plus the ones a gate looks up.
+   */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
@@ -113,6 +141,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
@@ -126,6 +155,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'dsh-log': 'dsh',
   };
 
   private readonly config: AnalyticsConfig;
@@ -147,9 +177,12 @@ export class Orchestrator extends EventEmitter {
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
+  private dashboardServer: DashboardServer | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
+  /** Shared multimodal processor (null when disabled). */
+  private multimodalProcessor: MultimodalProcessor | null = null;
 
   constructor(config: AnalyticsConfig) {
     super();
@@ -214,6 +247,23 @@ export class Orchestrator extends EventEmitter {
       logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
     }
 
+    const multimodalConfig = this.config.multimodal;
+    const agentsWantMultimodal = anyAgentMultimodalEnabled(this.config.agents);
+    this.multimodalProcessor = null;
+    if (agentsWantMultimodal && !multimodalConfig) {
+      logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
+    } else if (multimodalConfig && agentsWantMultimodal) {
+      try {
+        const uploader = createUploader(multimodalConfig);
+        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
+        this.inputManager.setMultimodalProcessor(processor);
+        this.multimodalProcessor = processor;
+        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+      } catch (err) {
+        logger.error('multimodal init failed; disabled for process', { error: String(err) });
+      }
+    }
+
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
     await this.restoreRegisteredPiSdkWrappers();
@@ -263,8 +313,10 @@ export class Orchestrator extends EventEmitter {
     const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -306,6 +358,12 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      // Same condition as the updater watchdog above, deliberately: whether an updater is
+      // supposed to exist decides both whether we restart it and whether its absence is
+      // worth an alarm. Auto-update resolves to disabled whenever no package source is
+      // configured, and the updater exits immediately on that config — so a missing pid
+      // there is the expected state, not a fault.
+      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
     await this.metricsWriter.start();
 
@@ -316,11 +374,29 @@ export class Orchestrator extends EventEmitter {
     this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
     this.runtimeWriter.start();
 
-    // Status bar metrics/native UI remain optional.
-    if (this.config.statusBar.enabled) {
-      this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
-      this.metricsSummaryWriter.start();
+    // MetricsSummaryWriter is a collector-owned source shared by every local
+    // presentation surface. It must keep running when the optional native menu
+    // bar app is disabled.
+    this.metricsSummaryWriter = new MetricsSummaryWriter(
+      this.dataDir,
+      this.config.statusBar,
+      this.config.flushers.jsonl?.outputDir,
+    );
+    this.metricsSummaryWriter.start();
 
+    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // its loopback port is unavailable. It never opens the system browser.
+    this.dashboardServer = new DashboardServer({
+      dataDir: this.dataDir,
+      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+      port: this.config.dashboard.port,
+    });
+    await this.dashboardServer.start().catch(err => {
+      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+    });
+
+    // Only the native macOS menu bar app remains optional.
+    if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
         await this.statusBarAppManager.syncDesiredState(true).catch(err => {
@@ -373,7 +449,9 @@ export class Orchestrator extends EventEmitter {
     await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
-    this.metricsSummaryWriter?.stop();
+    await this.dashboardServer?.stop();
+    this.dashboardServer = null;
+    await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
@@ -456,6 +534,9 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      // Grok Build uses snake_case event keys and a multi-file hook runtime.
+      // Its exact config and asset checks run through a dedicated intercept target.
+      if (def.id === 'grok-build') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -475,6 +556,39 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /** Grok Build-specific config and hook-runtime integrity checks. */
+  private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
+    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
+    if (!def?.hook) return [];
+    const pilotDir = this.resolvePilotDir();
+
+    return [{
+      id: 'hook:grok-build',
+      enabled: () => this.isAgentGatedEnabled(def.id),
+      precondition: () => this.deploymentManager.isAgentDetected(def),
+      check: async () =>
+        !(await this.deploymentManager.needsRedeploy(def))
+        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
+      repair: async () => {
+        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
+        const result = await this.deploymentManager.deploySingle(def);
+        if (!result.success) {
+          throw new Error(result.error ?? 'failed to restore Grok Build hook');
+        }
+        if (
+          await this.deploymentManager.needsRedeploy(def)
+          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
+        ) {
+          throw new Error('Grok Build hook remains unhealthy after repair');
+        }
+      },
+      cleanup: async () => {
+        const removed = await this.deploymentManager.undeployAgent(def);
+        if (!removed) throw new Error('failed to remove Grok Build hook');
+      },
+    }];
   }
 
   /**
@@ -550,6 +664,45 @@ export class Orchestrator extends EventEmitter {
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /** Self-heal the DSH YAML patch and its collection-enabled marker. */
+  private buildDshYamlPatchInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'dsh-yaml-patch' || !def.dshYamlPatch) continue;
+      const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
+      targets.push({
+        id: `dsh-yaml-patch:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await fileExists(pluginPath))
+          && (await this.deploymentManager.isAgentDetected(def)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          // Process discovery is intentionally best-effort. If DSH exits
+          // between precondition() and repair(), deploySingle reports a
+          // successful not-detected skip for deployAll compatibility. Surface
+          // that transient miss here so the watchdog does not consume its
+          // cooldown or daily repair budget without writing the patch.
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`DSH disappeared before YAML patch repair for ${def.id}`);
+          }
+          if (!result.success) {
+            throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
+          }
+        },
+        cleanup: async () => {
+          const removed = await this.deploymentManager.undeployAgent(def);
+          if (!removed) throw new Error(`failed to remove DSH YAML patch for ${def.id}`);
         },
       });
     }
@@ -1156,6 +1309,26 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Grok Build Log (three-source transcript fusion via Hook JSONL) ---
+    const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
+    const grokBuildLogInput = new GrokBuildLogInput({
+      stateStore: this.stateStore,
+      logDir: grokBuildLogDir,
+    });
+    this.inputManager.registerInput(grokBuildLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(grokBuildLogInput, {
+        watchPaths: [grokBuildLogDir],
+        isAvailable: async () => directoryExists(grokBuildLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['grok-build-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'grok-build-log',
+            listenerCfg['grok-build-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
+      }),
+    );
+
     // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
     const kiroCliLogDir = this.resolveKiroCliLogDir();
     // Eagerly create the log dir so kiro-cli-log's availability check
@@ -1209,8 +1382,16 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
+    const codexMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      multimodal: {
+        enabled: codexMultimodalEnabled,
+        uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
@@ -1368,6 +1549,28 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
+    const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
+    await ensureDshLogDir(dshLogDir);
+    const dshLogInput = new DshLogInput({
+      stateStore: this.stateStore,
+      sessionDir: dshLogDir,
+      pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(dshLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(dshLogInput, {
+        watchPaths: [dshLogDir],
+        isAvailable: async () => directoryExists(dshLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['dsh-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'dsh-log',
+            listenerCfg['dsh-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1485,9 +1688,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    const agents = this.config.agents;
-    if (!agents || Object.keys(agents).length === 0) return true;
-    return agents[agentId]?.enabled !== false;
+    return isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**
@@ -1523,109 +1724,119 @@ export class Orchestrator extends EventEmitter {
   }
 
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
-    try {
-      const currentFile = path.join(this.dataDir, 'current');
-      const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
-      if (versionName) {
-        const versionDir = path.join(this.dataDir, 'versions', versionName);
-        if (fsSync.existsSync(versionDir)) {
-          logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
-          return versionDir;
-        }
-      }
-    } catch {
-      // current file doesn't exist — legacy or dev layout
-    }
-
-    const legacyPackageDir = path.join(this.dataDir, 'package');
-    if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
-      return legacyPackageDir;
-    }
-
-    try {
-      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-      const candidates = [
-        path.resolve(moduleDir, '..'),
-        path.resolve(moduleDir, '..', '..'),
-      ];
-      for (const modulePackageDir of candidates) {
-        const packageJson = path.join(modulePackageDir, 'package.json');
-        const agentsDir = path.join(modulePackageDir, 'agents.d');
-        if (
-          fsSync.existsSync(packageJson)
-          && fsSync.existsSync(agentsDir)
-          && fsSync.statSync(packageJson).isFile()
-          && fsSync.statSync(agentsDir).isDirectory()
-        ) {
-          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
-          return modulePackageDir;
-        }
-      }
-    } catch {
-      // Module URL is invalid or the runtime package does not include required assets.
-    }
-
-    return this.dataDir;
+    return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {
     const inputCounters = this.inputManager.getInputCounters();
     const activeIds = this.inputManager.getActiveInputIds();
 
-    let sendEntriesTotal = 0;
-    let receivedBytesTotal = 0;
+    // Ingress only. The instance's egress is measured where the writes actually
+    // happen — the flusher counters below — so it is not summed from the inputs.
+    let inEventsTotal = 0;
+    let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
-      sendEntriesTotal += counter.outEvents;
-      receivedBytesTotal += counter.inBytes;
+      inEventsTotal += counter.inEvents;
+      inBytesTotal += counter.inBytes;
     }
 
-    // Aggregate flusher runner stats
-    const flusherRunner = {
-      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
-      totalDelayMs: 0, lastFlushTime: '', startTime: '',
-    };
+    // One entry per write destination, keyed by family plus the configured
+    // destination name — unique per flusher, and only ever a map key: the name is
+    // process-local ('user-sls', 'internal-cms'), so what identifies a row to a
+    // consumer is project + logstore, never the alias.
+    const flushers = new Map<string, FlusherEndpointStats>();
 
-    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
-
-    // Get SLS flusher counters if available
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) {
-      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
-        flusherRunner.inEntries += counter.inEntries;
-        flusherRunner.inBytes += counter.inBytes;
-        flusherRunner.outEntries += counter.outEntries;
-        flusherRunner.outFailed += counter.outFailed;
-        flusherRunner.totalDelayMs += counter.totalDelayMs;
-        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
-          flusherRunner.lastFlushTime = counter.lastFlushTime;
-        }
-        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
-          flusherRunner.startTime = counter.startTime;
-        }
-        flushers.set(epName, {
-          ...counter,
-          flusherName: 'sls',
+      for (const [name, counter] of slsFlusher.getEndpointCounters()) {
+        flushers.set(`sls:${name}`, {
+          kind: 'sls',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: counter.mode,
+          // SLS serializes the payload here, so these are real bytes.
+          bytesBasis: 'measured',
+          inEntries: counter.inEntries,
+          inBytes: counter.inBytes,
+          outEntries: counter.outEntries,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
         });
       }
     }
 
-    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    // OTLP spans: ARMS/CMS backends are their own family, everything else is
+    // plain otlp. A CMS destination resolves to a project and ARMS's fixed trace
+    // logstore, so its bytes sit on the same billing axis as an SLS row; a plain
+    // OTLP backend has no project of ours, so its row carries the family alone.
+    const otlpCounters = this.getOtlpEndpointCounters();
+    if (otlpCounters) {
+      for (const [name, counter] of otlpCounters) {
+        flushers.set(`${counter.isCms ? 'cms' : 'otlp'}:${name}`, {
+          kind: counter.isCms ? 'cms' : 'otlp',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: '',
+          // The OTLP exporter owns the encoding and reports no wire size, so these
+          // bytes are a per-span estimate — flagged, not passed off as measured.
+          bytesBasis: 'estimated',
+          inEntries: counter.inSpans,
+          inBytes: counter.inBytes,
+          outEntries: counter.outSpans,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
+        });
+      }
+    }
+
+    const inputs = new Map<string, InputStats & { type: string; agent: string; running: boolean }>();
     const inputIdleMinutes = new Map<string, number>();
+    const runningIds = new Set(activeIds);
     for (const [id, counter] of inputCounters) {
-      inputs.set(id, { ...counter });
+      // L2 rolls ingress up by owning agent; several inputs can share one agent.
+      // The map wins where it rolls several listeners into one agent; otherwise the
+      // input's own agentType is the answer. Never counter.type — that is the
+      // collection method, and reporting 'hook-jsonl' as an agent merges every
+      // unmapped hook input into one meaningless row.
+      const agent = Orchestrator.LISTENER_AGENT_MAP[id] ?? counter.agentType ?? id;
+      // `running` is what makes the owning agent count as installed: discovery only
+      // starts an input once it has detected the agent on this host.
+      inputs.set(id, { ...counter, agent, running: runningIds.has(id) });
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
     return {
-      sendEntriesTotal,
-      receivedBytesTotal,
-      inputCount: inputCounters.size,
-      activeInputCount: activeIds.length,
-      flusherRunner,
+      inEventsTotal,
+      inBytesTotal,
       inputs,
       flushers,
       inputIdleMinutes,
     };
+  }
+
+  /**
+   * Duck-typed on purpose: OtlpTraceFlusher is imported lazily so a missing
+   * OpenTelemetry dependency can't break startup, and a static `instanceof`
+   * import here would defeat that.
+   */
+  private getOtlpEndpointCounters(): Map<string, OtlpEndpointCounter> | null {
+    const candidates = this.flusher instanceof MultiFlusher
+      ? this.flusher.getFlushers()
+      : [this.flusher];
+    for (const f of candidates) {
+      if (f.name !== 'otlp-trace') continue;
+      const getter = (f as { getEndpointCounters?: unknown }).getEndpointCounters;
+      if (typeof getter === 'function') {
+        return (getter as () => Map<string, OtlpEndpointCounter>).call(f);
+      }
+    }
+    return null;
   }
 
   private getSlsFlusher(): SlsFlusher | null {

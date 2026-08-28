@@ -15,12 +15,14 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'opencode': 'opencode',
   'mimo-code': 'mimo-code',
   'pi-coding-agent': 'pi',
+  'grok-build': 'grok',
   'hermes': 'hermes',
   'wukong': 'wukong',
   'zcode': 'zcode',
   'zcode-hook': 'zcode',
   'zcode-rollout': 'zcode',
   'workbuddy': 'workbuddy',
+  'dsh': 'dsh',
 };
 
 export function resolveAgentSystem(agentType: string): string {

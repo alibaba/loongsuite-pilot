@@ -157,9 +157,10 @@ export class UpdaterMetrics {
       } catch (err) {
         logger.warn('updater event write failed', { error: String(err) });
       }
-      for (const ev of events) {
-        sendStatus('pilot_updater_event', flattenToStrings(ev));
-      }
+      // Updater events are not sent to loongsuite_status — they live only in this
+      // local JSONL. Update failures are surfaced independently via alarms below,
+      // and updater liveness/version state is covered by the collector heartbeat's
+      // infra-health fields (updater_pid_alive / current_version_valid / etc.).
     }
 
     if (alarms.length > 0) {

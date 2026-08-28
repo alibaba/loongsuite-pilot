@@ -147,6 +147,58 @@ describe('DeploymentManager', () => {
       });
     });
 
+    // `skipped: true` on its own is ambiguous — "not installed here" and "already in
+    // place" are opposite outcomes, and `deploy --require` (the image-build gate) has
+    // to fail on the first and pass on the second. So the reason is part of the
+    // contract, not diagnostic decoration.
+    describe('skip reasons', () => {
+      function hookDef(id: string): AgentDefinition {
+        return {
+          id,
+          displayName: id,
+          deployMode: 'hook',
+          detection: { paths: [], commands: [] },
+          hook: {
+            settingsPath: path.join(tmpDir, `${id}.json`),
+            events: ['Stop'],
+            hookCommand: `/opt/${id}.sh`,
+            format: 'flat',
+          },
+        };
+      }
+
+      it('reports not-detected when the agent is absent', async () => {
+        await writeAgentDef(hookDef('absent-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(false);
+
+        const [result] = await makeManager().deployAll();
+        expect(result).toMatchObject({ success: true, skipped: true, reason: 'not-detected' });
+      });
+
+      it('reports up-to-date on a second deploy into the same dataDir', async () => {
+        // Container mode deliberately keeps deployed-agents.json in the image, so a
+        // derived image rebuilding on top of an instrumented base lands here. Reporting
+        // anything but "satisfied" would make every rebuild fail.
+        await writeAgentDef(hookDef('repeat-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(true);
+
+        const mgr = makeManager();
+        const first = (await mgr.deployAll())[0];
+        expect(first.success).toBe(true);
+        expect(first.skipped).toBeFalsy();
+        expect((await mgr.deployAll())[0])
+          .toMatchObject({ success: true, skipped: true, reason: 'up-to-date' });
+      });
+
+      it('reports disabled when the caller gates the agent off', async () => {
+        await writeAgentDef(hookDef('gated-agent'));
+        vi.mocked(detectAgent).mockResolvedValue(true);
+
+        const [result] = await makeManager().deployAll(() => false);
+        expect(result).toMatchObject({ success: true, skipped: true, reason: 'disabled' });
+      });
+    });
+
     it('undeploys a hook agent that was deployed then disabled', async () => {
       const settingsPath = path.join(tmpDir, 'toggle-hooks.json');
       const def: AgentDefinition = {
@@ -176,6 +228,122 @@ describe('DeploymentManager', () => {
       expect(results.find(result => result.agentId === def.id)?.skipped).toBe(true);
       const afterDisable = await fs.readFile(settingsPath, 'utf-8');
       expect(afterDisable).not.toContain('/opt/toggle.sh');
+    });
+
+    it('removes the DSH YAML block and enabled marker when DSH is disabled', async () => {
+      const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
+      const patchPath = path.join(tmpDir, 'dsh-home', 'cordis.patch.yml');
+      await fs.mkdir(path.dirname(pluginPath), { recursive: true });
+      await fs.writeFile(pluginPath, 'export default function apply() {}\n');
+      const def: AgentDefinition = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: [], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: pluginPath,
+          patchPath,
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      expect((await mgr.deployAll(() => true))[0].success).toBe(true);
+      expect(await fs.readFile(patchPath, 'utf-8')).toContain('PILOT-OBSERVABILITY-MANAGED');
+      expect(await fs.readFile(path.join(path.dirname(pluginPath), '.collection-enabled'), 'utf-8'))
+        .toBe('enabled\n');
+
+      const [disabled] = await mgr.deployAll(() => false);
+      expect(disabled).toMatchObject({ success: true, skipped: true });
+      await expect(fs.stat(patchPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(path.join(path.dirname(pluginPath), '.collection-enabled')))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8')).dsh)
+        .toBeUndefined();
+    });
+
+    it('deploys DSH from a custom DSH_HOME when standard detection is false', async () => {
+      const originalDshHome = process.env.DSH_HOME;
+      const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
+      const customHome = path.join(tmpDir, 'fc-runtime-home');
+      const expectedPatch = path.join(customHome, 'cordis.patch.yml');
+      await fs.mkdir(path.dirname(pluginPath), { recursive: true });
+      await fs.writeFile(pluginPath, 'export default function apply() {}\n');
+      const def: AgentDefinition = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: {
+          paths: [path.join(tmpDir, 'missing-default-home')],
+          commands: ['missing-dsh-command'],
+        },
+        dshYamlPatch: {
+          pluginSource: pluginPath,
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(false);
+
+      try {
+        process.env.DSH_HOME = customHome;
+        const [result] = await makeManager().deployAll(() => true);
+
+        expect(result).toMatchObject({ success: true });
+        expect(result.skipped).toBeFalsy();
+        expect(await fs.readFile(expectedPatch, 'utf-8')).toContain('PILOT-OBSERVABILITY-MANAGED');
+        const deployed = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'));
+        expect(deployed.dsh.dshPatchPath).toBe(expectedPatch);
+      } finally {
+        if (originalDshHome === undefined) delete process.env.DSH_HOME;
+        else process.env.DSH_HOME = originalDshHome;
+      }
+    });
+
+    it('persists the resolved DSH patch path and cleans it after DSH_HOME changes', async () => {
+      const originalDshHome = process.env.DSH_HOME;
+      const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
+      const homeA = path.join(tmpDir, 'dsh-home-a');
+      const homeB = path.join(tmpDir, 'dsh-home-b');
+      const patchA = path.join(homeA, 'cordis.patch.yml');
+      const patchB = path.join(homeB, 'cordis.patch.yml');
+      await fs.mkdir(path.dirname(pluginPath), { recursive: true });
+      await fs.writeFile(pluginPath, 'export default function apply() {}\n');
+      const def: AgentDefinition = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: [], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: pluginPath,
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      try {
+        process.env.DSH_HOME = homeA;
+        const mgr = makeManager();
+        expect((await mgr.deployAll(() => true))[0].success).toBe(true);
+        const deployed = JSON.parse(
+          await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'),
+        );
+        expect(deployed.dsh.dshPatchPath).toBe(patchA);
+
+        process.env.DSH_HOME = homeB;
+        expect((await mgr.deployAll(() => false))[0]).toMatchObject({ success: true, skipped: true });
+        await expect(fs.stat(patchA)).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(fs.stat(patchB)).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        if (originalDshHome === undefined) delete process.env.DSH_HOME;
+        else process.env.DSH_HOME = originalDshHome;
+      }
     });
 
     it('does not touch settings for an agent disabled without a prior deployment', async () => {

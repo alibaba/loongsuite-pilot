@@ -48,7 +48,15 @@ export class HermesLogInput extends BaseSessionInput {
     try {
       entries = await fs.readdir(this.sessionDir, { withFileTypes: true });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') {
+        // The plugin creates its session directory 0700 inside the process that
+        // loaded it; an unreadable directory means a differently-privileged
+        // process (commonly root) is the one writing events. Diagnose once.
+        await this.diagnoseUnreadablePath(this.sessionDir, 'session directory');
+        return [];
+      }
+      if (code !== 'ENOENT') {
         logger.warn('failed to discover Hermes event logs', {
           sessionDir: this.sessionDir,
           error: String(err),

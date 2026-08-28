@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 
@@ -98,6 +98,62 @@ function extractOpenClawCleanupScripts() {
     ['sh', sh.slice(shStart + shMarker.length, sh.indexOf('\nNODE', shStart))],
     ['ps1', ps1.slice(psStart + psMarker.length, ps1.indexOf("\n'@", psStart))],
   ];
+}
+
+function extractGrokCleanupNodeScript(source, style) {
+  const functionMarker = style === 'sh'
+    ? 'remove_grok_build_hook_config()'
+    : 'function Remove-GrokBuildHookConfig';
+  const functionStart = source.indexOf(functionMarker);
+  const functionEnd = source.indexOf('# ====', functionStart);
+  const body = source.slice(functionStart, functionEnd);
+  const scriptStartMarker = style === 'sh' ? 'result="$(node -e \'\n' : "$result = & $script:NODE_BIN -e @'\n";
+  const scriptEndMarker = style === 'sh' ? '\n\' "$cfg"' : "\n'@ $cfg";
+  const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
+  const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
+  if (scriptStart < scriptStartMarker.length || scriptEnd < scriptStart) {
+    throw new Error(`failed to extract ${style} Grok cleanup script`);
+  }
+  return body.slice(scriptStart, scriptEnd);
+}
+
+function verifyGrokCleanupScript(script) {
+  const root = mkdtempSync(join(tmpdir(), 'pilot-grok-cleanup-script-'));
+  try {
+    const configPath = join(root, 'loongsuite-pilot.json');
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        stop: [
+          { command: '/custom/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop' },
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [
+              { command: 'powershell.exe -File "C:\\pilot data\\hooks\\grok-build-loongsuite-pilot-hook.ps1" stop' },
+              { command: '/opt/third-party/nested-hook.sh' },
+            ],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const run = spawnSync(process.execPath, ['-e', script, configPath], { encoding: 'utf8' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toBe('cleaned');
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+      hooks: {
+        stop: [
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [{ command: '/opt/third-party/nested-hook.sh' }],
+          },
+        ],
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 // Derive lifecycle coverage from the deployment manifests. New hook agents
@@ -331,6 +387,38 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall.indexOf('Remove-CodexHookConfig'))
       .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
   });
+
+  it('passes a valid fs module literal to node when rewriting Codex files', () => {
+    const writer = ps1.slice(
+      ps1.indexOf('function Write-FileUtf8NoBom'),
+      ps1.indexOf('function Remove-CodexTrustState'),
+    );
+    expect(writer).toContain("$rewriteScript = @'");
+    expect(writer).toContain("const fs = require('fs');");
+    expect(writer).not.toContain("-e 'const fs=require(\"fs\")");
+    expect(writer).toContain('if ($rewriteExit -ne 0)');
+
+    const script = writer.match(/\$rewriteScript = @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+    expect(script).toBeDefined();
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-rewrite-'));
+    try {
+      const input = join(root, 'input.txt');
+      const output = join(root, 'output.txt');
+      writeFileSync(input, '\uFEFFcodex-hook-config', 'utf8');
+      const run = spawnSync(process.execPath, ['-e', script, input, output], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(readFileSync(output, 'utf8')).toBe('codex-hook-config');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('continues uninstall when dedicated Codex cleanup fails', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
+    expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+  });
 });
 
 describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
@@ -512,5 +600,171 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
     expect(runtimePs1).toContain('agents.d\\hermes-agent.json');
     expect(runtimePs1.slice(runtimePs1.indexOf('function Cmd-Rollback')))
       .toContain('Remove-HermesPluginForRollback');
+  });
+});
+
+describe('Grok Build uninstall smoke', () => {
+  it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.match(/Remove-GrokBuildHookConfig/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ['POSIX', extractGrokCleanupNodeScript(sh, 'sh')],
+    ['PowerShell', extractGrokCleanupNodeScript(ps1, 'ps1')],
+  ])('%s cleanup removes direct/nested Pilot hooks and preserves third-party hooks', (_platform, script) => {
+    verifyGrokCleanupScript(script);
+  });
+
+  it('removes Pilot direct and nested hooks from an isolated HOME and preserves third-party hooks', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-grok-uninstall-'));
+    try {
+      const configDir = join(root, '.grok', 'hooks');
+      const configPath = join(configDir, 'loongsuite-pilot.json');
+      const dataDir = join(root, 'custom pilot data');
+      mkdirSync(configDir, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        hooks: {
+          stop: [
+            { command: `\"${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh')}\" stop` },
+            { command: '/opt/third-party/stop-hook.sh' },
+            {
+              matcher: '',
+              hooks: [
+                { command: `powershell.exe -File \"${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.ps1')}\" stop` },
+                { command: '/opt/third-party/nested-hook.sh' },
+              ],
+            },
+          ],
+          session_end: [
+            { command: `${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh')} session_end` },
+          ],
+        },
+      }, null, 2));
+
+      const run = spawnSync('/bin/bash', [
+        resolve('deploy', 'installer-opensource.sh'),
+        'uninstall',
+        '--data-dir',
+        dataDir,
+        '--lang',
+        'en',
+      ], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: root,
+          USERPROFILE: root,
+          // Exclude a developer-machine Pilot binary while retaining Node and
+          // standard system tools. The uninstall must stay inside this HOME.
+          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+        },
+      });
+
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+        hooks: {
+          stop: [
+            { command: '/opt/third-party/stop-hook.sh' },
+            {
+              matcher: '',
+              hooks: [{ command: '/opt/third-party/nested-hook.sh' }],
+            },
+          ],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+describe('Windows QoderWork-family runtime override lifecycle', () => {
+  const runtimeSection = ps1.slice(
+    ps1.indexOf('function Get-PilotRuntimeOverride'),
+    ps1.indexOf('function Install-Command'),
+  );
+  const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+
+  it('uses the final agent config and independently maintains both environment variables', () => {
+    expect(runtimeSection).toContain('config?.agents?.[agentId]?.enabled === false');
+    expect(runtimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
+    expect(runtimeSection).toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qwen-work-cn'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work'");
+    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'");
+    expect(ps1.match(/Inject-QoderworkRuntimeWrapper/g)).toHaveLength(3);
+  });
+
+  it('uses CLM-safe registry persistence with a guarded Explorer broadcast', () => {
+    expect(runtimeSection).toContain('reg.exe query "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe add "HKCU\\Environment"');
+    expect(runtimeSection).toContain('reg.exe delete "HKCU\\Environment"');
+    expect(runtimeSection).toContain('[Environment]::SetEnvironmentVariable');
+    expect(runtimeSection).toContain('catch {');
+    expect(runtimeSection).toContain('sign out and back in');
+  });
+
+  it('treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop', () => {
+    const getter = runtimeSection.slice(
+      runtimeSection.indexOf('function Get-PilotRuntimeOverride'),
+      runtimeSection.indexOf('function Test-AgentCollectionEnabled'),
+    );
+    expect(getter).toContain('$prevEAP = $ErrorActionPreference');
+    expect(getter).toContain('$ErrorActionPreference = "Continue"');
+    expect(getter).toContain('$regExitCode = $LASTEXITCODE');
+    expect(getter).toContain('$ErrorActionPreference = $prevEAP');
+    expect(getter.indexOf('$ErrorActionPreference = $prevEAP'))
+      .toBeLessThan(getter.indexOf('if ($regExitCode -ne 0)'));
+  });
+
+  it('detects app roots without assuming executables are outside version directories', () => {
+    expect(runtimeSection).toContain('Programs\\QwenWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork');
+    expect(runtimeSection).toContain('Programs\\QoderWorkCN');
+    expect(runtimeSection).toContain('Programs\\QoderWork CN');
+    expect(runtimeSection).not.toContain('QoderWork\\QoderWork.exe');
+    expect(runtimeSection).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
+  });
+
+  it('cleans an owned override before returning when the wrapper is missing', () => {
+    const sync = runtimeSection.slice(runtimeSection.indexOf('function Sync-PilotRuntimeOverride'));
+    expect(sync.indexOf('Get-PilotRuntimeOverride')).toBeLessThan(sync.indexOf('Test-Path $WrapperPath'));
+    expect(sync).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(sync).toContain('Wrapper missing; cleaned $Name');
+    expect(sync).toContain('Wrapper missing; did not set $Name');
+    expect(sync).toContain('$script:RUNTIME_WRAPPER_MISSING = $true');
+  });
+
+  it('uninstalls both overrides only when owned by the current dataDir', () => {
+    expect(uninstall).toContain("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')");
+    expect(uninstall).toContain('$currentRuntime -ieq $wrapperPath');
+    expect(uninstall).not.toContain("*\\hooks\\qoderwork-runtime-wrapper.mjs");
+  });
+
+  it('continues external cleanup but preserves retry assets when runtime env cleanup fails', () => {
+    const envCleanup = uninstall.slice(
+      uninstall.indexOf("foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH'))"),
+      uninstall.indexOf('if ($script:RUNTIME_ENV_BROADCAST_FAILED)'),
+    );
+    expect(envCleanup).toMatch(/foreach[\s\S]*try\s*\{[\s\S]*Remove-PilotRuntimeOverride[\s\S]*\}\s*catch\s*\{/);
+    expect(envCleanup).toContain('$runtimeEnvCleanupFailed = $true');
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'));
+    expect(uninstall.indexOf('if ($runtimeEnvCleanupFailed)'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall).toContain('installation files were preserved for retry');
+  });
+
+  it('cleans hook configs and runtime overrides before deleting their files and pinned node', () => {
+    expect(uninstall.indexOf('Remove-HookConfigs'))
+      .toBeLessThan(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"));
+    expect(uninstall.indexOf("@('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')"))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.indexOf('Remove-MimoCodePlugin'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
   });
 });

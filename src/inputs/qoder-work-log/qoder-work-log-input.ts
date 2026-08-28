@@ -284,8 +284,18 @@ export class QoderWorkLogInput extends BaseSessionInput {
 
     for (const filePath of files) {
       this.currentFilePath = filePath;
-      const fileEntries = await this.processLogFile(filePath);
-      allEntries.push(...fileEntries);
+      try {
+        const fileEntries = await this.processLogFile(filePath);
+        allEntries.push(...fileEntries);
+      } catch (err) {
+        if (this.isUnreadableError(err)) {
+          // An unreadable file (ownership mismatch) must not abort the whole
+          // cycle — diagnose it once and keep collecting the remaining files.
+          await this.diagnoseUnreadablePath(filePath, 'event file');
+          continue;
+        }
+        throw err;
+      }
     }
     this.currentFilePath = '';
 

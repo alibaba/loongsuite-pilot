@@ -63,6 +63,16 @@ describe('CorrelationStore', () => {
     expect(store.resolveSessionFirst(SID)).toBeNull();
   });
 
+  it('persists session consumption across collector restarts', () => {
+    write([JSON.stringify({ type: 'session', sessionId: SID, traceparent: TP_SESS })]);
+    expect(new CorrelationStore(dir).resolveSessionFirst(SID)).toBe(TP_SESS);
+
+    // A fresh store models a restarted Pilot collector. The process-level
+    // upstream context must still remain first-turn-only.
+    expect(new CorrelationStore(dir).resolveSessionFirst(SID)).toBeNull();
+    expect(fs.existsSync(path.join(dir, `${SID}.session-context.done`))).toBe(true);
+  });
+
   it('returns null for unknown session / no match', () => {
     write([turnRec('known', TP1)]);
     const store = new CorrelationStore(dir);

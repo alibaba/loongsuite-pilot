@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as path from 'path';
+import * as fs from 'fs';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging, flushLogsSync } from './utils/logger.js';
@@ -25,6 +26,21 @@ async function main(): Promise<void> {
   if (command === 'token-usage' || command === 'tokens') {
     const { runTokenUsageCommand } = await import('./cli/token-usage.js');
     process.exitCode = await runTokenUsageCommand(args);
+    return;
+  }
+
+  // One-shot deployment. The collector deploys hooks/plugins itself on startup,
+  // but only as a daemon side effect; image builds need it as a foreground step
+  // with an exit code (see runDeployCommand).
+  if (command === 'deploy') {
+    const { runDeployCommand } = await import('./deployment/deploy-command.js');
+    try {
+      process.exitCode = await runDeployCommand(args);
+    } catch (err) {
+      console.error(`loongsuite-pilot deploy: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+    flushLogsSync();
     return;
   }
 
@@ -54,11 +70,19 @@ async function main(): Promise<void> {
   // Lock file is runtime state, not a log — keep it in the dataDir root alongside
   // the pid file, not under logs/.
   const lockPath = path.join(dataDir, 'collector.lock');
-  const { lock, holderPid } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
+  const {
+    lock,
+    holderPid,
+    holderProcessStartState,
+    holderCommandState,
+    recoveredStaleLock,
+  } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
   if (!lock) {
     logger.warn('another collector instance already holds the lock; exiting', {
       pid: process.pid,
       holderPid,
+      holderProcessStartState,
+      holderCommandState,
       lockPath,
     });
     // See the disabled-config branch above: the pino-roll rotation timer keeps the
@@ -67,7 +91,36 @@ async function main(): Promise<void> {
     flushLogsSync();
     process.exit(0);
   }
+  if (recoveredStaleLock) {
+    logger.warn('stale single-instance lock recovered', {
+      pid: process.pid,
+      previousHolderPid: recoveredStaleLock.previousPid,
+      recoveryReason: recoveredStaleLock.reason,
+      lockPath,
+    });
+  }
   logger.info('single-instance lock acquired', { pid: process.pid, lockPath });
+
+  // PID-write authority lives HERE, not in the spawners (k8s-preload.cjs /
+  // start.sh). Two spawners that each recorded the pid they spawned could leave
+  // the lock pointing at a daemon that lost THIS collector.lock race and exited —
+  // so prestop.sh would signal a dead pid while the real daemon died in the
+  // SIGKILL with buffers unflushed. The daemon that actually holds collector.lock
+  // is the only one prestop.sh should ever signal, so it is the only one allowed
+  // to publish a pid. See the daemon.spawn.lock contract in prestop.sh.
+  //
+  // Only written on the K8s path (or when a spawner already created the file),
+  // so a bare local `npm start` does not grow a stray lock file in the data dir.
+  const spawnLockPath = path.join(dataDir, 'daemon.spawn.lock');
+  if (process.env.KUBERNETES_SERVICE_HOST || fs.existsSync(spawnLockPath)) {
+    try {
+      fs.writeFileSync(spawnLockPath, String(process.pid), 'utf8');
+    } catch (err) {
+      // Non-fatal: worst case prestop.sh finds a stale/empty lock and lets the
+      // grace period run its course — the same as before this write existed.
+      logger.warn('cannot record daemon pid in spawn lock', { spawnLockPath, error: String(err) });
+    }
+  }
 
   // On Windows the launcher cannot record the daemon's real pid: there is no exec(2),
   // so wscript/PowerShell run node as a *child* and would only ever capture the wrapper
@@ -90,6 +143,16 @@ async function main(): Promise<void> {
     flushLogsSync();
     lock.release();
     if (pidFile) removeOwnPidFileSync(pidFile);
+    // Release the spawn lock the same way the pid file is released: only when it
+    // still carries THIS daemon's pid, so a successor that already took over (or a
+    // pid-reused process) is never disturbed. Leaving a dead pid behind is exactly
+    // the hazard the prestop contract guards against — prestop.sh would SIGTERM a
+    // recycled pid. See the daemon.spawn.lock contract in prestop.sh.
+    try {
+      if (fs.readFileSync(spawnLockPath, 'utf8').trim() === String(process.pid)) {
+        fs.unlinkSync(spawnLockPath);
+      }
+    } catch { /* lock never written, or already gone — nothing to clean */ }
   });
 
   const orchestrator = new Orchestrator(config);
@@ -119,11 +182,38 @@ async function main(): Promise<void> {
   // must match the daemon writer and the updater reader (env-or-default), not config.dataDir.
   clearStartupCrash(resolveBreadcrumbDataDir());
 
+  const enabledFlushers = Object.entries(config.flushers)
+    .filter(([, v]) => v?.enabled)
+    .map(([k]) => k);
+
+  // LOONGSUITE_SLS_* alone does not switch SLS on: buildSlsConfig only consults
+  // those vars when the config file carries an `sls` section. Under K8s nothing
+  // writes that section except k8s-preload.cjs, so a failed unlock write leaves a
+  // destination fully configured in the env and no exporter to use it. The sole
+  // symptom used to be `sls` missing from the list logged below — readable only
+  // by someone who already knew it belonged there, which cost hours to diagnose
+  // once. Where the intent is this unambiguous, say so rather than stay quiet.
+  if (
+    !enabledFlushers.includes('sls')
+    && process.env.LOONGSUITE_SLS_PROJECT
+    && process.env.LOONGSUITE_SLS_LOGSTORE
+  ) {
+    logger.warn(
+      'an SLS destination is set in the environment but the SLS flusher is NOT enabled — '
+      + 'events will be collected locally and never uploaded. Those env vars are only read '
+      + 'when the config file carries an "sls" section; check that the file exists and is readable.',
+      {
+        project: process.env.LOONGSUITE_SLS_PROJECT,
+        logstore: process.env.LOONGSUITE_SLS_LOGSTORE,
+        expectedConfigPath: process.env.AGENT_DATA_COLLECTION_CONFIG ?? '~/.loongsuite-pilot/config.json',
+        enabledFlushers,
+      },
+    );
+  }
+
   logger.info('AI Agent Input is running', {
     dataDir: config.dataDir,
-    flushers: Object.entries(config.flushers)
-      .filter(([, v]) => v?.enabled)
-      .map(([k]) => k),
+    flushers: enabledFlushers,
   });
 }
 

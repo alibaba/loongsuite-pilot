@@ -9,12 +9,17 @@ function setPlatform(platform) {
   Object.defineProperty(process, 'platform', { value: platform, configurable: true });
 }
 
-// Simulate a host that mis-decoded UTF-8 bytes as GBK (CP936) and re-encoded them as UTF-8 —
-// the exact double-encoding decodePayload is meant to repair on Chinese Windows.
-function doubleEncode(text) {
+// Simulate a host that mis-decoded UTF-8 bytes with the system ANSI code page and re-encoded them
+// as UTF-8 — the exact double-encoding decodePayload is meant to repair on Windows. The ACP is
+// CP936 on Chinese Windows and CP1252 on en-US Windows; both were observed in production.
+function doubleEncodeAs(text, codePage) {
   const utf8Bytes = Buffer.from(text, 'utf-8');
-  const asGbk = new TextDecoder('gbk').decode(utf8Bytes);
-  return Buffer.from(asGbk, 'utf-8');
+  const asCodePage = new TextDecoder(codePage).decode(utf8Bytes);
+  return Buffer.from(asCodePage, 'utf-8');
+}
+
+function doubleEncode(text) {
+  return doubleEncodeAs(text, 'gbk');
 }
 
 describe('decodePayload', () => {
@@ -108,6 +113,99 @@ describe('decodePayload', () => {
     setPlatform('win32');
     for (const text of ['中文', '测试日志', '中文abc123']) {
       expect(decodePayload(doubleEncode(text))).toBe(text);
+    }
+  });
+
+  // --- Regression: CP936 single-byte mappings (the '€' abort) --------------------------------
+  // The encode map only enumerated 2-byte GBK pairs, but 0x80 is a SINGLE-byte CP936 mapping to
+  // '€' (U+20AC). Any source char whose code point is a multiple of 64 ends its UTF-8 encoding
+  // with 0x80 — 一 (U+4E00), 什 (U+4EC0), 最 (U+6700), 327 such chars in the CJK block alone —
+  // so the mojibake contained '€', the map lookup threw, and the ENTIRE payload stayed garbled.
+  // The prior fixtures ('中文', '测试日志') never produce 0x80, which is why CI stayed green.
+  it('repairs CP936 mojibake containing € (single-byte 0x80 mapping)', () => {
+    setPlatform('win32');
+    for (const text of ['{"c":"一"}', '{"c":"什"}', '{"c":"最"}', '{"c":"稀"}', '{"c":"耀"}']) {
+      const mojibake = doubleEncode(text);
+      expect(mojibake.toString('utf-8')).toContain('€'); // fixture really hits the trigger
+      expect(decodePayload(mojibake)).toBe(text);
+    }
+  });
+
+  // --- New: CP1252 (en-US Windows) ------------------------------------------------------------
+  // The ACP is not always CP936. On en-US Windows the host agent decodes with CP1252, producing
+  // 'å¤ªä¸š'-style mojibake; gbkEncode threw on 'ä' (U+00E4) so nothing was ever repaired there.
+  // CP1252 is a lossless 256-byte table, so these payloads recover exactly — no byte is ever lost.
+  it('repairs CP1252 double-encoded payloads on Windows', () => {
+    setPlatform('win32');
+    const cases = [
+      '{"c":"中文"}',
+      '{"c":"一下"}',
+      '{"c":"帮我看一下这个问题"}',
+      '{"workspace":{"path":"C:/Users/太业/项目"}}',
+      '{"status":"完成","summary":"已修复三个缺陷"}',
+    ];
+    for (const text of cases) {
+      expect(decodePayload(doubleEncodeAs(text, 'windows-1252'))).toBe(text);
+    }
+  });
+
+  it('does not run the CP1252 repair off Windows', () => {
+    const mojibake = doubleEncodeAs('{"c":"中文"}', 'windows-1252');
+    for (const platform of ['darwin', 'linux']) {
+      setPlatform(platform);
+      expect(decodePayload(mojibake)).toBe(mojibake.toString('utf-8'));
+    }
+  });
+
+  // --- New: partial repair around bytes the host agent destroyed ------------------------------
+  // CP936 decoding emits U+FFFD for illegal byte combinations and the source byte is gone for
+  // good (an odd number of CJK chars followed by an ASCII byte < 0x40 such as '"' or ',' — close
+  // to half of real Chinese-Windows payloads). Aborting the whole payload over one lost byte left
+  // the correction effectively useless there, so each U+FFFD-delimited run is repaired on its own
+  // and only the destroyed character stays marked as U+FFFD.
+  it('repairs around a destroyed byte, keeping one U+FFFD marker (CP936)', () => {
+    setPlatform('win32');
+    const cases = [
+      ['{"c":"一下"}', '{"c":"一\ufffd"}'],
+      ['{"c":"什么"}', '{"c":"什\ufffd"}'],
+      ['{"c":"帮我看一下这个问题"}', '{"c":"帮我看一下这个问\ufffd"}'],
+      ['{"status":"完成","summary":"已修复三个缺陷"}', '{"status":"完成","summary":"已修复三个缺\ufffd"}'],
+    ];
+    for (const [text, expected] of cases) {
+      const mojibake = doubleEncode(text);
+      expect(mojibake.toString('utf-8')).toContain('\ufffd'); // fixture really loses a byte
+      expect(decodePayload(mojibake)).toBe(expected);
+    }
+  });
+
+  // Nothing is ever guessed: if the destroyed character was the payload's ONLY non-ASCII content,
+  // the "repair" would just delete it, so the original mojibake is kept instead. This also closes
+  // the false-positive door for a clean payload that happens to carry a literal U+FFFD.
+  it('keeps the original when the only non-ASCII char was destroyed', () => {
+    setPlatform('win32');
+    const mojibake = doubleEncode('{"c":"上"}');
+    expect(decodePayload(mojibake)).toBe(mojibake.toString('utf-8'));
+  });
+
+  it('preserves clean payloads containing € or a literal U+FFFD on Windows', () => {
+    setPlatform('win32');
+    for (const text of ['{"c":"€100"}', '{"c":"一下"}', '{"c":"坏\ufffd字"}', '{"c":"café"}']) {
+      expect(decodePayload(Buffer.from(text, 'utf-8'))).toBe(text);
+    }
+  });
+
+  // Bulk sweep: no clean CJK payload may ever be rewritten, on any of the code pages tried.
+  it('never corrupts clean CJK payloads (bulk sweep)', () => {
+    setPlatform('win32');
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < 500; i++) {
+      let s = '';
+      for (let j = 0, n = 1 + Math.floor(rnd() * 12); j < n; j++) {
+        s += String.fromCodePoint(0x4e00 + Math.floor(rnd() * 0x51a6));
+      }
+      const text = JSON.stringify({ content: s, n: 42 });
+      expect(decodePayload(Buffer.from(text, 'utf-8'))).toBe(text);
     }
   });
 });

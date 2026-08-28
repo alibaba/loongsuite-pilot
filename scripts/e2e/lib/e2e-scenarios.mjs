@@ -794,6 +794,7 @@ const PLACEHOLDER_FIELDS = [
   'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
 ];
 const PLACEHOLDERS = new Set(['unknown', 'n/a', 'na', 'none', 'null', 'undefined']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 
 function listJsonl(dir) {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
@@ -823,6 +824,25 @@ function pct(num, total) {
 
 function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
+}
+
+function normalizedAgentType(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function isTerminalTurnEntry(entry) {
+  if (entry['gen_ai.agent.scope'] === 'subagent') return false;
+  if (entry['gen_ai.turn.end'] === true) return true;
+  const agentType = normalizedAgentType(entry['gen_ai.agent.type']);
+  if (agentType === 'codex') {
+    return entry['agent.codex.turn_status'] === 'completed'
+      || entry['agent.codex.turn_status'] === 'interrupted';
+  }
+  if (agentType === 'openclaw') {
+    return entry['agent.openclaw.hook'] === 'llm_output';
+  }
+  const reasons = entry['gen_ai.response.finish_reasons'];
+  return Array.isArray(reasons) && reasons.some(reason => TERMINAL_FINISH_REASONS.has(reason));
 }
 
 function increment(target, key, amount = 1) {
@@ -1001,15 +1021,17 @@ const turns = new Map();
 for (const row of rows) {
   const entry = row.entry;
   if (!hasValue(entry['gen_ai.turn.id'])) continue;
-  if (!hasValue(entry['gen_ai.turn.start']) && !hasValue(entry['gen_ai.turn.end'])) continue;
-  const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
+  if (entry['gen_ai.agent.scope'] === 'subagent') continue;
+  const key = String(entry['gen_ai.agent.type']) + '\\0'
+    + String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
   if (!turns.has(key)) turns.set(key, []);
   turns.get(key).push(row);
 }
 for (const turnRows of turns.values()) {
   const starts = turnRows.filter(row => row.entry['gen_ai.turn.start'] === true).length;
   const ends = turnRows.filter(row => row.entry['gen_ai.turn.end'] === true).length;
-  if (starts !== 1 || ends !== 1) {
+  const completed = turnRows.some(row => isTerminalTurnEntry(row.entry));
+  if (starts !== 1 || ends !== (completed ? 1 : 0)) {
     addIssue(turnRows[0].file, 'turn_boundary_error', ['gen_ai.turn.start', 'gen_ai.turn.end']);
   }
 }

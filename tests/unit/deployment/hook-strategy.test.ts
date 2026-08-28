@@ -33,8 +33,19 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 }));
 
 vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
+  CODEX_HOOK_EVENT_KEYS: {
+    SessionStart: 'session_start',
+    UserPromptSubmit: 'user_prompt_submit',
+    SubagentStart: 'subagent_start',
+    SubagentStop: 'subagent_stop',
+    Stop: 'stop',
+    PostToolUse: 'post_tool_use',
+  },
+  installedHookStateKey: vi.fn((hooksPath: string, location: { eventKey: string; groupIndex: number; handlerIndex: number }) =>
+    `${hooksPath}:${location.eventKey}:${location.groupIndex}:${location.handlerIndex}`),
   writeTrustedHashes: vi.fn(),
   removeTrustBlock: vi.fn(),
+  removeTrustStateKeys: vi.fn(),
   verifyTrustHashes: vi.fn(() => ({ valid: true, mismatches: [] })),
 }));
 
@@ -46,7 +57,11 @@ import {
   writeJsonFile,
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
-import { verifyTrustHashes } from '../../../src/deployment/codex-trust-writer.js';
+import {
+  removeTrustBlock,
+  verifyTrustHashes,
+  writeTrustedHashes,
+} from '../../../src/deployment/codex-trust-writer.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
   return {
@@ -134,7 +149,11 @@ describe('HookStrategy', () => {
     });
 
     it('returns true when Codex hook exists but its trust state is invalid', async () => {
-      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
       vi.mocked(verifyTrustHashes).mockReturnValue({
         valid: false,
         mismatches: ['missing trust state'],
@@ -161,6 +180,86 @@ describe('HookStrategy', () => {
       expect(verifyTrustHashes).toHaveBeenCalledOnce();
     });
 
+    it('verifies trust with the installed matcher and non-zero group/handler indices', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          SubagentStart: [
+            { matcher: '*', hooks: [{ type: 'command', command: 'third-party' }] },
+            {
+              matcher: '*',
+              hooks: [
+                { type: 'command', command: 'another-handler' },
+                {
+                  type: 'command',
+                  command: '/opt/pilot/hooks/codex-hook.sh subagent-start',
+                  timeout: 12,
+                  async: true,
+                  statusMessage: 'starting',
+                },
+              ],
+            },
+          ],
+        },
+      });
+      vi.mocked(verifyTrustHashes).mockReturnValue({ valid: true, mismatches: [] });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['SubagentStart'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(false);
+      expect(verifyTrustHashes).toHaveBeenCalledWith(expect.objectContaining({
+        locations: {
+          SubagentStart: expect.objectContaining({
+            matcher: '*',
+            groupIndex: 1,
+            handlerIndex: 1,
+            handler: expect.objectContaining({ timeout: 12, async: true, statusMessage: 'starting' }),
+          }),
+        },
+      }));
+    });
+
+    it('refuses ambiguous duplicate installed commands instead of trusting index zero', async () => {
+      const command = '/opt/pilot/hooks/codex-hook.sh stop';
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command }, { type: 'command', command }] }] },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(true);
+      expect(verifyTrustHashes).not.toHaveBeenCalled();
+    });
+
     it('builds correct hook definitions from agent config', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef();
@@ -179,7 +278,7 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
-    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+    it('quotes Codex PowerShell hook paths and removes the previous Windows command', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       try {
@@ -204,6 +303,36 @@ describe('HookStrategy', () => {
           hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
             + `-File "${script}" stop`,
           replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('quotes Grok Build PowerShell paths and preserves snake_case event names', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/pilot data/hooks/grok-build-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'grok-build',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.grok/hooks/loongsuite-pilot.json',
+            events: ['stop_failure'],
+            hookCommand: script,
+            format: 'nested',
+            eventSubcommand: 'as-is',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'stop_failure'],
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop_failure`,
+          replaceHookCommands: [`${script} stop_failure`],
         });
       } finally {
         if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
@@ -628,6 +757,71 @@ describe('HookStrategy', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('disk error');
     });
+
+    it('returns failure when Codex trust writing fails', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      vi.mocked(writeTrustedHashes).mockImplementationOnce(() => {
+        throw new Error('trust write failed');
+      });
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('trust write failed');
+    });
+
+    it('returns failure when Codex trust self-check fails', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      vi.mocked(verifyTrustHashes).mockReturnValueOnce({
+        valid: false,
+        mismatches: ['hash mismatch key=stop'],
+      });
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('codex trust hash verification failed');
+      expect(result.error).toContain('hash mismatch key=stop');
+    });
+
   });
 
   describe('env injection (settings.env merge)', () => {
@@ -796,6 +990,43 @@ describe('HookStrategy', () => {
 
       const result = await strategy.undeploy(makeDef());
       expect(result).toBe(false);
+    });
+
+    it('removes only exact Codex trust keys resolved before uninstall', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [
+            { hooks: [{ type: 'command', command: 'third-party' }] },
+            { hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] },
+          ],
+        },
+      });
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      });
+
+      const result = await strategy.undeploy(def);
+
+      expect(result).toBe(true);
+      expect(removeTrustBlock).toHaveBeenCalledWith(
+        '/home/.codex/config.toml',
+        'otel-codex-hook',
+        ['/home/.codex/hooks.json:stop:1:0'],
+      );
+      expect(mockHookManager.uninstallHook).toHaveBeenCalledOnce();
     });
   });
 
