@@ -1426,20 +1426,74 @@ function isRealUserPrompt(row) {
   return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row);
 }
 
-// Slash-command plumbing Qoder CLI writes as type=user: the caveat banner, the
-// command echo (`<command-message>` and `<command-name>` share one row), and the
-// command's stdout/stderr. None of them involves a model call, and only the
-// caveat/stdout rows carry isMeta, so the content envelope is the only reliable
-// signal.
-//
-// The text must consist of complete envelopes and nothing else, so that a real
-// prompt merely quoting one of these tags is never dropped. The backreference
-// ties each closing tag to the tag that opened it.
-const CONTROL_ENVELOPE_RE =
-  /^(?:\s*<(local-command-caveat|command-message|command-name|local-command-stdout|local-command-stderr)>[\s\S]*?<\/\1>)+\s*$/;
+// Slash-command plumbing qoder-cli writes as type=user rows. Confirmed shapes,
+// all of them a plain-string content and entrypoint=cli:
+//   [local-command-caveat]                  isMeta
+//   [command-message, command-name]         no isMeta (one row holds both)
+//   [local-command-stdout | ...-stderr]     isMeta
+// None involves a model call. Only the caveat/stdout rows carry isMeta, so the
+// content is what identifies the pair, and no metadata field identifies all three.
+const CONTROL_TAGS = new Set([
+  'local-command-caveat',
+  'command-message',
+  'command-name',
+  'local-command-stdout',
+  'local-command-stderr',
+]);
 
-function isCompleteControlEnvelope(text) {
-  return CONTROL_ENVELOPE_RE.test(text);
+const CAVEAT_OR_OUTPUT_TAGS = new Set([
+  'local-command-caveat',
+  'local-command-stdout',
+  'local-command-stderr',
+]);
+
+function isEnvelopeSpace(ch) {
+  return ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t';
+}
+
+/**
+ * Return the tag sequence `text` consists of, or null if it holds anything else.
+ *
+ * Deliberately a single forward scan rather than a regex: a pattern that repeats
+ * a lazily-matched envelope is ambiguous about where each envelope ends, and
+ * backtracks exponentially on input that nearly matches. The cursor here only
+ * ever moves forward, so cost is linear in the length of the text and a hostile
+ * prompt cannot stall the Stop hook.
+ */
+function scanControlEnvelopes(text) {
+  const tags = [];
+  let i = 0;
+
+  while (i < text.length) {
+    while (i < text.length && isEnvelopeSpace(text[i])) i++;
+    if (i >= text.length) break;
+    if (text[i] !== '<') return null;
+
+    const openEnd = text.indexOf('>', i + 1);
+    if (openEnd === -1) return null;
+    const tag = text.slice(i + 1, openEnd);
+    if (!CONTROL_TAGS.has(tag)) return null;
+
+    const closeAt = text.indexOf(`</${tag}>`, openEnd + 1);
+    if (closeAt === -1) return null;
+
+    tags.push(tag);
+    i = closeAt + tag.length + 3;
+  }
+
+  return tags.length > 0 ? tags : null;
+}
+
+function isControlEnvelopeSequence(tags, row) {
+  if (tags.length === 1) {
+    // A lone <command-name> is something a user can plausibly type or paste, so
+    // the banner and output rows are only recognized together with their isMeta.
+    return CAVEAT_OR_OUTPUT_TAGS.has(tags[0]) && isMetaUser(row);
+  }
+  if (tags.length === 2) {
+    return tags[0] === 'command-message' && tags[1] === 'command-name';
+  }
+  return false;
 }
 
 function isControlUserRow(row) {
@@ -1447,7 +1501,14 @@ function isControlUserRow(row) {
   // can never be plumbing. Most rows carry no promptId, so this only
   // short-circuits; the envelope shape is what decides.
   if (row?.type !== 'user' || isToolResult(row) || row.promptId) return false;
-  return isCompleteControlEnvelope(extractUserText(row));
+  // Only qoder-cli emits this plumbing, and only ever as a plain string. A
+  // content-block array is a real message, whatever its first block looks like.
+  if (row.entrypoint !== 'cli') return false;
+  const content = row.message?.content;
+  if (typeof content !== 'string') return false;
+
+  const tags = scanControlEnvelopes(content);
+  return tags !== null && isControlEnvelopeSequence(tags, row);
 }
 
 function extractUserText(row) {

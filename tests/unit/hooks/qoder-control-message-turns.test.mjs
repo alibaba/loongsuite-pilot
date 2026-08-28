@@ -176,4 +176,48 @@ describe('qoder slash-command control rows', () => {
 
     expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
   });
+
+  it('keeps a prompt that is exactly one command-name envelope', () => {
+    // Nothing stops a user from sending this, and the CLI never emits
+    // <command-name> on its own — it always pairs it with <command-message>.
+    const prompt = userRow('<command-name>model</command-name>');
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('keeps a row whose first content block is an envelope but which carries more', () => {
+    // Control rows are always a plain string, so a block array is a real message
+    // no matter what its first block holds.
+    const prompt = userRow([
+      { type: 'text', text: '<local-command-stdout>Model set to Ultimate</local-command-stdout>' },
+      { type: 'text', text: '这行是从哪来的？' },
+    ], { isMeta: true });
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('keeps a control-shaped row that did not come from the CLI', () => {
+    const prompt = userRow(
+      '<local-command-stdout>Model set to Ultimate</local-command-stdout>',
+      { isMeta: true, entrypoint: undefined },
+    );
+
+    expect(splitContentEventsIntoTurns([prompt])).toEqual([[prompt]]);
+  });
+
+  it('classifies adjacent envelopes with a trailing suffix without stalling', () => {
+    // A regex repeating a lazily-matched envelope backtracks exponentially here:
+    // 28 envelopes took ~3.8 s locally, and the Stop hook runs the processor in
+    // the foreground with no timeout, so this has to stay linear.
+    const prompt = userRow(
+      '<command-name>x</command-name>'.repeat(40) + '这些标签是什么？',
+    );
+
+    const started = performance.now();
+    const turns = splitContentEventsIntoTurns([prompt]);
+    const elapsed = performance.now() - started;
+
+    expect(turns).toEqual([[prompt]]);
+    expect(elapsed).toBeLessThan(200);
+  });
 });
