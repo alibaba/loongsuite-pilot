@@ -126,6 +126,58 @@ describe('DshLogInput state isolation and restart recovery', () => {
 
     expect(request?.['gen_ai.provider.name']).toBe('provider-a');
     expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
+    expect(JSON.stringify(request?.['gen_ai.input.messages_delta'])).toContain('private-prompt');
+  });
+
+  it('rebuilds the request delta cursor when restarting between ReAct steps', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'private-prompt'),
+      chunk('session-a'),
+      {
+        type: 'assistant/message', sid: 'session-a', time: 11,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            id: 'response-1',
+            source: { provider: 'provider-a', model: 'provider-a-model' },
+            content: [{
+              type: 'tool-call', id: 'call-1', name: 'read', arguments: { path: 'README.md' },
+            }],
+          },
+        },
+      },
+      {
+        type: 'tool/result', sid: 'session-a', time: 12,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { callId: 'call-1' },
+            content: [{ type: 'text', text: '# README' }],
+          },
+        },
+      },
+      { type: 'step/start', sid: 'session-a', time: 13, data: { turn: 1, step: 2 } },
+      { type: 'request/context', sid: 'session-a', time: 14, data: { turn: 1, step: 2 } },
+    ]);
+
+    const first = await makeInput();
+    const firstEntries = await first.input.runCollect();
+    await first.store.save();
+    const firstRequest = firstEntries.find(entry => entry['event.name'] === 'llm.request');
+    expect(JSON.stringify(firstRequest?.['gen_ai.input.messages_delta'])).toContain('private-prompt');
+
+    await appendRecords(file, [chunk('session-a', 15, 1, 2)]);
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const delta = request?.['gen_ai.input.messages_delta'] as Array<{ role: string }>;
+
+    expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(JSON.stringify(delta)).not.toContain('private-prompt');
+    expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
   });
 
   it('restores the last header after a completed turn and pairs a headerless next turn', async () => {

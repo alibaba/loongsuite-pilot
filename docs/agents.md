@@ -17,6 +17,7 @@ type differences are called out in the notes.
 | Cursor | `cursor` | Hook integration. |
 | Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
 | DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. |
+| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
@@ -44,12 +45,47 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
 
+## Grok Build Collection And Lifecycle
+
+Pilot detects Grok Build from `~/.grok` and installs four fail-open hooks in
+`~/.grok/hooks/loongsuite-pilot.json`: `stop`, `stop_failure`,
+`user_prompt_submit`, and `session_end`. Subagent hooks are intentionally not
+installed or collected.
+
+Each completed turn is reconstructed from three Grok-owned JSONL sources:
+
+- Session `chat_history.jsonl` provides messages, model metadata, tool
+  arguments, tool results, and the system instruction.
+- Session `updates.jsonl` provides the real prompt ID, turn terminal state,
+  cancellation or failure, and tool status.
+- `~/.grok/logs/unified.jsonl` provides model timing and token usage plus tool
+  execution timing and success.
+
+Collection starts with the turn observed after installation and does not replay
+older session history. Because Grok persists cancellation asynchronously, a
+cancelled turn can be emitted on the next `user_prompt_submit` or
+`session_end`. Setting `agents["grok-build"].captureMessageContent` to `false`
+removes user, assistant, and system content as well as tool arguments, tool
+results, and raw error details.
+
+The installed assets include POSIX and PowerShell launchers. The Grok-specific
+watchdog check repairs missing or changed Pilot Hook assets and configuration;
+uninstall removes only the Pilot-owned Grok Hook entries and preserves third-
+party hooks.
+
 ## DeepSeek Harness Collection And Lifecycle
 
-Pilot detects DeepSeek Harness from `~/.dsh` or the `dsh` command. When `dsh`
-is enabled, Pilot appends one marked, Pilot-owned block to
-`$DSH_HOME/cordis.patch.yml` when `DSH_HOME` is set, otherwise
-`~/.dsh/cordis.patch.yml`. That block loads the packaged plugin
+Pilot resolves one exact Harness home for both detection and deployment. It
+keeps a previously deployed patch path for repair and cleanup, then checks an
+explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and — on
+Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
+`~/.dsh` and `dsh` command detection remain the fallback. Pilot does not scan
+temporary directories or assume a fixed non-default home; multiple distinct
+running homes found during initial discovery are reported as ambiguous instead
+of selecting one silently.
+
+When `dsh` is enabled, Pilot appends one marked, Pilot-owned block to the
+resolved `<DSH_HOME>/cordis.patch.yml`. That block loads the packaged plugin
 from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
 preserved. Start a new DSH process after first enabling or reinstalling the
 integration so the host loads the current patch.
@@ -166,8 +202,9 @@ Use `config.json` when you need to control message content capture:
 | `enabled` | Set to `false` to disable the agent from config. |
 | `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
 | `multimodal.uploadMode` | Multimodal upload policy. `none` (default) disables; `input` / `tool` / `output` / `both` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
+| `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` only today).
+For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
 
 ## Verify Agent Collection
 

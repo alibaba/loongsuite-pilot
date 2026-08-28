@@ -284,6 +284,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -544,6 +545,27 @@ describe('ConfigLoader', () => {
         multimodal: { uploadMode: 'both' },
       });
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+    });
+
+    it('parses agent multimodal allowedRootPaths and expands ~', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          qoder: {
+            captureMessageContent: true,
+            multimodal: {
+              uploadMode: 'both',
+              allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('both');
+      expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
+        '/home/test/workspace/loongsuite-pilot',
+        '/tmp/extra',
+      ]);
     });
 
     it('defaults agent multimodal uploadMode to none', async () => {
@@ -1719,9 +1741,13 @@ describe('ConfigLoader', () => {
   describe('upstreamLink config', () => {
     it('is disabled by default', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
       expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
 
@@ -1744,6 +1770,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
       config = await loadConfig();
       expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables local trace generation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, generateTraceWhenMissing: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
     });
 
     it('treats an empty-string enable env as unset (not "true")', async () => {

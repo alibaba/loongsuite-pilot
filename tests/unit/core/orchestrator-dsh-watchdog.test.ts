@@ -21,7 +21,6 @@ vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
 });
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
-import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import { fileExists } from '../../../src/utils/fs-utils.js';
 
 const DATA_DIR = '/tmp/orchestrator-dsh-watchdog';
@@ -63,6 +62,7 @@ function buildTargets(orchestrator: Orchestrator) {
 
 describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
   let getDefinitions: ReturnType<typeof vi.fn>;
+  let isAgentDetected: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
   let undeployAgent: ReturnType<typeof vi.fn>;
@@ -70,6 +70,7 @@ describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getDefinitions = vi.fn().mockReturnValue([dshDef()]);
+    isAgentDetected = vi.fn().mockResolvedValue(true);
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
     undeployAgent = vi.fn();
@@ -82,22 +83,22 @@ describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
       { id: 'other', displayName: 'Other', deployMode: 'detection-only', detection: { paths: [], commands: [] } },
     ]);
     const targets = buildTargets(makeOrchestrator({
-      getDefinitions, needsRedeploy, deploySingle, undeployAgent,
+      getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent,
     }));
     expect(targets.map(target => target.id)).toEqual(['dsh-yaml-patch:dsh']);
   });
 
   it('checks asset, detection, health, repair, cleanup, and enabled gate', async () => {
     vi.mocked(fileExists).mockResolvedValue(true);
-    vi.mocked(detectAgent).mockResolvedValue(true);
     needsRedeploy.mockResolvedValue(true);
     deploySingle.mockResolvedValue({ success: true, agentId: 'dsh', deployMode: 'dsh-yaml-patch' });
     undeployAgent.mockResolvedValue(true);
-    const manager = { getDefinitions, needsRedeploy, deploySingle, undeployAgent };
+    const manager = { getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent };
     const [target] = buildTargets(makeOrchestrator(manager, true));
 
     expect(target.enabled?.()).toBe(true);
     await expect(target.precondition()).resolves.toBe(true);
+    expect(isAgentDetected).toHaveBeenCalledWith(expect.objectContaining({ id: 'dsh' }));
     await expect(target.check()).resolves.toBe(false);
     await expect(target.repair()).resolves.toBeUndefined();
     await expect(target.cleanup?.()).resolves.toBeUndefined();
@@ -106,6 +107,18 @@ describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
 
     const [disabled] = buildTargets(makeOrchestrator(manager, false));
     expect(disabled.enabled?.()).toBe(false);
+  });
+
+  it('rechecks strategy-aware detection when DSH starts after Pilot', async () => {
+    vi.mocked(fileExists).mockResolvedValue(true);
+    isAgentDetected.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const [target] = buildTargets(makeOrchestrator({
+      getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent,
+    }));
+
+    await expect(target.precondition()).resolves.toBe(false);
+    await expect(target.precondition()).resolves.toBe(true);
+    expect(isAgentDetected).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces deployment and cleanup failures to the watchdog', async () => {
@@ -117,9 +130,24 @@ describe('Orchestrator.buildDshYamlPatchInterceptTargets', () => {
     });
     undeployAgent.mockResolvedValue(false);
     const [target] = buildTargets(makeOrchestrator({
-      getDefinitions, needsRedeploy, deploySingle, undeployAgent,
+      getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent,
     }));
     await expect(target.repair()).rejects.toThrow('repair failed');
     await expect(target.cleanup?.()).rejects.toThrow('failed to remove DSH YAML patch');
+  });
+
+  it('treats a transient not-detected skip as a failed repair', async () => {
+    deploySingle.mockResolvedValue({
+      success: true,
+      agentId: 'dsh',
+      deployMode: 'dsh-yaml-patch',
+      skipped: true,
+      reason: 'not-detected',
+    });
+    const [target] = buildTargets(makeOrchestrator({
+      getDefinitions, isAgentDetected, needsRedeploy, deploySingle, undeployAgent,
+    }));
+
+    await expect(target.repair()).rejects.toThrow('DSH disappeared before YAML patch repair');
   });
 });

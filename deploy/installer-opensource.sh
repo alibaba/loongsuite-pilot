@@ -890,15 +890,39 @@ deploy_package() {
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
-    if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js || {
-            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+    if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
+        # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
+        # --data-dir would otherwise put hooks/skills/plugins in the default tree while
+        # the config lives elsewhere.
+        # Captured because two of the three failure modes are only in the output: a per-tree
+        # failure and a thrown main() both exit 0 on purpose (a non-zero exit would abort the
+        # npm install fallback above), announcing themselves as "N failed asset tree(s)" and
+        # "Post-install failed: <reason>" instead. 2>&1 because both go to stderr.
+        postinstall_exit=0
+        postinstall_out="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+            "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" 2>&1)" || postinstall_exit=$?
+        # `if`, not `[ -n ... ] && printf`: under set -e the latter aborts the function when
+        # the output is empty.
+        if [ -n "$postinstall_out" ]; then
+            printf '%s\n' "$postinstall_out"
+        fi
+        if [ "$postinstall_exit" -ne 0 ]; then
+            msg "    ❌ Hook 脚本部署失败 (exit=$postinstall_exit)，hooks/plugins 缺失" \
+                "    ❌ Hook script deployment failed (exit=$postinstall_exit); hooks/plugins are missing"
             return 1
-        }
+        fi
+        if printf '%s' "$postinstall_out" | grep -qE "failed asset tree|Post-install failed"; then
+            msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" \
+                "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
+            return 1
+        fi
+        msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+        msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
+            "    If using Codex desktop app, please manually trust hooks on first launch"
+    else
+        msg "    ⚠️ postinstall.js 未找到，跳过 Hook 部署" \
+            "    ⚠️ postinstall.js not found, skipping hook deployment"
     fi
-    msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-        "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 
     # Write current pointer only after all deploy steps succeed
@@ -1849,7 +1873,13 @@ cmd_install() {
     select_agents
     prompt_user_id
     confirm_config_overwrite
-    deploy_package "$INSTALL_SRC"
+    # set -e would end the install here anyway; saying why beats an exit code on its own.
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
+            "❌ Install aborted: hook script deployment failed; check the output above and retry"
+        exit 1
+    fi
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
@@ -2113,6 +2143,70 @@ try {
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
         fi
     done
+}
+
+# Grok Build uses a dedicated Pilot-owned hook file. Match the stable entry
+# script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
+# installations uninstall correctly, while unrelated hooks in the file remain.
+remove_grok_build_hook_config() {
+    local cfg="$HOME/.grok/hooks/loongsuite-pilot.json"
+    [ -f "$cfg" ] || return 0
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (Node.js unavailable; remove the Grok Build Pilot hook manually)"
+        return 0
+    fi
+
+    local result
+    result="$(node -e '
+const fs = require("fs");
+const cfg = process.argv[1];
+const owned = value => typeof value === "string"
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      if (owned(entry && entry.command)) { changed = true; continue; }
+      if (entry && Array.isArray(entry.hooks)) {
+        const nested = entry.hooks.filter(hook => !owned(hook && hook.command));
+        if (nested.length !== entry.hooks.length) changed = true;
+        if (entry.hooks.length > 0 && nested.length === 0) continue;
+        kept.push({ ...entry, hooks: nested });
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (Object.keys(hooks).length === 0) delete data.hooks;
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(cfg);
+  } else {
+    const tmp = `${cfg}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  }
+  process.stdout.write("cleaned");
+} catch (error) {
+  process.stderr.write(error.message); process.exit(1);
+}
+' "$cfg" 2>/dev/null || true)"
+
+    if [ "$result" = "cleaned" ] || [ "$result" = "nochange" ]; then
+        msg "    ✅ 已清理: ~/.grok/hooks/loongsuite-pilot.json" \
+            "    ✅ Cleaned: ~/.grok/hooks/loongsuite-pilot.json"
+    else
+        msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (需手动清理)" \
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (manual cleanup needed)"
+    fi
 }
 
 # ============================================================
@@ -2694,6 +2788,7 @@ cmd_uninstall() {
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
+    remove_grok_build_hook_config
     remove_qodercli_token_intercept
     remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept

@@ -57,6 +57,22 @@ describe('DSH uninstall cleanup helper', () => {
     await expect(fs.stat(patchPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('does not create a DSH home when the patch file is already absent', async () => {
+    const missingHome = path.join(tmpDir, 'missing-dsh-home');
+    const missingPatch = path.join(missingHome, 'cordis.patch.yml');
+
+    const result = await cleanupDshIntegration({
+      patchPath: missingPatch,
+      pluginDir,
+      marker: MARKER,
+    });
+
+    expect(result).toEqual({ success: true, changed: false });
+    await expect(fs.stat(missingHome)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(path.join(pluginDir, '.collection-enabled')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('fails closed and preserves an incomplete marker block', async () => {
     const invalid = `# BEGIN ${MARKER}\n- insert: []\n`;
     await fs.writeFile(patchPath, invalid);

@@ -16,6 +16,7 @@
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
 | DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。 |
+| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
@@ -42,11 +43,42 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
 
+## Grok Build 采集与生命周期
+
+Pilot 通过 `~/.grok` 检测 Grok Build，并在
+`~/.grok/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
+`stop`、`stop_failure`、`user_prompt_submit` 和 `session_end`。当前明确
+不安装、不采集 subagent Hook。
+
+每个已完成 turn 由 Grok 自身的三类 JSONL 数据融合生成：
+
+- session 目录下的 `chat_history.jsonl` 提供消息、模型元数据、
+  工具参数、工具结果和 system instruction。
+- session 目录下的 `updates.jsonl` 提供真实 prompt ID、turn 终态、
+  取消或失败状态以及工具状态。
+- `~/.grok/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
+  和成功状态。
+
+采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
+由于 Grok 会异步持久化取消终态，取消 turn 可能在下一次
+`user_prompt_submit` 或 `session_end` 时补采。将
+`agents["grok-build"].captureMessageContent` 设置为 `false`，会同时清除
+user、assistant、system 内容、工具参数、工具结果和原始错误详情。
+
+安装产物同时包含 POSIX 和 PowerShell 启动器。Grok 专用 watchdog
+检查会修复缺失或被修改的 Pilot Hook 资产和配置；卸载只删除
+Pilot 所有的 Grok Hook 条目，保留第三方 Hook。
+
 ## DeepSeek Harness 采集与生命周期
 
-Pilot 通过 `~/.dsh` 目录或 `dsh` 命令检测 DeepSeek Harness。启用
-`dsh` 后，Pilot 会在已设置 `DSH_HOME` 时修改 `$DSH_HOME/cordis.patch.yml`，
-否则修改 `~/.dsh/cordis.patch.yml`，并在其中追加一个
+Pilot 会为检测和部署解析同一个准确的 Harness home：已部署过的补丁路径
+用于后续修复和清理，其次依次检查本地 Agent 定义中显式设置的 `patchPath`、
+Pilot 服务进程的 `DSH_HOME`，以及 Linux 上唯一、同用户运行中 DSH 进程的
+`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。Pilot 不会扫描
+临时目录或假定某个固定的非默认 home；若初次发现时同时存在多个不同的运行中
+home，会报告歧义而不会静默选择其中一个。
+
+启用 `dsh` 后，Pilot 会在解析出的 `<DSH_HOME>/cordis.patch.yml` 中追加一个
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
@@ -156,8 +188,9 @@ loongsuite-pilot restart
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
 | `captureMessageContent` | 设置为 `false` 可避免采集完整 Prompt、Completion、工具参数和工具结果，前提是对应集成支持该策略。 |
 | `multimodal.uploadMode` | 多模态上传策略。`none`（默认）关闭；`input` / `tool` / `output` / `both` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
+| `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像、仅 `codex` 生效）。
+敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
 
 ## 验证 Agent 采集
 

@@ -41,9 +41,9 @@ export interface UriResult {
 
 export interface UriPart {
   type: 'uri';
+  uri: string;
   mime_type?: string;
   modality?: string;
-  uri: string;
 }
 
 /** Item in gen_ai.input.multimodal_metadata. */
@@ -76,11 +76,11 @@ export type PathToUriFn = (
   timeUnixMs?: number,
 ) => Promise<UriResult | null>;
 
-export interface PathStat {
-  resolvedPath: string;
-  mime_type: string;
-  size: number;
-  mtimeMs: number;
+export interface PathToUriOptions {
+  /** If empty / omitted, pathToUri rejects the read. */
+  allowedRootPaths?: string[];
+  /** Per-read deadline; `<= 0` disables. Default `PATH_TO_URI_DEADLINE_MS`. */
+  deadlineMs?: number;
 }
 
 export interface PathBytes {
@@ -90,6 +90,8 @@ export interface PathBytes {
 }
 
 export const MAX_MULTIMODAL_PARTS = 10;
+/** Max chars for one extracted image path (regex capture and resolve). */
+export const MAX_MULTIMODAL_PATH_CHARS = 1024;
 export const MAX_MULTIMODAL_DATA_SIZE = 30 * 1024 * 1024;
 export const MAX_MULTIMODAL_PENDING_UPLOADS = 1024;
 export const MAX_MULTIMODAL_PENDING_BYTES = 1024 * 1024 * 1024;
@@ -98,4 +100,6 @@ export const MAX_MULTIMODAL_PATH_INFLIGHT = 1024;
 /** Max base64 chars (~4/3 of MAX_MULTIMODAL_DATA_SIZE). */
 export const MAX_MULTIMODAL_BASE64_CHARS = Math.ceil(MAX_MULTIMODAL_DATA_SIZE * 4 / 3) + 16;
 export const MULTIMODAL_SHUTDOWN_TIMEOUT_MS = 1_500;
+/** Per-image stat/read deadline so a hung mount cannot block collect/stop. */
+export const PATH_TO_URI_DEADLINE_MS = 3_000;
 export const MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';

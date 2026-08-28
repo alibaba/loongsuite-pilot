@@ -73,7 +73,7 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 ## Multimodal Object Storage
 
-When Pilot should convert inline images in agent messages from base64 into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; see [Multimodal Collection](multimodal.md).
+When Pilot should convert images in agent messages (inline base64, or local paths read and encoded by each agent extractor) into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; local `pathToUri` reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus agent defaults. See [Multimodal Collection](multimodal.md).
 
 ### OSS
 

@@ -3,7 +3,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MultimodalProcessor } from '../../../src/multimodal/processor.js';
+import { MultimodalProcessor, withDeadline } from '../../../src/multimodal/processor.js';
+import { mergeAllowedRootPaths } from '../../../src/multimodal/resolve.js';
 import { yyyymmddLocal } from '../../../src/multimodal/resolve.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
@@ -23,13 +24,43 @@ afterEach(() => {
   }
 });
 
+const PNG_HDR = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const TMP_ALLOW = { allowedRootPaths: mergeAllowedRootPaths([os.tmpdir()]) };
+
 function writeTempPng(name: string, content: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mm-proc-'));
   tmpDirs.push(dir);
   const file = path.join(dir, name);
-  fs.writeFileSync(file, Buffer.from(content));
+  fs.writeFileSync(file, Buffer.concat([PNG_HDR, Buffer.from(content)]));
   return file;
 }
+
+describe('withDeadline', () => {
+  it('returns the value when work finishes first', async () => {
+    await expect(withDeadline(Promise.resolve('ok'), 50, () => 'late')).resolves.toBe('ok');
+  });
+
+  it('returns onTimeout when work never settles', async () => {
+    const started = Date.now();
+    await expect(withDeadline(new Promise<string>(() => {}), 30, () => 'late')).resolves.toBe('late');
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  it('does not swallow a fast rejection', async () => {
+    await expect(withDeadline(Promise.reject(new Error('boom')), 50, () => 'late'))
+      .rejects.toThrow('boom');
+  });
+
+  it('deadlineMs <= 0 disables the race', async () => {
+    let resolve!: (value: string) => void;
+    const pending = new Promise<string>(r => {
+      resolve = r;
+    });
+    const raced = withDeadline(pending, 0, () => 'late');
+    resolve('ok');
+    await expect(raced).resolves.toBe('ok');
+  });
+});
 
 describe('MultimodalProcessor.blobToUri', () => {
   it('returns optimistic uri and enqueues upload', async () => {
@@ -299,7 +330,7 @@ describe('MultimodalProcessor.pathToUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    const result = await processor.pathToUri(file, EVENT_TIME_MS);
+    const result = await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW);
     expect(result).not.toBeNull();
     expect(result!.mime_type).toBe('image/png');
     expect(result!.uri).toMatch(new RegExp(`^oss://bucket/pilot-mm/${EVENT_DAY}/[a-f0-9]{64}\\.png$`));
@@ -308,13 +339,32 @@ describe('MultimodalProcessor.pathToUri', () => {
     expect(uploader.items).toHaveLength(1);
   });
 
+  it('does not reuse a same-path URI across event days', async () => {
+    const file = writeTempPng('cross-day.png', 'same-bytes');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const day1Ms = Date.parse('2026-08-24T12:00:00+08:00');
+    const day2Ms = Date.parse('2026-08-25T12:00:00+08:00');
+    const day1 = yyyymmddLocal(new Date(day1Ms));
+    const day2 = yyyymmddLocal(new Date(day2Ms));
+
+    const first = await processor.pathToUri(file, day1Ms, TMP_ALLOW);
+    const second = await processor.pathToUri(file, day2Ms, TMP_ALLOW);
+    expect(first?.uri).toMatch(new RegExp(`/${day1}/[a-f0-9]{64}\\.png$`));
+    expect(second?.uri).toMatch(new RegExp(`/${day2}/[a-f0-9]{64}\\.png$`));
+    expect(second?.uri).not.toBe(first?.uri);
+
+    await processor.shutdown(1000);
+    expect(uploader.items.map(item => item.targetPath.split('/')[0])).toEqual([day1, day2]);
+  });
+
   it('LRU-caches path→uri so the same path is uploaded once', async () => {
     const file = writeTempPng('dup.png', 'same-bytes');
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    const a = await processor.pathToUri(file);
-    const b = await processor.pathToUri(path.join(path.dirname(file), '.', 'dup.png'));
+    const a = await processor.pathToUri(file, undefined, TMP_ALLOW);
+    const b = await processor.pathToUri(path.join(path.dirname(file), '.', 'dup.png'), undefined, TMP_ALLOW);
     expect(a?.uri).toBe(b?.uri);
 
     await processor.shutdown(1000);
@@ -327,8 +377,8 @@ describe('MultimodalProcessor.pathToUri', () => {
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
     const [a, b] = await Promise.all([
-      processor.pathToUri(file),
-      processor.pathToUri(file),
+      processor.pathToUri(file, undefined, TMP_ALLOW),
+      processor.pathToUri(file, undefined, TMP_ALLOW),
     ]);
     expect(a?.uri).toBe(b?.uri);
 
@@ -350,9 +400,13 @@ describe('MultimodalProcessor.pathToUri', () => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
       return {
         ...actual,
-        readImagePathBytes: async (stated: Parameters<typeof actual.readImagePathBytes>[0]) => {
+        openNormalizedLocalImage: async (
+          filePath: string,
+          maxBytes?: number,
+          allowedRootPaths?: string[],
+        ) => {
           await holdReads;
-          return actual.readImagePathBytes(stated);
+          return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
         },
       };
     });
@@ -366,15 +420,15 @@ describe('MultimodalProcessor.pathToUri', () => {
       const uploader = new FakeUploader();
       const processor = new ProcessorWithTinyPathBudget(STORAGE_BASE, uploader);
 
-      const first = processor.pathToUri(f1, EVENT_TIME_MS);
-      const second = processor.pathToUri(f2, EVENT_TIME_MS);
+      const first = processor.pathToUri(f1, EVENT_TIME_MS, TMP_ALLOW);
+      const second = processor.pathToUri(f2, EVENT_TIME_MS, TMP_ALLOW);
       // Fill the two slots before the third distinct path is admitted.
       await Promise.resolve();
-      const overflow = await processor.pathToUri(f3, EVENT_TIME_MS);
+      const overflow = await processor.pathToUri(f3, EVENT_TIME_MS, TMP_ALLOW);
       expect(overflow).toBeNull();
 
       // Same path as an in-flight read still coalesces (does not consume a new slot).
-      const coalesced = processor.pathToUri(f1, EVENT_TIME_MS);
+      const coalesced = processor.pathToUri(f1, EVENT_TIME_MS, TMP_ALLOW);
 
       releaseReads();
       const [a, b, c] = await Promise.all([first, second, coalesced]);
@@ -395,8 +449,8 @@ describe('MultimodalProcessor.pathToUri', () => {
   it('does not cache missing paths (re-stat each call)', async () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
-    expect(await processor.pathToUri('/no/such/image.png')).toBeNull();
-    expect(await processor.pathToUri('/no/such/image.png')).toBeNull();
+    expect(await processor.pathToUri('/no/such/image.png', undefined, TMP_ALLOW)).toBeNull();
+    expect(await processor.pathToUri('/no/such/image.png', undefined, TMP_ALLOW)).toBeNull();
     expect(uploader.items).toHaveLength(0);
     await processor.shutdown(100);
   });
@@ -406,15 +460,15 @@ describe('MultimodalProcessor.pathToUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    const first = await processor.pathToUri(file, EVENT_TIME_MS);
+    const first = await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW);
     expect(first).not.toBeNull();
 
     // Ensure mtime moves forward even on coarse filesystem timestamps.
     const previous = fs.statSync(file);
-    fs.writeFileSync(file, Buffer.from('version-2-different-bytes'));
+    fs.writeFileSync(file, Buffer.concat([PNG_HDR, Buffer.from('version-2-different-bytes')]));
     fs.utimesSync(file, previous.atime, new Date(previous.mtimeMs + 1000));
 
-    const second = await processor.pathToUri(file, EVENT_TIME_MS);
+    const second = await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW);
     expect(second).not.toBeNull();
     expect(second!.uri).not.toBe(first!.uri);
 
@@ -422,44 +476,128 @@ describe('MultimodalProcessor.pathToUri', () => {
     expect(uploader.items).toHaveLength(2);
   });
 
-  it('restarts when file changes between first and second stat', async () => {
+  it('rejects pathToUri without allowed roots or outside them', async () => {
+    const file = writeTempPng('deny.png', 'deny');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const denied = { allowedRootPaths: [path.join(os.tmpdir(), 'no-such-root')] };
+    expect(await processor.pathToUri(file, EVENT_TIME_MS)).toBeNull();
+    expect(await processor.pathToUri(file, EVENT_TIME_MS, denied)).toBeNull();
+    expect(await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW)).not.toBeNull();
+    // Cache must still honor roots if they change (no hot-reload today).
+    expect(await processor.pathToUri(file, EVENT_TIME_MS, denied)).toBeNull();
+    await processor.shutdown(100);
+  });
+
+  it('rejects a directory-symlink escape even when the lexical path is inside the root', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mm-proc-'));
+    tmpDirs.push(dir);
+    const allowed = path.join(dir, 'allowed');
+    const outside = path.join(dir, 'outside');
+    fs.mkdirSync(allowed);
+    fs.mkdirSync(outside);
+    const secret = path.join(outside, 'secret.png');
+    fs.writeFileSync(secret, Buffer.concat([PNG_HDR, Buffer.from('escaped')]));
+    fs.symlinkSync(outside, path.join(allowed, 'via'));
+    const escaped = path.join(allowed, 'via', 'secret.png');
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(await processor.pathToUri(escaped, EVENT_TIME_MS, {
+      allowedRootPaths: mergeAllowedRootPaths([allowed]),
+    })).toBeNull();
+    await processor.shutdown(100);
+  });
+
+  it('rejects symlink targets even inside an allowed root', async () => {
+    const real = writeTempPng('real.png', 'real');
+    const link = path.join(path.dirname(real), 'alias.png');
+    fs.symlinkSync(real, link);
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(await processor.pathToUri(link, EVENT_TIME_MS, TMP_ALLOW)).toBeNull();
+    await processor.shutdown(100);
+  });
+
+  it('rejects image-extension files whose magic is not an image', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mm-proc-'));
+    tmpDirs.push(dir);
+    const file = path.join(dir, 'secret.png');
+    fs.writeFileSync(file, Buffer.from('not-an-image'));
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(await processor.pathToUri(file, EVENT_TIME_MS, TMP_ALLOW)).toBeNull();
+    await processor.shutdown(100);
+  });
+
+  it('does not upload when a timed-out pathToUri later finishes reading', async () => {
     vi.resetModules();
-    let statCalls = 0;
+    let releaseRead!: () => void;
+    const holdRead = new Promise<void>(resolve => {
+      releaseRead = resolve;
+    });
+    let readsFinished = 0;
     vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
       return {
         ...actual,
-        statImagePath: async (filePath: string) => {
-          statCalls += 1;
-          if (statCalls === 1) {
-            const stated = await actual.statImagePath(filePath);
-            // Mutate after outer stat so the in-flight re-stat sees a new identity.
-            fs.writeFileSync(filePath, Buffer.from('version-2-mid-flight'));
-            const prev = fs.statSync(filePath);
-            fs.utimesSync(filePath, prev.atime, new Date(prev.mtimeMs + 1000));
-            return stated;
-          }
-          return actual.statImagePath(filePath);
+        openNormalizedLocalImage: async (
+          filePath: string,
+          maxBytes?: number,
+          allowedRootPaths?: string[],
+        ) => {
+          await holdRead;
+          readsFinished += 1;
+          return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
         },
       };
     });
     try {
-      const { MultimodalProcessor: ProcessorWithStatHook } = await import(
+      const { MultimodalProcessor: DelayedProcessor } = await import(
         '../../../src/multimodal/processor.js'
       );
-      const file = writeTempPng('toctou.png', 'version-1');
+      const file = writeTempPng('orphan.png', 'orphan');
       const uploader = new FakeUploader();
-      const processor = new ProcessorWithStatHook(STORAGE_BASE, uploader);
+      const processor = new DelayedProcessor(STORAGE_BASE, uploader);
+      expect(await processor.pathToUri(file, EVENT_TIME_MS, {
+        ...TMP_ALLOW,
+        deadlineMs: 40,
+      })).toBeNull();
+      expect(uploader.items).toHaveLength(0);
 
-      const result = await processor.pathToUri(file, EVENT_TIME_MS);
-      const expectedSha = createHash('sha256').update('version-2-mid-flight').digest('hex');
-      expect(result?.sha256).toBe(expectedSha);
-      // outer + mismatch re-stat + recurse outer + recurse re-stat
-      expect(statCalls).toBe(4);
+      releaseRead();
+      await vi.waitFor(() => expect(readsFinished).toBe(1));
+      expect(uploader.items).toHaveLength(0);
+      await processor.shutdown(100);
+    } finally {
+      releaseRead();
+      vi.doUnmock('../../../src/multimodal/resolve.js');
+      vi.resetModules();
+    }
+  });
 
-      await processor.shutdown(1000);
-      expect(uploader.items).toHaveLength(1);
-      expect(uploader.items[0]!.data?.toString()).toBe('version-2-mid-flight');
+  it('times out a never-resolving stat and returns null', async () => {
+    vi.resetModules();
+    vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
+      return {
+        ...actual,
+        lstatRegularImageFile: () => new Promise(() => {}),
+      };
+    });
+    try {
+      const { MultimodalProcessor: HungProcessor } = await import(
+        '../../../src/multimodal/processor.js'
+      );
+      const file = writeTempPng('hang.png', 'hang');
+      const uploader = new FakeUploader();
+      const processor = new HungProcessor(STORAGE_BASE, uploader);
+      const started = Date.now();
+      expect(await processor.pathToUri(file, EVENT_TIME_MS, {
+        ...TMP_ALLOW,
+        deadlineMs: 40,
+      })).toBeNull();
+      expect(Date.now() - started).toBeLessThan(500);
+      await processor.shutdown(100);
     } finally {
       vi.doUnmock('../../../src/multimodal/resolve.js');
       vi.resetModules();
@@ -471,7 +609,7 @@ describe('MultimodalProcessor.pathToUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     await processor.shutdown(100);
-    expect(await processor.pathToUri(file)).toBeNull();
+    expect(await processor.pathToUri(file, undefined, TMP_ALLOW)).toBeNull();
   });
 });
 

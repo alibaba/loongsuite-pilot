@@ -8,6 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import {
+  areGrokBuildHookAssetsHealthy,
+  restoreGrokBuildHookAssets,
+} from '../deployment/grok-build-assets.js';
+import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
@@ -49,6 +53,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
@@ -81,7 +86,8 @@ import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
-import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
+import type { DataflowSnapshot, FlusherEndpointStats, InputStats } from '../metrics/metrics-collector.js';
+import type { OtlpEndpointCounter } from '../flushers/otlp-trace-flusher.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
@@ -104,6 +110,16 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
+  /**
+   * Listener id → the agent it belongs to, which is also the key `config.agents`
+   * gates on. Both roles are why the values are what they are and not simply the
+   * input's own `agentType`: the four qoder listeners deliberately roll up to one
+   * `qoder` agent, and renaming a value here would silently re-point a gate.
+   *
+   * A listener missing from this map is not an error — snapshot reporting falls
+   * back to the input's `agentType`. Entries exist for listeners whose agent name
+   * differs from that, plus the ones a gate looks up.
+   */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
@@ -125,6 +141,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
@@ -335,6 +352,7 @@ export class Orchestrator extends EventEmitter {
     const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
@@ -555,6 +573,9 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      // Grok Build uses snake_case event keys and a multi-file hook runtime.
+      // Its exact config and asset checks run through a dedicated intercept target.
+      if (def.id === 'grok-build') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -572,6 +593,39 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /** Grok Build-specific config and hook-runtime integrity checks. */
+  private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
+    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
+    if (!def?.hook) return [];
+    const pilotDir = this.resolvePilotDir();
+
+    return [{
+      id: 'hook:grok-build',
+      enabled: () => this.isAgentGatedEnabled(def.id),
+      precondition: () => this.deploymentManager.isAgentDetected(def),
+      check: async () =>
+        !(await this.deploymentManager.needsRedeploy(def))
+        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
+      repair: async () => {
+        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
+        const result = await this.deploymentManager.deploySingle(def);
+        if (!result.success) {
+          throw new Error(result.error ?? 'failed to restore Grok Build hook');
+        }
+        if (
+          await this.deploymentManager.needsRedeploy(def)
+          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
+        ) {
+          throw new Error('Grok Build hook remains unhealthy after repair');
+        }
+      },
+      cleanup: async () => {
+        const removed = await this.deploymentManager.undeployAgent(def);
+        if (!removed) throw new Error('failed to remove Grok Build hook');
+      },
+    }];
   }
 
   /**
@@ -667,10 +721,18 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () =>
           (await fileExists(pluginPath))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          // Process discovery is intentionally best-effort. If DSH exits
+          // between precondition() and repair(), deploySingle reports a
+          // successful not-detected skip for deployAll compatibility. Surface
+          // that transient miss here so the watchdog does not consume its
+          // cooldown or daily repair budget without writing the patch.
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`DSH disappeared before YAML patch repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `DSH YAML patch repair failed for ${def.id}`);
           }
@@ -1193,9 +1255,18 @@ export class Orchestrator extends EventEmitter {
 
     // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
+    const qoderMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
+      multimodal: {
+        enabled: qoderMultimodalEnabled,
+        uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qoderAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qoderTraceInput);
     entries.push(
@@ -1281,6 +1352,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['claude-code-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- Grok Build Log (three-source transcript fusion via Hook JSONL) ---
+    const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
+    const grokBuildLogInput = new GrokBuildLogInput({
+      stateStore: this.stateStore,
+      logDir: grokBuildLogDir,
+    });
+    this.inputManager.registerInput(grokBuildLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(grokBuildLogInput, {
+        watchPaths: [grokBuildLogDir],
+        isAvailable: async () => directoryExists(grokBuildLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['grok-build-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'grok-build-log',
+            listenerCfg['grok-build-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
       }),
     );
 
@@ -1635,60 +1726,112 @@ export class Orchestrator extends EventEmitter {
     const inputCounters = this.inputManager.getInputCounters();
     const activeIds = this.inputManager.getActiveInputIds();
 
-    let sendEntriesTotal = 0;
-    let receivedBytesTotal = 0;
+    // Ingress only. The instance's egress is measured where the writes actually
+    // happen — the flusher counters below — so it is not summed from the inputs.
+    let inEventsTotal = 0;
+    let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
-      sendEntriesTotal += counter.outEvents;
-      receivedBytesTotal += counter.inBytes;
+      inEventsTotal += counter.inEvents;
+      inBytesTotal += counter.inBytes;
     }
 
-    // Aggregate flusher runner stats
-    const flusherRunner = {
-      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
-      totalDelayMs: 0, lastFlushTime: '', startTime: '',
-    };
+    // One entry per write destination, keyed by family plus the configured
+    // destination name — unique per flusher, and only ever a map key: the name is
+    // process-local ('user-sls', 'internal-cms'), so what identifies a row to a
+    // consumer is project + logstore, never the alias.
+    const flushers = new Map<string, FlusherEndpointStats>();
 
-    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
-
-    // Get SLS flusher counters if available
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) {
-      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
-        flusherRunner.inEntries += counter.inEntries;
-        flusherRunner.inBytes += counter.inBytes;
-        flusherRunner.outEntries += counter.outEntries;
-        flusherRunner.outFailed += counter.outFailed;
-        flusherRunner.totalDelayMs += counter.totalDelayMs;
-        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
-          flusherRunner.lastFlushTime = counter.lastFlushTime;
-        }
-        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
-          flusherRunner.startTime = counter.startTime;
-        }
-        flushers.set(epName, {
-          ...counter,
-          flusherName: 'sls',
+      for (const [name, counter] of slsFlusher.getEndpointCounters()) {
+        flushers.set(`sls:${name}`, {
+          kind: 'sls',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: counter.mode,
+          // SLS serializes the payload here, so these are real bytes.
+          bytesBasis: 'measured',
+          inEntries: counter.inEntries,
+          inBytes: counter.inBytes,
+          outEntries: counter.outEntries,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
         });
       }
     }
 
-    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    // OTLP spans: ARMS/CMS backends are their own family, everything else is
+    // plain otlp. A CMS destination resolves to a project and ARMS's fixed trace
+    // logstore, so its bytes sit on the same billing axis as an SLS row; a plain
+    // OTLP backend has no project of ours, so its row carries the family alone.
+    const otlpCounters = this.getOtlpEndpointCounters();
+    if (otlpCounters) {
+      for (const [name, counter] of otlpCounters) {
+        flushers.set(`${counter.isCms ? 'cms' : 'otlp'}:${name}`, {
+          kind: counter.isCms ? 'cms' : 'otlp',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: '',
+          // The OTLP exporter owns the encoding and reports no wire size, so these
+          // bytes are a per-span estimate — flagged, not passed off as measured.
+          bytesBasis: 'estimated',
+          inEntries: counter.inSpans,
+          inBytes: counter.inBytes,
+          outEntries: counter.outSpans,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
+        });
+      }
+    }
+
+    const inputs = new Map<string, InputStats & { type: string; agent: string; running: boolean }>();
     const inputIdleMinutes = new Map<string, number>();
+    const runningIds = new Set(activeIds);
     for (const [id, counter] of inputCounters) {
-      inputs.set(id, { ...counter });
+      // L2 rolls ingress up by owning agent; several inputs can share one agent.
+      // The map wins where it rolls several listeners into one agent; otherwise the
+      // input's own agentType is the answer. Never counter.type — that is the
+      // collection method, and reporting 'hook-jsonl' as an agent merges every
+      // unmapped hook input into one meaningless row.
+      const agent = Orchestrator.LISTENER_AGENT_MAP[id] ?? counter.agentType ?? id;
+      // `running` is what makes the owning agent count as installed: discovery only
+      // starts an input once it has detected the agent on this host.
+      inputs.set(id, { ...counter, agent, running: runningIds.has(id) });
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
     return {
-      sendEntriesTotal,
-      receivedBytesTotal,
-      inputCount: inputCounters.size,
-      activeInputCount: activeIds.length,
-      flusherRunner,
+      inEventsTotal,
+      inBytesTotal,
       inputs,
       flushers,
       inputIdleMinutes,
     };
+  }
+
+  /**
+   * Duck-typed on purpose: OtlpTraceFlusher is imported lazily so a missing
+   * OpenTelemetry dependency can't break startup, and a static `instanceof`
+   * import here would defeat that.
+   */
+  private getOtlpEndpointCounters(): Map<string, OtlpEndpointCounter> | null {
+    const candidates = this.flusher instanceof MultiFlusher
+      ? this.flusher.getFlushers()
+      : [this.flusher];
+    for (const f of candidates) {
+      if (f.name !== 'otlp-trace') continue;
+      const getter = (f as { getEndpointCounters?: unknown }).getEndpointCounters;
+      if (typeof getter === 'function') {
+        return (getter as () => Map<string, OtlpEndpointCounter>).call(f);
+      }
+    }
+    return null;
   }
 
   private getSlsFlusher(): SlsFlusher | null {

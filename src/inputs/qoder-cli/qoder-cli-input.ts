@@ -53,6 +53,7 @@ export class QoderCliInput extends BaseHookInput {
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
+      delete (canonicalEntry as Record<string, unknown>)['agent.qoder.attachments'];
       return canonicalEntry;
     }
 

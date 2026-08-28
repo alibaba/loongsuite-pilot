@@ -94,7 +94,10 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       'agent.openclaw.aggregate_usage.output_tokens': 326,
       'agent.openclaw.aggregate_usage.total_tokens': 27778,
       'agent.openclaw.per_call_usage.count': 2,
+      'gen_ai.turn.end': true,
     });
+    expect(records.filter(record => record['gen_ai.turn.start'] === true)).toHaveLength(1);
+    expect(records.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal?.['gen_ai.output.messages']).toBeUndefined();
 

@@ -278,7 +278,7 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
-    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+    it('quotes Codex PowerShell hook paths and removes the previous Windows command', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       try {
@@ -303,6 +303,36 @@ describe('HookStrategy', () => {
           hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
             + `-File "${script}" stop`,
           replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('quotes Grok Build PowerShell paths and preserves snake_case event names', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/pilot data/hooks/grok-build-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'grok-build',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.grok/hooks/loongsuite-pilot.json',
+            events: ['stop_failure'],
+            hookCommand: script,
+            format: 'nested',
+            eventSubcommand: 'as-is',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'stop_failure'],
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop_failure`,
+          replaceHookCommands: [`${script} stop_failure`],
         });
       } finally {
         if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);

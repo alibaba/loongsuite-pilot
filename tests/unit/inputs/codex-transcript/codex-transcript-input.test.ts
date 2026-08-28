@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -7,9 +6,13 @@ import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
-import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import {
+  CodexTranscriptInput,
+  codexDefaultAllowedRootPaths,
+} from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
-import type { BlobToUriFn, BlobToUriParams } from '../../../../src/multimodal/types.js';
+import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
+import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -44,10 +47,13 @@ function uuidV7At(timestamp: string, tail = '000000000001'): string {
   return `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-${tail}`;
 }
 
-function tokenUsage(input: number, output: number): Record<string, unknown> {
+function tokenUsage(input: number, output: number, cumulativeTotal?: number): Record<string, unknown> {
   return {
     type: 'token_count',
     info: {
+      ...(cumulativeTotal !== undefined
+        ? { total_token_usage: { total_tokens: cumulativeTotal } }
+        : {}),
       last_token_usage: {
         input_tokens: input,
         output_tokens: output,
@@ -2502,6 +2508,166 @@ describe('CodexTranscriptInput', () => {
     ]);
   });
 
+  it('restores the next-wave time anchor and suppresses repeated cumulative token snapshots', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-wave-continuation-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const initialWave = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'coordinate work' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'response_item', {
+        type: 'function_call', call_id: 'call-spawn', name: 'spawn_agent', arguments: '{}',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'response_item', {
+        type: 'function_call_output', call_id: 'call-spawn', output: '{}',
+      }),
+      record('2026-06-24T06:00:05.100Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+    ];
+    const transcript = await writeTranscript(first.sessionDir, initialWave.join('\n') + '\n');
+
+    await processTranscriptOnce(first.input, transcript);
+    await first.stateStore.save();
+    expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({
+      activeTurn: {
+        nextStepStartedAtMs: Date.parse('2026-06-24T06:00:05.100Z'),
+        lastCumulativeTokenTotal: 1_000,
+      },
+    });
+
+    const second = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:08.000Z', 'response_item', {
+        type: 'function_call', call_id: 'call-wait', name: 'wait_agent', arguments: '{}',
+      }),
+      record('2026-06-24T06:00:09.000Z', 'response_item', {
+        type: 'function_call_output', call_id: 'call-wait', output: '{}',
+      }),
+      record('2026-06-24T06:00:09.100Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(second.input, transcript);
+    await second.stateStore.save();
+
+    const third = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:12.000Z', 'event_msg', {
+        type: 'agent_message', message: 'continuing after wait', phase: 'commentary',
+      }),
+      // Codex may write the unchanged accounting snapshot again with a later message.
+      record('2026-06-24T06:00:12.100Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+      record('2026-06-24T06:00:13.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'continuing after wait',
+      }),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(third.input, transcript);
+
+    const allEntries = [...first.entries, ...second.entries, ...third.entries];
+    const responses = allEntries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([12, 22, 0]);
+    expect(responses.filter(entry => entry['gen_ai.usage.total_tokens'] === 22)).toHaveLength(1);
+
+    for (const stepNumber of [2, 3]) {
+      const stepId = `session-1:turn-1:s${stepNumber}`;
+      const request = allEntries.find(entry => entry['event.name'] === 'llm.request'
+        && entry['gen_ai.step.id'] === stepId)!;
+      const response = allEntries.find(entry => entry['event.name'] === 'llm.response'
+        && entry['gen_ai.step.id'] === stepId)!;
+      expect(entryTimestampMs(response)).toBeGreaterThan(entryTimestampMs(request));
+    }
+  });
+
+  it('attributes a later fresh sample to the wave a repeated snapshot left open', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-stale-then-fresh-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const lines = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', {
+        type: 'agent_message', message: 'A', phase: 'commentary',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      record('2026-06-24T06:00:06.000Z', 'event_msg', {
+        type: 'agent_message', message: 'B', phase: 'final',
+      }),
+      // Stale repeat of the wave-1 accounting: it must not close wave 2.
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      // Fresh accounting for wave 2; it has to land on the still-open wave.
+      record('2026-06-24T06:00:08.000Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+      record('2026-06-24T06:00:09.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'B',
+      }),
+    ];
+    const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
+
+    await processTranscriptOnce(input, transcript);
+    await input.stop();
+
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.step.id'])).toEqual([
+      'session-1:turn-1:s1',
+      'session-1:turn-1:s2',
+    ]);
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([12, 22]);
+  });
+
+  it('keeps a wave opened by a repeated snapshot collectable across a restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-stale-then-fresh-restart-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const head = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', {
+        type: 'agent_message', message: 'A', phase: 'commentary',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+      record('2026-06-24T06:00:06.000Z', 'event_msg', {
+        type: 'agent_message', message: 'B', phase: 'final',
+      }),
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(10, 2, 1_000)),
+    ];
+    const transcript = await writeTranscript(first.sessionDir, head.join('\n') + '\n');
+
+    await processTranscriptOnce(first.input, transcript);
+    await first.stateStore.save();
+    // Wave 2 still awaits its own accounting, so only wave 1 may be emitted.
+    expect(first.entries.filter(entry => entry['event.name'] === 'llm.response'))
+      .toHaveLength(1);
+    expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({
+      activeTurn: { lastCumulativeTokenTotal: 1_000 },
+    });
+
+    const second = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:10.000Z', 'event_msg', tokenUsage(20, 2, 1_100)),
+      record('2026-06-24T06:00:11.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'B',
+      }),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(second.input, transcript);
+    await second.input.stop();
+
+    const allEntries = [...first.entries, ...second.entries];
+    const responses = allEntries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.step.id'])).toEqual([
+      'session-1:turn-1:s1',
+      'session-1:turn-1:s2',
+    ]);
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([12, 22]);
+  });
+
   it('does not commit a tool wave until an output written after token_count is present', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-token-before-tool-output-'));
     tempDirs.push(root);
@@ -3785,19 +3951,6 @@ describe('Codex transcript multimodal extraction', () => {
     return { timestamp, type, payload };
   }
 
-  const fakeBlobToUri: BlobToUriFn = (input: BlobToUriParams) => {
-    const mimeType = input.mime_type ?? 'image/png';
-    const bytes = Buffer.from(input.content, 'base64');
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    return {
-      uri: `oss://test/${digest}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
-      mime_type: mimeType,
-      modality: 'image',
-      size: bytes.length,
-      sha256: digest,
-    };
-  };
-
   function userContentItem(content: unknown[]): TurnBodyItem {
     return {
       type: 'response_item',
@@ -3880,6 +4033,10 @@ describe('Codex transcript multimodal extraction', () => {
   function userParts(turn: NonNullable<ReturnType<typeof extractCodexPartialTurn>>): any[] {
     return (turn.inputMessages[0] as any).parts;
   }
+
+  it('defaults allowed roots to ~/.codex', () => {
+    expect(codexDefaultAllowedRootPaths()).toEqual([path.join(os.homedir(), '.codex')]);
+  });
 
   it('write-time converts input_image to uri parts and keeps text-only prompt', () => {
     // Shape mirrors real Codex paste/upload turns (codex-hook-debug):

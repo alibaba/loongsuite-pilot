@@ -156,12 +156,28 @@ export class UpdaterWatchdog {
 
     const processState = await this.readUpdaterProcess();
     if (!processState.running) {
+      // Grace-checked like every branch below, and for the same reason. start() runs the
+      // first check immediately, and on a fresh install the collector is running before
+      // the updater task has been registered at all -- so this branch fired on
+      // essentially every install: a SERVICE_NOT_RUNNING_ALARM plus a restart-updater
+      // racing the installer's own launch of it. Being inside the startup window is
+      // exactly the situation where "the updater is not up yet" is expected rather than
+      // evidence of anything, which is what inGraceWindow means. The sleep/wake half
+      // matters just as much: after a resume the pid file can name a process that did not
+      // survive the suspend, and Task Scheduler's own repeating trigger will bring the
+      // updater back within the window without help.
+      if (this.inGraceWindow(now)) return { status: 'grace', reason: processState.reason };
       this.recordServiceAlarm(processState.reason);
       return this.restart('missing-process', processState.reason);
     }
 
     if (!processState.commandOk) {
       const reason = `updater pid ${processState.pid} command mismatch`;
+      // Same argument. Mid-install and mid-deploy the pid file legitimately still names
+      // the outgoing version's process, so a mismatch observed inside the window is a
+      // snapshot of a handover, not a broken updater. The alarm has to stay behind the
+      // check too -- an alarm raised on every install is noise that hides the real ones.
+      if (this.inGraceWindow(now)) return { status: 'grace', reason };
       this.recordFailureAlarm(reason);
       return this.restart('command-mismatch', reason);
     }

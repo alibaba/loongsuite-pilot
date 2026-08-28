@@ -140,6 +140,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Generate a per-turn trace context for tools when no upstream context is available. */
+  generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
   ttlMs: number;
 }
@@ -222,11 +224,13 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
 
 /** Per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
+  /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */
+  allowedRootPaths?: string[];
 }
 
 export interface AgentConfig {

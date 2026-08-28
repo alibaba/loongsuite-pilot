@@ -38,19 +38,13 @@ vi.mock('../../../src/internal/sender.js', () => ({
 
 function buildSnapshot(): DataflowSnapshot {
   return {
-    sendEntriesTotal: 10,
-    receivedBytesTotal: 2048,
-    inputCount: 2,
-    activeInputCount: 1,
-    flusherRunner: {
-      inEntries: 10, inBytes: 2048, outEntries: 9, outFailed: 1,
-      totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00',
-    },
+    inEventsTotal: 12,
+    inBytesTotal: 2048,
     inputs: new Map([
-      ['test-input', { inEvents: 5, inBytes: 1024, outEvents: 5, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling' }],
+      ['test-input', { inEvents: 5, inBytes: 1024, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling', agent: 'test-agent', running: true }],
     ]),
     flushers: new Map([
-      ['test-ep', { inEntries: 10, inBytes: 2048, outEntries: 9, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', flusherName: 'sls', mode: 'webtracking', endpoint: 'https://cn-heyuan.log.aliyuncs.com', project: 'test-project', logstore: 'test-logstore' }],
+      ['sls:main', { kind: 'sls' as const, project: 'proj-a', logstore: 'store-a', mode: 'sls', bytesBasis: 'measured' as const, inEntries: 10, inBytes: 2048, outEntries: 9, outBytes: 1900, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00' }],
     ]),
     inputIdleMinutes: new Map(),
   };
@@ -117,7 +111,7 @@ describe('MetricsWriter', () => {
     const entry = JSON.parse(lines[0]);
     expect(entry.version).toBe('2.0.0');
     expect(entry.user_id).toBe('u1');
-    expect(entry.metric_json.input_count).toBe('2');
+    expect(entry.metric_json.agent_count).toBe('1');
   });
 
   it('calls sendStatus with pilot_status topic on L1 write', async () => {
@@ -139,9 +133,77 @@ describe('MetricsWriter', () => {
     expect(call).toBeDefined();
     expect(call![1]).toHaveProperty('version', '2.0.0');
     expect(call![1]).not.toHaveProperty('__topic__');
+
+    // Old L2 topics must no longer be emitted (merged into pilot_pipeline)
+    const legacy = mockSendStatus.mock.calls.filter((c: unknown[]) =>
+      ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
+    );
+    expect(legacy).toHaveLength(0);
   });
 
-  it('writes L2 input/flusher metrics on stop (final flush)', async () => {
+  it('sends one row per agent and per destination on L2 flush', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    // Flush explicitly rather than leaning on start()'s priming flush: an
+    // overlapping prime coalesces into the same in-flight write, which would
+    // make a call count assertion race.
+    await (writer as any).writeL2();
+
+    // Both row types share the pilot_pipeline topic and are told apart by
+    // `type`; the snapshot has one agent with traffic and one destination.
+    const rows = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
+      .map((c: unknown[]) => c[1] as Record<string, string>);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'flusher']);
+
+    const [agent, flusher] = rows;
+    // Host identity ships with every flow row, so grouping by machine needs no
+    // join back to pilot_status.
+    expect(agent.hostname).toBe(os.hostname());
+    expect(agent.ip).toBeDefined();
+    expect(flusher.hostname).toBe(os.hostname());
+
+    // Flat string fields throughout: nothing needs json_extract to be queried.
+    expect(agent.agent).toBe('test-agent');
+    expect(agent.in_events).toBe('5');
+    expect(flusher.flusher).toBe('sls');
+    expect(flusher.project).toBe('proj-a');
+    expect(flusher.logstore).toBe('store-a');
+    expect(flusher.out_entries).toBe('9');
+  });
+
+  it('drains the rows, so an unchanged snapshot reports zeros', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await (writer as any).writeL2();
+    mockSendStatus.mockClear();
+    await (writer as any).writeL2();
+
+    const rows = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
+      .map((c: unknown[]) => c[1] as Record<string, string>);
+    // Both still report, at zero: the input is running, so its agent has gone
+    // quiet rather than gone away, and the destination is still configured.
+    expect(rows.map(r => r.type)).toEqual(['agent', 'flusher']);
+    expect(rows[0].in_events).toBe('0');
+    expect(rows[0].in_bytes).toBe('0');
+    expect(rows[1].out_entries).toBe('0');
+    expect(rows[1].out_bytes).toBe('0');
+  });
+
+  it('mirrors each L2 row type to its own file on stop (final flush)', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -153,27 +215,27 @@ describe('MetricsWriter', () => {
     await writer.start();
     await writer.stop();
 
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
+    const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+    const firstLine = (name: string): any => JSON.parse(
+      fs.readFileSync(path.join(metricDir, name), 'utf-8').trim().split('\n')[0],
+    );
 
-    expect(fs.existsSync(inputPath)).toBe(true);
-    expect(fs.existsSync(flusherPath)).toBe(true);
+    const agent = firstLine('pilot-agent-metrics.jsonl');
+    expect(agent.type).toBe('agent');
+    expect(agent.user_id).toBe('u1');
+    expect(agent.agent).toBe('test-agent');
+    expect(agent.in_events).toBe('5');
 
-    const inputLine = JSON.parse(fs.readFileSync(inputPath, 'utf-8').trim().split('\n')[0]);
-    expect(inputLine.category).toBe('input');
-    expect(inputLine.label.input_name).toBe('test-input');
-    expect(inputLine.in_events_total).toBe('5');
-
-    const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
-    expect(flusherLine.category).toBe('flusher');
-    expect(flusherLine.label.endpoint_name).toBe('https://cn-heyuan.log.aliyuncs.com');
-    expect(flusherLine.out_entries_total).toBe('9');
+    const flusher = firstLine('pilot-flusher-metrics.jsonl');
+    expect(flusher.type).toBe('flusher');
+    expect(flusher.flusher).toBe('sls');
+    expect(flusher.logstore).toBe('store-a');
+    expect(flusher.out_entries).toBe('9');
   });
 
-  it('does not write L2 files when snapshot has no inputs/flushers', async () => {
+  it('does not write the L2 file when snapshot has no inputs/flushers', async () => {
     const emptySnapshot: DataflowSnapshot = {
-      sendEntriesTotal: 0, receivedBytesTotal: 0, inputCount: 0, activeInputCount: 0,
-      flusherRunner: { inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0, totalDelayMs: 0, lastFlushTime: '', startTime: '' },
+      inEventsTotal: 0, inBytesTotal: 0,
       inputs: new Map(),
       flushers: new Map(),
       inputIdleMinutes: new Map(),
@@ -190,11 +252,9 @@ describe('MetricsWriter', () => {
     await writer.start();
     await writer.stop();
 
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
-
-    expect(fs.existsSync(inputPath)).toBe(false);
-    expect(fs.existsSync(flusherPath)).toBe(false);
+    const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+    expect(fs.existsSync(path.join(metricDir, 'pilot-agent-metrics.jsonl'))).toBe(false);
+    expect(fs.existsSync(path.join(metricDir, 'pilot-flusher-metrics.jsonl'))).toBe(false);
   });
 
   it('includes capture_message_disabled_agents in L1 metrics', async () => {
@@ -217,27 +277,6 @@ describe('MetricsWriter', () => {
     const entry = JSON.parse(lines[0]);
 
     expect(entry.capture_message_disabled_agents).toBe('qoder');
-  });
-
-  it('includes user_id in L2 input and flusher metrics', async () => {
-    writer = new MetricsWriter({
-      dataDir: tmpDir,
-      version: '2.0.0',
-      userId: 'u1',
-      getSnapshot: buildSnapshot,
-    });
-
-    vi.useRealTimers();
-    await writer.start();
-    await writer.stop();
-
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const inputLine = JSON.parse(fs.readFileSync(inputPath, 'utf-8').trim().split('\n')[0]);
-    expect(inputLine.user_id).toBe('u1');
-
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
-    const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
-    expect(flusherLine.user_id).toBe('u1');
   });
 
   describe('process resource thresholds', () => {

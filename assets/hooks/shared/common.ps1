@@ -41,7 +41,9 @@ function Resolve-NodeBin {
     }
     foreach ($pinFile in $pinFiles) {
         if (Test-Path $pinFile) {
-            $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
+            # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+            # defaults Get-Content to ANSI, which turns it into "??".
+            $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
             if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
         }
     }

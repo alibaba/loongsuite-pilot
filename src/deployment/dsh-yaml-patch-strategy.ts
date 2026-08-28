@@ -1,6 +1,5 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type {
@@ -10,13 +9,12 @@ import type {
   DeployedAgentRecord,
   DshYamlPatchConfig,
 } from '../types/index.js';
-import { detectAgent } from './detect-utils.js';
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { DshRuntimeLocator, type DshRuntimeTarget } from './dsh-runtime-locator.js';
 
 const logger = createLogger('DshYamlPatchStrategy');
 
-const DEFAULT_PATCH_PATH = path.join(os.homedir(), '.dsh', 'cordis.patch.yml');
 export const DSH_ENABLED_MARKER = '.collection-enabled';
 
 const BEGIN_PREFIX = '# BEGIN ';
@@ -50,16 +48,29 @@ const STALE_LOCK_MS = 30_000;
  */
 export class DshYamlPatchStrategy implements DeployStrategy {
   private readonly dataDir: string;
+  private readonly runtimeLocator: DshRuntimeLocator;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, runtimeLocator = new DshRuntimeLocator()) {
     this.dataDir = dataDir;
+    this.runtimeLocator = runtimeLocator;
   }
 
-  async detect(def: AgentDefinition): Promise<boolean> {
-    return detectAgent(def.detection);
+  resolveTarget(def: AgentDefinition, record?: DeployedAgentRecord): Promise<DshRuntimeTarget | null> {
+    return this.runtimeLocator.locate(def, record);
+  }
+
+  async detect(def: AgentDefinition, record?: DeployedAgentRecord): Promise<boolean> {
+    return (await this.resolveTarget(def, record)) !== null;
   }
 
   async needsDeploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<boolean> {
+    if (!def.dshYamlPatch) return false;
+    const target = await this.resolveTarget(def, record);
+    if (!target) return true;
+    return this.needsDeployAt(def, target);
+  }
+
+  async needsDeployAt(def: AgentDefinition, target: DshRuntimeTarget): Promise<boolean> {
     const cfg = def.dshYamlPatch;
     if (!cfg) return false;
     const pluginPath = this.resolvePluginPath(cfg);
@@ -67,7 +78,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     if (!pluginHash) return true;
     if (!(await fileExists(this.resolveEnabledMarkerPath(cfg)))) return true;
     const pluginUrl = pathToFileURL(pluginPath).href;
-    const fileBytes = await this.readBytes(this.resolvePatchPath(cfg, record?.dshPatchPath));
+    const fileBytes = await this.readBytes(target.patchPath);
     const parsed = this.splitOnPilotBlock(fileBytes, cfg.marker);
     const block = parsed.existingBlock;
     if (parsed.conflictBlock || !block) return true;
@@ -78,6 +89,22 @@ export class DshYamlPatchStrategy implements DeployStrategy {
   }
 
   async deploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<DeployResult> {
+    if (!def.dshYamlPatch) {
+      return { success: false, agentId: def.id, deployMode: 'dsh-yaml-patch', error: 'missing dshYamlPatch config' };
+    }
+    const target = await this.resolveTarget(def, record);
+    if (!target) {
+      return {
+        success: false,
+        agentId: def.id,
+        deployMode: 'dsh-yaml-patch',
+        error: 'DSH runtime target is unavailable',
+      };
+    }
+    return this.deployAt(def, target);
+  }
+
+  async deployAt(def: AgentDefinition, target: DshRuntimeTarget): Promise<DeployResult> {
     const cfg = def.dshYamlPatch;
     if (!cfg) {
       return { success: false, agentId: def.id, deployMode: 'dsh-yaml-patch', error: 'missing dshYamlPatch config' };
@@ -93,7 +120,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       };
     }
 
-    const patchPath = this.resolvePatchPath(cfg, record?.dshPatchPath);
+    const patchPath = target.patchPath;
     const lockToken = await this.acquirePatchLock(patchPath);
     if (!lockToken) {
       return {
@@ -176,13 +203,21 @@ export class DshYamlPatchStrategy implements DeployStrategy {
   async undeploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<boolean> {
     const cfg = def.dshYamlPatch;
     if (!cfg) return false;
+    const target = await this.resolveTarget(def, record);
+    if (!target) return false;
     try {
       await this.removeEnabledMarker(cfg);
     } catch (err) {
       logger.warn('failed to disable DSH collection marker', { error: String(err) });
       return false;
     }
-    const patchPath = this.resolvePatchPath(cfg, record?.dshPatchPath);
+    const patchPath = target.patchPath;
+    // A stale deployment record may outlive a user-removed DSH home. Check the
+    // target before acquiring the in-directory lock so disable/undeploy remains
+    // a true no-op instead of recreating that home as an empty directory.
+    const initialBytes = await this.readBytes(patchPath);
+    if (initialBytes.length === 0 && !(await fileExists(patchPath))) return true;
+
     const lockToken = await this.acquirePatchLock(patchPath);
     if (!lockToken) return false;
 
@@ -331,20 +366,6 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
   private resolvePluginPath(cfg: DshYamlPatchConfig): string {
     return resolveHome(cfg.pluginSource);
-  }
-
-  resolvePatchPathForRecord(def: AgentDefinition, record?: DeployedAgentRecord): string | undefined {
-    return def.dshYamlPatch
-      ? this.resolvePatchPath(def.dshYamlPatch, record?.dshPatchPath)
-      : undefined;
-  }
-
-  private resolvePatchPath(cfg: DshYamlPatchConfig, persistedPath?: string): string {
-    if (persistedPath && path.isAbsolute(persistedPath)) return persistedPath;
-    const fromEnv = process.env.DSH_HOME;
-    if (cfg.patchPath) return path.resolve(resolveHome(cfg.patchPath));
-    if (fromEnv) return path.resolve(fromEnv, 'cordis.patch.yml');
-    return DEFAULT_PATCH_PATH;
   }
 
   private resolveEnabledMarkerPath(cfg: DshYamlPatchConfig): string {

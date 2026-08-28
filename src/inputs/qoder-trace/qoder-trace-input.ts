@@ -1,7 +1,10 @@
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
+import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -10,12 +13,62 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
+import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  /** Cached multimodal policy; IDE + CLI extraction when enabled. */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+    allowedRootPaths?: string[];
+  };
+}
+
+const QODER_ATTACHMENTS_FIELD = 'agent.qoder.attachments';
+
+function stripQoderAttachmentCarrier(entries: AgentActivityEntry[]): void {
+  for (const entry of entries) {
+    delete (entry as Record<string, unknown>)[QODER_ATTACHMENTS_FIELD];
+  }
+}
+
+function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const agentType = e['gen_ai.agent.type'] as string;
+    return agentType === ClientType.QoderIdea || agentType === 'qoder-idea';
+  });
+}
+
+const QODER_IDE_IMAGES_TAIL = path.join('SharedClientCache', 'cache', 'images');
+
+export function qoderDefaultAllowedRootPaths(): string[] {
+  const appRoot = resolveQoderAppRoot();
+  const roots = [
+    resolveHome('~/.qoder/tmp'),
+    resolveHome('~/.qoder/vibe_images'),
+    path.join(appRoot, QODER_IDE_IMAGES_TAIL),
+  ];
+  let names: string[];
+  try {
+    names = fsSync.readdirSync(appRoot);
+  } catch {
+    return roots;
+  }
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    roots.push(path.join(appRoot, name, QODER_IDE_IMAGES_TAIL));
+  }
+  return roots;
+}
+
+export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
+  return mergeAllowedRootPaths(qoderDefaultAllowedRootPaths(), userPaths);
 }
 
 /**
@@ -32,10 +85,26 @@ export class QoderTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder';
+  private readonly multimodalEnabled: boolean;
+  private readonly multimodalUploadMode: MultimodalUploadMode;
+  private readonly multimodalProcessor: MultimodalProcessor | null;
+  private readonly allowedRootPaths: string[];
+  private multimodalStopped = false;
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
+    this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
+    this.multimodalProcessor = opts.multimodal?.processor ?? null;
+    this.allowedRootPaths = this.multimodalEnabled
+      ? resolveQoderAllowedRootPaths(opts.multimodal?.allowedRootPaths)
+      : [];
+  }
+
+  override async stop(): Promise<void> {
+    this.multimodalStopped = true;
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -50,6 +119,7 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.multimodalStopped = false;
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -67,6 +137,10 @@ export class QoderTraceInput extends BaseInput {
     }
   }
 
+  protected override async onStop(): Promise<void> {
+    clearAttachedImagePathsCache();
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
@@ -80,6 +154,7 @@ export class QoderTraceInput extends BaseInput {
     // Intercept data is loaded lazily on first qoder-cli turn.
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const cliTurns: AgentActivityEntry[][] = [];
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
@@ -93,6 +168,7 @@ export class QoderTraceInput extends BaseInput {
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
@@ -115,6 +191,32 @@ export class QoderTraceInput extends BaseInput {
         }
       }
     }
+
+    if (this.multimodalEnabled && this.multimodalProcessor) {
+      const pathToUri = async (filePath: string, timeUnixMs?: number) => {
+        if (this.multimodalStopped) return null;
+        return this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
+          allowedRootPaths: this.allowedRootPaths,
+        });
+      };
+      for (const sessionEntries of ideSessionGroups.values()) {
+        // JetBrains shares this input but has no multimodal extractor yet.
+        if (isQoderIdeaSession(sessionEntries)) continue;
+        if (this.multimodalStopped) break;
+        await enrichIdeMultimodal(sessionEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+      }
+      for (const turnEntries of cliTurns) {
+        if (this.multimodalStopped) break;
+        await enrichCliMultimodal(turnEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+      }
+    }
+    stripQoderAttachmentCarrier(rawEntries);
 
     // 4. Inject trace_id per turn
     for (const turnEntries of turnGroups.values()) {

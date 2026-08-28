@@ -50,16 +50,31 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+/** Inputs are a collection detail; what the tests care about is the owning agent. */
+function inputEntry(agent: string, overrides: Record<string, any> = {}): any {
+  return {
+    inEvents: 0, inBytes: 0, outFailed: 0,
+    lastPollTime: '', startTime: '', type: 'polling', agent,
+    running: true, ...overrides,
+  };
+}
+
+/** Egress is measured where the writes happen: one entry per destination. */
+function flusherEntry(kind: string, overrides: Record<string, any> = {}): any {
+  return {
+    kind, project: '', logstore: '', mode: '',
+    // SLS counts the bytes it serializes; the OTLP families can only estimate.
+    bytesBasis: kind === 'sls' ? 'measured' : 'estimated',
+    inEntries: 0, inBytes: 0, outEntries: 0, outBytes: 0, outFailed: 0,
+    totalDelayMs: 0, lastFlushTime: '', startTime: '',
+    ...overrides,
+  };
+}
+
 function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnapshot {
   return {
-    sendEntriesTotal: 0,
-    receivedBytesTotal: 0,
-    inputCount: 0,
-    activeInputCount: 0,
-    flusherRunner: {
-      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
-      totalDelayMs: 0, lastFlushTime: '', startTime: '',
-    },
+    inEventsTotal: 0,
+    inBytesTotal: 0,
     inputs: new Map(),
     flushers: new Map(),
     inputIdleMinutes: new Map(),
@@ -83,14 +98,23 @@ describe('MetricsCollector', () => {
   describe('collectL1', () => {
     it('returns all required fields with correct types', () => {
       const snapshot = buildSnapshot({
-        sendEntriesTotal: 100,
-        receivedBytesTotal: 5000,
-        inputCount: 3,
-        activeInputCount: 2,
-        flusherRunner: {
-          inEntries: 80, inBytes: 4000, outEntries: 75, outFailed: 5,
-          totalDelayMs: 1200, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00',
-        },
+        inEventsTotal: 110,
+        inBytesTotal: 5000,
+        // Egress is the flusher side, summed over every destination the data was
+        // written to: 70+30 entries and 3000+1800 bytes.
+        flushers: new Map<string, any>([
+          ['sls:main', flusherEntry('sls', { outEntries: 70, outBytes: 3000 })],
+          ['cms:arms', flusherEntry('cms', { outEntries: 30, outBytes: 1800 })],
+        ]),
+        // qoder owns two inputs, cursor one, and kiro-cli is registered but never
+        // started — so the agent dimension reads 2 installed, 1 of them collecting.
+        inputs: new Map<string, any>([
+          ['qoder-sqlite', inputEntry('qoder')],
+          ['qoder-trace', inputEntry('qoder')],
+          ['cursor-hook', inputEntry('cursor')],
+          ['kiro-cli', inputEntry('kiro-cli', { running: false })],
+        ]),
+        inputIdleMinutes: new Map([['qoder-sqlite', 4]]),
       });
 
       const result = collector.collectL1(snapshot);
@@ -102,8 +126,15 @@ describe('MetricsCollector', () => {
       expect(result.os_detail).toContain(require('os').type());
       expect(result.os_detail).toContain(require('os').arch());
 
-      // instance_id format: userId_ip_timestamp
-      expect(result.instance_id).toMatch(/^test-user_.+_\d+$/);
+      // instance_id: hostname_userid_<base64url(dataDir)> (no timestamp, restart-invariant)
+      const dirEnc = Buffer.from(tmpDir, 'utf8').toString('base64url');
+      expect(result.instance_id).toBe(`${require('os').hostname()}_test-user_${dirEnc}`);
+      // dataDir is encoded, not plaintext, but reversible
+      expect(result.instance_id).not.toContain(tmpDir);
+      expect(Buffer.from(dirEnc, 'base64url').toString('utf8')).toBe(tmpDir);
+      // run_id: instance_id plus the startTimestamp incarnation suffix
+      expect(result.run_id.startsWith(result.instance_id + '_')).toBe(true);
+      expect(result.run_id).toMatch(/_\d+$/);
 
       // Numeric fields stored as strings
       expect(typeof result.cpu).toBe('string');
@@ -111,53 +142,119 @@ describe('MetricsCollector', () => {
       expect(typeof result.mem_heap).toBe('string');
       expect(Number(result.mem)).toBeGreaterThan(0);
 
-      // metric_json fields
-      expect(result.metric_json.input_count).toBe('3');
-      expect(result.metric_json.active_input_count).toBe('2');
-      expect(result.metric_json.send_entries_total).toBe('100');
-      expect(result.metric_json.received_bytes_total).toBe('5000');
+      // metric_json fields — agent-dimensioned, inputs never surface
+      expect(result.metric_json.agent_count).toBe('2');
+      expect(result.metric_json.active_agent_count).toBe('1');
+      expect((result.metric_json as Record<string, unknown>).input_count).toBeUndefined();
+      expect((result.metric_json as Record<string, unknown>).active_input_count).toBeUndefined();
+      // First row's window opens at process start, so the deltas equal the totals.
+      expect(result.metric_json.in_events).toBe('110');
+      expect(result.metric_json.in_bytes).toBe('5000');
+      // Instance egress: what was written to the backends, not what the inputs
+      // handed to the fan-out.
+      expect(result.metric_json.out_events).toBe('100');
+      expect(result.metric_json.out_bytes).toBe('4800');
+      expect(typeof result.metric_json.window_ms).toBe('string');
       expect(typeof result.metric_json.open_fd).toBe('string');
 
-      // flusher_runner
-      expect(result.flusher_runner.in_entries_total).toBe('80');
-      expect(result.flusher_runner.in_bytes_total).toBe('4000');
-      expect(result.flusher_runner.out_entries_total).toBe('75');
-      expect(result.flusher_runner.out_failed_entries_total).toBe('5');
-      expect(result.flusher_runner.last_flush_time).toBe('2026-05-19 10:00:00');
+      // flusher_runner is removed — per-flusher detail lives in pilot_pipeline now
+      expect((result as Record<string, unknown>).flusher_runner).toBeUndefined();
+
+      // updater events are NOT in status telemetry (local JSONL + alarms only)
+      expect((result as Record<string, unknown>).updater_event).toBeUndefined();
 
       // __time__ is unix timestamp
       expect(result.__time__).toBeGreaterThan(1700000000);
+    });
+
+    it('counts installed agents, and an agent stays installed while idle', () => {
+      const result = collector.collectL1(buildSnapshot({
+        inputs: new Map<string, any>([
+          ['qoder-sqlite', inputEntry('qoder')],
+          ['codex-jsonl', inputEntry('codex')],
+          // Registered for an agent this host does not have: never started.
+          ['wukong-hook', inputEntry('wukong', { running: false })],
+        ]),
+        // Only qoder has ever collected; codex is installed but has produced nothing.
+        inputIdleMinutes: new Map([['qoder-sqlite', 120], ['codex-jsonl', -1]]),
+      }));
+
+      expect(result.metric_json.agent_count).toBe('2');
+      expect(result.metric_json.active_agent_count).toBe('1');
     });
 
     it('reports zero rates on the first sample (seeds baseline)', () => {
       // Even when the first snapshot already shows nonzero totals, the
       // collector must not divide them by a near-zero elapsed window.
       const result = collector.collectL1(buildSnapshot({
-        sendEntriesTotal: 1234,
-        receivedBytesTotal: 99999,
+        inEventsTotal: 1234,
+        inBytesTotal: 99999,
+        flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 1200, outBytes: 88888 })]]),
       }));
-      expect(result.metric_json.send_entries_ps).toBe('0.0');
-      expect(result.metric_json.received_bytes_ps).toBe('0.0');
+      expect(result.metric_json.in_events_ps).toBe('0.0');
+      expect(result.metric_json.in_bytes_ps).toBe('0.0');
+      expect(result.metric_json.out_events_ps).toBe('0.0');
+      expect(result.metric_json.out_bytes_ps).toBe('0.0');
     });
 
     it('calculates per-second rates from deltas after the first sample', async () => {
       // First call seeds baseline
-      collector.collectL1(buildSnapshot({ sendEntriesTotal: 0, receivedBytesTotal: 0 }));
+      collector.collectL1(buildSnapshot({
+        inEventsTotal: 0, inBytesTotal: 0,
+        flushers: new Map<string, any>([['sls:main', flusherEntry('sls')]]),
+      }));
 
       // Wait a tick so elapsed > 0
       await new Promise(r => setTimeout(r, 50));
 
       const result = collector.collectL1(buildSnapshot({
-        sendEntriesTotal: 60,
-        receivedBytesTotal: 3000,
+        inEventsTotal: 70,
+        inBytesTotal: 3000,
+        flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 60, outBytes: 2800 })]]),
       }));
 
-      const entriesPs = parseFloat(result.metric_json.send_entries_ps);
-      const bytesPs = parseFloat(result.metric_json.received_bytes_ps);
+      // Rates should be positive (delta / elapsed) across all four dimensions
+      expect(parseFloat(result.metric_json.in_events_ps)).toBeGreaterThan(0);
+      expect(parseFloat(result.metric_json.in_bytes_ps)).toBeGreaterThan(0);
+      expect(parseFloat(result.metric_json.out_events_ps)).toBeGreaterThan(0);
+      expect(parseFloat(result.metric_json.out_bytes_ps)).toBeGreaterThan(0);
+    });
 
-      // Rates should be positive (delta / elapsed)
-      expect(entriesPs).toBeGreaterThan(0);
-      expect(bytesPs).toBeGreaterThan(0);
+    it('drains flow values on report, so an idle window reads zero', () => {
+      const snapshot = buildSnapshot({
+        inEventsTotal: 110, inBytesTotal: 5000,
+        flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 100, outBytes: 4800 })]]),
+      });
+
+      const first = collector.collectL1(snapshot);
+      expect(first.metric_json.in_events).toBe('110');
+      expect(first.metric_json.out_bytes).toBe('4800');
+
+      // Same cumulative totals means nothing flowed since the previous row.
+      const second = collector.collectL1(snapshot);
+      expect(second.metric_json.in_events).toBe('0');
+      expect(second.metric_json.in_bytes).toBe('0');
+      expect(second.metric_json.out_events).toBe('0');
+      expect(second.metric_json.out_bytes).toBe('0');
+
+      // Only the increment shows up in the next row, never the running total.
+      const third = collector.collectL1(buildSnapshot({
+        inEventsTotal: 135, inBytesTotal: 5600,
+        flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 130, outBytes: 5400 })]]),
+      }));
+      expect(third.metric_json.in_events).toBe('25');
+      expect(third.metric_json.in_bytes).toBe('600');
+      expect(third.metric_json.out_events).toBe('30');
+      expect(third.metric_json.out_bytes).toBe('600');
+    });
+
+    it('clamps at zero when a counter goes backwards', () => {
+      collector.collectL1(buildSnapshot({ inEventsTotal: 100, inBytesTotal: 4000 }));
+      // Source counters are monotonic in practice; a regression here would
+      // otherwise report a large negative window.
+      const result = collector.collectL1(buildSnapshot({ inEventsTotal: 10, inBytesTotal: 400 }));
+      expect(result.metric_json.in_events).toBe('0');
+      expect(result.metric_json.in_bytes).toBe('0');
     });
 
     it('start_time remains constant across calls', () => {
@@ -172,74 +269,258 @@ describe('MetricsCollector', () => {
     });
   });
 
-  describe('collectL2Inputs', () => {
-    it('returns one InputMetrics per input in snapshot', () => {
+  describe('collectL2', () => {
+    function pipelineSnapshot(): DataflowSnapshot {
       const inputs = new Map<string, any>();
-      inputs.set('qoder-sqlite', {
-        inEvents: 42, inBytes: 1024, outEvents: 40, outFailed: 2,
+      // Two inputs owned by the same agent — they must roll up into one entry.
+      inputs.set('qoder-sqlite', inputEntry('qoder', {
+        inEvents: 42, inBytes: 1024, outFailed: 2,
         lastPollTime: '2026-05-19 10:01:00', startTime: '2026-05-19 09:00:00',
-        type: 'polling',
-      });
-      inputs.set('cursor-hook', {
-        inEvents: 10, inBytes: 500, outEvents: 10, outFailed: 0,
+      }));
+      inputs.set('qoder-trace', inputEntry('qoder', {
+        inEvents: 8, inBytes: 256, outFailed: 0,
+        lastPollTime: '2026-05-19 10:03:00', startTime: '2026-05-19 08:30:00',
+        type: 'trace',
+      }));
+      inputs.set('cursor-hook', inputEntry('cursor', {
+        inEvents: 10, inBytes: 500, outFailed: 0,
         lastPollTime: '2026-05-19 10:02:00', startTime: '2026-05-19 09:30:00',
         type: 'hook',
-      });
+      }));
+      const inputIdleMinutes = new Map([['qoder-sqlite', 3], ['qoder-trace', 7]]);
 
-      const result = collector.collectL2Inputs(buildSnapshot({ inputs }));
-
-      expect(result).toHaveLength(2);
-
-      const qoder = result.find(r => r.label.input_name === 'qoder-sqlite')!;
-      expect(qoder.category).toBe('input');
-      expect(qoder.label.input_type).toBe('polling');
-      expect(qoder.in_events_total).toBe('42');
-      expect(qoder.in_size_bytes).toBe('1024');
-      expect(qoder.out_events_total).toBe('40');
-      expect(qoder.out_failed_events_total).toBe('2');
-      expect(qoder.last_poll_time).toBe('2026-05-19 10:01:00');
-      expect(qoder.start_time).toBe('2026-05-19 09:00:00');
-      expect(qoder.__time__).toBeGreaterThan(0);
-    });
-
-    it('returns empty array when no inputs', () => {
-      const result = collector.collectL2Inputs(buildSnapshot());
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe('collectL2Flushers', () => {
-    it('returns one FlusherMetrics per endpoint in snapshot', () => {
       const flushers = new Map<string, any>();
-      flushers.set('internal-default', {
-        inEntries: 200, inBytes: 50000, outEntries: 195, outFailed: 5,
+      flushers.set('sls:main', flusherEntry('sls', {
+        project: 'proj-a', logstore: 'store-a', mode: 'sls',
+        inEntries: 200, inBytes: 50000, outEntries: 195, outBytes: 48000, outFailed: 5,
         totalDelayMs: 3500, lastFlushTime: '2026-05-19 10:05:00',
-        startTime: '2026-05-19 09:00:00', flusherName: 'sls', mode: 'webtracking',
-        endpoint: 'https://cn-heyuan.log.aliyuncs.com', project: 'my-project', logstore: 'my-logstore',
+        startTime: '2026-05-19 09:00:00',
+      }));
+      flushers.set('cms:arms', flusherEntry('cms', {
+        inEntries: 60, inBytes: 9000, outEntries: 60, outBytes: 8800,
+        totalDelayMs: 900, lastFlushTime: '2026-05-19 10:06:00',
+        startTime: '2026-05-19 09:10:00',
+      }));
+
+      return buildSnapshot({
+        inputs, inputIdleMinutes, flushers,
+        inEventsTotal: 60, inBytesTotal: 1780,
       });
+    }
 
-      const result = collector.collectL2Flushers(buildSnapshot({ flushers }));
+    function agentRow(rows: any[], agent: string): any {
+      return rows.find(r => r.agent === agent);
+    }
 
-      expect(result).toHaveLength(1);
-      const ep = result[0];
-      expect(ep.category).toBe('flusher');
-      expect(ep.label.flusher_name).toBe('sls');
-      expect(ep.label.endpoint_name).toBe('https://cn-heyuan.log.aliyuncs.com');
-      expect(ep.label.project).toBe('my-project');
-      expect(ep.label.logstore).toBe('my-logstore');
-      expect(ep.label.mode).toBe('webtracking');
-      expect(ep.in_entries_total).toBe('200');
-      expect(ep.in_size_bytes).toBe('50000');
-      expect(ep.out_entries_total).toBe('195');
-      expect(ep.out_failed_entries_total).toBe('5');
-      expect(ep.total_delay_ms).toBe('3500');
-      expect(ep.last_flush_time).toBe('2026-05-19 10:05:00');
-      expect(ep.start_time).toBe('2026-05-19 09:00:00');
+    it('emits only detail rows — no instance-total row', () => {
+      const l2 = collector.collectL2(pipelineSnapshot())!;
+
+      // The total would be the exact sum of these rows over one window, and L1
+      // already reports the same four axes plus agent_count for the instance.
+      // Emitting it a third time is three chances for the numbers to disagree.
+      expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers']);
+      expect([...l2.agents, ...l2.flushers].map(r => r.type).includes('pipeline' as never)).toBe(false);
+
+      // What the dropped row said is still recoverable by summing the detail.
+      const sum = (rows: any[], field: string): number =>
+        rows.reduce((acc, r) => acc + Number(r[field]), 0);
+      expect(sum(l2.agents, 'in_events')).toBe(60);
+      expect(sum(l2.agents, 'in_bytes')).toBe(1780);
+      expect(sum(l2.flushers, 'out_entries')).toBe(255);
+      expect(sum(l2.flushers, 'out_bytes')).toBe(56800);
     });
 
-    it('returns empty array when no flushers', () => {
-      const result = collector.collectL2Flushers(buildSnapshot());
-      expect(result).toEqual([]);
+    it('repeats the full identity on every row', () => {
+      const { agents, flushers } = collector.collectL2(pipelineSnapshot())!;
+      // Same values L1 reports — the two levels must not disagree about the host.
+      const l1 = collector.collectL1(buildSnapshot());
+
+      // Identity is repeated on every row so each type can be queried on its own,
+      // with no join to another row (or to L1) needed to learn the host.
+      for (const row of [...agents, ...flushers]) {
+        expect(row.hostname).toBe(require('os').hostname());
+        expect(row.hostname).toBe(l1.hostname);
+        expect(row.ip).toBe(l1.ip);
+        expect(row.instance_id).toBe(`${require('os').hostname()}_test-user_${Buffer.from(tmpDir, 'utf8').toString('base64url')}`);
+        expect(row.run_id).toMatch(/_\d+$/);
+        expect(row.user_id).toBe(l1.user_id);
+        expect(Number(row.window_ms)).toBeGreaterThanOrEqual(0);
+        expect(row.__time__).toBeGreaterThan(0);
+      }
+      // One window per cycle: every row of the cycle must carry the same one.
+      const windows = new Set([...agents, ...flushers].map(r => r.window_ms));
+      expect(windows.size).toBe(1);
+    });
+
+    it('rolls ingress up by owning agent, one row each', () => {
+      const { agents } = collector.collectL2(pipelineSnapshot())!;
+
+      expect(agents.map(r => r.agent).sort()).toEqual(['cursor', 'qoder']);
+      expect(agents.every(r => r.type === 'agent')).toBe(true);
+
+      const qoder = agentRow(agents, 'qoder');
+      expect(qoder.in_events).toBe('50');
+      expect(qoder.in_bytes).toBe('1280');
+      // Ingress only: egress cannot be attributed to an agent, it lives per flusher.
+      expect(qoder.out_events).toBeUndefined();
+      expect(qoder.out_bytes).toBeUndefined();
+      expect(qoder.failed_events).toBe('2');
+      // Most-recent poll and earliest start win across the agent's inputs.
+      expect(qoder.last_poll_time).toBe('2026-05-19 10:03:00');
+      expect(qoder.start_time).toBe('2026-05-19 08:30:00');
+      // idle_minutes folded in from the former pilot_alarm_metric topic; smallest wins.
+      expect(qoder.idle_minutes).toBe('3');
+      // Never active: -1 rather than a misleading 0.
+      expect(agentRow(agents, 'cursor').idle_minutes).toBe('-1');
+    });
+
+    it('reports one flusher row per destination, with its own identity', () => {
+      const { flushers } = collector.collectL2(pipelineSnapshot())!;
+
+      // One row per destination, told apart by family + project/logstore. The
+      // process-local config alias ('main', 'arms') is a map key only, never a field.
+      expect(flushers.map(r => r.flusher).sort()).toEqual(['cms', 'sls']);
+      expect(flushers.every(r => !('endpoint' in r))).toBe(true);
+
+      const sls = flushers.find(r => r.flusher === 'sls')!;
+      // project / logstore ride along: billing has to attribute bytes to them.
+      expect(sls.type).toBe('flusher');
+      expect(sls.project).toBe('proj-a');
+      expect(sls.logstore).toBe('store-a');
+      expect(sls.mode).toBe('sls');
+      expect(sls.in_entries).toBe('200');
+      expect(sls.in_bytes).toBe('50000');
+      expect(sls.out_entries).toBe('195');
+      expect(sls.out_bytes).toBe('48000');
+      expect(sls.failed_entries).toBe('5');
+      expect(sls.total_delay_ms).toBe('3500');
+      expect(sls.last_flush_time).toBe('2026-05-19 10:05:00');
+      expect(sls.start_time).toBe('2026-05-19 09:00:00');
+
+      const cms = flushers.find(r => r.flusher === 'cms')!;
+      expect(cms.out_entries).toBe('60');
+      expect(cms.out_bytes).toBe('8800');
+      // Non-SLS destinations have no project/logstore to report.
+      expect(cms.project).toBe('');
+      expect(cms.logstore).toBe('');
+    });
+
+    it('keeps two logstores on one endpoint apart', () => {
+      const snapshot = pipelineSnapshot();
+      snapshot.flushers.set('sls:second', flusherEntry('sls', {
+        project: 'proj-a', logstore: 'store-b',
+        outEntries: 7, outBytes: 700,
+      }));
+
+      const { flushers } = collector.collectL2(snapshot)!;
+
+      expect(flushers.filter(r => r.flusher === 'sls').map(r => r.logstore).sort())
+        .toEqual(['store-a', 'store-b']);
+      // Every destination reports its own bytes: 195 + 60 + 7.
+      expect(flushers.reduce((acc, r) => acc + Number(r.out_entries), 0)).toBe(262);
+    });
+
+    it('drains ingress and egress on report', () => {
+      const snapshot = pipelineSnapshot();
+      collector.collectL2(snapshot);
+
+      // Second call over the same cumulative counters: nothing flowed since.
+      const second = collector.collectL2(snapshot)!;
+      // The installed agents still report — at zero flow, with idle_minutes intact.
+      // That row is the only way a consumer can see an agent has gone quiet.
+      expect(second.agents.map(r => r.agent).sort()).toEqual(['cursor', 'qoder']);
+      expect(second.agents.every(r => r.in_events === '0' && r.in_bytes === '0')).toBe(true);
+      expect(agentRow(second.agents, 'qoder').idle_minutes).toBe('3');
+      const sls = second.flushers.find(r => r.flusher === 'sls')!;
+      expect(sls.out_entries).toBe('0');
+      expect(sls.out_bytes).toBe('0');
+      expect(sls.total_delay_ms).toBe('0');
+      // Descriptors and state are not flow — they stay put.
+      expect(sls.project).toBe('proj-a');
+      expect(sls.last_flush_time).toBe('2026-05-19 10:05:00');
+    });
+
+    it('reports only the increment in the following window', () => {
+      collector.collectL2(pipelineSnapshot());
+
+      const next = pipelineSnapshot();
+      next.inputs.get('qoder-sqlite')!.inEvents = 50;
+      next.inputs.get('qoder-sqlite')!.outFailed = 3;
+      next.flushers.get('sls:main')!.outEntries = 200;
+      next.flushers.get('sls:main')!.outBytes = 49000;
+      const result = collector.collectL2(next)!;
+
+      // Only qoder moved; cursor is still installed, so it reports a zero row.
+      expect(result.agents.map(r => r.agent).sort()).toEqual(['cursor', 'qoder']);
+      expect(agentRow(result.agents, 'cursor').in_events).toBe('0');
+      expect(agentRow(result.agents, 'qoder').in_events).toBe('8');
+      expect(agentRow(result.agents, 'qoder').failed_events).toBe('1');
+      expect(result.flushers.find(r => r.flusher === 'sls')!.out_entries).toBe('5');
+      expect(result.flushers.find(r => r.flusher === 'sls')!.out_bytes).toBe('1000');
+      // A silent destination still reports, at zero.
+      expect(result.flushers.find(r => r.flusher === 'cms')!.out_entries).toBe('0');
+    });
+
+    it('counts an input registered mid-run in full, having no baseline yet', () => {
+      collector.collectL2(pipelineSnapshot());
+
+      const next = pipelineSnapshot();
+      next.inputs.set('codex-jsonl', inputEntry('codex', {
+        inEvents: 12, inBytes: 900, outFailed: 0,
+        lastPollTime: '2026-05-19 10:07:00', startTime: '2026-05-19 10:06:00',
+      }));
+      const result = collector.collectL2(next)!;
+
+      expect(agentRow(result.agents, 'codex').in_events).toBe('12');
+    });
+
+    it('keeps a silent running agent but drops one that is not installed', () => {
+      const snapshot = pipelineSnapshot();
+      // An input is registered for every agent the build knows about, but discovery
+      // only starts the ones actually found on the host. A never-started input is a
+      // missing agent, not an idle one, so it must not ship a row; a running input
+      // that carried nothing must, because that silence is what idle alarms read.
+      snapshot.inputs.set('wukong-hook', inputEntry('wukong', { running: false }));
+      snapshot.inputs.set('dsh-hook', inputEntry('dsh', { running: false }));
+      snapshot.inputs.set('idle-hook', inputEntry('idle-agent'));
+
+      const result = collector.collectL2(snapshot)!;
+
+      expect(result.agents.map(r => r.agent).sort()).toEqual(['cursor', 'idle-agent', 'qoder']);
+      const idle = agentRow(result.agents, 'idle-agent');
+      expect(idle.in_events).toBe('0');
+      expect(idle.in_bytes).toBe('0');
+      // How many are installed is L1's job, and it counts the silent-but-running one.
+      expect(collector.collectL1(snapshot).metric_json.agent_count).toBe('3');
+    });
+
+    it('keeps traffic an uninstalled agent collected before it stopped', () => {
+      const snapshot = pipelineSnapshot();
+      // Discovery stopped this input mid-window, but the events it collected while
+      // running still have to be reported or the chain totals lose them.
+      snapshot.inputs.set('kiro-cli', inputEntry('kiro-cli', {
+        inEvents: 5, inBytes: 300, running: false,
+      }));
+
+      const result = collector.collectL2(snapshot)!;
+
+      expect(agentRow(result.agents, 'kiro-cli').in_events).toBe('5');
+      expect(result.agents.reduce((acc, r) => acc + Number(r.in_events), 0)).toBe(65);
+      // It is no longer installed, so it is not counted as one.
+      expect(collector.collectL1(snapshot).metric_json.agent_count).toBe('2');
+    });
+
+    it('returns null when there are no inputs and no flushers', () => {
+      expect(collector.collectL2(buildSnapshot())).toBeNull();
+    });
+
+    it('still reports when only flushers are present', () => {
+      const flushers = new Map<string, any>([['sls:main', flusherEntry('sls', {
+        inEntries: 1, inBytes: 2, outEntries: 1, outBytes: 2, totalDelayMs: 5,
+      })]]);
+      const result = collector.collectL2(buildSnapshot({ flushers }))!;
+      expect(result.agents).toEqual([]);
+      expect(result.flushers[0].out_entries).toBe('1');
     });
   });
 
@@ -279,37 +560,6 @@ describe('MetricsCollector', () => {
 
       cpuSpy.mockRestore();
       dateSpy.mockRestore();
-    });
-  });
-
-  describe('collectL2Alarms', () => {
-    it('returns per-input alarm rows scoped to the input only', () => {
-      const inputs = new Map<string, any>();
-      inputs.set('cursor-hook', {
-        inEvents: 20, inBytes: 4096, outEvents: 18, outFailed: 2,
-        lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'hook-jsonl',
-      });
-      const inputIdleMinutes = new Map([['cursor-hook', 5]]);
-
-      const result = collector.collectL2Alarms(buildSnapshot({ inputs, inputIdleMinutes }));
-
-      expect(result).toHaveLength(1);
-      const m = result[0];
-      expect(m.category).toBe('alarm');
-      expect(m.input_name).toBe('cursor-hook');
-      expect(m.succeed_events).toBe('18');
-      expect(m.failed_events).toBe('2');
-      expect(m.input_idle_minutes).toBe('5');
-      expect(m.instance_id).toContain('test-user');
-      expect(m.__time__).toBeGreaterThan(0);
-      // Global flusher stats must NOT be smeared across per-input rows
-      // (they live in collectL2Flushers instead).
-      expect((m as Record<string, unknown>).flush_failed_total).toBeUndefined();
-      expect((m as Record<string, unknown>).flush_latency_avg_ms).toBeUndefined();
-    });
-
-    it('returns empty when no inputs', () => {
-      expect(collector.collectL2Alarms(buildSnapshot())).toEqual([]);
     });
   });
 
@@ -519,10 +769,10 @@ describe('MetricsCollector', () => {
     });
   });
 
-  describe('project', () => {
+  describe('projects', () => {
     it('returns empty string when no SLS endpoints', () => {
       const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      expect(col.collectL1(buildSnapshot()).project).toBe('');
+      expect(col.collectL1(buildSnapshot()).projects).toBe('');
     });
 
     it('joins unique projects with space in sorted order', () => {
@@ -536,7 +786,7 @@ describe('MetricsCollector', () => {
           { name: 'c', endpoint: 'https://x', project: 'aaa', logstore: 'l3', kind: 'agentActivity', mode: 'ak' },
         ],
       });
-      expect(col.collectL1(buildSnapshot()).project).toBe('aaa bbb');
+      expect(col.collectL1(buildSnapshot()).projects).toBe('aaa bbb');
     });
   });
 

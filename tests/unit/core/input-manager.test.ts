@@ -1,11 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
-import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import {
+  buildTestEntry,
+  cleanupTempDir,
+  createTempDir,
+  writeJsonlFile,
+} from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
+import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -225,6 +234,50 @@ describe('InputManager', () => {
       expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
       expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
     });
+
+    it('links TRACEPARENT with the native session before applying invocation session identity', async () => {
+      const nativeSessionId = 'opencode-native-session';
+      const customerSessionId = 'customer-session';
+      const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const upstreamSpanId = '00f067aa0ba902b7';
+      const localTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const dataDir = await createTempDir('input-manager-upstream-identity-');
+
+      try {
+        const correlateDir = path.join(dataDir, 'acp-correlate');
+        await writeJsonlFile(path.join(correlateDir, `${nativeSessionId}.jsonl`), [{
+          type: 'session',
+          sessionId: nativeSessionId,
+          traceparent: `00-${upstreamTraceId}-${upstreamSpanId}-01`,
+        }]);
+        manager.setTraceLinker(new TraceLinker(
+          new CorrelationStore(correlateDir),
+          { retries: 0 },
+        ));
+
+        const input = new StubInput('opencode-log');
+        manager.registerInput(input as any);
+        const entry = buildTestEntry({
+          agentType: ClientType.OpenCode,
+          sessionId: nativeSessionId,
+          trace_id: localTraceId,
+          'gen_ai.turn.id': `${nativeSessionId}:t1`,
+        });
+        entry[INVOCATION_SESSION_ID_FIELD] = customerSessionId;
+
+        input.emit('entries', [entry]);
+        await manager.stopAll();
+
+        expect(flusher.batchCalls).toHaveLength(1);
+        const dispatched = flusher.batchCalls[0][0];
+        expect(dispatched['gen_ai.session.id']).toBe(customerSessionId);
+        expect(dispatched.trace_id).toBe(upstreamTraceId);
+        expect(dispatched.parent_span_id).toBe(upstreamSpanId);
+        expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      } finally {
+        await cleanupTempDir(dataDir);
+      }
+    });
   });
 
   describe('agent content policy', () => {
@@ -324,6 +377,70 @@ describe('InputManager', () => {
     });
   });
 
+  describe('turn boundary enrichment', () => {
+    it('fills boundaries once before dispatching the same records to every flusher', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      manager.setFlusher(new MultiFlusher([jsonl, sls, http]));
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const entries = [
+        buildTestEntry({
+          'event.id': 'request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-1',
+        }),
+        buildTestEntry({
+          'event.id': 'response',
+          'event.name': 'llm.response',
+          'gen_ai.turn.id': 'turn-1',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ];
+
+      input.emit('entries', entries);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0]).toHaveLength(2);
+        expect(child.batchCalls[0][0]).toMatchObject({
+          'event.id': 'request',
+          'gen_ai.turn.start': true,
+        });
+        expect(child.batchCalls[0][1]).toMatchObject({
+          'event.id': 'response',
+          'gen_ai.turn.end': true,
+        });
+      }
+    });
+
+    it('fails open and dispatches original entries when enrichment throws', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const enrich = vi.spyOn(TurnBoundaryProcessor.prototype, 'enrich')
+        .mockImplementationOnce(() => {
+          throw new Error('synthetic enrichment failure');
+        });
+      const original = buildTestEntry({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+
+      input.emit('entries', [original]);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]).toMatchObject({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+      expect(flusher.batchCalls[0][0]['gen_ai.turn.start']).toBeUndefined();
+      enrich.mockRestore();
+    });
+  });
+
   describe('collector mask', () => {
     it('masks whitelisted content fields before dispatching to the flusher', async () => {
       const input = new StubInput('cursor-hook');
@@ -399,6 +516,19 @@ describe('InputManager', () => {
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(phone);
       }
+    });
+  });
+
+  describe('counter identity', () => {
+    it('records the collection method and the owning agent separately', () => {
+      // Reporting rolls ingress up by agent, so the counter has to carry the agent
+      // the input collects for. Without it the only label left is the collection
+      // method, and every unmapped input of one method collapses into one row.
+      manager.registerInput(new StubInput('qoder-ide') as any);
+
+      const counter = manager.getInputCounters().get('qoder-ide')!;
+      expect(counter.type).toBe(CollectionMethod.IdeSnapshotPolling);
+      expect(counter.agentType).toBe(ClientType.Qoder);
     });
   });
 

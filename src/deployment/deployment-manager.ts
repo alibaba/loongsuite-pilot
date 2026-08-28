@@ -200,6 +200,17 @@ export class DeploymentManager {
     return this.definitions;
   }
 
+  /** Strategy-aware detection used by lifecycle watchdogs. */
+  isAgentDetected(def: AgentDefinition): Promise<boolean> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      if (def.deployMode === 'dsh-yaml-patch') {
+        return this.dshYamlPatchStrategy.detect(def, this.state[def.id]);
+      }
+      return this.getStrategy(def).detect(def);
+    });
+  }
+
   /**
    * Whether the agent's integration is currently missing and needs to be
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
@@ -208,6 +219,10 @@ export class DeploymentManager {
   needsRedeploy(def: AgentDefinition): Promise<boolean> {
     return this.runExclusive(async () => {
       await this.loadState();
+      if (def.deployMode === 'dsh-yaml-patch') {
+        const target = await this.dshYamlPatchStrategy.resolveTarget(def, this.state[def.id]);
+        return target ? this.dshYamlPatchStrategy.needsDeployAt(def, target) : true;
+      }
       const strategy = this.getStrategy(def);
       return strategy.needsDeploy(def, this.state[def.id]);
     });
@@ -226,8 +241,14 @@ export class DeploymentManager {
 
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
     const strategy = this.getStrategy(def);
+    const record = this.state[def.id];
+    const dshTarget = def.deployMode === 'dsh-yaml-patch'
+      ? await this.dshYamlPatchStrategy.resolveTarget(def, record)
+      : null;
 
-    const detected = await strategy.detect(def);
+    const detected = def.deployMode === 'dsh-yaml-patch'
+      ? dshTarget !== null
+      : await strategy.detect(def);
     if (!detected) {
       logger.debug('agent not detected, skipping', { agentId: def.id });
       return {
@@ -239,18 +260,19 @@ export class DeploymentManager {
       };
     }
 
-    const record = this.state[def.id];
     const isRemote = def.deployMode === 'plugin-probe'
       && def.pluginProbe
       && this.pluginProbeStrategy.isRemoteOnly(def.pluginProbe.source);
 
-    const needs = await strategy.needsDeploy(def, record);
+    const needs = def.deployMode === 'dsh-yaml-patch' && dshTarget
+      ? await this.dshYamlPatchStrategy.needsDeployAt(def, dshTarget)
+      : await strategy.needsDeploy(def, record);
     if (!needs) {
       if (isRemote && record && this.pluginProbeStrategy.isRemoteCheckDue(record)) {
         record.lastRemoteCheckedAt = new Date().toISOString();
       }
       if (def.deployMode === 'dsh-yaml-patch' && record && !record.dshPatchPath) {
-        record.dshPatchPath = this.dshYamlPatchStrategy.resolvePatchPathForRecord(def, record);
+        record.dshPatchPath = dshTarget?.patchPath;
       }
       // Also the terminal state for detection-only agents: they share another
       // agent's hook, so needsDeploy() is always false and "detected but nothing
@@ -266,8 +288,8 @@ export class DeploymentManager {
     }
 
     logger.info('deploying agent', { agentId: def.id, deployMode: def.deployMode });
-    const result = def.deployMode === 'dsh-yaml-patch'
-      ? await this.dshYamlPatchStrategy.deploy(def, record)
+    const result = def.deployMode === 'dsh-yaml-patch' && dshTarget
+      ? await this.dshYamlPatchStrategy.deployAt(def, dshTarget)
       : await strategy.deploy(def);
 
     if (result.success) {
@@ -291,11 +313,23 @@ export class DeploymentManager {
         newRecord.targetDir = path.resolve(def.directoryPlugin.targetDir);
       }
 
-      if (def.deployMode === 'dsh-yaml-patch') {
-        newRecord.dshPatchPath = this.dshYamlPatchStrategy.resolvePatchPathForRecord(def, record);
+      if (def.deployMode === 'dsh-yaml-patch' && dshTarget) {
+        newRecord.dshPatchPath = dshTarget.patchPath;
       }
 
       this.state[def.id] = newRecord;
+    } else if (!result.skipped) {
+      // A strategy that RETURNS {success:false, error} used to vanish here: only a
+      // thrown error was logged, and deployAll just added it to the `failed` tally.
+      // So "deployAll complete {failed:1}" was the entire record of dsh failing every
+      // cycle with "plugin file not found or unreadable" -- the reason never reached
+      // the log, which is why a missing plugins/ tree took a live filesystem probe to
+      // find rather than a grep.
+      logger.error('deployment failed', {
+        agentId: def.id,
+        deployMode: def.deployMode,
+        error: result.error ?? 'strategy reported failure without an error',
+      });
     }
 
     return result;

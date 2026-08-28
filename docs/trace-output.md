@@ -234,6 +234,23 @@ Open [http://localhost:3000](http://localhost:3000) and navigate to **Traces** t
 
 > **Note:** Langfuse uses HTTP for OTLP — gRPC (port 4317) is not supported. LLM message content is included in traces by default (`captureMessageContent` defaults to `true`). To disable it, explicitly set `captureMessageContent` to `false` in config.
 
+## Token Usage Aggregation
+
+Pilot reports token usage at two levels in an OTLP trace:
+
+- Each `LLM` span reports the usage of one model call.
+- The parent `AGENT` span reports the aggregate usage of the whole agent turn. Its token values equal the sum of its `LLM` children; they are not additional usage.
+
+This keeps both per-call details and a turn-level total available. However, a backend that calculates a trace total by summing usage across every span may count the same tokens twice. For example, Langfuse may add the `AGENT` aggregate to all child `LLM` values in its trace header.
+
+Use one level consistently when querying token usage:
+
+- For the total usage of one agent turn, read the `AGENT` span (`gen_ai.span.kind = AGENT`).
+- For per-call analysis, sum only the `LLM` spans (`gen_ai.span.kind = LLM`).
+- Do not add an `AGENT` span's usage to the usage of its descendant `LLM` spans.
+
+This caveat applies to OTLP trace backends that aggregate across a span hierarchy. SLS, JSONL, HTTP output, and the built-in status bar consume event records instead of summing both levels of the trace hierarchy.
+
 ## Content Capture In Traces
 
 Trace spans can carry sensitive content if message capture is enabled. For sensitive or team-managed setups, prefer:
