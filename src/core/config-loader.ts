@@ -185,6 +185,7 @@ export interface ConfigFile {
     captureMessageContent?: boolean | string;
     multimodal?: {
       uploadMode?: string;
+      allowedRootPaths?: string[];
     };
   }>;
 
@@ -471,7 +472,7 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 }
 
 function buildAgentMultimodalConfig(
-  block: { uploadMode?: string } | undefined,
+  block: { uploadMode?: string; allowedRootPaths?: string[] } | undefined,
 ): AgentMultimodalConfig | undefined {
   if (!block || typeof block !== 'object') return undefined;
 
@@ -480,7 +481,19 @@ function buildAgentMultimodalConfig(
     ? (uploadModeRaw as MultimodalUploadMode)
     : 'none';
 
-  return { uploadMode };
+  const allowedRootPaths = Array.isArray(block.allowedRootPaths)
+    ? [...new Set(
+      block.allowedRootPaths
+        .filter((p): p is string => typeof p === 'string')
+        .map(p => resolveHome(p.trim()))
+        .filter(Boolean),
+    )]
+    : undefined;
+
+  return {
+    uploadMode,
+    ...(allowedRootPaths && allowedRootPaths.length > 0 ? { allowedRootPaths } : {}),
+  };
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);

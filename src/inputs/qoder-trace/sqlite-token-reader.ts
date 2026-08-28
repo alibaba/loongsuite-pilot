@@ -24,6 +24,82 @@ export interface SqliteTokenResult {
   matchedDbPath: string | null;
 }
 
+/**
+ * Batch-read user-attached image paths from chat_record.extra.
+ * Keys are request_id; values are local image paths for that request.
+ * DB paths are resolved the same way as token enrichment (not caller-supplied).
+ * Fail-open: query errors are logged and skipped.
+ * Only request_ids that appear in a row are recorded (`[]` if extra has no images).
+ */
+export async function readAttachedImagePathsForRequestIds(
+  requestIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  const unique = [...new Set(requestIds.map(id => id.trim()).filter(Boolean))];
+  if (unique.length === 0) return result;
+
+  const dbPaths = resolveAllQoderDbPaths();
+  if (dbPaths.length === 0) return result;
+
+  const placeholders = unique.map(() => '?').join(', ');
+  const sql = `
+    SELECT request_id AS request_id, extra AS extra
+    FROM chat_record
+    WHERE request_id IN (${placeholders})
+  `;
+
+  for (const dbPath of dbPaths) {
+    let rows: Array<{ request_id: string; extra: string | null }>;
+    try {
+      rows = await queryReadonly(dbPath, sql, unique);
+    } catch (err) {
+      logger.debug('sqlite attachedImagePaths query failed', { dbPath, error: String(err) });
+      continue;
+    }
+    for (const row of rows) {
+      const requestId = row.request_id?.trim();
+      if (!requestId || result.has(requestId)) continue;
+      const paths = parseAttachedImagePaths(row.extra);
+      result.set(requestId, paths);
+    }
+    if (result.size >= unique.length) break;
+  }
+  return result;
+}
+
+function parseAttachedImagePaths(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const extra = JSON.parse(raw) as Record<string, unknown>;
+
+    const fromField: string[] = [];
+    if (Array.isArray(extra.attachedImagePaths)) {
+      for (const item of extra.attachedImagePaths) {
+        if (typeof item === 'string' && item.trim()) fromField.push(item.trim());
+      }
+    }
+    if (fromField.length > 0) return [...new Set(fromField)];
+
+    // Fallback: context entries marked as image.
+    const fromContext: string[] = [];
+    const context = Array.isArray(extra.context) ? extra.context : [];
+    for (const item of context) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name : '';
+      const fileType = typeof record.fileType === 'string' ? record.fileType : '';
+      if (name !== 'image' && fileType !== 'image') continue;
+      const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
+      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+      const candidate = imgUrl || filePath;
+      if (candidate) fromContext.push(candidate);
+    }
+    return [...new Set(fromContext)];
+  } catch {
+    return [];
+  }
+}
+
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
   const dbPaths = resolveAllQoderDbPaths();
   if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
@@ -96,28 +172,36 @@ export function isIdeaDbPath(dbPath: string | null): boolean {
   return normalized.includes('.qoder/shared_client');
 }
 
-function resolveAllQoderDbPaths(): string[] {
-  // Qoder Desktop (Electron app) keeps SQLite under platform app-support.
-  // Qoder for JetBrains shares state through ~/.qoder/shared_client/.
-  // Both may coexist on the same machine with different sessions, so we return ALL accessible paths.
-  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-  const candidates = process.platform === 'darwin'
-    ? [
-        resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db'),
-        resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-      ]
-    : process.platform === 'win32'
-      ? [
-          path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db'),
-          path.join(os.homedir(), '.qoder', 'shared_client', 'cache', 'db', 'local.db'),
-        ]
-      : [
-          resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db'),
-          resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-        ];
+/** Relative path from a Qoder profile root to local.db. */
+const QODER_DB_TAIL = path.join('SharedClientCache', 'cache', 'db', 'local.db');
+
+/** Desktop Qoder data root (macOS Application Support / Windows AppData / Linux XDG). */
+export function resolveQoderAppRoot(): string {
+  if (process.platform === 'darwin') {
+    return resolveHome('~/Library/Application Support/Qoder');
+  }
+  if (process.platform === 'win32') {
+    const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appdata, 'Qoder');
+  }
+  return resolveHome('~/.config/Qoder');
+}
+
+/** Desktop app-support DB, hashed-profile DBs, and JetBrains ~/.qoder/shared_client. */
+export function resolveAllQoderDbPaths(): string[] {
+  const qoderRoot = resolveQoderAppRoot();
+
+  const candidates = [
+    path.join(qoderRoot, QODER_DB_TAIL),
+    ...listHashedProfileDbPaths(qoderRoot),
+    resolveHome('~/.qoder/shared_client/cache/db/local.db'),
+  ];
 
   const available: string[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     try {
       fs.accessSync(candidate);
       available.push(candidate);
@@ -126,6 +210,22 @@ function resolveAllQoderDbPaths(): string[] {
     }
   }
   return available;
+}
+
+/** Linux remote / multi-profile Qoder nests local.db under <qoderRoot>/<hash>/. */
+function listHashedProfileDbPaths(qoderRoot: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(qoderRoot);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    found.push(path.join(qoderRoot, name, QODER_DB_TAIL));
+  }
+  return found;
 }
 
 function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {

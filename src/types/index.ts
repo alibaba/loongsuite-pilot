@@ -198,11 +198,13 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
 
 /** Per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
+  /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */
+  allowedRootPaths?: string[];
 }
 
 export interface AgentConfig {

@@ -547,6 +547,27 @@ describe('ConfigLoader', () => {
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
 
+    it('parses agent multimodal allowedRootPaths and expands ~', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          qoder: {
+            captureMessageContent: true,
+            multimodal: {
+              uploadMode: 'both',
+              allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('both');
+      expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
+        '/home/test/workspace/loongsuite-pilot',
+        '/tmp/extra',
+      ]);
+    });
+
     it('defaults agent multimodal uploadMode to none', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {

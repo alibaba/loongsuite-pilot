@@ -136,6 +136,11 @@ interface CodexWakeupMarker {
   hookEvent?: string;
 }
 
+/** Default pathToUri roots (reserved; Codex today uses inline base64). */
+export function codexDefaultAllowedRootPaths(): string[] {
+  return [resolveHome('~/.codex')];
+}
+
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;

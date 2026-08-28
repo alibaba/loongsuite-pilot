@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -7,9 +6,13 @@ import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
-import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import {
+  CodexTranscriptInput,
+  codexDefaultAllowedRootPaths,
+} from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
-import type { BlobToUriFn, BlobToUriParams } from '../../../../src/multimodal/types.js';
+import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
+import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -3948,19 +3951,6 @@ describe('Codex transcript multimodal extraction', () => {
     return { timestamp, type, payload };
   }
 
-  const fakeBlobToUri: BlobToUriFn = (input: BlobToUriParams) => {
-    const mimeType = input.mime_type ?? 'image/png';
-    const bytes = Buffer.from(input.content, 'base64');
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    return {
-      uri: `oss://test/${digest}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
-      mime_type: mimeType,
-      modality: 'image',
-      size: bytes.length,
-      sha256: digest,
-    };
-  };
-
   function userContentItem(content: unknown[]): TurnBodyItem {
     return {
       type: 'response_item',
@@ -4043,6 +4033,10 @@ describe('Codex transcript multimodal extraction', () => {
   function userParts(turn: NonNullable<ReturnType<typeof extractCodexPartialTurn>>): any[] {
     return (turn.inputMessages[0] as any).parts;
   }
+
+  it('defaults allowed roots to ~/.codex', () => {
+    expect(codexDefaultAllowedRootPaths()).toEqual([path.join(os.homedir(), '.codex')]);
+  });
 
   it('write-time converts input_image to uri parts and keeps text-only prompt', () => {
     // Shape mirrors real Codex paste/upload turns (codex-hook-debug):

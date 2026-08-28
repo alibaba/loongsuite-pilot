@@ -1,15 +1,43 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
-import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
+import {
+  clearAttachedImagePathsCache,
+  enrichIdeMultimodal,
+  extractMarkdownImagePaths,
+  extractToolImagePaths,
+} from '../../../src/inputs/qoder-trace/qoder-ide-multimodal.js';
+import {
+  QoderTraceInput,
+  qoderDefaultAllowedRootPaths,
+  resolveQoderAllowedRootPaths,
+} from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { canonicalizeRootPath } from '../../../src/multimodal/resolve.js';
+import { withDeadline } from '../../../src/multimodal/processor.js';
+import { fakePathToUri } from '../multimodal/fake-uri.js';
+import { MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
-import type { SqliteTokenData } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
+import {
+  readAttachedImagePathsForRequestIds,
+  type SqliteTokenData,
+} from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+
+vi.mock('../../../src/inputs/qoder-trace/sqlite-token-reader.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/inputs/qoder-trace/sqlite-token-reader.js')>();
+  return {
+    ...actual,
+    readAttachedImagePathsForRequestIds: vi.fn(),
+  };
+});
+
+const mockReadAttachedImagePaths = vi.mocked(readAttachedImagePathsForRequestIds);
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -751,6 +779,1073 @@ describe('QoderTraceInput token-enricher', () => {
 
     it('does nothing for empty array', () => {
       expect(() => injectTraceId([])).not.toThrow();
+    });
+  });
+});
+
+describe('QoderTraceInput multimodal', () => {
+  const mmTmpDirs: string[] = [];
+
+  function makeMmTempDir(): string {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'pilot-qoder-mm-'));
+    mmTmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of mmTmpDirs.splice(0)) {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function writePng(dir: string, name: string, content = 'png-bytes'): string {
+    const file = path.join(dir, name);
+    fsSync.writeFileSync(file, Buffer.from(content));
+    return file;
+  }
+
+  function mmEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
+    return {
+      'event.id': 'e1',
+      'event.name': 'other',
+      'gen_ai.agent.type': 'qoder',
+      'gen_ai.session.id': 'sess',
+      'gen_ai.turn.id': 'turn-1',
+      time_unix_nano: String(1_700_000_000_000_000_000n),
+      ...overrides,
+    } as AgentActivityEntry;
+  }
+
+  it('includes tmp, vibe_images, and IDE cache/images in default roots', () => {
+    const roots = qoderDefaultAllowedRootPaths();
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'tmp'));
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'vibe_images'));
+    const appRoot = process.platform === 'darwin'
+      ? path.join(os.homedir(), 'Library', 'Application Support', 'Qoder')
+      : process.platform === 'win32'
+        ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Qoder')
+        : path.join(os.homedir(), '.config', 'Qoder');
+    expect(roots).toContain(path.join(appRoot, 'SharedClientCache', 'cache', 'images'));
+  });
+
+  it('merges user-configured roots with defaults', () => {
+    const extra = canonicalizeRootPath('~/Documents');
+    const merged = resolveQoderAllowedRootPaths(['~/Documents']);
+    expect(merged).toContain(canonicalizeRootPath(path.join(os.homedir(), '.qoder', 'tmp')));
+    expect(merged).toContain(extra);
+  });
+
+  describe('extractToolImagePaths / extractMarkdownImagePaths', () => {
+    it('parses Read and ImageGen tool result paths', () => {
+      expect(extractToolImagePaths('Image file: /tmp/a.png')).toEqual(['/tmp/a.png']);
+      const gen = [
+        'Image generated successfully! The absolute path of the image is: /tmp/gen.png',
+        'Request ID: x',
+      ].join('\n');
+      expect(extractToolImagePaths(gen)).toEqual(['/tmp/gen.png']);
+    });
+
+    it('parses markdown image paths', () => {
+      expect(extractMarkdownImagePaths('see ![x](/tmp/a.png) and ![y](/tmp/b.jpg)')).toEqual([
+        '/tmp/a.png',
+        '/tmp/b.jpg',
+      ]);
+    });
+
+    it('parses markdown destinations and joins relative paths with cwd', () => {
+      const cwd = '/proj';
+      expect(extractMarkdownImagePaths('![x](images/a.png)', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](<images/My Image.png>)', cwd)).toEqual([
+        path.resolve(cwd, 'images/My Image.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](images/a.png "preview")', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths("![x](rel/b.jpg 'preview')", cwd)).toEqual([
+        path.resolve(cwd, 'rel/b.jpg'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](/tmp/a.png)', cwd)).toEqual(['/tmp/a.png']);
+      expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)', cwd)).toEqual(['/tmp/My Image.png']);
+      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual(['images/a.png']);
+    });
+
+    it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
+      const started = Date.now();
+      const noise = '!['.repeat(80_000);
+      expect(extractMarkdownImagePaths(`${noise} ![x](/tmp/ok.png)`)).toEqual(['/tmp/ok.png']);
+      expect(Date.now() - started).toBeLessThan(200);
+      expect(extractMarkdownImagePaths(noise)).toEqual([]);
+    });
+
+    it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      expect(extractToolImagePaths(listed.map(p => `Image file: ${p}`).join('\n'))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+      expect(extractMarkdownImagePaths(listed.map((p, i) => `![n${i}](${p})`).join(' '))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+    });
+  });
+
+  describe('enrichIdeMultimodal', () => {
+    describe('attached image paths (mocked sqlite map)', () => {
+      beforeEach(() => {
+        clearAttachedImagePathsCache();
+        mockReadAttachedImagePaths.mockReset();
+        mockReadAttachedImagePaths.mockResolvedValue(new Map());
+      });
+
+      it('attaches paths onto llm.request messages_delta by request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'attach.png', 'attach');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-1',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockImplementation(async (ids) => {
+          expect(ids).toEqual(['req-1']);
+          return new Map([['req-1', [img]]]);
+        });
+
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'text')).toBe(true);
+        expect(parts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/attach')).toBe(true);
+        expect(request['gen_ai.input.multimodal_metadata']).toEqual([
+          { uri: 'oss://test/attach', mime_type: 'image/png', modality: 'image' },
+        ]);
+      });
+
+      it('uploadMode gates input attach: tool/output skip; both enriches', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'in-gate.png', 'in-gate');
+        const makeRequest = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-in-gate',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-in-gate', [img]]]));
+
+        for (const mode of ['tool', 'output'] as const) {
+          clearAttachedImagePathsCache();
+          const request = makeRequest();
+          await enrichIdeMultimodal([request], { uploadMode: mode, pathToUri: fakePathToUri });
+          const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
+          expect(parts, mode).toHaveLength(1);
+          expect(parts[0].type, mode).toBe('text');
+        }
+
+        clearAttachedImagePathsCache();
+        const both = makeRequest();
+        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+        expect((both['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
+      });
+
+      it('prefers llm.request over other when both carry the same request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'prefer.png', 'prefer');
+        const pathToUri = fakePathToUri;
+        const user = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-pref',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
+          ],
+        });
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-pref',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'ctx' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-pref', [img]]]));
+
+        await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
+
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+      });
+
+      it('batches multiple request_ids and only enriches matching rows', async () => {
+        const dir = makeMmTempDir();
+        const imgA = writePng(dir, 'a.png', 'a');
+        const imgB = writePng(dir, 'b.png', 'b');
+        const pathToUri = fakePathToUri;
+        const reqA = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a' }] },
+          ],
+        });
+        const reqB = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-b',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'b' }] },
+          ],
+        });
+        const reqNoAttach = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-empty',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'none' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockImplementation(async (ids) => {
+          expect(ids.sort()).toEqual(['req-a', 'req-b', 'req-empty'].sort());
+          return new Map([
+            ['req-a', [imgA]],
+            ['req-b', [imgB]],
+            ['req-empty', []],
+          ]);
+        });
+
+        await enrichIdeMultimodal([reqA, reqB, reqNoAttach], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        expect((reqA['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((reqB['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((reqNoAttach['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+      });
+
+      it('skips when request_id missing or map is empty', async () => {
+        const pathToUri = vi.fn(fakePathToUri);
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+          ],
+        });
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+        expect(pathToUri).not.toHaveBeenCalled();
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+      });
+
+      it('caps persistent lookup failures at three attempts and still processes tool surface', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 't.png', 't');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-x',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+          ],
+        });
+        const tool = mmEntry({
+          'event.name': 'tool.result',
+          'gen_ai.tool.call.result': `Image file: ${img}`,
+        });
+        mockReadAttachedImagePaths.mockRejectedValue(new Error('sqlite down'));
+
+        await enrichIdeMultimodal([request, tool], {
+          uploadMode: 'both',
+          pathToUri,
+        });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(3);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(1, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(2, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(3, ['req-x']);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+        expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
+      });
+
+      it('retries a lookup exception and attaches when the next query recovers', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'recovered.png', 'recovered');
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-recovered',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths
+          .mockRejectedValueOnce(new Error('sqlite busy'))
+          .mockResolvedValueOnce(new Map([['req-recovered', [img]]]));
+
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri: fakePathToUri,
+        });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/recovered')).toBe(true);
+      });
+
+      it('falls back to same-turn carrier when only llm.response has request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'fb.png', 'fb');
+        const pathToUri = fakePathToUri;
+        const other = mmEntry({
+          'event.name': 'other',
+          'gen_ai.turn.id': 't1',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'img?' }] },
+          ],
+        });
+        const response = mmEntry({
+          'event.name': 'llm.response',
+          'gen_ai.turn.id': 't1',
+          'gen_ai.request.id': 'req-fb',
+          'gen_ai.output.messages': [
+            { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fb', [img]]]));
+
+        await enrichIdeMultimodal([other, response], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        const parts = (other['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('after attach, same request_id is neither re-queried nor re-attached', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'cached.png', 'cached');
+        const pathToUri = vi.fn(fakePathToUri);
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', [img]]]));
+
+        const first = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-cache',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: '1' }] },
+          ],
+        });
+        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+
+        const second = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-cache',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: '2' }] },
+          ],
+        });
+        await enrichIdeMultimodal([second], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect((second['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect(pathToUri).toHaveBeenCalledTimes(1);
+      });
+
+      it('only queries uncached request_ids when a batch mixes done and new ids', async () => {
+        const dir = makeMmTempDir();
+        const imgA = writePng(dir, 'a.png', 'a');
+        const imgB = writePng(dir, 'b.png', 'b');
+        const pathToUri = fakePathToUri;
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', [imgA]]]));
+        const first = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a' }] },
+          ],
+        });
+        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', [imgB]]]));
+        const againA = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a2' }] },
+          ],
+        });
+        const freshB = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-b',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'b' }] },
+          ],
+        });
+        await enrichIdeMultimodal([againA, freshB], { uploadMode: 'input', pathToUri });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect(mockReadAttachedImagePaths).toHaveBeenLastCalledWith(['req-b']);
+        expect((againA['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect((freshB['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('keeps cached paths when carrier is missing so a later batch can attach', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'late.png', 'late');
+        const pathToUri = vi.fn(fakePathToUri);
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-late', [img]]]));
+
+        const responseOnly = mmEntry({
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-late',
+          'gen_ai.output.messages': [
+            { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
+          ],
+        });
+        await enrichIdeMultimodal([responseOnly], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect(pathToUri).not.toHaveBeenCalled();
+
+        const user = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-late',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
+          ],
+        });
+        await enrichIdeMultimodal([user], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('caches a confirmed empty lookup and does not re-query', async () => {
+        const pathToUri = vi.fn(fakePathToUri);
+        const makeReq = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-empty',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-empty', []]]));
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect(pathToUri).not.toHaveBeenCalled();
+      });
+
+      it('retries an absent row within the same event and attaches when it appears', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'retry.png', 'retry');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-retry',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths
+          .mockResolvedValueOnce(new Map())
+          .mockResolvedValueOnce(new Map([['req-retry', [img]]]));
+
+        await enrichIdeMultimodal([request], { uploadMode: 'input', pathToUri });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/retry')).toBe(true);
+      });
+    });
+
+    it('tool mode rewrites Image file tool.result to text+uri parts', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'read.png', 'read-img');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'Read',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result[0]).toEqual({ type: 'text', content: `Image file: ${img}` });
+      expect(result[1]).toMatchObject({ type: 'uri', uri: 'oss://test/read-img', modality: 'image' });
+    });
+
+    it('caps pathToUri attempts for missing tool images', async () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      const pathToUri = vi.fn(async () => null);
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': listed.map(p => `Image file: ${p}`).join('\n'),
+      });
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
+      expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Image file: ${p}`).join('\n'));
+    });
+
+    it('tool mode parses ImageGen success path', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'gen.png', 'gen-img');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'ImageGen',
+        'gen_ai.tool.call.result':
+          `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
+      });
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img')).toBe(true);
+    });
+
+    it('uploadMode gates ImageGen tool: input/output skip; both enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'gen-gate.png', 'gen-gate');
+      const makeTool = () => mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'ImageGen',
+        'gen_ai.tool.call.result':
+          `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
+      });
+
+      for (const mode of ['input', 'output'] as const) {
+        const tool = makeTool();
+        const before = tool['gen_ai.tool.call.result'];
+        await enrichIdeMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri });
+        expect(tool['gen_ai.tool.call.result'], mode).toBe(before);
+      }
+
+      const both = makeTool();
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      const result = both['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-gate')).toBe(true);
+    });
+
+    it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
+      const dir = makeMmTempDir();
+      writePng(dir, 'rel.png', 'rel-img');
+      const pathToUri = vi.fn(fakePathToUri);
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          {
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'here ![g](rel.png)' }],
+          },
+        ],
+      });
+      (response as Record<string, unknown>)['agent.qoder.cwd'] = dir;
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      expect(pathToUri).toHaveBeenCalledWith(path.resolve(dir, 'rel.png'), expect.any(Number));
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/rel-img' });
+    });
+
+    it('output mode appends uri parts for markdown images on llm.response', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'out.png', 'out-img');
+      const pathToUri = fakePathToUri;
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          {
+            role: 'assistant',
+            parts: [{ type: 'text', content: `here ![g](${img})` }],
+          },
+        ],
+      });
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts[0].type).toBe('text');
+      expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
+    });
+
+    it('uploadMode gates output markdown: input/tool skip; both enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'out-gate.png', 'out-gate');
+      const makeResponse = () => mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          { role: 'assistant', parts: [{ type: 'text', content: `here ![g](${img})` }] },
+        ],
+      });
+
+      for (const mode of ['input', 'tool'] as const) {
+        const response = makeResponse();
+        await enrichIdeMultimodal([response], { uploadMode: mode, pathToUri: fakePathToUri });
+        const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+        expect(parts, mode).toHaveLength(1);
+        expect(parts[0].type, mode).toBe('text');
+      }
+
+      const both = makeResponse();
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      expect((both['gen_ai.output.messages'] as any[])[0].parts.some((p: any) =>
+        p.type === 'uri' && p.uri === 'oss://test/out-gate')).toBe(true);
+    });
+
+    it('both mode converts tool+output surfaces', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'shared.png', 'shared');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          { role: 'assistant', parts: [{ type: 'text', content: `![x](${img})` }] },
+        ],
+      });
+
+      await enrichIdeMultimodal([tool, response], { uploadMode: 'both', pathToUri });
+      expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts.some((p: any) => p.type === 'uri')).toBe(true);
+    });
+
+    it('uploadMode none / missing paths / toUri null leave entries unchanged', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'x.png', 'x');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      const before = structuredClone(tool);
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'none', pathToUri: fakePathToUri });
+      expect(tool).toEqual(before);
+
+      const missing = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': 'Image file: /no/such/file.png',
+      });
+      await enrichIdeMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri });
+      expect(missing['gen_ai.tool.call.result']).toBe('Image file: /no/such/file.png');
+
+      const nullUri = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      await enrichIdeMultimodal([nullUri], { uploadMode: 'tool', pathToUri: async () => null });
+      expect(nullUri['gen_ai.tool.call.result']).toBe(`Image file: ${img}`);
+    });
+
+    it('caps converted images at MAX_MULTIMODAL_PARTS', async () => {
+      const dir = makeMmTempDir();
+      const paths: string[] = [];
+      for (let i = 0; i < MAX_MULTIMODAL_PARTS + 3; i++) {
+        paths.push(writePng(dir, `n${i}.png`, `img-${i}`));
+      }
+      const pathToUri = fakePathToUri;
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [{
+            type: 'text',
+            content: paths.map((p, i) => `![${i}](${p})`).join('\n'),
+          }],
+        }],
+      });
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      const uriCount = parts.filter((p: any) => p.type === 'uri').length;
+      expect(uriCount).toBe(MAX_MULTIMODAL_PARTS);
+    });
+
+    it('does not throw when pathToUri throws; entries remain processable', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'boom.png', 'boom');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      await expect(enrichIdeMultimodal([tool], {
+        uploadMode: 'tool',
+        pathToUri: async () => {
+          throw new Error('processor boom');
+        },
+      })).resolves.toBeUndefined();
+      expect(tool['event.name']).toBe('tool.result');
+      expect(tool['gen_ai.tool.call.result']).toBeDefined();
+    });
+
+    it('skips a throwing path and still converts later images with metadata', async () => {
+      const dir = makeMmTempDir();
+      const boom = writePng(dir, 'boom.png', 'boom');
+      const ok = writePng(dir, 'ok.png', 'ok');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${boom}\nImage file: ${ok}`,
+      });
+      await enrichIdeMultimodal([tool], {
+        uploadMode: 'tool',
+        pathToUri: async (filePath: string) => {
+          if (filePath === boom) throw new Error('processor boom');
+          return {
+            uri: 'oss://test/ok',
+            mime_type: 'image/png',
+            modality: 'image',
+            size: 2,
+            sha256: 'ok',
+          };
+        },
+      });
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
+      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
+      ]);
+    });
+  });
+
+  describe('IDE gate via collect', () => {
+    it('converts IDE and CLI tool Image file paths independently', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const ideTool = {
+          'event.id': 'ide-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(
+          logFile,
+          [ideTool, cliTool].map(e => JSON.stringify(e)).join('\n') + '\n',
+        );
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
+        const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
+        expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+        expect(Array.isArray(cli['gen_ai.tool.call.result'])).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips JetBrains qoder-idea sessions and still converts desktop IDE', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-idea-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const ideaTool = {
+          'event.id': 'idea-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-idea',
+          'gen_ai.session.id': 'idea-sess',
+          'gen_ai.turn.id': 'idea-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        const ideTool = {
+          'event.id': 'ide-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(
+          logFile,
+          [ideaTool, ideTool].map(e => JSON.stringify(e)).join('\n') + '\n',
+        );
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        const idea = entries.find(e => e['event.id'] === 'idea-tool')!;
+        const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
+        expect(idea['gen_ai.tool.call.result']).toBe(`Image file: ${imgPath}`);
+        expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('collect still returns text when pathToUri never resolves', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-hang-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) =>
+                withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 40, () => null),
+            } as any,
+          },
+        });
+
+        const started = Date.now();
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        expect(Date.now() - started).toBeLessThan(500);
+        const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
+        expect(cli['gen_ai.tool.call.result']).toBe(`Read image: ${imgPath} (1KB)`);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resumes image enrichment after stop then start', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-restart-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const toolEvent = (id: string, turnId: string) => ({
+          'event.id': id,
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': turnId,
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(toolEvent('cli-tool-1', 'cli-turn-1'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const entries: AgentActivityEntry[] = [];
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+        input.on('entries', batch => entries.push(...batch));
+
+        await input.start();
+        const first = entries.find(e => e['event.id'] === 'cli-tool-1');
+        expect(Array.isArray(first?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+
+        await fs.appendFile(logFile, `${JSON.stringify(toolEvent('cli-tool-2', 'cli-turn-2'))}\n`);
+        await input.start();
+        const second = entries.find(e => e['event.id'] === 'cli-tool-2');
+        expect(Array.isArray(second?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('stop finishes while a collect cycle is blocked on never-resolving pathToUri', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-stop-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        let pathToUriCalls = 0;
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) => {
+                pathToUriCalls += 1;
+                return withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 80, () => null);
+              },
+            } as any,
+          },
+        });
+
+        const started = input.start();
+        await vi.waitFor(() => expect(pathToUriCalls).toBeGreaterThan(0));
+        const stopStarted = Date.now();
+        await expect(input.stop()).resolves.toBeUndefined();
+        expect(Date.now() - stopStarted).toBeLessThan(500);
+        await expect(started).resolves.toBeUndefined();
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops agent.qoder.attachments before emit', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-attach-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const withAttach = (id: string, extra: Record<string, unknown> = {}) => ({
+          'event.id': id,
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': id,
+          'agent.qoder.attachments': [
+            { type: 'image_file', filename: imgPath },
+          ],
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+          time_unix_nano: '1780000000000000000',
+          ...extra,
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(withAttach('cli-off'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const off = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+        });
+        const offEntries = await (off as any).collect() as AgentActivityEntry[];
+        expect(offEntries[0]).not.toHaveProperty('agent.qoder.attachments');
+
+        await fs.appendFile(logFile, `${JSON.stringify(withAttach('cli-on'))}\n`);
+        const on = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'input',
+            processor: { pathToUri: fakePathToUri } as any,
+          },
+        });
+        const onEntries = await (on as any).collect() as AgentActivityEntry[];
+        const cli = onEntries.find(e => e['event.id'] === 'cli-on')!;
+        expect(cli).not.toHaveProperty('agent.qoder.attachments');
+        const parts = (cli['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/shot')).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 });
