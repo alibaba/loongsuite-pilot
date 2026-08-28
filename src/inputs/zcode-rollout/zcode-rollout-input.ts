@@ -256,7 +256,7 @@ export class ZCodeRolloutInput extends BaseInput {
         // with empty sid/tid would otherwise share a single `:+` state key,
         // corrupting pairing across sessions/turns.
         if (sid && tid) {
-          this.bufferPendingToolCalls(sid, tid, record);
+          allEntries.push(...this.bufferPendingToolCalls(sid, tid, record));
         }
       } else {
         allEntries.push(...this.buildEntriesFromRolloutLine(record, nextRecord));
@@ -331,12 +331,13 @@ export class ZCodeRolloutInput extends BaseInput {
   /**
    * Buffer a line's toolCalls to state for cross-batch pairing. Stores enough
    * metadata to emit tool.call + tool.result records in a future batch without
-   * re-reading the source line.
+   * re-reading the source line. Returns tool.call entries drained from turns
+   * evicted by the bounded registry (never silently dropped — Copilot review).
    */
   private bufferPendingToolCalls(
     sid: string, tid: string,
     record: Record<string, unknown>,
-  ): void {
+  ): AgentActivityEntry[] {
     const key = `zcode-rollout:pending-tool-calls:${sid}+${tid}`;
     const existing = (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [];
     const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
@@ -374,27 +375,67 @@ export class ZCodeRolloutInput extends BaseInput {
 
     // Register the turn so drainStalePendingTurns can close it out when a
     // later batch moves on to another turn. Bounded: keep the most recent
-    // MAX_PENDING_TURNS; evicted turns are drained immediately without
-    // fabricated results.
+    // MAX_PENDING_TURNS. Evicted turns are EMITTED as tool.call records
+    // (truthful, no fabricated result) rather than silently dropped —
+    // dropping them would irreversibly lose the tool.call events and
+    // block downstream orphan synthesis (Copilot review).
     const MAX_PENDING_TURNS = 32;
     const turnKey = `${sid}+${tid}`;
     const registry = this.getPendingTurnRegistry().filter((t) => t !== turnKey);
     registry.push(turnKey);
+    const evictedEntries: AgentActivityEntry[] = [];
     if (registry.length > MAX_PENDING_TURNS) {
       const evicted = registry.splice(0, registry.length - MAX_PENDING_TURNS);
       for (const t of evicted) {
+        const evictedPending = (this.stateStore.get(`zcode-rollout:pending-tool-calls:${t}`)
+          .extra?.pending as PendingToolCall[] | undefined) ?? [];
+        if (evictedPending.length > 0) {
+          evictedEntries.push(...this.buildDrainedToolCallEntries(evictedPending));
+        }
         this.stateStore.update(`zcode-rollout:pending-tool-calls:${t}`, { extra: { pending: [] } });
       }
     }
     this.setPendingTurnRegistry(registry);
+    return evictedEntries;
+  }
+
+  /**
+   * Build truthful tool.call entries for a list of buffered PendingToolCall
+   * records (used by registry eviction — the buffered calls must still reach
+   * the flusher even when their turn is evicted without a pairing line).
+   */
+  private buildDrainedToolCallEntries(calls: PendingToolCall[]): AgentActivityEntry[] {
+    return calls.map((p) => buildAgentActivityEntry({
+      time_unix_nano: p.completedAtNs,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'tool.call',
+      'gen_ai.session.id': p.sid,
+      'gen_ai.turn.id': p.tid,
+      'gen_ai.step.id': p.stepId,
+      'gen_ai.agent.type': ClientType.ZCode,
+      'gen_ai.agent.id': p.sid,
+      'gen_ai.agent.name': 'ZCode',
+      'agent.source': 'zcode-rollout',
+      'gen_ai.provider.name': p.providerId,
+      'gen_ai.tool.name': p.toolName,
+      'gen_ai.tool.call.id': p.callId,
+      'gen_ai.tool.call.exec.id': p.callId,
+      ...(p.args !== undefined && p.args !== null
+        ? { 'gen_ai.tool.call.arguments': p.args as JsonValue }
+        : {}),
+      trace_id: p.traceId,
+      span_id: deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId),
+      parent_span_id: p.stepSpanId,
+    }));
   }
 
   /**
    * Pair pending toolCalls (buffered in previous batches) with the current
-   * line's request.messages[role=tool]. Emits tool.call + tool.result records
-   * for matched pairs. Unmatched pending toolCalls are emitted as
-   * tool.call + 1ms placeholder tool.result (EOF/abort fallback per task #3).
-   * Clears the state key after flushing.
+   * line's request.messages[role=tool]. Emits tool.call for every buffered
+   * call, and a tool.result ONLY when a real matching role=tool message is
+   * present — unmatched calls get NO fabricated result (the flusher's
+   * orphan-tool synthesis owns result-less tool.calls). Clears the state
+   * key after flushing.
    */
   private flushPendingToolCalls(
     sid: string, tid: string,
@@ -1008,9 +1049,10 @@ const CANONICAL_FINISH_REASONS = new Set([
 /**
  * Normalize a raw ZCode finish reason to the canonical validator set.
  * Raw rollout values seen in the wild: 'tool_use', 'tool-calls',
- * 'tool_calls', 'function_call' (all → 'tool_call'); 'aborted'/'cancelled'
- * (→ 'interrupted'); 'max_output_tokens' (→ 'max_tokens'). Values already
- * canonical pass through; unknown values fall back to 'stop'.
+ * 'tool_calls', 'function_call' (all → 'tool_call'); 'aborted'/'interrupted'
+ * (→ 'interrupted'); 'cancelled'/'canceled' (→ 'cancelled', kept distinct —
+ * it is canonical itself); 'max_output_tokens' (→ 'max_tokens'). Values
+ * already canonical pass through; unknown values fall back to 'stop'.
  */
 function normalizeFinishReason(raw: string): string {
   const v = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
@@ -1022,10 +1064,11 @@ function normalizeFinishReason(raw: string): string {
     case 'function_calls':
       return 'tool_call';
     case 'aborted':
-    case 'cancelled':
-    case 'canceled':
     case 'interrupted':
       return 'interrupted';
+    case 'cancelled':
+    case 'canceled':
+      return 'cancelled';
     case 'max_output_tokens':
       return 'max_tokens';
     default:
