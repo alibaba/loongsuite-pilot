@@ -181,6 +181,16 @@ macOS 菜单栏 App：
 
 在 macOS 上，Pilot 安装完成后会自动常驻菜单栏，无需额外命令。它实时展示 Token、会话、请求、工具调用数量，以及按 Agent 和 Provider 的分布，让你不用打开 Dashboard 也能随时掌握活动情况。
 
+菜单栏中点击“退出”只会退出菜单栏，不会停止采集。需要重新打开时，执行：
+
+```bash
+loongsuite-pilot menubar start
+```
+
+请在 macOS 桌面用户的终端中执行，不要加 `sudo`。该命令不会重启采集服务；菜单栏已经运行时不会重复启动。采集服务需已启动，且菜单栏未被配置禁用。
+
+只关闭菜单栏可执行 `loongsuite-pilot menubar stop`，采集服务继续运行；菜单栏已退出时也会正常返回。该命令不修改自动启动配置，下次启动采集服务时菜单栏仍可自动打开。
+
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS 菜单栏 App" width="360">
 </p>

@@ -199,6 +199,16 @@ macOS menu bar app:
 
 On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
 
+If you quit the menu bar app, reopen it without restarting collection:
+
+```bash
+loongsuite-pilot menubar start
+```
+
+Run this in your macOS desktop terminal without `sudo`. Pilot must already be running and the menu bar app must be enabled. Repeated calls reuse the running app.
+
+To close only the menu bar app, run `loongsuite-pilot menubar stop`. Collection keeps running, and stopping an already closed app succeeds. This does not change the auto-start setting; the next collector startup can open it again.
+
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
 </p>

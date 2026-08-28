@@ -23,6 +23,11 @@ async function main(): Promise<void> {
   }
 
   const [command, ...args] = argv;
+  if (command === 'menubar') {
+    const { runMenubarCommand } = await import('./cli/menubar.js');
+    process.exitCode = await runMenubarCommand(args);
+    return;
+  }
   if (command === 'token-usage' || command === 'tokens') {
     const { runTokenUsageCommand } = await import('./cli/token-usage.js');
     process.exitCode = await runTokenUsageCommand(args);
