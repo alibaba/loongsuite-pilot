@@ -172,6 +172,34 @@ http://127.0.0.1:8765/
 
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
 
+### macOS Dashboard 启动器
+
+macOS 安装时会生成 `~/Applications/LoongSuite Pilot Dashboard.app`，升级成功后会更新。
+可在 Finder 中双击，也可以拖到 Dock。它使用系统当前的默认浏览器，与菜单栏 App
+相互独立，不内置浏览器，也不后台常驻。
+
+```bash
+loongsuite-pilot dashboard open  # macOS：确认对应实例后打开
+loongsuite-pilot dashboard url   # Linux/macOS：输出配置中的页面地址
+```
+
+每次点击都会重新读取安装配置中的 `dashboard.port`，默认配置文件为
+`~/.loongsuite-pilot/config.json`。安装时使用了 `--data-dir`，启动器会记录对应路径，
+不要求 Finder 继承终端里的环境变量。例如配置为 `"dashboard": { "port": 9000 }`，
+就打开 `http://127.0.0.1:9000/`。端口未配置或不合法时，与采集服务一样使用 `8765`。
+修改端口后需要重启 Pilot 生效，但不用重新生成 App。命令行入口也支持
+`AGENT_DATA_COLLECTION_CONFIG` 和 `LOONGSUITE_PILOT_DATA_DIR`。
+
+页面不可用时会提示“重试/取消”，不会自动启动、停止或重启 Pilot；如果端口被其他程序
+或另一套 Pilot 占用，不会自动打开错误的页面。首次启动尚未生成汇总文件时仍可打开。
+启动器使用 Pilot 安装的 Node，不依赖终端 PATH，也不加载采集模块及其原生依赖。
+
+App 使用 macOS 自带工具在本机生成，此快捷入口不要求用户安装 Swift 或 Xcode。
+生成失败不会阻断 Pilot 安装；升级和卸载只处理带有 Pilot 管理标记的 App，不覆盖
+同名的其他应用。自行移动或复制的 App 需要手动清理；自定义目录安装在卸载时应传入
+相同的 `--data-dir`。它不是经过公证、可独立下载运行的软件包：每位用户应通过安装器
+在自己的 Mac 上生成，并使用自己本机的 Pilot。
+
 ## 卸载
 
 卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。

@@ -177,6 +177,10 @@ loongsuite-pilot rollback
 `http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
 `logs/metrics-summary.json`。
 
+macOS 安装时还会生成 `~/Applications/LoongSuite Pilot Dashboard.app`。
+点击它，或运行 `loongsuite-pilot dashboard open`，即可按配置中的 `dashboard.port`
+用系统默认浏览器打开页面，不会启停 Pilot。详见[Dashboard 启动器](docs/zh-CN/installation.md#macos-dashboard-启动器)。
+
 macOS 菜单栏 App：
 
 在 macOS 上，Pilot 安装完成后会自动常驻菜单栏，无需额外命令。它实时展示 Token、会话、请求、工具调用数量，以及按 Agent 和 Provider 的分布，让你不用打开 Dashboard 也能随时掌握活动情况。

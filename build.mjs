@@ -28,6 +28,17 @@ const internalStubPlugin = {
 
 const commonPlugins = [internalStubPlugin];
 
+// Dependency-free browser launcher, safe even when the collector cannot start.
+await build({
+  entryPoints: ['src/dashboard-cli.ts'],
+  outfile: 'dist/dashboard-cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  minifySyntax: true,
+});
+
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',

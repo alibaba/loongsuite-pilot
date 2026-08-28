@@ -195,6 +195,11 @@ The local dashboard starts and stops with the collector. Open
 `http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
 collector-owned `logs/metrics-summary.json` file directly.
 
+On macOS, the installer also creates `~/Applications/LoongSuite Pilot Dashboard.app`.
+Click it (or run `loongsuite-pilot dashboard open`) to open the configured
+`dashboard.port` in your default browser. The shortcut does not start or stop
+Pilot. See [Dashboard launcher](docs/installation.md#macos-dashboard-launcher).
+
 macOS menu bar app:
 
 On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
