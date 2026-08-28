@@ -77,7 +77,10 @@ $NodeBin = $null
 # Check pinned node
 $NodePinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
 if (Test-Path $NodePinFile) {
-    $pinned = (Get-Content $NodePinFile -Raw).Trim()
+    # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and
+    # Windows PowerShell 5.1 defaults Get-Content to the ANSI code page,
+    # which would corrupt it into "??" (same pattern as the other hooks).
+    $pinned = ([string](Get-Content -LiteralPath $NodePinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
     if ($pinned -and (Test-NodeSuitable $pinned)) {
         $NodeBin = $pinned
     }
