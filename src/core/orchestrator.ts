@@ -214,7 +214,7 @@ export class Orchestrator extends EventEmitter {
       this.config.globalSpanAttributes ?? {},
       path.join(this.dataDir, 'span-attributes.json'),
     );
-    this.flusher = await this.buildFlusher();
+    this.flusher = await this.buildFlusher(this.readPackageVersion());
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
@@ -715,12 +715,12 @@ export class Orchestrator extends EventEmitter {
     return path.isAbsolute(resolved) ? resolved : null;
   }
 
-  private async buildFlusher(): Promise<BaseFlusher> {
+  private async buildFlusher(pilotVersion: string): Promise<BaseFlusher> {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
-      const r = new SlsFlusher(cfg.sls, this.dataDir);
+      const r = new SlsFlusher(cfg.sls, this.dataDir, pilotVersion);
       await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
