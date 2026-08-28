@@ -73,6 +73,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
+| `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
 | `--package-url <url>` | Install from a custom URL or local `file://` path. |
 | `--sls-endpoint <url>` | SLS endpoint URL. |
 | `--sls-project <name>` | SLS project name. |
@@ -90,6 +91,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--service-name-prefix <name>` | Service name prefix used by reporting backends. |
 | `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
+
+For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. Open `http://127.0.0.1:9000/` after installation. Invalid or missing port values stop installation before downloads or service changes.
 
 ## Verify Installation
 
@@ -122,7 +125,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open:
+The local dashboard starts and stops with the collector. Open the default address below, or use your configured port:
 
 ```text
 http://127.0.0.1:8765/

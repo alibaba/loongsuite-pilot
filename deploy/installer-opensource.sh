@@ -18,6 +18,9 @@
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
 #
+# Optional Dashboard port (default: 8765; preserve existing port on reinstall):
+#   curl -fsSL <URL>/installer.sh | bash -s -- install --dashboard-port 9000
+#
 # Upgrade (preserve config, auto-rollback on failure):
 #   curl -fsSL <URL>/installer.sh | bash -s -- upgrade
 #
@@ -55,6 +58,8 @@ SLS_AK_ID=""
 SLS_AK_SECRET=""
 SLS_API_KEY=""
 DATA_DIR="$DEFAULT_DATA_DIR"
+DASHBOARD_PORT=""
+DASHBOARD_PORT_SET=0
 LOG_LEVEL=""
 USER_ID=""
 COLLECT_LOG=""
@@ -102,6 +107,13 @@ while [[ $# -gt 0 ]]; do
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
+        --dashboard-port)
+            if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then
+                echo "--dashboard-port requires an integer between 1 and 65535" >&2
+                exit 1
+            fi
+            DASHBOARD_PORT="$2"; DASHBOARD_PORT_SET=1; shift 2 ;;
+        --dashboard-port=*)   DASHBOARD_PORT="${1#*=}"; DASHBOARD_PORT_SET=1; shift ;;
         --log-level)          LOG_LEVEL="$2"; shift 2 ;;
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
         --userId|--user.id)   USER_ID="$2"; shift 2 ;;
@@ -139,6 +151,13 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
+    if ! [[ "$DASHBOARD_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DASHBOARD_PORT < 1 || 10#$DASHBOARD_PORT > 65535 )); then
+        echo "--dashboard-port must be an integer between 1 and 65535" >&2
+        exit 1
+    fi
+fi
 
 if [ -n "$MASK_MODE" ]; then
     case "$MASK_MODE" in
@@ -771,6 +790,7 @@ const checks = [
   { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
+  { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
   { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
 ];
@@ -781,8 +801,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -982,6 +1002,7 @@ write_config() {
     printf '%s' "$PROBE_RESULT" | \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
+        LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
@@ -997,6 +1018,8 @@ const config = {
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }
+const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
+if (dashboardPort) config.dashboard.port = Number(dashboardPort);
 if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {

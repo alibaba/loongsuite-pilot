@@ -17,6 +17,9 @@
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
 #
+# Optional Dashboard port (default: 8765; preserve existing port on reinstall):
+#   .\installer-opensource.ps1 install -DashboardPort 9000
+#
 # Upgrade (preserve config, auto-rollback on failure):
 #   .\installer-opensource.ps1 upgrade
 #
@@ -38,6 +41,7 @@ param(
     [string]$SlsApiKey,
     [string]$PackageUrl,
     [string]$DataDir,
+    [string]$DashboardPort,
     [string]$LogLevel,
     [Alias("user.id")]
     [string]$UserId,
@@ -99,8 +103,14 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 }
 
 # ============================================================
-# Validate mask options
+# Validate install options
 # ============================================================
+if ($PSBoundParameters.ContainsKey('DashboardPort')) {
+    if ($DashboardPort -notmatch '\A[0-9]{1,5}\z' -or [int]$DashboardPort -lt 1 -or [int]$DashboardPort -gt 65535) {
+        Write-Error "-DashboardPort must be an integer between 1 and 65535"
+        exit 1
+    }
+}
 if ($MaskMode) {
     if ($MaskMode -notin @("all", "none", "custom")) {
         Write-Error "Unknown mask mode: $MaskMode (use 'all', 'custom', or 'none')"
@@ -916,6 +926,7 @@ function Confirm-ConfigOverwrite {
         cmsEndpoint = $CmsEndpoint
         cmsWorkspace = $CmsWorkspace
         serviceNamePrefix = $ServiceNamePrefix
+        dashboardPort = $DashboardPort
         maskMode = $MaskMode
         maskTypes = $MaskTypes
     } | ConvertTo-Json -Compress
@@ -943,6 +954,7 @@ const checks = [
   { label: 'cms.endpoint',      oldVal: (old.cms||{}).endpoint||'',      newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
+  { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
 ];
@@ -1195,6 +1207,7 @@ function Write-Config {
     $cfgArgs = [ordered]@{
         configPath        = $configFile
         dataDir           = $DataDir
+        dashboardPort     = "$DashboardPort"
         slsEndpoint       = "$SlsEndpoint"
         slsProject        = "$SlsProject"
         slsLogstore       = "$SlsLogstore"
@@ -1242,6 +1255,7 @@ const config = {
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }
+if (opts.dashboardPort) config.dashboard.port = Number(opts.dashboardPort);
 if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
