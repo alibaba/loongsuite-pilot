@@ -38,17 +38,18 @@ class MockSessionInput extends BaseSessionInput {
 
   protected async processSessionLine(
     record: Record<string, unknown>,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
     const type = record.type as string;
-    if (type !== 'action') return null;
+    if (type !== 'action') return [];
 
-    return buildTestEntry({
+    const entry = buildTestEntry({
       sessionId: (record.session_id as string) ?? '',
       agentType: this.agentType,
       actionType: ActionType.Edit,
       filePath: (record.file_path as string) ?? '',
       timestamp: (record.timestamp as number) ?? Date.now(),
     });
+    return entry ? [entry] : [];
   }
 }
 

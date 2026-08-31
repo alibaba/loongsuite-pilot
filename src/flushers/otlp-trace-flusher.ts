@@ -40,7 +40,7 @@ import {
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'interrupted', 'error']);
 const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
 const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',

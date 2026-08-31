@@ -74,8 +74,13 @@ export class HermesLogInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     _filePath: string,
-  ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.Hermes, 'hermes-agent');
+  ): Promise<AgentActivityEntry[]> {
+    // Round 3 (PR #233): BaseSessionInput.processSessionLine now returns an
+    // array of entries. Hermes source records are 1:1 with normalized
+    // entries, so the hook transform result is wrapped in a single-element
+    // array. Return `[]` (after filtering null) to skip.
+    const entry = await transformHookRecord(record, ClientType.Hermes, 'hermes-agent');
+    return entry ? [entry] : [];
   }
 }
 

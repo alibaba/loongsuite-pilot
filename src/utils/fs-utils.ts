@@ -227,9 +227,47 @@ export async function ensureDir(path: string): Promise<void> {
 }
 
 /**
- * Expands a leading `~` to the user home directory.
+ * Expands `~` (leading) and env-var tokens to runtime values.
+ *
+ *   - `~` and `~/...` -> user home directory (per platform)
+ *   - `%VAR%` (Windows) -> `process.env.VAR` (only expanded on Windows;
+ *     treated as a literal on POSIX so paths containing `%` are not
+ *     accidentally rewritten)
+ *   - `$VAR` and `${VAR}` (POSIX) -> `process.env.VAR` (expanded on
+ *     POSIX; on Windows these are treated as literal text since Windows
+ *     batch uses `%VAR%`)
+ *
+ * Round 8 fix (PR #233, addressing fangxiu-wf review): the official
+ * MiniMax Code 3.0.60 Windows desktop client writes its native data
+ * to `%APPDATA%\MiniMax` and `~/.minimax-agent-cn`. Without env-var
+ * expansion, the agent def could not reference either location on
+ * Windows.
  */
 export function resolveHome(filepath: string): string {
+  if (!filepath) return filepath;
+
+  // Platform-specific env-var expansion. We keep the two styles
+  // platform-scoped to avoid accidental rewriting:
+  //   - POSIX shells (bash / zsh) use $VAR and ${VAR}; users on POSIX
+  //     sometimes use literal `%` in paths (rare but legal).
+  //   - Windows cmd / PowerShell use %VAR%; users on Windows rarely
+  //     use literal `$` in path names.
+  if (process.platform === 'win32') {
+    filepath = filepath.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, name) => {
+      const v = process.env[name];
+      return v !== undefined ? v : m;
+    });
+  } else {
+    filepath = filepath.replace(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+      (m, braceName, plainName) => {
+        const name = braceName ?? plainName;
+        const v = process.env[name];
+        return v !== undefined ? v : m;
+      },
+    );
+  }
+
   if (filepath === '~') {
     return os.homedir();
   }

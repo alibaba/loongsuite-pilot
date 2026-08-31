@@ -18,6 +18,7 @@ export type AgentEventName =
   | 'tool.result'
   | 'skill.use'
   | 'tool.approve'
+  | 'diagnostic'
   | 'other';
 
 export type JsonValue =

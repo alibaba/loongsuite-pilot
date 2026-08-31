@@ -6,6 +6,7 @@ import {
   cleanStaleTmpFiles,
   readJsonFile,
   writeJsonFile,
+  resolveHome,
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
 
@@ -138,5 +139,116 @@ describe('readJsonFile', () => {
     const broken = path.join(dir, 'broken.json');
     await fs.writeFile(broken, '\uFEFF{"a":', 'utf8');
     expect(await readJsonFile(broken)).toBeNull();
+  });
+});
+
+// Round 8 fix (PR #233): env-var expansion in resolveHome, so agent defs
+// can reference Windows %APPDATA% / POSIX $VAR without runtime
+// path-rewriting surprises. Behavior is platform-scoped: Windows only
+// rewrites %VAR%, POSIX only rewrites $VAR/${VAR}.
+describe('resolveHome env-var expansion', () => {
+  const originalPlatform = process.platform;
+  // Env vars we touch in the suite. Round 9 fix (PR #233, copilot
+  // suppressed comment): the previous afterEach unconditionally deleted
+  // every tracked var if defined, which clobbered any value another
+  // test had previously set on `process.env` — making the suite
+  // order-dependent on any other test that touches these vars. Snapshot
+  // each var's pre-test value and restore that exact value (delete if
+  // it was undefined, restore the original string otherwise).
+  const tracked = ['APPDATA', 'HOME', 'NOT_SET_VAR'] as const;
+  const snapshot: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of tracked) snapshot[key] = process.env[key];
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    vi.restoreAllMocks();
+    for (const key of tracked) {
+      const original = snapshot[key];
+      if (original === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = original;
+      }
+    }
+  });
+
+  it('expands %VAR% on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.APPDATA = 'C:\\Users\\test';
+    expect(resolveHome('%APPDATA%\\MiniMax\\settings.json'))
+      .toBe('C:\\Users\\test\\MiniMax\\settings.json');
+  });
+
+  it('expands $VAR and ${VAR} on POSIX', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    process.env.HOME = '/home/test';
+    expect(resolveHome('$HOME/.minimax-code/rollout'))
+      .toBe('/home/test/.minimax-code/rollout');
+    expect(resolveHome('${HOME}/.minimax-code/rollout'))
+      .toBe('/home/test/.minimax-code/rollout');
+  });
+
+  it('does NOT expand %VAR% on POSIX (avoids rewriting literal %)', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    // No APPDATA env, but the literal % should pass through untouched.
+    expect(resolveHome('%APPDATA%/foo')).toBe('%APPDATA%/foo');
+  });
+
+  it('does NOT expand $VAR on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.HOME = 'C:\\Users\\test';
+    expect(resolveHome('$HOME/foo')).toBe('$HOME/foo');
+  });
+
+  it('leaves %VAR% literal when the env var is undefined', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    // NOT_SET is not set; should pass through untouched.
+    expect(resolveHome('%NOT_SET_VAR%\\foo')).toBe('%NOT_SET_VAR%\\foo');
+  });
+
+  it('still expands ~ on all platforms', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    const home = os.homedir();
+    expect(resolveHome('~/.minimax-code')).toBe(path.join(home, '.minimax-code'));
+  });
+
+  it('Round 9: snapshot mechanism captures pre-test env-var state (per-test, per-var)', () => {
+    // Round 9 fix (PR #233, copilot suppressed comment): the previous
+    // afterEach unconditionally deleted APPDATA / HOME / NOT_SET_VAR
+    // whenever they were defined, which clobbered any value another
+    // test (or a parent setup) had set on process.env. This made the
+    // suite order-dependent on any other test that touched these vars.
+    // The new afterEach snapshots each tracked var in beforeEach and
+    // restores the exact pre-test value (delete if originally
+    // undefined, restore the original string otherwise).
+    //
+    // Round 20 fix (PR #233, copilot suppressed comment): the
+    // previous test name claimed "afterEach restores ..." but the
+    // assertion actually ran INSIDE the test body, before
+    // afterEach. This test only verifies the snapshot mechanism
+    // (per-var, per-test scope) and the resolveHome env-var
+    // expansion. The actual post-afterEach restoration is
+    // verified transitively: every OTHER test in this describe
+    // block sets its own env vars and reads them back without
+    // seeing this test's mutations, which is only possible if
+    // afterEach restores between tests.
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.APPDATA = 'C:\\round9-marker';
+    expect(resolveHome('%APPDATA%\\foo')).toBe('C:\\round9-marker\\foo');
+    // The snapshot is taken in beforeEach. The test body's mutation
+    // of APPDATA does not affect the snapshot, so the afterEach
+    // (which runs after this body returns) will restore APPDATA to
+    // the snapshot value. This assertion verifies the snapshot
+    // captured the pre-test HOME value (set by the parent process
+    // or a prior test's afterEach).
+    expect(process.env.HOME).toBe(snapshot['HOME']);
+    // The test body's mutation of APPDATA must NOT bleed into the
+    // snapshot. snapshot['APPDATA'] is whatever the parent
+    // process had set (or undefined). The afterEach will use
+    // snapshot['APPDATA'] to restore, not process.env.APPDATA.
+    expect(snapshot['APPDATA']).not.toBe('C:\\round9-marker');
   });
 });

@@ -267,7 +267,7 @@ export class QoderWorkLogInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
     // BaseSessionInput parses each line via JSON.parse first. For SDK logs
     // (non-JSON), JSON.parse will throw and BaseSessionInput logs a warning.
     // To handle plain text lines, we override collect() below to bypass the
@@ -275,7 +275,7 @@ export class QoderWorkLogInput extends BaseSessionInput {
     // accidental JSON-shaped lines that slip through.
     void record;
     void filePath;
-    return null;
+    return [];
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {

@@ -33,6 +33,7 @@
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
+| MiniMax Code | `minimax-code` | Hook 集成支持 `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` 生命周期事件，并配合 transcript 尾随提供 per-LLM `llm.request` / `llm.response` 事件配对（参见 `agent-onboarding.md` 的 hybrid collection 模式）。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。

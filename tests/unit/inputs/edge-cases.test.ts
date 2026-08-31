@@ -42,8 +42,16 @@ class EdgeSessionInput extends BaseSessionInput {
     } catch { return []; }
   }
 
-  protected async processSessionLine(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
-    return buildTestEntry({ filePath: (record.file_path as string) ?? '' });
+  protected async processSessionLine(
+    record: Record<string, unknown>,
+    _filePath: string,
+  ): Promise<AgentActivityEntry[]> {
+    // BaseSessionInput.processSessionLine now returns AgentActivityEntry[]
+    // (Round 3, PR #233 multi-entry refactor). Skip returns []; this edge-case
+    // input always emits one entry per line, mirroring the prior single-entry
+    // shape.
+    const entry = buildTestEntry({ filePath: (record.file_path as string) ?? '' });
+    return entry ? [entry] : [];
   }
 }
 

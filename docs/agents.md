@@ -34,6 +34,7 @@ type differences are called out in the notes.
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
+| MiniMax Code | `minimax-code` | Hook integration for `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` lifecycle events, plus a sibling transcript tail for per-LLM `llm.request` / `llm.response` event pairs (hybrid collection per `agent-onboarding.md`). |
 
 The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL

@@ -38,6 +38,10 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('mimo-code')).toBe('mimo-code');
   });
 
+  it('maps minimax-code to minimax-code', () => {
+    expect(resolveAgentSystem('minimax-code')).toBe('minimax-code');
+  });
+
   it('maps pi-coding-agent to pi', () => {
     expect(resolveAgentSystem('pi-coding-agent')).toBe('pi');
   });
@@ -64,7 +68,7 @@ describe('resolveAgentSystem', () => {
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
       'cursor', 'cursor-hook', 'grok-build',
-      'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes', 'dsh',
+      'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'minimax-code', 'pi-coding-agent', 'workbuddy', 'hermes', 'dsh',
     ];
     for (const key of expectedKeys) {
       expect(AGENT_SYSTEM_MAP[key]).toBeDefined();

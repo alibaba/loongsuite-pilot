@@ -1,0 +1,5 @@
+{"event":"SessionStart","sessionId":"sess-test-001","timestamp":"2026-08-10T12:00:00.000Z","traceId":"11111111-2222-3333-4444-555555555555","cwd":"/tmp/minimax-code-test"}
+{"event":"UserPromptSubmit","sessionId":"sess-test-001","turnId":"turn-1","timestamp":"2026-08-10T12:00:01.000Z","prompt":"hello world"}
+{"event":"PreToolUse","sessionId":"sess-test-001","turnId":"turn-1","timestamp":"2026-08-10T12:00:02.000Z","toolName":"Read","toolCallId":"call-1","toolInput":{"file_path":"/etc/hosts"}}
+{"event":"PostToolUse","sessionId":"sess-test-001","turnId":"turn-1","timestamp":"2026-08-10T12:00:03.000Z","toolName":"Read","toolCallId":"call-1","toolInput":{"file_path":"/etc/hosts"},"toolResult":"127.0.0.1 localhost\n"}
+{"event":"Stop","sessionId":"sess-test-001","turnId":"turn-1","timestamp":"2026-08-10T12:00:04.000Z","toolCallCount":1}
