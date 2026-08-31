@@ -187,6 +187,23 @@ describe('QoderWorkTraceInput', () => {
     expect(entries[0]['workspace.path']).toBe(TEST_CWD);
   });
 
+  it('strips a legacy bare runtime version while preserving the agent-scoped version', async () => {
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const entry = buildHookEntry({
+      version: '1.1.26',
+      'agent.qoderwork.version': '1.1.26',
+    });
+    await fs.writeFile(hookFile, JSON.stringify(entry) + '\n');
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].version).toBeUndefined();
+    expect(entries[0]['agent.qoderwork.version']).toBe('1.1.26');
+  });
+
   it('resumes from offset on second poll', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const entry1 = buildHookEntry({ 'event.id': 'e1', 'gen_ai.turn.id': 'turn-1' });

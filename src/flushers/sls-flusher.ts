@@ -12,6 +12,7 @@ import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
+import { readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
 import {
@@ -115,6 +116,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly serviceName: string;
   private readonly serviceNamePrefix: string;
   private readonly userAgent: string;
+  private readonly pilotVersion: string;
 
   private readonly resolvedTimeoutMs: number;
   private readonly resolvedRetryMaxAttempts: number;
@@ -124,7 +126,11 @@ export class SlsFlusher extends BaseFlusher {
   private readonly dispatcher: UndiciAgent | undefined;
   private flushing = false;
 
-  constructor(config: SlsFlusherConfig, dataDir: string) {
+  constructor(
+    config: SlsFlusherConfig,
+    dataDir: string,
+    pilotVersion = readInstalledVersion(dataDir),
+  ) {
     super();
     this.config = config;
     this.failedLogWriter = new SlsFailureLogWriter(
@@ -133,6 +139,7 @@ export class SlsFlusher extends BaseFlusher {
     this.serviceName = config.serviceName || '';
     this.serviceNamePrefix = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
+    this.pilotVersion = pilotVersion;
 
     const tc = config.timeout ?? {};
     const rc = config.retry ?? {};
@@ -192,6 +199,7 @@ export class SlsFlusher extends BaseFlusher {
 
   async send(entry: AgentActivityEntry): Promise<void> {
     const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
+    serialized.version = this.pilotVersion;
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
 
     for (const endpoint of this.config.endpoints) {

@@ -125,6 +125,15 @@ describe('SlsFlusher', () => {
       expect(content['agent.file_path']).toBe('/tmp/test/file.ts');
       expect(content['gen_ai.agent.type']).toBe('qoder');
     });
+
+    it('sets version to the Pilot version for every SLS entry', async () => {
+      const entry = buildTestEntry({ version: 'agent-runtime-version' });
+      await flusher.send(entry);
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.logs[0].content.version).toBe('0.0.0-test');
+    });
   });
 
   describe('redact logic (T013)', () => {
