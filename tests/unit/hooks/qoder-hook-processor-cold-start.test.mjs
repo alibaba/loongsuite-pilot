@@ -481,7 +481,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       's1', 's2', 's3',
     ]);
     expect(responses.map(record => record['gen_ai.response.finish_reasons'])).toEqual([
-      ['tool_call'], ['tool_call'], ['end_turn'],
+      ['tool_use'], ['tool_use'], ['end_turn'],
     ]);
   });
 });

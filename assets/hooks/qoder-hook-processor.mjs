@@ -1139,7 +1139,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       .find(r => r.type === 'assistant' && r.message?.stop_reason)?.message?.stop_reason;
     let finishReason;
     if (toolCalls.length > 0) {
-      finishReason = 'tool_call';
+      finishReason = 'tool_use';
     } else if (lastStopReason === 'max_tokens') {
       finishReason = 'max_tokens';
     } else if (lastStopReason === 'end_turn' || (i === boundaries.length - 1)) {

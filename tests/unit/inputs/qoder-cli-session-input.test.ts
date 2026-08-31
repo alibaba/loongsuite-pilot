@@ -97,7 +97,7 @@ describe('QoderCliSessionInput', () => {
     const entries = await input.collectOnce();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.response.id']).toBe('new-request');
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
     expect(entries[0]?.['agent.request_id']).toBe('new-request');
     expect(entries[0]?.['gen_ai.usage.input_tokens']).toBe(20);
@@ -114,7 +114,7 @@ describe('QoderCliSessionInput', () => {
     const entries = await input.collectOnce();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.response.id']).toBe('runtime-request');
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
     expect(entries[0]?.['agent.request_id']).toBe('runtime-request');
     expect(entries[0]?.['gen_ai.usage.input_tokens']).toBe(33);
@@ -186,8 +186,52 @@ describe('QoderCliSessionInput', () => {
       'agent.stop_reason': 'end_turn',
       'agent.content_block_count': 2,
     });
-    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.response.id']).toBe('request-123');
+    expect(entries[0]?.['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+  });
+
+  it('emits gen_ai.response.finish_reasons as [data.stop_reason] (passthrough)', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const row = makeModelResponse({ requestId: 'req-fr', seq: 1 });
+    (row.data as Record<string, unknown>).stop_reason = 'tool_use';
+
+    const entry = await input.mapOnce(row, file);
+
+    expect(entry?.['event.name']).toBe('llm.response');
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['tool_use']);
+    expect(Array.isArray(entry?.['gen_ai.response.finish_reasons'])).toBe(true);
+  });
+
+  it('emits gen_ai.response.id top-level field equal to responseId', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const row = makeModelResponse({ requestId: 'resp-id-xyz', seq: 1 });
+
+    const entry = await input.mapOnce(row, file);
+
+    expect(entry?.['gen_ai.response.id']).toBe('resp-id-xyz');
+    expect(entry?.['agent.request_id']).toBe('resp-id-xyz');
+  });
+
+  it('omits gen_ai.response.finish_reasons and gen_ai.response.id when stop_reason/request_id missing', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const row = makeModelResponse({ seq: 1 });
+    delete (row.data as Record<string, unknown>).stop_reason;
+    delete (row as Record<string, unknown>).request_id;
+
+    const entry = await input.mapOnce(row, file);
+
+    expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(entry?.['gen_ai.response.id']).toBeUndefined();
   });
 
   it('generates deterministic event ids for the same source row', async () => {

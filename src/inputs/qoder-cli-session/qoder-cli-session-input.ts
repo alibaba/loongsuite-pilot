@@ -132,6 +132,9 @@ export class QoderCliSessionInput extends BaseSessionInput {
       base['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
       base['gen_ai.usage.cache_creation.input_tokens'] = cacheWriteTokens;
       base['gen_ai.usage.total_tokens'] = sumIfPresent(inputTokens, outputTokens);
+      if (responseId) base['gen_ai.response.id'] = responseId;
+      const stopReason = stringValue(data.stop_reason);
+      if (stopReason) base['gen_ai.response.finish_reasons'] = [stopReason];
     }
 
     return buildAgentActivityEntry(base);
