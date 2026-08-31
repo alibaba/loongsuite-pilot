@@ -351,7 +351,9 @@ function buildRulesJson(sections, operationKindMapping) {
 
   return {
     version: '1.0',
-    generatedAt: new Date().toISOString(),
+    // No generatedAt timestamp on purpose: the file is committed, and a
+    // per-run timestamp would produce a meaningless diff on every
+    // regeneration (review feedback).
     specSource: 'docs/EVENT_LOG_TO_TRACE_SPEC.md',
 
     commonAttributes: { must: commonMust, should: commonShould },

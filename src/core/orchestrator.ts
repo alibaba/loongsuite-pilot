@@ -61,6 +61,8 @@ import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
+import { ZCodeHookInput } from '../inputs/zcode-hook/zcode-hook-input.js';
+import { ZCodeRolloutInput } from '../inputs/zcode-rollout/zcode-rollout-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
@@ -147,6 +149,8 @@ export class Orchestrator extends EventEmitter {
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
+    'zcode-hook': 'zcode',
+    'zcode-rollout': 'zcode',
     'hermes-agent-log': 'hermes-agent',
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
@@ -541,6 +545,8 @@ export class Orchestrator extends EventEmitter {
         settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
+        eventsRoot: def.hook.eventsRoot,
+        requiresHooksEnabled: def.hook.requiresEnabledFlag === true,
         // Runtime gate: a user who has turned this agent off (config.agents[id]
         // .enabled === false) must never have its hook re-injected. Evaluated on
         // each check so a config change takes effect without rebuilding targets.
@@ -1608,6 +1614,57 @@ export class Orchestrator extends EventEmitter {
             listenerCfg.workbuddy?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+      }),
+    );
+
+    // --- ZCode Hook (Stop hook ENTRY/AGENT envelope path) ---
+    // Reads JSONL written by assets/hooks/zcode-hook-processor.mjs (Stop hook
+    // stdin → ENTRY/AGENT envelope, no messages). Messages come from the
+    // independent ZCodeRolloutInput below. Cross-source parent linking by
+    // trace_id + gen_ai.session.id + gen_ai.turn.id; AGENT.span_id and
+    // STEP.parent_span_id derived from the SAME shared deriveSpanId() so
+    // they match across processes.
+    const zcodeHookLogDir = path.join(this.dataDir, 'logs', 'zcode');
+    await ensureDir(zcodeHookLogDir);
+    const zcodeHookInput = new ZCodeHookInput({
+      stateStore: this.stateStore,
+      logDir: zcodeHookLogDir,
+    });
+    this.inputManager.registerInput(zcodeHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeHookInput, {
+        watchPaths: [zcodeHookLogDir],
+        isAvailable: async () => directoryExists(zcodeHookLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-hook',
+            listenerCfg['zcode-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-hook']?.pollInterval,
+      }),
+    );
+
+    // --- ZCode Rollout (main data path: LLM/STEP/TOOL + messages) ---
+    // Tails ~/.zcode/cli/rollout/model-io-sess_*.jsonl directly. Emits
+    // llm.request + llm.response (with gen_ai.input/output.messages) +
+    // tool.call per response.toolCalls[] + STEP envelope. Baseline skip
+    // on first install: per-file byteOffset initialized to EOF so pilot
+    // doesn't replay history (spec §1.4). turnIdleTimeoutMs in the OTLP
+    // flusher handles the "hook didn't fire" fallback (spec §1.2).
+    const zcodeRolloutInput = new ZCodeRolloutInput({
+      stateStore: this.stateStore,
+    });
+    this.inputManager.registerInput(zcodeRolloutInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeRolloutInput, {
+        watchPaths: ZCodeRolloutInput.getWatchPaths(),
+        isAvailable: ZCodeRolloutInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-rollout']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-rollout',
+            listenerCfg['zcode-rollout']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-rollout']?.pollInterval,
       }),
     );
 

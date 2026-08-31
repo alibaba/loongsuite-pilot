@@ -200,6 +200,14 @@ export class HookStrategy implements DeployStrategy {
         return { success: true, agentId: def.id, deployMode: 'hook' };
       }
 
+      // Agents declaring requiresEnabledFlag (zcode) gate hook execution
+      // behind a global hooks.enabled switch in their config. Fresh installs
+      // and users who previously disabled hooks need this set. Preserve
+      // existing user config — only write if absent or false.
+      if (hookConfig.requiresEnabledFlag) {
+        await this.ensureHooksEnabledSwitch(hookConfig.settingsPath);
+      }
+
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
       let retiredTrustKeys: string[] = [];
       if (hookConfig.trustToml && retiredHookDefs.length > 0) {
@@ -365,6 +373,34 @@ export class HookStrategy implements DeployStrategy {
       }
     }
 
+    // Disable the hooks.enabled switch on undeploy (agents declaring
+    // requiresEnabledFlag, e.g. zcode) — but ONLY when no user-managed hook
+    // entries remain. Unconditionally writing enabled=false would also turn
+    // off third-party hooks that survive in the same config (review fix).
+    if (def.hook?.requiresEnabledFlag && def.hook?.settingsPath) {
+      try {
+        const resolvedPath = resolveHome(def.hook.settingsPath);
+        const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
+        const hooks = existing?.hooks;
+        if (hooks && typeof hooks === 'object' && !Array.isArray(hooks)) {
+          const hooksObj = hooks as Record<string, unknown>;
+          const hasRemainingHookEntries = Object.entries(hooksObj)
+            .filter(([k]) => k !== 'enabled')
+            .some(([, v]) =>
+              (Array.isArray(v) && v.length > 0) ||
+              (v && typeof v === 'object' && Object.values(v as Record<string, unknown>)
+                .some((vv) => Array.isArray(vv) && vv.length > 0)));
+          if (!hasRemainingHookEntries && hooksObj.enabled === true) {
+            hooksObj.enabled = false;
+            await writeJsonFile(resolvedPath, existing!);
+            logger.info('zcode hooks.enabled set to false on undeploy (no user hooks remain)', { settingsPath: resolvedPath });
+          }
+        }
+      } catch (err) {
+        logger.warn('zcode hooks.enabled cleanup failed (non-blocking)', { error: String(err) });
+      }
+    }
+
     return allOk;
   }
 
@@ -444,11 +480,19 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) return [];
 
+    // eventsRoot lets agents with strict schemas (zcode.cjs hkn) place hook
+    // entries under `hooks.events.<event>` instead of the default
+    // `hooks.<event>`. Default behavior unchanged for all other agents.
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
+
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: hookJsonPath(event),
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -468,13 +512,17 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: hookJsonPath(event),
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
@@ -680,5 +728,37 @@ export class HookStrategy implements DeployStrategy {
       delete existing.version;
       await writeJsonFile(settingsPath, existing);
     }
+  }
+
+  /**
+   * Ensure the agent's config has hooks.enabled=true.
+   *
+   * Agents declaring `hook.requiresEnabledFlag` (zcode) gate hook execution
+   * behind this switch in their user-level config — without it the Stop hook
+   * never fires even though the hook command is registered. This method
+   * reads the existing config, sets the flag if missing or false, and
+   * writes back preserving all other user settings.
+   *
+   * Idempotent: skips write if already true.
+   * Safe: preserves existing user config keys.
+   */
+  private async ensureHooksEnabledSwitch(settingsPath: string): Promise<void> {
+    const resolvedPath = resolveHome(settingsPath);
+    const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
+    if (!existing) return; // ensureSettingsFile should have created it
+
+    // Guard: existing.hooks may be a non-object (e.g. boolean from user config).
+    // Only reuse if it's a plain object; otherwise start fresh.
+    const rawHooks = existing.hooks;
+    const hooks: Record<string, unknown> =
+      (rawHooks && typeof rawHooks === 'object' && !Array.isArray(rawHooks))
+        ? { ...(rawHooks as Record<string, unknown>) }
+        : {};
+    if (hooks.enabled === true) return; // already enabled
+
+    hooks.enabled = true;
+    existing.hooks = hooks;
+    await writeJsonFile(resolvedPath, existing);
+    logger.info('hooks.enabled set to true', { settingsPath: resolvedPath });
   }
 }

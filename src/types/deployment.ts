@@ -80,6 +80,23 @@ export interface AgentHookConfig {
    */
   rawCommand?: boolean;
   /**
+   * Optional intermediate path segment between `hooks` and the event name
+   * in the agent's settings JSON. Defaults to undefined (writes
+   * `hooks.<event>`). Set to `'events'` for agents whose schema strictly
+   * requires `hooks.events.<event>` (zcode.cjs hkn schema strict mode —
+   * writing `hooks.<event>` would be silently rejected and the hook would
+   * never fire). Spec §1.4 / source-evidence.md §4.
+   */
+  eventsRoot?: string;
+  /**
+   * When true, the agent gates ALL hook execution behind a global
+   * `hooks.enabled` switch in its settings (zcode). Deploy sets it to true
+   * (preserving the rest of the user config); undeploy flips it back to
+   * false only when no user-managed hook entries remain; the watchdog
+   * reports the config unhealthy while the switch is off.
+   */
+  requiresEnabledFlag?: boolean;
+  /**
    * Windows-only: shell to declare on the nested hook entry
    * (`{ command, type, shell }`). Some hosts (Qoder family) require an explicit
    * `"shell": "powershell"` so the host runs the `.ps1` command through

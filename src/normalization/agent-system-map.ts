@@ -18,6 +18,9 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'grok-build': 'grok',
   'hermes': 'hermes',
   'wukong': 'wukong',
+  'zcode': 'zcode',
+  'zcode-hook': 'zcode',
+  'zcode-rollout': 'zcode',
   'workbuddy': 'workbuddy',
   'dsh': 'dsh',
 };

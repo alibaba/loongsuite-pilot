@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { hashJson } from '../agent-event-normalizer.mjs';
 
 // ─── trace/span id 生成(纯 crypto,与 OTel JS SDK 内部 IdGenerator 行为一致) ───
 
@@ -91,4 +92,42 @@ export function writeJsonlRecords(logDir, agentId, records) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const lines = records.map((r) => JSON.stringify(r)).join('\n') + '\n';
   fs.appendFileSync(filePath, lines, 'utf-8');
+}
+
+// ─── W3C trace id + cross-source span_id derivation ───
+
+/**
+ * Convert a UUID (or any 32+ hex-with-dashes string) into a W3C-compatible
+ * 32-char lowercase hex trace_id. Non-UUID inputs (already 32-hex or other)
+ * are passed through as-is, lowercased — this preserves zcode's own traceId
+ * when it happens to already be in W3C form.
+ *
+ * Used by both the zcode hook-processor (mjs) and ZCodeRolloutInput (ts)
+ * so the OTLP flusher can stitch hook ENTRY/AGENT envelopes together with
+ * rollout LLM/STEP records under a single trace_id.
+ */
+export function toW3CTraceId(value) {
+  if (typeof value !== 'string' || value.length === 0) return '';
+  const stripped = value.replace(/-/g, '');
+  if (!/^[0-9a-fA-F]{32,}$/.test(stripped)) return value.toLowerCase();
+  return stripped.slice(0, 32).toLowerCase();
+}
+
+/**
+ * Deterministically derive a 16-hex span_id from a namespace + key material.
+ * Used by BOTH the zcode hook-processor (AGENT envelope span_id) AND the
+ * ZCodeRolloutInput (STEP parent_span_id referencing the AGENT envelope).
+ *
+ * Using the same function in both processes guarantees the cross-source
+ * parent_span_id / span_id pair matches without any shared in-process state
+ * — the OTLP flusher can stitch them purely by derived value equality.
+ *
+ * Salt prefix ensures different namespaces (ENTRY / AGENT / STEP / LLM / TOOL)
+ * never collide even with identical key material.
+ */
+export function deriveSpanId(namespace, ...keys) {
+  const ns = String(namespace || 'span');
+  const material = [ns, ...keys.map((k) => (typeof k === 'string' ? k : JSON.stringify(k ?? '')))].join('\0');
+  const full = hashJson(material) || '';
+  return full.slice(0, 16).toLowerCase();
 }

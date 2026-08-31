@@ -24,6 +24,20 @@ export interface PluginCheckTarget {
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
 
+  /**
+   * Optional nested key under `hooks` where hook entries live.
+   * e.g. eventsRoot="events" → check hooks.events.<event> instead of hooks.<event>.
+   * Used by agents with strict schemas like ZCode.
+   */
+  eventsRoot?: string;
+
+  /**
+   * When true, the agent gates ALL hook execution behind a global
+   * `hooks.enabled` switch in its settings (zcode). The watchdog reports
+   * the config unhealthy when the switch is off so repair re-enables it.
+   */
+  requiresHooksEnabled?: boolean;
+
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
   /** Arguments for the external install command. */
@@ -390,8 +404,22 @@ export class HookWatchdog {
     const missing: string[] = [];
     const hooksRoot = settings?.hooks as Record<string, unknown> | undefined;
 
+    // Global enable gate: agents that manage a `hooks.enabled` switch (zcode)
+    // must have it on, otherwise the registered commands never fire. Report
+    // it as a missing hook so repair (re-deploy) flips it back on.
+    if (target.requiresHooksEnabled && hooksRoot?.enabled !== true) {
+      missing.push('hooks.enabled');
+    }
+
+    // Support eventsRoot for agents with strict schemas (e.g. ZCode uses
+    // hooks.events.Stop instead of hooks.Stop). When eventsRoot is set,
+    // navigate one level deeper before checking for event arrays.
+    const eventContainer = target.eventsRoot
+      ? (hooksRoot?.[target.eventsRoot] as Record<string, unknown> | undefined)
+      : hooksRoot;
+
     for (const event of target.expectedHooks) {
-      const arr = hooksRoot?.[event];
+      const arr = eventContainer?.[event];
       if (!Array.isArray(arr)) {
         missing.push(event);
         continue;

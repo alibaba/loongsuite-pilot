@@ -617,4 +617,74 @@ describe('HookWatchdog', () => {
       expect(repairFn).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ─── ZCode: nested hooks.events + global hooks.enabled gate (review fix #3) ───
+
+  describe('zcode nested eventsRoot + hooks.enabled gate', () => {
+    const makeZcodeTarget = (tmpDir: string, overrides: Partial<PluginCheckTarget> = {}): PluginCheckTarget =>
+      makeClaudeTarget(tmpDir, {
+        agentId: 'zcode',
+        settingsPath: path.join(tmpDir, '.zcode', 'cli', 'config.json'),
+        expectedHooks: ['Stop'],
+        markers: ['zcode-loongsuite-pilot-hook'],
+        eventsRoot: 'events',
+        requiresHooksEnabled: true,
+        ...overrides,
+      });
+
+    const zcodeHealthySettings = (): Record<string, unknown> => ({
+      hooks: {
+        enabled: true,
+        events: {
+          Stop: [
+            { command: 'bash /opt/pilot/hooks/zcode-loongsuite-pilot-hook.sh stop' },
+          ],
+        },
+      },
+    });
+
+    it('reports healthy when hooks.enabled=true and hooks.events.Stop holds our command', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target = makeZcodeTarget(tmpDir, { repairFn });
+      await writeSettings(target.settingsPath, zcodeHealthySettings());
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 1, repaired: 0, skipped: 0 });
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('triggers repair when the command lives at hooks.events.Stop but hooks.enabled is false', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target = makeZcodeTarget(tmpDir, { repairFn });
+      const settings = zcodeHealthySettings() as any;
+      settings.hooks.enabled = false;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT treat a flat hooks.Stop entry as healthy when eventsRoot=events is set', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target = makeZcodeTarget(tmpDir, { repairFn });
+      // Wrong layout: entry directly under hooks.Stop instead of hooks.events.Stop.
+      await writeSettings(target.settingsPath, {
+        hooks: {
+          enabled: true,
+          Stop: [{ command: 'bash /opt/pilot/hooks/zcode-loongsuite-pilot-hook.sh stop' }],
+        },
+      });
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+  });
 });
