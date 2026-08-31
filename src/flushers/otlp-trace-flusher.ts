@@ -65,6 +65,11 @@ interface TurnBuffer {
   keyValue: string;
   agentType: string;
   sessionId?: string;
+  // Which collection path produced these records (agent.source). Two inputs may
+  // collect the same agent+session concurrently; Signal B must not treat one
+  // path's turn as a boundary for the other's. Undefined when the source does
+  // not stamp agent.source, in which case all such buffers count as one path.
+  dataSource?: string;
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
@@ -517,9 +522,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Different or unknown sessions may be concurrent; preempting one would
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
+    const incomingDataSource = (entry['agent.source'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
+      // Signal B assumes turns within a session arrive one after another, which
+      // only holds inside a single collection path. When two inputs collect the
+      // same session at once (qoder-transcript-hook + qoder-cli-session-segment),
+      // each mints turn ids from its own id space, so their buffers are
+      // concurrent rather than successive. Preempting across paths cuts both
+      // mid-turn: the truncated buffer often holds just the turn-entry "other",
+      // which converts standalone into a phantom ENTRY+AGENT pair.
+      if (buf.dataSource !== incomingDataSource) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
     }
@@ -547,13 +561,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
         keyValue: value,
         agentType,
         sessionId: incomingSessionId,
+        dataSource: incomingDataSource,
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
       };
       this.turnBuffers.set(key, buf);
-    } else if (!buf.sessionId && incomingSessionId) {
-      buf.sessionId = incomingSessionId;
+    } else {
+      if (!buf.sessionId && incomingSessionId) {
+        buf.sessionId = incomingSessionId;
+      }
+      if (!buf.dataSource && incomingDataSource) {
+        buf.dataSource = incomingDataSource;
+      }
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
