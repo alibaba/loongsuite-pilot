@@ -96,7 +96,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       'agent.openclaw.per_call_usage.count': 2,
       'gen_ai.turn.end': true,
     });
-    expect(records.filter(record => record['gen_ai.turn.start'] === true)).toHaveLength(1);
+    const turnStarts = records.filter(record => record['gen_ai.turn.start'] === true);
+    expect(turnStarts.map(record => record['event.name'])).toEqual(['other', 'agent.input']);
     expect(records.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal?.['gen_ai.output.messages']).toBeUndefined();
@@ -117,7 +118,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
     try {
-      const converted = await convertEventLogToReadableSpans(records as EventLogRecord[], { strict: false });
+      const traceRecords = records.filter(record => record['event.name'] !== 'agent.input');
+      const converted = await convertEventLogToReadableSpans(traceRecords as EventLogRecord[], { strict: false });
       expect(converted.warnings).toEqual([]);
       const kindCounts = converted.spans.reduce<Record<string, number>>((counts, span) => {
         const kind = String(span.attributes['gen_ai.span.kind']);

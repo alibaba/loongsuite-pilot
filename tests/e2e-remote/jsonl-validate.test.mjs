@@ -212,6 +212,13 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('bad_event_name=1');
   });
 
+  it('accepts agent.input as a valid event name', () => {
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'agent.input' })]);
+    const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('bad_event_name=0');
+  });
+
   it.each([
     {
       name: 'duplicate event IDs',

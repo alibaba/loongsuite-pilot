@@ -18,7 +18,15 @@ boundary.
 | `tool.result` | The result returned by a tool execution. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
+| `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
 | `other` | Other events that cannot be classified into the above event names. |
+
+During the compatibility period, an `other` carrying `gen_ai.input.messages` or
+`gen_ai.input.messages_delta` is preserved and followed by one `agent.input`.
+The two events have identical fields except `event.name` and `event.id`; the new
+ID is deterministically derived from the original. SLS, JSONL, and HTTP retain
+both events. OTLP Trace conversion continues to consume the legacy `other` and
+excludes the compatibility copy, so the Span tree does not gain an empty STEP.
 
 The four core `event.name` values map to GenAI audit events as follows:
 

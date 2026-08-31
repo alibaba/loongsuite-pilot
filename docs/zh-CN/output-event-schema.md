@@ -16,7 +16,14 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `tool.result` | 工具执行返回的结果。 |
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
+| `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
 | `other` | 无法归类到上述类型的其他事件。 |
+
+兼容期内，携带 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta` 的
+`other` 会被原样保留，并紧邻追加一条 `agent.input`。两条事件除
+`event.name` 和 `event.id` 外完全一致，新 ID 从原 ID 确定性派生。SLS、
+JSONL 和 HTTP 保留两条事件；OTLP Trace 转换继续消费旧 `other`，并在
+转换前排除兼容副本，因此不会增加空 STEP。
 
 四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
 
