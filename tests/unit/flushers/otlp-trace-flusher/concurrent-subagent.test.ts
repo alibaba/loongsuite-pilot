@@ -350,37 +350,58 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     expect(mockConvert).not.toHaveBeenCalled();
   });
 
-  it('does NOT let a second collection path preempt the first one in the same session', async () => {
-    // Qoder CLI is collected by two inputs at once while qoder-trace is off:
-    // qoder-transcript-hook (turn id = crypto.randomUUID()) and
-    // qoder-cli-session-segment (turn id = record.turn_id). They share the
-    // session id but mint turn ids from separate id spaces, so their buffers
-    // are concurrent, not successive. Preempting across paths truncated the
-    // hook buffer down to its turn-entry `other`, which the converter turns
-    // into a phantom ENTRY+AGENT pair with no turn/step/llm children.
+  // Qoder CLI is collected by two inputs at once while qoder-trace is off:
+  // qoder-transcript-hook (turn id = crypto.randomUUID()) and
+  // qoder-cli-session-segment (turn id = record.turn_id). They share the
+  // session id but mint turn ids from separate id spaces, so their buffers
+  // are concurrent, not successive. Preempting across paths truncated the
+  // hook buffer down to its turn-entry `other`, which the converter turns
+  // into a phantom ENTRY+AGENT pair with no turn/step/llm children.
+  //
+  // The two paths group under different key shapes, and that shape changes with
+  // #342, so both are covered below: Signal B walks every buffer of the same
+  // agent+session regardless of key shape, and the guard must hold either way.
+  const QODER_SESSION = 'qoder-cli-session-1';
+  const QODER_HOOK = {
+    'gen_ai.agent.type': 'qoder-cli',
+    'gen_ai.session.id': QODER_SESSION,
+    'gen_ai.turn.id': 'c0ffee00-0000-4000-8000-000000000001',
+    'agent.source': 'qoder-transcript-hook',
+    // The hook processor writes no trace_id, so turn.id decides the key.
+    'trace_id': undefined,
+  };
+
+  function findCall(
+    mockConvert: { mock: { calls: unknown[][] } },
+    source: string,
+  ): Record<string, unknown>[] | undefined {
+    const call = mockConvert.mock.calls.find(
+      (args) => ((args[0] as Record<string, unknown>[])[0])['agent.source'] === source,
+    );
+    return call?.[0] as Record<string, unknown>[] | undefined;
+  }
+
+  it('does NOT let the session-keyed segment path preempt the hook path in the same session', async () => {
+    // Production shape on this branch: qoder-cli-session-segment stamps neither
+    // gen_ai.turn.id nor trace_id — no input writes trace_id for Qoder CLI and
+    // upstreamLink is off by default — so its records fall through
+    // resolveGroupKey to `session:<sid>` while the hook path uses `turn:<uuid>`.
+    // This is the shape CI must cover until #342 lands.
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
-    const session = 'qoder-cli-session-1';
-    const hook = {
-      'gen_ai.agent.type': 'qoder-cli',
-      'gen_ai.session.id': session,
-      'gen_ai.turn.id': 'c0ffee00-0000-4000-8000-000000000001',
-      'agent.source': 'qoder-transcript-hook',
-      'trace_id': 'ddd12f3577b34da6a3ce929d0e0e4736',
-    };
     const segment = {
       'gen_ai.agent.type': 'qoder-cli',
-      'gen_ai.session.id': session,
-      'gen_ai.turn.id': 'segment-turn-7',
+      'gen_ai.session.id': QODER_SESSION,
       'agent.source': 'qoder-cli-session-segment',
-      'trace_id': 'eee12f3577b34da6a3ce929d0e0e4736',
+      'trace_id': undefined,
     };
 
     // Hook turn opens with the entry `other` carrying the user prompt.
-    await flusher.send(makeEntry({ ...hook, 'event.name': 'other' }));
-    // Segment path emits a record for the same session mid-stream.
+    await flusher.send(makeEntry({ ...QODER_HOOK, 'event.name': 'other' }));
+    // Segment path emits a record for the same session mid-stream. `tool_call`
+    // is not in TERMINAL_FINISH_REASONS, so Signal A does not fire here.
     await flusher.send(makeEntry({
       ...segment,
       'event.name': 'llm.response',
@@ -389,21 +410,122 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     // The hook buffer must still be open — nothing flushed yet.
     expect(mockConvert).not.toHaveBeenCalled();
 
+    // The segment buffer really is session-keyed, and on this branch it has no
+    // closer of its own: no terminal finish reason (that is what #342 supplies)
+    // and turnIdleTimeoutMs defaults to 0, leaving only the 64-buffer cap and
+    // shutdown. Read through the internal map because no public API exposes a
+    // buffer's key or completion state, and because triggerFlush deletes the
+    // buffer synchronously — so this observation cannot race the async export.
+    const buffers = (flusher as unknown as {
+      turnBuffers: Map<string, { completed: boolean }>;
+    }).turnBuffers;
+    expect([...buffers.keys()]).toContain(`session:${QODER_SESSION}`);
+    expect(buffers.get(`session:${QODER_SESSION}`)!.completed).toBe(false);
+
     // Hook turn finishes on its own signal.
-    await flusher.send(makeEntry({ ...hook, 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({ ...QODER_HOOK, 'event.name': 'llm.request' }));
     await flusher.send(makeEntry({
-      ...hook,
+      ...QODER_HOOK,
       'event.name': 'llm.response',
       'gen_ai.response.finish_reasons': ['stop'],
     }));
     await flusher.flush();
 
-    const hookCall = mockConvert.mock.calls.find(
-      ([records]) => (records[0] as Record<string, unknown>)['agent.source'] === 'qoder-transcript-hook',
-    );
-    expect(hookCall).toBeDefined();
     // All three hook records converted together — not an `other`-only skeleton.
-    expect(hookCall![0]).toHaveLength(3);
+    const hookRecords = findCall(mockConvert, 'qoder-transcript-hook');
+    expect(hookRecords).toBeDefined();
+    expect(hookRecords).toHaveLength(3);
+    // And the segment payload is intact rather than dropped: the guard prevents
+    // preemption, it does not discard the other path's records.
+    const segmentRecords = findCall(mockConvert, 'qoder-cli-session-segment');
+    expect(segmentRecords).toBeDefined();
+    expect(segmentRecords).toHaveLength(1);
+  });
+
+  it('does NOT let the turn-keyed segment path preempt the hook path once #342 lands', async () => {
+    // After #342 the segment input lifts turn_id and finish_reasons to
+    // top-level fields, so its records group under `turn:<record.turn_id>` and
+    // close on Signal A. This PR merges after #342, so that is the shape
+    // production will actually run — the guard has to hold there too, and the
+    // two turn ids still come from unrelated id spaces.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const segment = {
+      'gen_ai.agent.type': 'qoder-cli',
+      'gen_ai.session.id': QODER_SESSION,
+      'gen_ai.turn.id': 'segment-turn-7',
+      'agent.source': 'qoder-cli-session-segment',
+      'trace_id': undefined,
+    };
+
+    await flusher.send(makeEntry({ ...QODER_HOOK, 'event.name': 'other' }));
+    await flusher.send(makeEntry({
+      ...segment,
+      'event.name': 'llm.request',
+    }));
+    await flusher.send(makeEntry({ ...QODER_HOOK, 'event.name': 'llm.request' }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Each path now closes on its own Signal A, in interleaved order.
+    await flusher.send(makeEntry({
+      ...segment,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['end_turn'],
+    }));
+    await flusher.send(makeEntry({
+      ...QODER_HOOK,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.flush();
+
+    // Neither path truncated the other: both payloads are complete.
+    expect(findCall(mockConvert, 'qoder-transcript-hook')).toHaveLength(3);
+    expect(findCall(mockConvert, 'qoder-cli-session-segment')).toHaveLength(2);
+  });
+
+  it('does NOT let a hook turn preempt a segment buffer that opened first', async () => {
+    // Mirror image of the hook-first case. Signal B is evaluated on the
+    // incoming record, so whichever path arrives second is the one doing the
+    // preempting — the hook's records must not close a segment buffer either.
+    // Ordering between the two inputs is not controlled by anything, so both
+    // directions occur in the field.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const segment = {
+      'gen_ai.agent.type': 'qoder-cli',
+      'gen_ai.session.id': QODER_SESSION,
+      'agent.source': 'qoder-cli-session-segment',
+      'trace_id': undefined,
+    };
+
+    // Segment path opens first, with a non-terminal response.
+    await flusher.send(makeEntry({
+      ...segment,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['tool_call'],
+    }));
+    // Hook turn starts mid-stream and runs to its own terminal record.
+    await flusher.send(makeEntry({ ...QODER_HOOK, 'event.name': 'other' }));
+    await flusher.send(makeEntry({
+      ...segment,
+      'event.name': 'llm.request',
+    }));
+    await flusher.send(makeEntry({
+      ...QODER_HOOK,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.flush();
+
+    // Both payloads survive intact: the segment buffer kept both of its records
+    // instead of being cut in half by the hook turn starting.
+    expect(findCall(mockConvert, 'qoder-cli-session-segment')).toHaveLength(2);
+    expect(findCall(mockConvert, 'qoder-transcript-hook')).toHaveLength(2);
   });
 
   it('still preempts within one collection path', async () => {
