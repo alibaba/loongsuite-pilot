@@ -1150,13 +1150,13 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       .find(r => r.type === 'assistant' && r.message?.stop_reason)?.message?.stop_reason;
     let finishReason;
     if (toolCalls.length > 0) {
-      finishReason = 'tool_use';
+      finishReason = 'tool_call';
     } else if (lastStopReason === 'max_tokens') {
       finishReason = 'max_tokens';
     } else if (lastStopReason === 'end_turn' || (i === boundaries.length - 1)) {
       finishReason = 'end_turn';
     } else if (lastStopReason) {
-      finishReason = lastStopReason;
+      finishReason = normalizeFinishReason(lastStopReason);
     } else {
       finishReason = 'stop';
     }
@@ -1384,6 +1384,17 @@ function extractToolResults(rows) {
     }
   }
   return results;
+}
+
+// The transcript carries Anthropic's native stop_reason values, but
+// gen_ai.response.finish_reasons / output.messages[].finish_reason are the
+// normalized OTel GenAI enum. validate-trace.mjs rejects anything outside
+// VALID_FINISH_REASONS, so vendor values must be mapped before they leave
+// the processor. Qoder's raw value stays available via agent.qoder.* fields.
+const FINISH_REASON_ALIASES = { tool_use: 'tool_call' };
+
+function normalizeFinishReason(reason) {
+  return FINISH_REASON_ALIASES[reason] ?? reason;
 }
 
 function isMetaUser(row) {

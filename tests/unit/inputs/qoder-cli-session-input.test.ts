@@ -191,7 +191,12 @@ describe('QoderCliSessionInput', () => {
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
   });
 
-  it('emits gen_ai.response.finish_reasons as [data.stop_reason] (passthrough)', async () => {
+  it('normalizes the vendor stop_reason tool_use into the OTel value tool_call', async () => {
+    // gen_ai.response.finish_reasons is the normalized OTel GenAI enum:
+    // validate-trace.mjs errors on values outside VALID_FINISH_REASONS, and
+    // `tool_use` is Anthropic's native wording, not part of it. The transcript
+    // hook emits `tool_call` for the same situation, so both collection paths
+    // must agree or downstream aggregation splits one meaning across two values.
     const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
     await fs.mkdir(path.dirname(file), { recursive: true });
     const input = makeInput();
@@ -202,8 +207,26 @@ describe('QoderCliSessionInput', () => {
     const entry = await input.mapOnce(row, file);
 
     expect(entry?.['event.name']).toBe('llm.response');
-    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['tool_use']);
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
     expect(Array.isArray(entry?.['gen_ai.response.finish_reasons'])).toBe(true);
+    // The raw vendor value must stay reachable — normalization is a rename at
+    // the semantic-convention layer, not a loss of the source observation.
+    expect(entry?.['agent.stop_reason']).toBe('tool_use');
+  });
+
+  it('passes through stop_reason values that are already valid OTel finish reasons', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    for (const reason of ['end_turn', 'max_tokens', 'stop']) {
+      const row = makeModelResponse({ requestId: `req-${reason}`, seq: 1 });
+      (row.data as Record<string, unknown>).stop_reason = reason;
+
+      const entry = await input.mapOnce(row, file);
+
+      expect(entry?.['gen_ai.response.finish_reasons']).toEqual([reason]);
+    }
   });
 
   it('emits gen_ai.response.id top-level field equal to responseId', async () => {

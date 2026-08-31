@@ -134,7 +134,7 @@ export class QoderCliSessionInput extends BaseSessionInput {
       base['gen_ai.usage.total_tokens'] = sumIfPresent(inputTokens, outputTokens);
       if (responseId) base['gen_ai.response.id'] = responseId;
       const stopReason = stringValue(data.stop_reason);
-      if (stopReason) base['gen_ai.response.finish_reasons'] = [stopReason];
+      if (stopReason) base['gen_ai.response.finish_reasons'] = [normalizeFinishReason(stopReason)];
     }
 
     return buildAgentActivityEntry(base);
@@ -197,6 +197,16 @@ function extractSessionInfo(filePath: string): { sessionId: string; cwdKey: stri
     sessionId: path.basename(sessionDir),
     cwdKey: path.basename(cwdDir),
   };
+}
+
+// Segment records carry Anthropic's native stop_reason, but
+// gen_ai.response.finish_reasons is the normalized OTel GenAI enum — the same
+// one the transcript hook emits, so both collection paths must agree. The raw
+// value stays reachable through attributes.stop_reason.
+const FINISH_REASON_ALIASES: Record<string, string> = { tool_use: 'tool_call' };
+
+function normalizeFinishReason(reason: string): string {
+  return FINISH_REASON_ALIASES[reason] ?? reason;
 }
 
 function buildStepId(

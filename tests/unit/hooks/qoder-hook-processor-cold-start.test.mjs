@@ -481,7 +481,25 @@ describe('qoder-hook-processor cold-start recovery', () => {
       's1', 's2', 's3',
     ]);
     expect(responses.map(record => record['gen_ai.response.finish_reasons'])).toEqual([
-      ['tool_use'], ['tool_use'], ['end_turn'],
+      ['tool_call'], ['tool_call'], ['end_turn'],
     ]);
+    // Every emitted finish reason must survive validate-trace.mjs, whose
+    // VALID_FINISH_REASONS is hand-maintained and rejects vendor spellings such
+    // as Anthropic's `tool_use`. Checking against the whole set (rather than the
+    // two literals above) also catches any future stop_reason that reaches the
+    // output unmapped, since the transcript can carry arbitrary vendor values.
+    const validFinishReasons = new Set([
+      'stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens',
+    ]);
+    for (const record of responses) {
+      for (const reason of record['gen_ai.response.finish_reasons']) {
+        expect(validFinishReasons).toContain(reason);
+      }
+      // output.messages carries its own copy; validate-trace.mjs errors on that
+      // one specifically (rule schema.output_messages), so assert it too.
+      for (const message of record['gen_ai.output.messages'] ?? []) {
+        expect(validFinishReasons).toContain(message.finish_reason);
+      }
+    }
   });
 });
