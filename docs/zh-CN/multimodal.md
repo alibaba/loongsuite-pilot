@@ -2,6 +2,8 @@
 
 [English](../multimodal.md) | 简体中文
 
+> **实验性。** 多模态配置与事件字段可能调整。
+
 LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图像：内联 base64 或本地路径读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留图像内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
 
 多模态与消息内容采集是两层不同控制：
@@ -23,7 +25,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 两处同时就绪：
 
-1. 全局 `config.multimodal`（uploader、凭证、`storageBasePath` 等）。
+1. 全局 `config.multimodal.storage`（`type` / `target` / `auth`）。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
 示例（Codex + Qoder IDE）：
@@ -31,12 +33,17 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 ```json
 {
   "multimodal": {
-    "uploader": "oss",
-    "storageBasePath": "oss://your-bucket/pilot-mm",
-    "oss": {
-      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
+    "storage": {
+      "type": "oss",
+      "target": {
+        "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+        "storageBasePath": "oss://your-bucket/pilot-mm"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
     }
   },
   "agents": {

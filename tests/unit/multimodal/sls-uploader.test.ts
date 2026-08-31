@@ -5,12 +5,16 @@ import * as slsClient from '../../../src/multimodal/uploader/sls-client.js';
 describe('SlsUploader', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   const sls = {
-    endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-    project: 'proj',
-    logstore: 'logstore',
+    type: 'sls' as const,
+    target: {
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'proj',
+      logstore: 'logstore',
+    },
     auth: {
       mode: 'ak' as const,
       accessKeyId: 'ak',
@@ -72,8 +76,7 @@ describe('SlsUploader', () => {
   it('throws when project/logstore cannot be resolved', () => {
     expect(() => new SlsUploader({
       ...sls,
-      project: '',
-      logstore: '',
+      target: { ...sls.target, project: '', logstore: '' },
     }, 'sls://only-project')).toThrow(/requires project and logstore/);
   });
 
@@ -104,9 +107,7 @@ describe('SlsUploader', () => {
       requestId: 'r-api',
     });
     const uploader = new SlsUploader({
-      endpoint: sls.endpoint,
-      project: sls.project,
-      logstore: sls.logstore,
+      ...sls,
       auth: {
         mode: 'apiKey',
         apiKey: 'edge-key',
@@ -123,9 +124,9 @@ describe('SlsUploader', () => {
     expect(put).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'apiKey',
       apiKey: 'edge-key',
-      accessKeyId: undefined,
       objectKey: '20260101/a.png',
     }));
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('accessKeyId');
   });
 
   it('uploads via ApiKey presigned HTTP and skips PutObject', async () => {
@@ -136,10 +137,8 @@ describe('SlsUploader', () => {
       requestId: 'r-http',
     });
     const uploader = new SlsUploader({
-      endpoint: sls.endpoint,
-      project: sls.project,
-      logstore: sls.logstore,
-      writeVia: 'http',
+      ...sls,
+      type: 'delegatedOss',
       auth: {
         mode: 'apiKey',
         apiKey: 'edge-key',
@@ -169,7 +168,7 @@ describe('SlsUploader', () => {
     });
     const uploader = new SlsUploader({
       ...sls,
-      writeVia: 'http',
+      type: 'delegatedOss',
     }, 'sls://proj/logstore');
     const ok = await uploader.upload({
       targetPath: '20260101/a.png',
@@ -210,6 +209,42 @@ describe('SlsUploader', () => {
     expect(put).toHaveBeenCalledTimes(1);
     expect(await uploader.upload(item)).toBe(false);
     expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not issue the second-stage PUT after shutdown during presign', async () => {
+    const seen: string[] = [];
+    let releasePresign!: () => void;
+    const presignGate = new Promise<void>(resolve => {
+      releasePresign = resolve;
+    });
+    vi.stubGlobal('fetch', async (url: string) => {
+      seen.push(`${url}`);
+      if (String(url).includes('/presign')) {
+        await presignGate;
+        return new Response(JSON.stringify({
+          url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/20260101/a.png?sig=1',
+        }), { status: 200 });
+      }
+      return new Response('', { status: 200 });
+    });
+    const uploader = new SlsUploader({
+      ...sls,
+      type: 'delegatedOss',
+    }, 'sls://proj/logstore', {
+      eventStorageBasePath: 'oss://user-bucket/proj/logstore',
+    });
+    const uploading = uploader.upload({
+      targetPath: '20260101/a.png',
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    });
+    await uploader.shutdown();
+    releasePresign();
+    expect(await uploading).toBe(false);
+    expect(seen.some(url => url.includes('/presign'))).toBe(true);
+    expect(seen.some(url => url.includes('user-bucket.oss-'))).toBe(false);
   });
 });
 

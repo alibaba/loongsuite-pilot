@@ -178,4 +178,30 @@ describe('oss-client (OSS V4)', () => {
     expect(result.retryable).toBe(true);
     expect(result.error).toMatch(/aborted/i);
   });
+
+  it('does not retry when the caller abort signal fires', async () => {
+    const abort = new AbortController();
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }));
+
+    const put = ossPutObject({
+      endpoint: 'https://oss-cn-shanghai.aliyuncs.com',
+      bucket: 'valid-bucket',
+      objectKey: '20260101/abc.png',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      body: Buffer.from('x'),
+      contentType: 'image/png',
+      timeoutMs: 5000,
+      signal: abort.signal,
+    });
+    abort.abort();
+    const result = await put;
+    expect(result.ok).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toBe('aborted');
+  });
 });

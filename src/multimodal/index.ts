@@ -8,7 +8,6 @@ export { attachMultimodalMetadataForEntry } from './rewrite.js';
 export { createUploader } from './uploader/factory.js';
 export {
   resolveMultimodalEventStorageBasePath,
-  slsEnsureHostedOss,
 } from './uploader/sls-client.js';
 export type {
   PathToUriFn,

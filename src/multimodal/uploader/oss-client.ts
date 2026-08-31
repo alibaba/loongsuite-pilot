@@ -20,6 +20,7 @@ export interface OssPutObjectParams {
   contentType: string;
   timeoutMs: number;
   meta?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface OssPutObjectResult {
@@ -53,7 +54,12 @@ export async function ossPutObject(params: OssPutObjectParams): Promise<OssPutOb
       meta: params.meta,
     });
 
+    if (params.signal?.aborted) {
+      return { ok: false, error: 'aborted', retryable: false };
+    }
     const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    params.signal?.addEventListener('abort', onExternalAbort);
     const timer = setTimeout(() => controller.abort(), params.timeoutMs);
     try {
       const resp = await fetch(url, {
@@ -77,10 +83,14 @@ export async function ossPutObject(params: OssPutObjectParams): Promise<OssPutOb
         retryable,
       };
     } catch (err) {
+      if (params.signal?.aborted) {
+        return { ok: false, error: 'aborted', retryable: false };
+      }
       const error = err instanceof Error ? err.message : String(err);
       return { ok: false, error, retryable: true };
     } finally {
       clearTimeout(timer);
+      params.signal?.removeEventListener('abort', onExternalAbort);
     }
   } catch (err) {
     return {

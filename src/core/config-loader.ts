@@ -13,14 +13,11 @@ import type {
   MaskConfig,
   MaskType,
   AgentMultimodalConfig,
-  MultimodalOssConfig,
   MultimodalRuntimeConfig,
   MultimodalSlsAuthMode,
-  MultimodalSlsConfig,
-  MultimodalSlsHostedOssConfig,
-  MultimodalSlsWriteVia,
+  MultimodalStorage,
+  MultimodalStorageAuth,
   MultimodalUploadMode,
-  MultimodalUploaderKind,
   OtlpEndpoint,
   OtlpEndpointEntry,
   CmsEndpointEntry,
@@ -33,9 +30,7 @@ import type {
 } from '../types/index.js';
 import {
   MULTIMODAL_SLS_AUTH_MODES,
-  MULTIMODAL_SLS_WRITE_VIAS,
   MULTIMODAL_UPLOAD_MODES,
-  MULTIMODAL_UPLOADER_KINDS,
   SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
@@ -143,29 +138,21 @@ export interface ConfigFile {
   };
 
   multimodal?: {
-    uploader?: string;
-    storageBasePath?: string;
-    oss?: {
-      endpoint?: string;
-      accessKeyId?: string;
-      accessKeySecret?: string;
-      securityToken?: string;
-    };
-    sls?: {
-      endpoint?: string;
-      project?: string;
-      logstore?: string;
-      writeVia?: string;
+    storage?: {
+      type?: string;
+      target?: {
+        endpoint?: string;
+        project?: string;
+        logstore?: string;
+        ossBucket?: string;
+        storageBasePath?: string;
+      };
       auth?: {
         mode?: string;
         accessKeyId?: string;
         accessKeySecret?: string;
         securityToken?: string;
         apiKey?: string;
-      };
-      hostedOss?: {
-        ossBucket?: string;
-        roleArn?: string;
       };
     };
   };
@@ -342,7 +329,6 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 }
 
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
-const MULTIMODAL_UPLOADER_KIND_SET = new Set<string>(MULTIMODAL_UPLOADER_KINDS);
 
 /** Parse global multimodal storage config; invalid → undefined. */
 function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
@@ -350,143 +336,119 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
   if (!block || typeof block !== 'object') return undefined;
 
   try {
-    const uploaderRaw = block.uploader ?? 'oss';
-    if (!MULTIMODAL_UPLOADER_KIND_SET.has(uploaderRaw)) {
-      throw new Error(`invalid multimodal.uploader: ${uploaderRaw}`);
+    const storageRaw = block.storage;
+    if (!storageRaw || typeof storageRaw !== 'object') {
+      throw new Error('multimodal.storage is required');
     }
-    const uploader = uploaderRaw as MultimodalUploaderKind;
-
-    if (uploader === 'oss') {
-      const storageBasePathRaw = (block.storageBasePath ?? '').trim();
-      if (!storageBasePathRaw) {
-        throw new Error('multimodal.storageBasePath is required when uploader=oss');
-      }
-      if (!storageBasePathRaw.startsWith('oss://')) {
-        throw new Error('multimodal.storageBasePath must start with oss:// when uploader=oss');
-      }
+    const type = (storageRaw.type ?? '').trim();
+    if (type === 'oss') {
+      const storage = buildMultimodalOssStorage(storageRaw);
+      return { storage, storageBasePath: storage.target.storageBasePath };
+    }
+    if (type === 'sls' || type === 'delegatedOss') {
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw);
       return {
-        uploader,
-        storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
-        oss: buildMultimodalOssConfig(block),
+        storage,
+        storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
       };
     }
-
-    if (uploader === 'sls') {
-      const sls = buildMultimodalSlsConfig(block);
-      return {
-        uploader,
-        storageBasePath: `sls://${sls.project}/${sls.logstore}`,
-        sls,
-      };
-    }
-
-    throw new Error(`unsupported multimodal.uploader: ${uploaderRaw}`);
+    throw new Error(`invalid multimodal.storage.type: ${type || '(missing)'}`);
   } catch (err) {
     logger.error('multimodal config invalid; disabled for process', { error: String(err) });
     return undefined;
   }
 }
 
-function buildMultimodalOssConfig(
-  block: ConfigFile['multimodal'] | undefined,
-): MultimodalOssConfig {
-  const endpoint = block?.oss?.endpoint ?? '';
-  const accessKeyId = block?.oss?.accessKeyId ?? '';
-  const accessKeySecret = block?.oss?.accessKeySecret ?? '';
-  const securityToken = block?.oss?.securityToken ?? '';
-  if (!endpoint || !accessKeyId || !accessKeySecret) {
-    throw new Error('multimodal.oss requires endpoint, accessKeyId, accessKeySecret');
+function buildMultimodalOssStorage(
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+): Extract<MultimodalStorage, { type: 'oss' }> {
+  const endpoint = (raw.target?.endpoint ?? '').trim();
+  const storageBasePathRaw = (raw.target?.storageBasePath ?? '').trim();
+  if (!endpoint) throw new Error('multimodal.storage.target.endpoint is required when type=oss');
+  if (!storageBasePathRaw) {
+    throw new Error('multimodal.storage.target.storageBasePath is required when type=oss');
+  }
+  if (!storageBasePathRaw.startsWith('oss://')) {
+    throw new Error('multimodal.storage.target.storageBasePath must start with oss:// when type=oss');
+  }
+  const auth = buildMultimodalStorageAuth(raw.auth);
+  if (auth.mode !== 'ak') {
+    throw new Error('multimodal.storage.type=oss requires auth.mode=ak');
   }
   return {
-    endpoint: endpoint.replace(/\/+$/, ''),
+    type: 'oss',
+    target: {
+      endpoint: endpoint.replace(/\/+$/, ''),
+      storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
+    },
+    auth,
+  };
+}
+
+function buildMultimodalSlsBackedStorage(
+  type: 'sls' | 'delegatedOss',
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
+  const endpoint = (raw.target?.endpoint ?? '').trim();
+  const project = (raw.target?.project ?? '').trim();
+  const logstore = (raw.target?.logstore ?? '').trim() || 'logstore-multimodal';
+  if (!endpoint || !project) {
+    throw new Error(`multimodal.storage.target requires endpoint and project when type=${type}`);
+  }
+  const auth = buildMultimodalStorageAuth(raw.auth);
+  const ossBucket = (raw.target?.ossBucket ?? '').trim();
+  return {
+    type,
+    target: {
+      endpoint: endpoint.replace(/\/+$/, ''),
+      project,
+      logstore,
+      ...(ossBucket ? { ossBucket } : {}),
+    },
+    auth,
+  };
+}
+
+function buildMultimodalStorageAuth(
+  raw: { mode?: string; accessKeyId?: string; accessKeySecret?: string; securityToken?: string; apiKey?: string } | undefined,
+): MultimodalStorageAuth {
+  const accessKeyId = (raw?.accessKeyId ?? '').trim();
+  const accessKeySecret = (raw?.accessKeySecret ?? '').trim();
+  const securityToken = (raw?.securityToken ?? '').trim();
+  const apiKey = (raw?.apiKey ?? '').trim();
+  const hasAk = !!(accessKeyId && accessKeySecret);
+  const hasApiKey = !!apiKey;
+
+  const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
+  if (mode === 'apiKey') {
+    if (!apiKey) throw new Error('multimodal.storage.auth requires apiKey when mode=apiKey');
+    return { mode: 'apiKey', apiKey };
+  }
+  if (!hasAk) {
+    throw new Error('multimodal.storage.auth requires accessKeyId and accessKeySecret when mode=ak');
+  }
+  return {
+    mode: 'ak',
     accessKeyId,
     accessKeySecret,
     ...(securityToken ? { securityToken } : {}),
   };
 }
 
-function buildMultimodalSlsConfig(
-  block: ConfigFile['multimodal'] | undefined,
-): MultimodalSlsConfig {
-  const sls = block?.sls;
-  const endpoint = sls?.endpoint ?? '';
-  const project = sls?.project ?? '';
-  const logstore = sls?.logstore ?? 'logstore-multimodal';
-  const accessKeyId = (sls?.auth?.accessKeyId ?? '').trim();
-  const accessKeySecret = (sls?.auth?.accessKeySecret ?? '').trim();
-  const securityToken = (sls?.auth?.securityToken ?? '').trim();
-  const apiKey = (sls?.auth?.apiKey ?? '').trim();
-  if (!endpoint || !project) {
-    throw new Error('multimodal.sls requires endpoint and project');
-  }
-
-  const mode = resolveMultimodalSlsAuthMode(sls?.auth?.mode, {
-    apiKey,
-    accessKeyId,
-    accessKeySecret,
-  });
-  const writeVia = resolveMultimodalSlsWriteVia(sls?.writeVia);
-  const hostedOss = resolveMultimodalSlsHostedOss(sls?.hostedOss);
-  if (hostedOss && mode !== 'ak') {
-    throw new Error('multimodal.sls.hostedOss requires auth.mode=ak');
-  }
-  if (mode === 'apiKey') {
-    if (!apiKey) {
-      throw new Error('multimodal.sls.auth requires apiKey when mode=apiKey');
-    }
-  } else if (!accessKeyId || !accessKeySecret) {
-    throw new Error('multimodal.sls.auth requires accessKeyId and accessKeySecret when mode=ak');
-  }
-  return {
-    endpoint: endpoint.replace(/\/+$/, ''),
-    project,
-    logstore,
-    writeVia,
-    auth: {
-      mode,
-      ...(accessKeyId ? { accessKeyId } : {}),
-      ...(accessKeySecret ? { accessKeySecret } : {}),
-      ...(securityToken ? { securityToken } : {}),
-      ...(apiKey ? { apiKey } : {}),
-    },
-    ...(hostedOss ? { hostedOss } : {}),
-  };
-}
-
-function resolveMultimodalSlsAuthMode(
+function resolveMultimodalStorageAuthMode(
   raw: string | undefined,
-  creds: { apiKey: string; accessKeyId: string; accessKeySecret: string },
+  creds: { hasAk: boolean; hasApiKey: boolean },
 ): MultimodalSlsAuthMode {
   const mode = (raw ?? '').trim();
   if ((MULTIMODAL_SLS_AUTH_MODES as readonly string[]).includes(mode)) {
     return mode as MultimodalSlsAuthMode;
   }
-  if (mode) throw new Error(`unsupported multimodal.sls.auth.mode: ${mode}`);
-  if (creds.apiKey) return 'apiKey';
-  if (creds.accessKeyId && creds.accessKeySecret) return 'ak';
+  if (mode) throw new Error(`unsupported multimodal.storage.auth.mode: ${mode}`);
+  if (creds.hasApiKey) return 'apiKey';
+  if (creds.hasAk) return 'ak';
   throw new Error(
-    'multimodal.sls.auth.mode is required when apiKey is missing and accessKeyId/accessKeySecret are incomplete',
+    'multimodal.storage.auth.mode is required when apiKey is missing and accessKeyId/accessKeySecret are incomplete',
   );
-}
-
-function resolveMultimodalSlsHostedOss(
-  raw: { ossBucket?: string; roleArn?: string } | undefined,
-): MultimodalSlsHostedOssConfig | undefined {
-  const ossBucket = (raw?.ossBucket ?? '').trim();
-  const roleArn = (raw?.roleArn ?? '').trim();
-  if (!ossBucket && !roleArn) return undefined;
-  if (!ossBucket || !roleArn) {
-    throw new Error('multimodal.sls.hostedOss.ossBucket and roleArn must both be set or both omitted');
-  }
-  return { ossBucket, roleArn };
-}
-
-function resolveMultimodalSlsWriteVia(raw: string | undefined): MultimodalSlsWriteVia {
-  const writeVia = (raw ?? 'putObject').trim();
-  if ((MULTIMODAL_SLS_WRITE_VIAS as readonly string[]).includes(writeVia)) {
-    return writeVia as MultimodalSlsWriteVia;
-  }
-  throw new Error(`unsupported multimodal.sls.writeVia: ${writeVia}`);
 }
 
 /**

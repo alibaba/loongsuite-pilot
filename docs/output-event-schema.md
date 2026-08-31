@@ -103,6 +103,8 @@ Automatic working-directory collection covers Claude Code, Codex, Cursor / Curso
 
 ## Multimodal Message Parts
 
+> **Experimental.** Multimodal `uri` parts and `gen_ai.*.multimodal_metadata` may change.
+
 When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Multimodal Collection](multimodal.md)), media in message `parts` uses object-storage references instead of inline base64:
 
 | `parts[].type` | Description |

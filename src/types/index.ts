@@ -170,63 +170,58 @@ export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolea
   return mode === 'tool' || mode === 'both';
 }
 
-export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
-export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
+export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export interface MultimodalOssConfig {
-  endpoint: string;
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
+
+export interface MultimodalAkAuth {
+  mode: 'ak';
   accessKeyId: string;
   accessKeySecret: string;
   securityToken?: string;
 }
 
-export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
-export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
+export interface MultimodalApiKeyAuth {
+  mode: 'apiKey';
+  apiKey: string;
+}
 
-export const MULTIMODAL_SLS_WRITE_VIAS = ['putObject', 'http'] as const;
-export type MultimodalSlsWriteVia = (typeof MULTIMODAL_SLS_WRITE_VIAS)[number];
+/** Discriminated auth after load. User config may include both sets; explicit mode wins, otherwise apiKey then AK. */
+export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
 
-export interface MultimodalSlsConfig {
+export interface MultimodalSlsTarget {
   endpoint: string;
   project: string;
   logstore: string;
-  /** 'putObject' (default) writes via SLS API; 'http' uses ApiKey presign then raw PUT. */
-  writeVia?: MultimodalSlsWriteVia;
-  /** SLS auth options */
-  auth: MultimodalSlsAuthConfig;
-  /**
-   * One-time SLS multimodal hosted-OSS bootstrap. Requires auth.mode=ak.
-   * Once Enabled on the logstore, SLS keeps the bucket even after Pilot stops.
-   */
-  hostedOss?: MultimodalSlsHostedOssConfig;
+  /** Expected landing bucket. Not provisioned by Pilot. */
+  ossBucket?: string;
 }
 
-export interface MultimodalSlsAuthConfig {
-  /** 'ak' uses LOG V1 signature; 'apiKey' uses Bearer token. */
-  mode: MultimodalSlsAuthMode;
-  accessKeyId?: string;
-  accessKeySecret?: string;
-  securityToken?: string;
-  apiKey?: string;
-}
-
-export interface MultimodalSlsHostedOssConfig {
-  ossBucket: string;
-  roleArn: string;
-}
-
-/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
-export interface MultimodalRuntimeConfig {
-  uploader: MultimodalUploaderKind;
+export interface MultimodalOssTarget {
+  endpoint: string;
   storageBasePath: string;
-  oss?: MultimodalOssConfig;
-  sls?: MultimodalSlsConfig;
+}
+
+export type MultimodalStorage =
+  | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
+
+/**
+ * Experimental global multimodal storage; per-agent policy is under agents.<id>.multimodal.
+ * This subtree and multimodal event fields may change without migration.
+ */
+export interface MultimodalRuntimeConfig {
+  storage: MultimodalStorage;
+  storageBasePath: string;
 }
 
 /** Agent ids with multimodal extraction implemented. */
 export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
 
-/** Per-agent multimodal policy (`uploadMode: none` disables). */
+/** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
   /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */

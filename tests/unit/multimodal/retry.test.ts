@@ -55,4 +55,17 @@ describe('multimodal upload retry', () => {
     expect(result).toEqual({ ok: true, value: 'ok' });
     expect(run).toHaveBeenCalledTimes(2);
   });
+
+  it('stops without another attempt after abort', async () => {
+    const abort = new AbortController();
+    const run = vi.fn(async () => {
+      abort.abort();
+      return { ok: false as const, retryable: true, error: 'busy', statusCode: 503 };
+    });
+    const result = await withRetries({ maxAttempts: 3, baseDelayMs: 20 }, run, {
+      signal: abort.signal,
+    });
+    expect(result).toEqual({ ok: false, error: 'aborted' });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
 });

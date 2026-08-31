@@ -77,7 +77,6 @@ import {
   isAgentMultimodalEnabled,
   MultimodalProcessor,
   resolveMultimodalEventStorageBasePath,
-  slsEnsureHostedOss,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -252,49 +251,18 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const hostedOss = multimodalConfig.sls?.hostedOss;
-        const sls = multimodalConfig.sls;
-        let hostedReady = true;
-        if (hostedOss && sls) {
-          const ensured = await slsEnsureHostedOss({
-            endpoint: sls.endpoint,
-            project: sls.project,
-            logstore: sls.logstore,
-            accessKeyId: sls.auth.accessKeyId ?? '',
-            accessKeySecret: sls.auth.accessKeySecret ?? '',
-            securityToken: sls.auth.securityToken,
-            ossBucket: hostedOss.ossBucket,
-            roleArn: hostedOss.roleArn,
-          });
-          if (!ensured.ok) {
-            logger.error('multimodal init failed; disabled for process', {
-              error: ensured.error,
-              statusCode: ensured.statusCode,
-            });
-            hostedReady = false;
-          } else {
-            logger.info('multimodal hosted OSS ready', {
-              action: ensured.action,
-              ossBucket: hostedOss.ossBucket,
-            });
-          }
-        }
-
-        const eventBase = hostedReady
-          ? await resolveMultimodalEventStorageBasePath(multimodalConfig)
-          : { ok: false as const, error: 'hosted OSS ensure failed' };
+        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
         if (!eventBase.ok) {
-          if (hostedReady) {
-            logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
-          }
+          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
         } else {
-          const uploader = createUploader(multimodalConfig);
+          const uploader = createUploader(multimodalConfig, {
+            eventStorageBasePath: eventBase.storageBasePath,
+          });
           const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
           this.inputManager.setMultimodalProcessor(processor);
           this.multimodalProcessor = processor;
           logger.info('multimodal processor enabled', {
-            uploader: multimodalConfig.uploader,
-            writeVia: multimodalConfig.sls?.writeVia,
+            type: multimodalConfig.storage.type,
             storageBasePath: eventBase.storageBasePath,
           });
         }

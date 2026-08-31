@@ -1,5 +1,5 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalSlsConfig, UploadItem, Uploader } from '../types.js';
+import type { MultimodalStorage, UploadItem, Uploader } from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import {
   DEFAULT_MULTIMODAL_RETRY,
@@ -9,28 +9,34 @@ import {
 import {
   slsPutObject,
   slsPutViaPresignedHttp,
+  tryParseOssEventStorageBasePath,
   tryParseSlsStorageBasePath,
 } from './sls-client.js';
 
 const logger = createLogger('SlsUploader');
 
-/** SLS uploader (fail-open). putObject: AK/ApiKey API write. http: ApiKey presign then raw PUT. */
+/** SLS-backed uploader (fail-open). sls=PutObject; delegatedOss=presign then raw PUT. */
 export class SlsUploader implements Uploader {
   private readonly project: string;
   private readonly logstore: string;
+  private readonly expectedBucket?: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private readonly abort = new AbortController();
   private closed = false;
 
   constructor(
-    private readonly sls: MultimodalSlsConfig,
+    private readonly storage: Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }>,
     storageBasePath: string,
+    opts?: { eventStorageBasePath?: string },
   ) {
     const parsed = tryParseSlsStorageBasePath(storageBasePath);
-    this.project = sls.project || parsed?.project || '';
-    this.logstore = sls.logstore || parsed?.logstore || '';
+    this.project = storage.target.project || parsed?.project || '';
+    this.logstore = storage.target.logstore || parsed?.logstore || '';
     if (!this.project || !this.logstore) {
-      throw new Error('multimodal.sls requires project and logstore');
+      throw new Error('multimodal.storage.target requires project and logstore');
     }
+    const eventTarget = tryParseOssEventStorageBasePath(opts?.eventStorageBasePath ?? '');
+    this.expectedBucket = eventTarget?.bucket ?? storage.target.ossBucket;
   }
 
   async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
@@ -56,7 +62,7 @@ export class SlsUploader implements Uploader {
       }
 
       const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
-        if (this.closed) {
+        if (this.closed || this.abort.signal.aborted) {
           return { ok: false as const, retryable: false, error: 'uploader closed' };
         }
         const put = await this.writeObject(objectKey, item);
@@ -67,7 +73,7 @@ export class SlsUploader implements Uploader {
           error: put.error,
           statusCode: put.statusCode,
         };
-      });
+      }, { signal: this.abort.signal });
 
       if (!result.ok) {
         logger.warn('sls upload failed', {
@@ -106,27 +112,36 @@ export class SlsUploader implements Uploader {
       return;
     }
     this.closed = true;
+    this.abort.abort();
     this.successKeys.clear();
   }
 
   private writeObject(objectKey: string, item: UploadItem) {
+    const auth = this.storage.auth;
     const params = {
-      endpoint: this.sls.endpoint,
+      endpoint: this.storage.target.endpoint,
       project: this.project,
       logstore: this.logstore,
       objectKey,
-      mode: this.sls.auth.mode,
-      accessKeyId: this.sls.auth.accessKeyId,
-      accessKeySecret: this.sls.auth.accessKeySecret,
-      securityToken: this.sls.auth.securityToken,
-      apiKey: this.sls.auth.apiKey,
+      mode: auth.mode,
+      ...(auth.mode === 'ak'
+        ? {
+          accessKeyId: auth.accessKeyId,
+          accessKeySecret: auth.accessKeySecret,
+          securityToken: auth.securityToken,
+        }
+        : { apiKey: auth.apiKey }),
       body: item.data!,
       contentType: item.contentType,
       timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,
       meta: item.meta,
+      signal: this.abort.signal,
     };
-    return this.sls.writeVia === 'http'
-      ? slsPutViaPresignedHttp(params)
+    return this.storage.type === 'delegatedOss'
+      ? slsPutViaPresignedHttp({
+        ...params,
+        expectedBucket: this.expectedBucket,
+      })
       : slsPutObject(params);
   }
 }

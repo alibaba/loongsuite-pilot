@@ -3,14 +3,12 @@ import { OssUploader } from './oss-uploader.js';
 import { SlsUploader } from './sls-uploader.js';
 
 /** Build configured Uploader; throws if credentials missing. */
-export function createUploader(config: MultimodalRuntimeConfig): Uploader {
-  if (config.uploader === 'oss') {
-    if (!config.oss) throw new Error('multimodal.oss config is required');
-    return new OssUploader(config.oss, config.storageBasePath);
+export function createUploader(
+  config: MultimodalRuntimeConfig,
+  opts?: { eventStorageBasePath?: string },
+): Uploader {
+  if (config.storage.type === 'oss') {
+    return new OssUploader(config.storage);
   }
-  if (config.uploader === 'sls') {
-    if (!config.sls) throw new Error('multimodal.sls config is required');
-    return new SlsUploader(config.sls, config.storageBasePath);
-  }
-  throw new Error(`unsupported multimodal.uploader: ${config.uploader}`);
+  return new SlsUploader(config.storage, config.storageBasePath, opts);
 }

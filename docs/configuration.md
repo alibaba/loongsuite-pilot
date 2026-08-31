@@ -73,117 +73,100 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 ## Multimodal Object Storage
 
-When Pilot should convert images in agent messages (inline base64, or local paths read and encoded by each agent extractor) into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; local `pathToUri` reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus agent defaults. See [Multimodal Collection](multimodal.md).
+> **Experimental.** Multimodal config and event fields may change.
 
-### OSS
+To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, set `multimodal.storage` in `config.json`: `type`, `target`, and `auth`. Whether upload runs is controlled per agent by `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
 
-```json
-{
-  "multimodal": {
-    "uploader": "oss",
-    "storageBasePath": "oss://your-bucket/pilot-mm",
-    "oss": {
-      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
-    }
-  }
-}
-```
+`type` is one of `sls`, `delegatedOss`, or `oss`. This is separate from the log `sls` flusher. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
 
-| Setting | Description |
-|---------|-------------|
-| `multimodal.uploader` | `oss` or `sls`. |
-| `multimodal.storageBasePath` | Required for OSS; must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.oss.endpoint` | Standard regional endpoint (accelerate endpoints are not supported). |
-| `multimodal.oss.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
+`auth` may include both an ApiKey and access keys. If `mode` is set, that credential set is used. If `mode` is omitted, `apiKey` is used when present, otherwise AK. Incomplete credentials leave image upload off; text collection continues.
 
-### SLS PutObject
+### `type: sls`
 
-SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flusher block. `storageBasePath` is derived as `sls://{project}/{logstore}` and does not need to be set by hand.
-
-Configuring `uploader: sls` enables SLS multimodal collection on that logstore and writes objects there.
-
-`sls.writeVia` selects the write path (default `putObject`):
-
-- `putObject`: AK or ApiKey calls SLS PutObject. Event URI is `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
-- `http`: AK or ApiKey fetches a presigned URL, then raw HTTP PUT. Startup sniffs one presign to learn the landing bucket; event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. Presign failure or timeout disables multimodal.
+Writes with SLS PutObject. Event URI is `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
 
 ```json
 {
   "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "ak",
-        "accessKeyId": "your-access-key-id",
-        "accessKeySecret": "your-access-key-secret"
-      }
-    }
-  }
-}
-```
-
-ApiKey PutObject path (`auth.mode` selects which credentials are used; AK and ApiKey may both be present):
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "apiKey",
-        "apiKey": "your-sls-project-api-key"
-      }
-    }
-  }
-}
-```
-
-HTTP presign upload (`writeVia=http`). Use ApiKey or AK (`auth.mode` selects which credentials are used):
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "writeVia": "http",
-      "auth": {
-        "mode": "apiKey",
-        "apiKey": "your-sls-project-api-key"
-      }
-    }
-  }
-}
-```
-
-Hosted-user OSS (`hostedOss`). **AK only** — ApiKey cannot `GET/PUT multimodalconfiguration`. If this block is set and `auth.mode` is not `ak`, config is invalid and multimodal stays off. Use it only to point the logstore at a user bucket the first time; SLS keeps the setting after Pilot stops, so you can omit `hostedOss` later. Startup GETs first: Disabled → enable; Enabled with the same `ossBucket` → no write; Enabled with a different bucket → Disabled then Enabled. Any failure disables multimodal.
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "ak",
-        "accessKeyId": "your-access-key-id",
-        "accessKeySecret": "your-access-key-secret"
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
       },
-      "hostedOss": {
-        "ossBucket": "your-bucket",
-        "roleArn": "acs:ram::<uid>:role/<roleName>"
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
+    }
+  }
+}
+```
+
+ApiKey:
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: delegatedOss`
+
+Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. At startup Pilot confirms the current landing bucket with SLS. Optional `target.ossBucket` is checked against that bucket; a mismatch or a failed check leaves image upload off.
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "delegatedOss",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal",
+        "ossBucket": "your-bucket"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: oss`
+
+Writes directly to OSS. AK only.
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "oss",
+      "target": {
+        "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+        "storageBasePath": "oss://your-bucket/pilot-mm"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
       }
     }
   }
@@ -192,16 +175,17 @@ Hosted-user OSS (`hostedOss`). **AK only** — ApiKey cannot `GET/PUT multimodal
 
 | Setting | Description |
 |---------|-------------|
-| `multimodal.sls.endpoint` | SLS endpoint. |
-| `multimodal.sls.project` | SLS project. |
-| `multimodal.sls.logstore` | Logstore used for multimodal objects; defaults to `logstore-multimodal`. |
-| `multimodal.sls.writeVia` | Default `putObject`. `http` means presign then raw PUT; AK or ApiKey. |
-| `multimodal.sls.auth.mode` | Optional in user config; always set after load. `ak` or `apiKey`. If omitted: use `apiKey` when `apiKey` is present (even if AK is also set), otherwise use `ak` when both `accessKeyId` and `accessKeySecret` are present. |
-| `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`; optional `securityToken` for STS. |
-| `multimodal.sls.auth.apiKey` | Required when `mode=apiKey`. May coexist with AK; unused unless `mode=apiKey`. |
-| `multimodal.sls.hostedOss.ossBucket` / `roleArn` | Optional, must be a pair. `mode=ak` only. Startup hosts the logstore onto the user OSS bucket; omit after it is already set. |
+| `multimodal.storage.type` | `sls`, `delegatedOss`, or `oss`. |
+| `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
+| `multimodal.storage.target.project` | SLS project. Required for `sls` and `delegatedOss`. |
+| `multimodal.storage.target.logstore` | Logstore for multimodal objects; defaults to `logstore-multimodal`. |
+| `multimodal.storage.target.ossBucket` | Optional. For `sls` and `delegatedOss`, checked against the landing bucket; a mismatch leaves image upload off. |
+| `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
+| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
+| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. May be set together with AK; if `mode` is omitted, `apiKey` is preferred. |
 
-If global multimodal config is missing or invalid, Pilot fails open: text collection continues, and blob→uri conversion is skipped.
+If `multimodal.storage` is missing or invalid, text collection continues and images are not converted to `uri`.
 
 ## Configuration Topics
 

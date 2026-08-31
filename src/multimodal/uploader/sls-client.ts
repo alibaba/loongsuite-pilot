@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { MultimodalRuntimeConfig } from '../types.js';
+import type { MultimodalRuntimeConfig, MultimodalStorageAuth } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SlsClient');
@@ -33,6 +33,7 @@ export interface SlsRequest {
   securityToken?: string;
   apiKey?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface SlsResult {
@@ -67,31 +68,60 @@ interface SlsHttpResult extends SlsResult {
   text?: string;
 }
 
-export function parseSlsStorageBasePath(storageBasePath: string): {
-  project: string;
-  logstore: string;
-} {
-  let path = (storageBasePath || '').trim();
-  if (path.startsWith('sls://')) path = path.slice('sls://'.length);
-  path = path.replace(/^\/+/, '');
-  const parts = path.split('/');
-  const project = parts[0] ?? '';
-  const logstore = parts[1] ?? '';
-  if (!project || !logstore) {
-    throw new Error(`invalid sls storageBasePath: ${storageBasePath}`);
+/** Virtual-hosted OSS host → bucket. Does not log or return query credentials. */
+export function parseOssBucketFromPresignedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    const match = parsed.hostname.toLowerCase().match(/^(.+?)\.oss[-.]/i);
+    const bucket = match?.[1]?.trim() ?? '';
+    return bucket || null;
+  } catch {
+    return null;
   }
-  return { project, logstore };
 }
 
 export function tryParseSlsStorageBasePath(storageBasePath: string): {
   project: string;
   logstore: string;
 } | null {
-  try {
-    return parseSlsStorageBasePath(storageBasePath);
-  } catch {
-    return null;
+  let path = (storageBasePath || '').trim();
+  if (path.startsWith('sls://')) path = path.slice('sls://'.length);
+  path = path.replace(/^\/+/, '');
+  const parts = path.split('/');
+  const project = parts[0] ?? '';
+  const logstore = parts[1] ?? '';
+  if (!project || !logstore) return null;
+  return { project, logstore };
+}
+
+export function tryParseOssEventStorageBasePath(storageBasePath: string): {
+  bucket: string;
+  project: string;
+  logstore: string;
+} | null {
+  const raw = (storageBasePath || '').trim();
+  if (!raw.startsWith('oss://')) return null;
+  const parts = raw.slice('oss://'.length).replace(/^\/+/, '').split('/');
+  const bucket = parts[0] ?? '';
+  const project = parts[1] ?? '';
+  const logstore = parts[2] ?? '';
+  if (!bucket || !project || !logstore || parts.length !== 3) return null;
+  return { bucket, project, logstore };
+}
+
+export function buildSlsHttpEventStorageBasePath(args: {
+  ossBucket: string;
+  project: string;
+  logstore: string;
+}): string {
+  const ossBucket = args.ossBucket.trim();
+  const project = args.project.trim();
+  const logstore = args.logstore.trim();
+  if (!ossBucket || !project || !logstore) {
+    throw new Error('oss bucket, project, and logstore are required');
   }
+  return `oss://${ossBucket}/${project}/${logstore}`;
 }
 
 /** RFC822 GMT, e.g. Wed, 19 Aug 2026 05:53:26 GMT. Required for ApiKey writes. */
@@ -317,11 +347,17 @@ async function slsHttpRequest(args: {
   headers: Record<string, string>;
   body?: Buffer;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<SlsHttpResult & { body?: Buffer }> {
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) {
     return { ok: false, error: 'SLS request timeoutMs must be a positive number', retryable: false };
   }
+  if (args.signal?.aborted) {
+    return { ok: false, error: 'aborted', retryable: false };
+  }
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  args.signal?.addEventListener('abort', onExternalAbort);
   const timer = setTimeout(() => controller.abort(), args.timeoutMs);
   try {
     const resp = await fetch(args.url, {
@@ -354,10 +390,14 @@ async function slsHttpRequest(args: {
       body,
     };
   } catch (err) {
+    if (args.signal?.aborted) {
+      return { ok: false, error: 'aborted', retryable: false };
+    }
     const error = err instanceof Error ? err.message : String(err);
     return { ok: false, error, retryable: true };
   } finally {
     clearTimeout(timer);
+    args.signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -397,6 +437,7 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
       headers,
       body: params.body,
       timeoutMs: params.timeoutMs,
+      signal: params.signal,
     });
   } catch (err) {
     return failClosed(err);
@@ -434,6 +475,7 @@ export async function slsGeneratePresignedUrl(params: SlsObjectTarget): Promise<
       headers,
       body,
       timeoutMs: params.timeoutMs,
+      signal: params.signal,
     });
     if (!result.ok) return result;
 
@@ -458,6 +500,7 @@ export async function slsPutPresignedObject(params: {
   url: string;
   body: Buffer;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<SlsResult> {
   try {
     if (!params.url.trim()) throw new Error('presigned URL is required');
@@ -467,21 +510,81 @@ export async function slsPutPresignedObject(params: {
       headers: {},
       body: params.body,
       timeoutMs: params.timeoutMs,
+      signal: params.signal,
     });
   } catch (err) {
     return failClosed(err);
   }
 }
 
+export interface SlsPresignPutTarget {
+  objectKey: string;
+  project: string;
+  logstore: string;
+  expectedBucket?: string;
+}
+
+/** Bind a presign URL to HTTPS (or loopback HTTP) and the expected OSS object. */
+export function bindPresignedPutUrl(
+  url: string,
+  target: SlsPresignPutTarget,
+): { ok: true; url: string } | { ok: false; error: string; retryable: false } {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, error: 'presign url is invalid', retryable: false };
+  }
+  if (!isAllowedPresignUrl(parsed)) {
+    return { ok: false, error: 'presign url must be https', retryable: false };
+  }
+  const bucket = parseOssBucketFromPresignedUrl(url);
+  if (!bucket) {
+    return { ok: false, error: 'presign url missing oss bucket', retryable: false };
+  }
+  if (target.expectedBucket && bucket !== target.expectedBucket) {
+    return { ok: false, error: 'presign url bucket mismatch', retryable: false };
+  }
+  const pathname = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
+  const expectedPath = `${target.project}/${target.logstore}/${target.objectKey}`;
+  if (pathname !== expectedPath) {
+    return { ok: false, error: 'presign url object path mismatch', retryable: false };
+  }
+  return { ok: true, url };
+}
+
 /** ApiKey/AK presign PUT, then upload to the returned URL with no extra headers. */
-export async function slsPutViaPresignedHttp(params: SlsPutObjectParams): Promise<SlsResult> {
+export async function slsPutViaPresignedHttp(
+  params: SlsPutObjectParams & { expectedBucket?: string },
+): Promise<SlsResult> {
+  if (params.signal?.aborted) {
+    return { ok: false, error: 'aborted', retryable: false };
+  }
   const presign = await slsGeneratePresignedUrl(params);
   if (!presign.ok || !presign.url) return presign;
+  if (params.signal?.aborted) {
+    return { ok: false, error: 'aborted', retryable: false };
+  }
+  const bound = bindPresignedPutUrl(presign.url, {
+    objectKey: params.objectKey,
+    project: params.project,
+    logstore: params.logstore,
+    expectedBucket: params.expectedBucket,
+  });
+  if (!bound.ok) return bound;
   return slsPutPresignedObject({
-    url: presign.url,
+    url: bound.url,
     body: params.body,
     timeoutMs: params.timeoutMs,
+    signal: params.signal,
   });
+}
+
+function isAllowedPresignUrl(parsed: URL): boolean {
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol !== 'http:') return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
 function parsePresignedUrl(text: string | undefined): string | undefined {
@@ -489,7 +592,9 @@ function parsePresignedUrl(text: string | undefined): string | undefined {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const url = pickString(parsed, 'url', 'Url', 'URL');
-    return url && /^https?:\/\//i.test(url) ? url : undefined;
+    if (!url) return undefined;
+    const parsedUrl = new URL(url);
+    return isAllowedPresignUrl(parsedUrl) ? url : undefined;
   } catch {
     return undefined;
   }
@@ -503,219 +608,26 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
   return undefined;
 }
 
-/** Startup sniff / hosted-OSS GET+PUT. Shorter than upload timeout so a hung call does not stall start. */
+/** Startup sniff. Shorter than upload timeout so a hung call does not stall start. */
 const SLS_STARTUP_TIMEOUT_MS = 5_000;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
 
-export interface SlsMultimodalConfiguration {
-  status: 'Enabled' | 'Disabled';
-  ossBucket?: string;
-}
-
-export interface SlsMultimodalConfigParams extends SlsRequest {
-  accessKeyId: string;
-  accessKeySecret: string;
-}
-
-export interface SlsGetMultimodalConfigResult extends SlsResult {
-  config?: SlsMultimodalConfiguration;
-}
-
-export interface SlsEnsureHostedOssResult extends SlsResult {
-  action?: 'unchanged' | 'enabled' | 'replaced';
-}
-
-function slsMultimodalConfigResource(logstore: string): string {
-  return `/logstores/${logstore}/multimodalconfiguration`;
-}
-
-function prepareAkManageTarget(params: SlsMultimodalConfigParams): {
-  endpoint: SlsEndpoint;
-  project: string;
-  logstore: string;
-  accessKeyId: string;
-  accessKeySecret: string;
+export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
+  mode: 'ak' | 'apiKey';
+  accessKeyId?: string;
+  accessKeySecret?: string;
   securityToken?: string;
-  timeoutMs: number;
+  apiKey?: string;
 } {
-  const project = params.project.trim();
-  const logstore = params.logstore.trim();
-  const accessKeyId = params.accessKeyId.trim();
-  const accessKeySecret = params.accessKeySecret.trim();
-  if (!project || !logstore) throw new Error('SLS project and logstore are required');
-  if (!accessKeyId || !accessKeySecret) {
-    throw new Error('SLS hosted OSS management requires access key ID and secret');
+  if (auth.mode === 'apiKey') {
+    return { mode: 'apiKey', apiKey: auth.apiKey };
   }
   return {
-    endpoint: normalizeSlsEndpoint(params.endpoint),
-    project,
-    logstore,
-    accessKeyId,
-    accessKeySecret,
-    securityToken: params.securityToken?.trim() || undefined,
-    timeoutMs: params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS,
+    mode: 'ak',
+    accessKeyId: auth.accessKeyId,
+    accessKeySecret: auth.accessKeySecret,
+    securityToken: auth.securityToken,
   };
-}
-
-function parseMultimodalConfiguration(text: string | undefined): SlsMultimodalConfiguration | undefined {
-  if (!text) return undefined;
-  try {
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    const statusRaw = pickString(parsed, 'status') ?? '';
-    const normalized = statusRaw.toLowerCase();
-    if (normalized !== 'enabled' && normalized !== 'disabled') return undefined;
-    const ossBucket = pickString(parsed, 'ossBucket');
-    return {
-      status: normalized === 'enabled' ? 'Enabled' : 'Disabled',
-      ...(ossBucket ? { ossBucket } : {}),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-/** GET /logstores/{logstore}/multimodalconfiguration. AK only. */
-export async function slsGetMultimodalConfiguration(
-  params: SlsMultimodalConfigParams,
-): Promise<SlsGetMultimodalConfigResult> {
-  try {
-    const prepared = prepareAkManageTarget(params);
-    const { url, headers } = buildLogV1JsonRequest({
-      endpoint: prepared.endpoint,
-      project: prepared.project,
-      method: 'GET',
-      resource: slsMultimodalConfigResource(prepared.logstore),
-      accessKeyId: prepared.accessKeyId,
-      accessKeySecret: prepared.accessKeySecret,
-      securityToken: prepared.securityToken,
-    });
-    const result = await slsHttpRequest({
-      url,
-      method: 'GET',
-      headers,
-      timeoutMs: prepared.timeoutMs,
-    });
-    if (!result.ok) return result;
-    const config = parseMultimodalConfiguration(result.text);
-    if (!config) {
-      return {
-        ok: false,
-        statusCode: result.statusCode,
-        requestId: result.requestId,
-        error: 'multimodal configuration response invalid',
-        retryable: false,
-      };
-    }
-    return { ...result, config };
-  } catch (err) {
-    return failClosed(err);
-  }
-}
-
-/** PUT /logstores/{logstore}/multimodalconfiguration. AK only. */
-export async function slsPutMultimodalConfiguration(
-  params: SlsMultimodalConfigParams & {
-    status: 'Enabled' | 'Disabled';
-    ossBucket?: string;
-    roleArn?: string;
-  },
-): Promise<SlsResult> {
-  try {
-    const prepared = prepareAkManageTarget(params);
-    const ossBucket = params.ossBucket?.trim() ?? '';
-    const roleArn = params.roleArn?.trim() ?? '';
-    if (params.status === 'Enabled' && ((ossBucket && !roleArn) || (!ossBucket && roleArn))) {
-      throw new Error('ossBucket and roleArn must both be set or both omitted');
-    }
-    const payload: Record<string, string> = { status: params.status };
-    if (params.status === 'Enabled' && ossBucket && roleArn) {
-      payload.ossBucket = ossBucket;
-      payload.roleArn = roleArn;
-    }
-    const body = Buffer.from(JSON.stringify(payload), 'utf8');
-    const { url, headers } = buildLogV1JsonRequest({
-      endpoint: prepared.endpoint,
-      project: prepared.project,
-      method: 'PUT',
-      resource: slsMultimodalConfigResource(prepared.logstore),
-      accessKeyId: prepared.accessKeyId,
-      accessKeySecret: prepared.accessKeySecret,
-      securityToken: prepared.securityToken,
-      body,
-    });
-    return await slsHttpRequest({
-      url,
-      method: 'PUT',
-      headers,
-      body,
-      timeoutMs: prepared.timeoutMs,
-    });
-  } catch (err) {
-    return failClosed(err);
-  }
-}
-
-/**
- * Make the logstore land on the configured user OSS bucket.
- * Disabled → Enabled. Same ossBucket → no write. Different bucket → Disabled then Enabled.
- */
-export async function slsEnsureHostedOss(
-  params: SlsMultimodalConfigParams & { ossBucket: string; roleArn: string },
-): Promise<SlsEnsureHostedOssResult> {
-  const ossBucket = params.ossBucket.trim();
-  const roleArn = params.roleArn.trim();
-  if (!ossBucket || !roleArn) {
-    return { ok: false, error: 'ossBucket and roleArn are required', retryable: false };
-  }
-
-  const current = await slsGetMultimodalConfiguration(params);
-  if (!current.ok || !current.config) return current;
-  if (current.config.status === 'Enabled' && (current.config.ossBucket ?? '') === ossBucket) {
-    return { ...current, action: 'unchanged' };
-  }
-  if (current.config.status === 'Enabled') {
-    const disabled = await slsPutMultimodalConfiguration({ ...params, status: 'Disabled' });
-    if (!disabled.ok) return disabled;
-  }
-
-  const enabled = await slsPutMultimodalConfiguration({
-    ...params,
-    status: 'Enabled',
-    ossBucket,
-    roleArn,
-  });
-  if (!enabled.ok) return enabled;
-  return {
-    ...enabled,
-    action: current.ok && current.config?.status === 'Enabled' ? 'replaced' : 'enabled',
-  };
-}
-
-/** Virtual-hosted OSS host → bucket. Does not log or return query credentials. */
-export function parseOssBucketFromPresignedUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-    const match = parsed.hostname.toLowerCase().match(/^(.+?)\.oss[-.]/i);
-    const bucket = match?.[1]?.trim() ?? '';
-    return bucket || null;
-  } catch {
-    return null;
-  }
-}
-
-export function buildSlsHttpEventStorageBasePath(args: {
-  ossBucket: string;
-  project: string;
-  logstore: string;
-}): string {
-  const ossBucket = args.ossBucket.trim();
-  const project = args.project.trim();
-  const logstore = args.logstore.trim();
-  if (!ossBucket || !project || !logstore) {
-    throw new Error('oss bucket, project, and logstore are required');
-  }
-  return `oss://${ossBucket}/${project}/${logstore}`;
 }
 
 /** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
@@ -730,6 +642,13 @@ export async function sniffSlsHttpEventStorageBasePath(
   });
   if (!presign.ok || !presign.url) {
     return { ok: false, error: presign.error || 'presign failed' };
+  }
+  try {
+    if (!isAllowedPresignUrl(new URL(presign.url))) {
+      return { ok: false, error: 'presign url must be https' };
+    }
+  } catch {
+    return { ok: false, error: 'presign url is invalid' };
   }
   const bucket = parseOssBucketFromPresignedUrl(presign.url);
   if (!bucket) {
@@ -751,12 +670,13 @@ export async function sniffSlsHttpEventStorageBasePath(
 
 /**
  * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * writeVia=http sniffs one presign; timeout or error → fail-closed (no processor).
+ * delegatedOss always sniffs one presign. If target.ossBucket is set (sls or delegatedOss),
+ * the sniffed bucket must match or multimodal stays off.
  */
 export async function resolveMultimodalEventStorageBasePath(
   config: MultimodalRuntimeConfig,
 ): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
-  if (config.uploader !== 'sls' || config.sls?.writeVia !== 'http') {
+  if (config.storage.type === 'oss') {
     const storageBasePath = (config.storageBasePath ?? '').trim();
     if (!storageBasePath) {
       return { ok: false, error: 'multimodal storageBasePath is required' };
@@ -764,31 +684,42 @@ export async function resolveMultimodalEventStorageBasePath(
     return { ok: true, storageBasePath };
   }
 
-  const sls = config.sls;
-  const hostedBucket = sls.hostedOss?.ossBucket?.trim() ?? '';
-  if (hostedBucket) {
-    try {
-      return {
-        ok: true,
-        storageBasePath: buildSlsHttpEventStorageBasePath({
-          ossBucket: hostedBucket,
-          project: sls.project,
-          logstore: sls.logstore,
-        }),
-      };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  const { target, auth } = config.storage;
+  const configuredBucket = target.ossBucket?.trim() ?? '';
+  const shouldSniff = config.storage.type === 'delegatedOss' || !!configuredBucket;
+  if (!shouldSniff) {
+    const storageBasePath = (config.storageBasePath ?? '').trim();
+    if (!storageBasePath) {
+      return { ok: false, error: 'multimodal storageBasePath is required' };
     }
+    return { ok: true, storageBasePath };
   }
-  return sniffSlsHttpEventStorageBasePath({
-    endpoint: sls.endpoint,
-    project: sls.project,
-    logstore: sls.logstore,
-    mode: sls.auth.mode,
-    accessKeyId: sls.auth.accessKeyId,
-    accessKeySecret: sls.auth.accessKeySecret,
-    securityToken: sls.auth.securityToken,
-    apiKey: sls.auth.apiKey,
+
+  const sniffed = await sniffSlsHttpEventStorageBasePath({
+    endpoint: target.endpoint,
+    project: target.project,
+    logstore: target.logstore,
+    ...slsStorageAuthFields(auth),
     timeoutMs: SLS_STARTUP_TIMEOUT_MS,
   });
+  if (!sniffed.ok) return sniffed;
+
+  if (configuredBucket) {
+    const currentBucket = tryParseOssEventStorageBasePath(sniffed.storageBasePath)?.bucket ?? '';
+    if (currentBucket !== configuredBucket) {
+      return {
+        ok: false,
+        error: `configured ossBucket (${configuredBucket}) does not match current landing bucket (${currentBucket || 'unknown'})`,
+      };
+    }
+  }
+
+  if (config.storage.type === 'delegatedOss') {
+    return sniffed;
+  }
+  const storageBasePath = (config.storageBasePath ?? '').trim();
+  if (!storageBasePath) {
+    return { ok: false, error: 'multimodal storageBasePath is required' };
+  }
+  return { ok: true, storageBasePath };
 }

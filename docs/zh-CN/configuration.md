@@ -73,117 +73,100 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 ## 多模态对象存储
 
-当需要把 Agent 消息中的图片（内联 base64，或由各 Agent 从本地路径读入后再编码）转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制；本地 `pathToUri` 读取范围是 `agents.<id>.multimodal.allowedRootPaths` 加上 Agent 默认根。见 [多模态采集](multimodal.md)。
+> **实验性。** 多模态配置和事件字段可能调整。
 
-### OSS
+把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。在 `config.json` 配置 `multimodal.storage`：`type`、`target`、`auth`。是否上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 决定；本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-```json
-{
-  "multimodal": {
-    "uploader": "oss",
-    "storageBasePath": "oss://your-bucket/pilot-mm",
-    "oss": {
-      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
-    }
-  }
-}
-```
+`type` 选一种：`sls`、`delegatedOss` 或 `oss`。这和日志用的 `sls` flusher 不是同一块配置。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
-| 配置项 | 说明 |
-|--------|------|
-| `multimodal.uploader` | `oss` 或 `sls`。 |
-| `multimodal.storageBasePath` | OSS 必填，须以 `oss://` 开头，形如 `oss://bucket/prefix`。 |
-| `multimodal.oss.endpoint` | 标准区域 Endpoint（不支持 accelerate）。 |
-| `multimodal.oss.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+`auth` 里可以同时写 ApiKey 和 AK。写了 `mode` 就用对应那一套；没写 `mode` 时，有 `apiKey` 用 ApiKey，否则用 AK。凭证不完整则不开启图片上传，文本采集照常。
 
-### SLS PutObject
+### `type: sls`
 
-SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一配置块。`storageBasePath` 由 `project` / `logstore` 推导为 `sls://{project}/{logstore}`，无需手写。
-
-配置 `uploader: sls` 后，Pilot 会对该 logstore 开启多模态采集并写入对象。
-
-写入方式由 `sls.writeVia` 决定（缺省 `putObject`）：
-
-- `putObject`：用 AK 或 ApiKey 调 SLS PutObject。事件 URI 为 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
-- `http`：用 AK 或 ApiKey 换预签名 URL，再裸 HTTP PUT。启动时探测一次 presign，从 URL 拆出 bucket；事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。探测失败或超时则不开多模态。
+通过 SLS PutObject 写入。事件 URI 为 `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
 
 ```json
 {
   "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "ak",
-        "accessKeyId": "your-access-key-id",
-        "accessKeySecret": "your-access-key-secret"
-      }
-    }
-  }
-}
-```
-
-ApiKey 走 PutObject（由 `auth.mode` 选择用哪套凭证；AK 与 ApiKey 可以同时存在）：
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "apiKey",
-        "apiKey": "your-sls-project-api-key"
-      }
-    }
-  }
-}
-```
-
-HTTP 预签名上传（`writeVia=http`）。可用 ApiKey 或 AK（由 `auth.mode` 选择）：
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "writeVia": "http",
-      "auth": {
-        "mode": "apiKey",
-        "apiKey": "your-sls-project-api-key"
-      }
-    }
-  }
-}
-```
-
-托管用户 OSS（`hostedOss`）。**只能用 AK 管理**，ApiKey 没有 `GET/PUT multimodalconfiguration` 权限。配了但 `auth.mode` 不是 `ak` 时，配置非法，多模态关闭。这一项只用于第一次把 logstore 指到用户 Bucket；SLS 侧配置会保留，之后可以删掉 `hostedOss`，Pilot 停止也不会关掉托管。启动时会先 GET：已是 Disabled 则打开；已 Enabled 且 `ossBucket` 相同则不动；已 Enabled 但 Bucket 不同则先 Disabled 再 Enabled。任一步失败则不开多模态。
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "auth": {
-        "mode": "ak",
-        "accessKeyId": "your-access-key-id",
-        "accessKeySecret": "your-access-key-secret"
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
       },
-      "hostedOss": {
-        "ossBucket": "your-bucket",
-        "roleArn": "acs:ram::<uid>:role/<roleName>"
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
+    }
+  }
+}
+```
+
+用 ApiKey：
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: delegatedOss`
+
+先向 SLS 换预签名，再写入 OSS。事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。启动时会向 SLS 确认当前落地 Bucket。可选填写 `target.ossBucket` 做核对：和当前落地 Bucket 不一致，或确认失败，则不开启图片上传。
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "delegatedOss",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal",
+        "ossBucket": "your-bucket"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: oss`
+
+直连 OSS，只能用 AK。
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "oss",
+      "target": {
+        "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+        "storageBasePath": "oss://your-bucket/pilot-mm"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
       }
     }
   }
@@ -192,16 +175,17 @@ HTTP 预签名上传（`writeVia=http`）。可用 ApiKey 或 AK（由 `auth.mod
 
 | 配置项 | 说明 |
 |--------|------|
-| `multimodal.sls.endpoint` | SLS Endpoint。 |
-| `multimodal.sls.project` | SLS Project。 |
-| `multimodal.sls.logstore` | 用于存放多模态对象的 Logstore；缺省为 `logstore-multimodal`。 |
-| `multimodal.sls.writeVia` | 缺省 `putObject`。`http` 表示换预签名后裸 PUT；AK 或 ApiKey 均可。 |
-| `multimodal.sls.auth.mode` | 用户配置可省略，加载后必有。`ak` 或 `apiKey`。未填时：有 `apiKey` 就用 `apiKey`（即使也配了 AK）；否则 `accessKeyId` 与 `accessKeySecret` 都有才用 `ak`。 |
-| `multimodal.sls.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；可选 `securityToken`（STS）。 |
-| `multimodal.sls.auth.apiKey` | `mode=apiKey` 时必填。可与 AK 同时存在，仅在 `mode=apiKey` 时使用。 |
-| `multimodal.sls.hostedOss.ossBucket` / `roleArn` | 可选，必须成对。仅 `mode=ak` 可用。启动时把该 logstore 托管到用户 OSS；已配过可省略。 |
+| `multimodal.storage.type` | `sls`、`delegatedOss` 或 `oss`。 |
+| `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
+| `multimodal.storage.target.project` | SLS Project。`sls` / `delegatedOss` 必填。 |
+| `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore；缺省 `logstore-multimodal`。 |
+| `multimodal.storage.target.ossBucket` | 可选。`sls` / `delegatedOss` 用来核对落地 Bucket；不一致则不开启图片上传。 |
+| `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
+| `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。`type=oss` 必须是 `ak`。 |
+| `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
+| `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。可与 AK 同时写；未填 `mode` 时优先用 `apiKey`。 |
 
-全局多模态配置缺失或非法时，Pilot 会 fail-open：进程继续采集文本，但不做 blob→uri 转换。
+`multimodal.storage` 缺失或无效时，文本采集照常，图片不会转成 `uri`。
 
 ## 配置主题
 
