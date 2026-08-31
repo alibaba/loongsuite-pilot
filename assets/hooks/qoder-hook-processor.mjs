@@ -769,10 +769,17 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     if (triggerPromptLine < 0) return waiting('prompt-not-found');
 
     let stopLine = -1;
+    let stopSource = null;
     for (let i = triggerPromptLine + 1; i < limit; i++) {
       const hookEvent = hookEventOf(rows[i]);
       if (hookEvent === 'Stop') {
         stopLine = i;
+        stopSource = 'progress-stop';
+        break;
+      }
+      if (rows[i]?.type === 'assistant' && rows[i]?.message?.stop_reason) {
+        stopLine = i;
+        stopSource = 'assistant-stop-reason';
         break;
       }
       if (i >= triggerLimit && (
@@ -783,6 +790,10 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
       }
     }
     if (stopLine < 0) return waiting('stop-not-found');
+    logDebug(
+      'qoder',
+      `Stop detected at line ${stopLine} (source: ${stopSource}) for prompt at line ${triggerPromptLine}`,
+    );
 
     // Resolve the start from the actual Stop instead of trusting a global
     // cursor that may have been reset by redeployment.
