@@ -14,8 +14,13 @@
 | MiMo Code | `mimo-code` | `mimo` |
 | Qwen Code CLI | `qwen-code-cli` | `qwen` |
 | Cursor CLI | `cursor-cli` | `cursor-agent` |
+| OpenClaw | `openclaw` | `openclaw` |
 
 Cursor Desktop 不支持这组变量。
+
+OpenClaw 当前仅支持 `AGENTTEAMS_WORKER_NAME`，暂不支持
+`AGENTTEAMS_INSTANCE_ID`。如果 OpenClaw 运行在容器中，环境变量必须注入
+OpenClaw Gateway 所在的容器和进程；修改变量后需要重启或重建容器。
 
 ## 设置环境变量
 
