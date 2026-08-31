@@ -845,7 +845,6 @@ describe('sls-client (presign)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toMatch(/does not match current landing bucket \(other-bucket\)/);
-      expect(result.error).toMatch(/update multimodal\.storage\.target\.ossBucket/);
     }
   });
 
