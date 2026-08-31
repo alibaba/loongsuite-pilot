@@ -1410,7 +1410,12 @@ function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeCon
   // When no progress events are available, use the old per-line normalization
   for (const row of contentEvents) {
     const record = buildQoderHookRecord(row, { agentId, runtimeConfig, turnId });
-    if (record) existingRecords.push(record);
+    if (!record) continue;
+    // Same stamp the boundary path applies. The OTLP flusher uses agent.source to
+    // tell collection paths apart before letting one turn close another's buffer,
+    // so a turn falling back to the legacy path must not look like a foreign source.
+    record['agent.source'] = 'qoder-transcript-hook';
+    existingRecords.push(record);
   }
 
   // Apply step.id with timestamp proximity (legacy logic)

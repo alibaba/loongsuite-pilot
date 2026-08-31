@@ -350,6 +350,93 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     expect(mockConvert).not.toHaveBeenCalled();
   });
 
+  it('does NOT let a second collection path preempt the first one in the same session', async () => {
+    // Qoder CLI is collected by two inputs at once while qoder-trace is off:
+    // qoder-transcript-hook (turn id = crypto.randomUUID()) and
+    // qoder-cli-session-segment (turn id = record.turn_id). They share the
+    // session id but mint turn ids from separate id spaces, so their buffers
+    // are concurrent, not successive. Preempting across paths truncated the
+    // hook buffer down to its turn-entry `other`, which the converter turns
+    // into a phantom ENTRY+AGENT pair with no turn/step/llm children.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const session = 'qoder-cli-session-1';
+    const hook = {
+      'gen_ai.agent.type': 'qoder-cli',
+      'gen_ai.session.id': session,
+      'gen_ai.turn.id': 'c0ffee00-0000-4000-8000-000000000001',
+      'agent.source': 'qoder-transcript-hook',
+      'trace_id': 'ddd12f3577b34da6a3ce929d0e0e4736',
+    };
+    const segment = {
+      'gen_ai.agent.type': 'qoder-cli',
+      'gen_ai.session.id': session,
+      'gen_ai.turn.id': 'segment-turn-7',
+      'agent.source': 'qoder-cli-session-segment',
+      'trace_id': 'eee12f3577b34da6a3ce929d0e0e4736',
+    };
+
+    // Hook turn opens with the entry `other` carrying the user prompt.
+    await flusher.send(makeEntry({ ...hook, 'event.name': 'other' }));
+    // Segment path emits a record for the same session mid-stream.
+    await flusher.send(makeEntry({
+      ...segment,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['tool_call'],
+    }));
+    // The hook buffer must still be open — nothing flushed yet.
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Hook turn finishes on its own signal.
+    await flusher.send(makeEntry({ ...hook, 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({
+      ...hook,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.flush();
+
+    const hookCall = mockConvert.mock.calls.find(
+      ([records]) => (records[0] as Record<string, unknown>)['agent.source'] === 'qoder-transcript-hook',
+    );
+    expect(hookCall).toBeDefined();
+    // All three hook records converted together — not an `other`-only skeleton.
+    expect(hookCall![0]).toHaveLength(3);
+  });
+
+  it('still preempts within one collection path', async () => {
+    // The same-source guard must not disable Signal B: two successive turns
+    // from the same input are still sequential, so the abandoned one closes.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const base = {
+      'gen_ai.agent.type': 'qoder-cli',
+      'gen_ai.session.id': 'same-path-session',
+      'agent.source': 'qoder-transcript-hook',
+    };
+
+    await flusher.send(makeEntry({
+      ...base,
+      'gen_ai.turn.id': 'hook-turn-1',
+      'trace_id': 'fff12f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+    await flusher.send(makeEntry({
+      ...base,
+      'gen_ai.turn.id': 'hook-turn-2',
+      'trace_id': 'fff22f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    const preempted = mockConvert.mock.calls[0][0];
+    expect((preempted[0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('hook-turn-1');
+  });
+
   it('force-flushes oldest incomplete buffers when MAX_TURN_BUFFERS is exceeded', async () => {
     // Bounded cleanup: if buffers accumulate past the hard cap (neither
     // Signal A, same-session successor, nor idle timeout ever fires for
