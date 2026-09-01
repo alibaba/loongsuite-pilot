@@ -172,6 +172,45 @@ http://127.0.0.1:8765/
 
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
 
+### macOS Dashboard 快捷方式
+
+快捷方式**按需安装**：普通安装、升级和启动 Pilot 都不会创建快捷方式或修改程序坞。
+它与菜单栏 App 相互独立。
+
+```bash
+loongsuite-pilot dashboard shortcut install
+loongsuite-pilot dashboard shortcut status
+loongsuite-pilot dashboard shortcut uninstall
+```
+
+`install` 会创建带雷达图标的网页快捷方式：
+`~/Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc`，
+并添加到程序坞的文件区（下载、废纸篓这一侧，不能放在应用区）。点击后使用默认浏览器打开。
+不生成或编译 `.app`，不需要额外安装软件，不增加后台进程，也不会重启 Pilot。
+安装命令只使用 Pilot 已有的 Node 和 macOS 自带工具。
+
+网址在**执行快捷方式安装命令时**读取配置中的 `dashboard.port`，支持
+`AGENT_DATA_COLLECTION_CONFIG` 和安装时的自定义数据目录；端口缺失或不合法时，
+与采集服务一样使用 `8765`。例如配置端口 `9000`，生成的网址就是
+`http://127.0.0.1:9000/`。
+`.webloc` 保存的是网址，不会执行读取配置的代码。因此修改端口并重启 Pilot 后，
+需要再执行一次 `dashboard shortcut install` 更新网址；重复安装会保留原来的程序坞位置，
+不会重复添加。用户移除的入口也不会在升级或启动时被自动加回来。
+
+`status` 只在终端显示快捷文件位置、**文件里保存的目标网址**和是否已添加到程序坞，
+不是服务健康检查。`uninstall` 只移除对应程序坞入口，并把受管理的快捷文件移到废纸篓，
+不会卸载 Pilot。建议卸载 Pilot 本体前先执行此命令；之后也可以手动删除快捷文件和入口。
+自行移动或复制的文件不受命令管理。
+
+仅更新或移除带 Pilot 管理标记、且属于同一配置路径的快捷方式；不覆盖同名用户文件、
+符号链接或另一套配置的快捷方式，不修改被管理策略锁定的程序坞。若快捷文件已经丢失，
+会提示手动移除残留入口。修改程序坞前会把布局备份到快捷目录的 `Backups` 子目录，
+卸载快捷方式时保留备份。程序坞配置格式不是 Apple 公开接口，因此会在写入前后检查布局，
+遇到不支持的格式直接报错，不覆盖原布局。入口或图标变化时程序坞会短暂刷新。
+
+网页快捷方式只保存网址，不会判断 Pilot 是否正在运行，也不会识别端口是否被其他程序占用。
+浏览器无法打开预期页面时，可用 `loongsuite-pilot status` 检查 Pilot 状态。
+
 ## 卸载
 
 卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。

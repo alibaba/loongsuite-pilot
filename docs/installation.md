@@ -131,6 +131,53 @@ http://127.0.0.1:8765/
 The page reads `logs/metrics-summary.json` directly and does not run a second
 aggregation pipeline.
 
+### macOS Dashboard shortcut
+
+Shortcut installation is **opt-in**. Normal Pilot installation, upgrades and
+service starts do not create shortcuts or modify the Dock. This is separate
+from the menu bar app.
+
+```bash
+loongsuite-pilot dashboard shortcut install
+loongsuite-pilot dashboard shortcut status
+loongsuite-pilot dashboard shortcut uninstall
+```
+
+`install` creates a radar-icon web shortcut at
+`~/Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc`
+and adds it to the Dock's files area (beside Downloads/Trash, not the applications
+area). Clicking it uses the default browser. No `.app` is compiled or signed;
+there is no additional software dependency, background process, or service restart.
+The command uses Pilot's existing Node runtime and macOS system tools.
+
+The URL is read from `dashboard.port` in the active configuration at **shortcut
+installation time**. The CLI honors `AGENT_DATA_COLLECTION_CONFIG` and the installed
+custom data directory; missing/invalid ports use the collector's default of
+`8765`. For example, port `9000` produces `http://127.0.0.1:9000/`.
+A `.webloc` stores a URL, not executable code: after changing the port, restart
+Pilot as usual and rerun `dashboard shortcut install` to update the shortcut.
+Repeated installation keeps the existing Dock position and does not add duplicates.
+Upgrades/startup never silently re-add a shortcut you removed.
+
+`status` is a read-only terminal report of the shortcut file path, **stored target
+URL**, and Dock presence. It is not a service-health check. `uninstall` removes only
+the matching managed Dock entry and moves the matching shortcut file to Trash;
+it does not uninstall Pilot. Run it before uninstalling Pilot itself, or remove
+the shortcut manually afterwards. Copies/moved files are not managed.
+
+Only shortcuts marked as Pilot-managed for the same configuration are replaced
+or removed. Unrelated files, symbolic links, other configurations, and locked or
+managed Dock layouts are preserved. If the file is already missing, an orphaned
+Dock item is reported for manual removal. Dock changes are backed up in the
+shortcut directory's `Backups` subdirectory; uninstall keeps these backups.
+The Dock preference format is not a public Apple API: layout changes are checked
+before/after writing, and unsupported layouts fail rather than being overwritten.
+The Dock briefly refreshes when an entry or icon changes.
+
+The web shortcut only stores a URL. It does not check whether Pilot is running
+or whether another program has taken its port. Use `loongsuite-pilot status` to
+check Pilot's status if the browser cannot open the expected page.
+
 ## Uninstall
 
 Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., and the injected plugin spec in OpenCode's config). Add `--purge` (`-Purge` on Windows) to also delete the local data directory.
