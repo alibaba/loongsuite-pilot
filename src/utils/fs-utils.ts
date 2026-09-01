@@ -63,6 +63,8 @@ export interface AtomicTextWriteOptions {
    * Only applies when the expected target already exists.
    */
   backupPath?: string;
+  /** Optional permissions for the newly-created temporary file. */
+  mode?: number;
 }
 
 async function assertExpectedFileState(
@@ -111,7 +113,7 @@ export async function writeTextFileAtomic(
 
   const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -127,7 +129,7 @@ export async function writeTextFileAtomic(
       await ensureDir(dir);
       const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, 'utf8');
+        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }

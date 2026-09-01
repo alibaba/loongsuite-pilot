@@ -205,15 +205,15 @@ If you quit the menu bar app, reopen it without restarting collection:
 loongsuite-pilot menubar start
 ```
 
-Run this in your macOS desktop terminal without `sudo`. Pilot must already be running and the menu bar app must be enabled. Repeated calls reuse the running app.
+Run this in your macOS desktop terminal without `sudo`. Pilot must already be running. The command persists `"enableStatusBarApp": true` in the active `config.json`; repeated calls reuse the running app.
 
-To close only the menu bar app, run `loongsuite-pilot menubar stop`. Collection keeps running, and stopping an already closed app succeeds. This does not change the auto-start setting; the next collector startup can open it again.
+To close only the menu bar app, run `loongsuite-pilot menubar stop`. Collection keeps running, and stopping an already closed app succeeds. The command persists `"enableStatusBarApp": false`, so the next collector startup leaves it closed.
 
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
 </p>
 
-To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
+The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has higher priority than `config.json`. Unset a disabling value before `menubar start`; an enabling value can override the setting written by `menubar stop` on future Pilot starts.
 
 ## Documentation
 

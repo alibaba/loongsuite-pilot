@@ -187,15 +187,15 @@ macOS 菜单栏 App：
 loongsuite-pilot menubar start
 ```
 
-请在 macOS 桌面用户的终端中执行，不要加 `sudo`。该命令不会重启采集服务；菜单栏已经运行时不会重复启动。采集服务需已启动，且菜单栏未被配置禁用。
+请在 macOS 桌面用户的终端中执行，不要加 `sudo`。该命令不会重启采集服务；菜单栏已经运行时不会重复启动。采集服务需已启动。命令会向当前生效的 `config.json` 持久化 `"enableStatusBarApp": true`。
 
-只关闭菜单栏可执行 `loongsuite-pilot menubar stop`，采集服务继续运行；菜单栏已退出时也会正常返回。该命令不修改自动启动配置，下次启动采集服务时菜单栏仍可自动打开。
+只关闭菜单栏可执行 `loongsuite-pilot menubar stop`，采集服务继续运行；菜单栏已退出时也会正常返回。命令会持久化 `"enableStatusBarApp": false`，下次启动采集服务时不会再自动打开菜单栏。
 
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS 菜单栏 App" width="360">
 </p>
 
-如需关闭，设置环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false`，或在 `~/.loongsuite-pilot/config.json` 中加入 `"enableStatusBarApp": false`。
+环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 的优先级仍高于 `config.json`。如果它设置为禁用，需先取消或改为 `true` 才能执行 `menubar start`；如果它设置为启用，后续启动 Pilot 时仍可能覆盖 `menubar stop` 写入的配置。
 
 ## 文档
 
