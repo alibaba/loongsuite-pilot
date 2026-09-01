@@ -346,6 +346,22 @@ describe('DiskUsageSampler', () => {
     expect(tree.calls.at(-1)?.operation).toBe('close');
   });
 
+  it('publishes a complete sample when the final handle close crosses the budget', async () => {
+    const tree = installTree({ 'a': 7 });
+    tree.hooks.before = async operation => {
+      if (operation === 'close') await new Promise(resolve => setTimeout(resolve, 60));
+    };
+    const instance = sampler({ budgetMs: 50 });
+    const pending = instance.sample();
+    await vi.advanceTimersByTimeAsync(60);
+    await pending;
+    expect(instance.getSnapshot()).toMatchObject({
+      status: 'ok', dataBytes: 7, logsBytes: 0, scanMs: 60,
+    });
+    expect(tree.opened.every(dir => dir.closed)).toBe(true);
+    expect(tree.calls.at(-1)?.operation).toBe('close');
+  });
+
   it('does not treat a close error as a complete sample', async () => {
     const tree = installTree();
     let failures = 0;
@@ -462,6 +478,31 @@ describe('DiskUsageSampler', () => {
     tree.hooks.before = undefined;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(onSample).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts the new generation immediately when an old scan settles after its restart tick', async () => {
+    const tree = installTree({ 'a': 7 });
+    let releaseOldRead: (() => void) | undefined;
+    tree.hooks.before = operation => {
+      if (operation === 'read') return new Promise<void>(resolve => { releaseOldRead = resolve; });
+    };
+    let resolveFreshSample: (() => void) | undefined;
+    const freshSample = new Promise<void>(resolve => { resolveFreshSample = resolve; });
+    const onSample = vi.fn(() => resolveFreshSample!());
+    const instance = sampler({ onSample });
+    const oldAttempt = instance.sample();
+    await vi.advanceTimersByTimeAsync(0);
+    instance.stop();
+    instance.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fs.opendir).toHaveBeenCalledTimes(1);
+    tree.hooks.before = undefined;
+    releaseOldRead!();
+    await Promise.all([oldAttempt, freshSample]);
+    expect(onSample).toHaveBeenCalledTimes(1);
+    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 7, logsBytes: 0 });
+    expect(fs.opendir).toHaveBeenCalledTimes(2);
+    expect(tree.maxActive()).toBe(1);
   });
 
   it('isolates a throwing consumer callback from later sampling', async () => {

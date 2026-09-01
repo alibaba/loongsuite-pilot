@@ -36,6 +36,11 @@ interface DirectoryFrame {
   inLogs: boolean;
 }
 
+interface InFlightSample {
+  generation: number;
+  promise: Promise<void>;
+}
+
 class ScanInterrupted extends Error {
   constructor(readonly status: 'partial' | 'timeout' | 'error' | 'cancelled') {
     super(status);
@@ -57,7 +62,7 @@ export class DiskUsageSampler {
   private snapshot: DiskUsageSnapshot = { status: 'pending' };
   private timer: ReturnType<typeof setTimeout> | null = null;
   private cancelPause: (() => void) | null = null;
-  private inFlight: Promise<void> | null = null;
+  private inFlight: InFlightSample | null = null;
   private active = false;
   private stopped = false;
   private generation = 0;
@@ -108,11 +113,17 @@ export class DiskUsageSampler {
 
   sample(): Promise<void> {
     if (this.stopped) return Promise.resolve();
-    if (this.inFlight) return this.inFlight;
+    const generation = this.generation;
+    const current = this.inFlight;
+    if (current) {
+      if (current.generation === generation) return current.promise;
+      const retry = (): Promise<void> => this.sample();
+      return current.promise.then(retry, retry);
+    }
     const attempt = this.runSample(this.generation).finally(() => {
-      this.inFlight = null;
+      if (this.inFlight?.promise === attempt) this.inFlight = null;
     });
-    this.inFlight = attempt;
+    this.inFlight = { generation, promise: attempt };
     return attempt;
   }
 
@@ -149,6 +160,7 @@ export class DiskUsageSampler {
     let logsBytes = 0;
     let entries = 0;
     let rootOpened = false;
+    let completed = false;
 
     const check = (): void => {
       if (generation !== this.generation) throw new ScanInterrupted('cancelled');
@@ -235,7 +247,8 @@ export class DiskUsageSampler {
           if (!entry) {
             await validatePath(frame.path);
             await closeTop();
-            check();
+            if (frames.length === 0) completed = true;
+            else check();
             continue;
           }
           entries++;
@@ -291,7 +304,8 @@ export class DiskUsageSampler {
       }
     }
     if (generation !== this.generation) return;
-    if (performance.now() - startedTick >= this.options.budgetMs) status = 'timeout';
+    if (status === 'ok' && !completed
+      && performance.now() - startedTick >= this.options.budgetMs) status = 'timeout';
     const scanMs = Math.max(0, Math.round(performance.now() - startedTick));
     this.snapshot = status === 'ok'
       ? { status, dataBytes, logsBytes, sampledAt: Date.now(), scanMs }
