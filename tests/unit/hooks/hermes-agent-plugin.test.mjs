@@ -248,6 +248,7 @@ function skillViewTurn() {
 
 function replay(events, {
   captureMessageContent = true,
+  agentTeamsWorkerName,
   pilotEnvUser,
   legacyEnvUser,
   configUser = 'pilot-config-user',
@@ -318,6 +319,8 @@ print(json.dumps(sorted(ctx.hooks)))
   else env.LOONGSUITE_PILOT_USER_ID = pilotEnvUser;
   if (legacyEnvUser === undefined) delete env.LOONGSUITE_USER_ID;
   else env.LOONGSUITE_USER_ID = legacyEnvUser;
+  if (agentTeamsWorkerName === undefined) delete env.AGENTTEAMS_WORKER_NAME;
+  else env.AGENTTEAMS_WORKER_NAME = agentTeamsWorkerName;
   const run = spawnSync('python3', ['-c', driver, pluginPath, path.join(root, 'events.jsonl')], {
     cwd: root,
     env,
@@ -428,6 +431,30 @@ describe('Hermes Agent native plugin', () => {
     expect(partTypes(requestTwo['gen_ai.input.messages'])).toEqual(expect.arrayContaining(['tool_call', 'tool_call_response']));
     expect(partTypes(responseTwo['gen_ai.output.messages'])).toContain('text');
     expect(responseTwo['gen_ai.response.finish_reasons']).toEqual(['stop']);
+  });
+
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', () => {
+    const { records } = replay(firstTurn(), {
+      agentTeamsWorkerName: ' planner ',
+    });
+
+    expect(records).not.toHaveLength(0);
+    expect(records.every(record => record['gen_ai.agent.name'] === 'planner')).toBe(true);
+    expect(records.every(record =>
+      record.resourceAttributes?.['agentteams.worker.name'] === 'planner')).toBe(true);
+    expect(new Set(records.map(record => record['event.name']))).toEqual(new Set([
+      'llm.request', 'llm.response', 'tool.call', 'tool.result',
+    ]));
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['overlong', 'x'.repeat(513)],
+  ])('ignores a %s AGENTTEAMS_WORKER_NAME value', (_label, agentTeamsWorkerName) => {
+    const { records } = replay(firstTurn(), { agentTeamsWorkerName });
+
+    expect(records.every(record => !('gen_ai.agent.name' in record))).toBe(true);
+    expect(records.every(record => !('resourceAttributes' in record))).toBe(true);
   });
 
   it('emits an error response when a provider request fails before post_llm_call', () => {

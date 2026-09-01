@@ -133,7 +133,7 @@ When a supported agent process starts with the following environment variables, 
 | `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`, `resourceAttributes["agentteams.worker.name"]` | Logical worker name; takes precedence over the native name for a main agent. |
 | `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | Concrete worker instance; never overwrites `gen_ai.agent.id`. |
 
-This is currently supported for Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
+Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI support both variables. OpenClaw and Hermes Agent support only `AGENTTEAMS_WORKER_NAME` and do not currently consume `AGENTTEAMS_INSTANCE_ID`. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
 
 ## Provider Names
 
