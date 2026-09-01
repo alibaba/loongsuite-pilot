@@ -834,13 +834,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
           grokMetadata = prepared.metadata;
         }
 
+        // agent.input is a compatibility copy of the input-bearing `other`.
+        // Keep it in the normal OTLP flusher path, but exclude it at the
+        // EventLog-to-Trace boundary so the converter does not emit an extra
+        // empty STEP for the duplicate input boundary.
+        const traceConversionRecords = recordsForConversion.filter(
+          record => record['event.name'] !== 'agent.input',
+        );
+
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
         // missing output.messages / tool.call.result. This happens when a
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(recordsForConversion);
+        const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
         let result;
         try {

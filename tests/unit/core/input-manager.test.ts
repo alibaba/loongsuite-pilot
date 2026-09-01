@@ -19,6 +19,7 @@ import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
 } from '../../../src/normalization/invocation-identity.js';
+import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -516,6 +517,154 @@ describe('InputManager', () => {
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(phone);
       }
+    });
+  });
+
+  describe('agent.input compatibility dual-write', () => {
+    it('dual-writes masked input other after shared enrichment', async () => {
+      const input = new StubInput('dual-write-mask');
+      manager.registerInput(input as any);
+      manager.setMaskConfig({ mode: 'all', types: [] });
+
+      const accessKey = 'AKIAIOSFODNN7EXAMPLE';
+      const source = buildTestEntry({
+        'event.id': 'input-other',
+        'gen_ai.turn.id': 'turn-dual-write',
+        'gen_ai.input.messages_delta': [
+          { role: 'user', content: `use ${accessKey}` },
+        ],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      const [other, agentInput] = flusher.batchCalls[0];
+      expect(flusher.batchCalls[0]).toHaveLength(2);
+      expect(other['event.name']).toBe('other');
+      expect(other['event.id']).toBe('input-other');
+      expect(agentInput['event.name']).toBe('agent.input');
+      expect(agentInput['event.id']).toBe(deriveAgentInputEventId('input-other'));
+      expect(other['gen_ai.turn.start']).toBe(true);
+      expect(agentInput['gen_ai.turn.start']).toBeUndefined();
+      expect(agentInput['gen_ai.turn.end']).toBeUndefined();
+      expect(JSON.stringify(other)).toContain('[ACCESSKEY_MASKED]');
+      expect(JSON.stringify(agentInput)).toContain('[ACCESSKEY_MASKED]');
+      expect(JSON.stringify(other)).not.toContain(accessKey);
+      expect(JSON.stringify(agentInput)).not.toContain(accessKey);
+
+      const stripDerivedFields = (entry: AgentActivityEntry) => {
+        const comparable = { ...entry };
+        delete comparable['event.id'];
+        delete comparable['event.name'];
+        delete comparable['gen_ai.turn.start'];
+        delete comparable['gen_ai.turn.end'];
+        return comparable;
+      };
+      expect(stripDerivedFields(agentInput)).toEqual(stripDerivedFields(other));
+      expect(source['event.name']).toBe('other');
+      expect(source['event.id']).toBe('input-other');
+    });
+
+    it('does not generate agent.input after content policy removes input fields', async () => {
+      const input = new StubInput('dual-write-content-policy');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
+      });
+      const source = buildTestEntry({
+        agentType: ClientType.Cursor,
+        'event.id': 'content-policy-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'secret prompt' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.name']).toBe('other');
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('gen_ai.input.messages_delta');
+    });
+
+    it('does not copy a non-input other event', async () => {
+      const input = new StubInput('non-input-other');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({ 'event.id': 'metadata-other' });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.id']).toBe('metadata-other');
+    });
+
+    it('dispatches the same expanded pair to every child flusher', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      manager.setFlusher(new MultiFlusher([jsonl, sls, http]));
+      const input = new StubInput('dual-write-multi');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({
+        'event.id': 'multi-input',
+        'gen_ai.input.messages': [{ role: 'user', content: 'hello' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const expectedIds = ['multi-input', deriveAgentInputEventId('multi-input')];
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0].map(entry => entry['event.id'])).toEqual(expectedIds);
+      }
+    });
+
+    it('counts ingress before expansion and successful egress after expansion', async () => {
+      const input = new StubInput('dual-write-metrics');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({
+        'event.id': 'metrics-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+      });
+      let flushed: { count: number; bytes: number } | undefined;
+      manager.on('flushed', payload => {
+        flushed = payload as { count: number; bytes: number };
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const counter = manager.getInputCounters().get(input.id)!;
+      const dispatched = flusher.batchCalls[0];
+      const expectedBytes = dispatched.reduce(
+        (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
+        0,
+      );
+      expect(counter.inEvents).toBe(1);
+      expect(counter.outEvents).toBe(2);
+      expect(counter.outFailed).toBe(0);
+      expect(flushed).toEqual({ count: 2, bytes: expectedBytes });
+    });
+
+    it('counts the full expanded batch when dispatch fails', async () => {
+      const input = new StubInput('dual-write-failure');
+      manager.registerInput(input as any);
+      flusher.shouldFail = true;
+      const source = buildTestEntry({
+        'event.id': 'failed-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const counter = manager.getInputCounters().get(input.id)!;
+      expect(counter.inEvents).toBe(1);
+      expect(counter.outEvents).toBe(0);
+      expect(counter.outFailed).toBe(2);
     });
   });
 

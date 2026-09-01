@@ -9,6 +9,7 @@ const eventNameValues = [
   'tool.result',
   'skill.use',
   'tool.approve',
+  'agent.input',
   'other',
 ] as const;
 

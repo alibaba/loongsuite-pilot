@@ -16,6 +16,7 @@ import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js
 import { convertEventLogToTrace } from '@loongsuite/otel-util-genai';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import { GlobalAttributesProvider } from '../../../../src/normalization/global-attributes.js';
+import { expandAgentInputEvents } from '../../../../src/normalization/agent-input-dual-write.js';
 
 function makeConfig() {
   return {
@@ -51,6 +52,36 @@ describe('OtlpTraceFlusher - conversion', () => {
     const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
     expect(callArgs[0]).toHaveLength(2);
     expect(callArgs[1]).toMatchObject({ strict: false });
+  });
+
+  it('excludes agent.input only at the EventLog-to-Trace boundary', async () => {
+    const inputOther = {
+      time_unix_nano: '1700000000000000000',
+      'event.id': 'input-other',
+      'event.name': 'other',
+      'user.id': 'user-1',
+      'gen_ai.session.id': 'session-1',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.turn.id': 'dual-write-turn',
+      'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+    } as AgentActivityEntry;
+    const terminal = {
+      ...inputOther,
+      time_unix_nano: '1700000001000000000',
+      'event.id': 'terminal',
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.input.messages_delta': undefined,
+    } as AgentActivityEntry;
+
+    await flusher.sendBatch([...expandAgentInputEvents([inputOther]), terminal]);
+
+    const records = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(records.map(record => record['event.name'])).toEqual([
+      'other',
+      'llm.response',
+    ]);
   });
 
   it('passes handler from per-agent convert state', async () => {

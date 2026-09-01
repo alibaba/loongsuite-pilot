@@ -398,6 +398,8 @@ export function normalizeEventName(value: unknown): AgentEventName {
       return 'skill.use';
     case 'tool.approve':
       return 'tool.approve';
+    case 'agent.input':
+      return 'agent.input';
     case 'event':
     case 'other':
     default:

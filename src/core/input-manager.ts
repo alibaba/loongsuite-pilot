@@ -19,6 +19,7 @@ import type { TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
+import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
 
 const logger = createLogger('InputManager');
 
@@ -251,13 +252,11 @@ export class InputManager extends EventEmitter {
     }
 
     const counter = this.counters.get(inputId);
-    let batchBytes = 0;
     if (counter) {
       counter.inEvents += entries.length;
       for (const entry of entries) {
         const b = Buffer.byteLength(JSON.stringify(entry));
         counter.inBytes += b;
-        batchBytes += b;
       }
       counter.lastPollTime = formatTime(new Date());
       counter.lastActiveTime = Date.now();
@@ -302,8 +301,14 @@ export class InputManager extends EventEmitter {
             maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
           );
 
-    logger.info('dispatching entries', { inputId, count: maskedEntries.length });
-    await this.dispatchEntries(inputId, maskedEntries, batchBytes);
+    const expandedEntries = expandAgentInputEvents(maskedEntries);
+    const outputBatchBytes = expandedEntries.reduce(
+      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
+      0,
+    );
+
+    logger.info('dispatching entries', { inputId, count: expandedEntries.length });
+    await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes);
   }
 
   markInputStarted(id: string): void {
