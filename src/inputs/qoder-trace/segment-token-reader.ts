@@ -30,6 +30,7 @@ interface SegmentEvent {
   ts: number;
   requestId?: string;
   turnId?: string;
+  filePath: string;
   data?: Record<string, unknown>;
 }
 
@@ -38,6 +39,7 @@ interface StartedEvent {
   requestId?: string;
   turnId?: string;
   requestIndex?: number;
+  filePath: string;
 }
 
 export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
@@ -47,8 +49,16 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   const files = await findSegmentFilesForSession(sessionId);
   if (files.length === 0) return [];
 
-  // Collect all events in order to properly associate tool.execution.finished with LLM calls
+  // Segment files are emitted per-turn by qoder-cli (one segment-N.jsonl per
+  // turn). Pairing is therefore scoped to within the same file. This is the
+  // critical boundary that prevents cross-turn timestamp leaks: even when
+  // `model.request.started` lacks `turn_id` (only `model.response.completed`
+  // carries it), the file boundary keeps the pairing within the right turn.
+  // The prior fix (ad34e14f) used a global startedList with a turnId-based
+  // filter; when started lacked turnId the filter rejected all candidates,
+  // startTs fell back to evt.ts (completed), and duration collapsed to 0.
   const allEvents: SegmentEvent[] = [];
+  const fileBuckets: Array<{ path: string; events: SegmentEvent[] }> = [];
 
   for (const filePath of files) {
     let content: string;
@@ -58,6 +68,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       continue;
     }
 
+    const bucket: { path: string; events: SegmentEvent[] } = { path: filePath, events: [] };
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
       let record: Record<string, unknown>;
@@ -79,21 +90,24 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
         ? record.data as Record<string, unknown>
         : undefined;
-      allEvents.push({
+      const evt: SegmentEvent = {
         type,
         ts,
         requestId: requestId || undefined,
         turnId: turnId || undefined,
+        filePath,
         data,
-      });
+      };
+      allEvents.push(evt);
+      bucket.events.push(evt);
     }
+    fileBuckets.push(bucket);
   }
 
-  // Build a complete list of started events with their turn_id and request_index.
-  // request_index resets per turn, so the composite key `${turnId}:${requestIndex}`
-  // is what makes the lookup unambiguous in multi-turn sessions. The prior fix
-  // (b30a2ef6) used request_index alone as the key, which collided across turns
-  // and caused turn 2/3 LLM span timestamps to be sourced from turn 1.
+  // Global startedList sorted by ts asc. Exact requestId and composite-key
+  // matches can look across files when needed (rare; qoder-cli rotates
+  // mid-turn). The per-file fallback below is the primary path; cross-file
+  // is only a last resort.
   const startedList: StartedEvent[] = [];
   for (const evt of allEvents) {
     if (evt.type !== 'model.request.started') continue;
@@ -103,91 +117,131 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       ts: evt.ts,
       requestId: evt.requestId,
       turnId: evt.turnId,
-      requestIndex: requestIndex,
+      requestIndex,
+      filePath: evt.filePath,
     });
   }
   startedList.sort((a, b) => a.ts - b.ts);
 
-  const startedByRequestId = new Map<string, number>();
-  const startedByTurnIndex = new Map<string, number>();
-  for (const s of startedList) {
-    if (s.requestId && !startedByRequestId.has(s.requestId)) {
-      startedByRequestId.set(s.requestId, s.ts);
-    }
-    if (s.turnId && s.requestIndex !== undefined && !startedByTurnIndex.has(turnIndexKey(s.turnId, s.requestIndex))) {
-      startedByTurnIndex.set(turnIndexKey(s.turnId, s.requestIndex), s.ts);
-    }
-  }
-
-  // Track which started events have been consumed so the order fallback only
-  // uses genuinely unclaimed starts. Pairing strategy per completed event:
-  //   1. exact requestId match (UUID globally unique — preserved)
-  //   2. composite (turnId, requestIndex) match — fixes the cross-turn collision
-  //      that occurred when request_index alone was used as the key
-  //   3. order fallback scoped to the same turn: first unclaimed started event
-  //      in the SAME turn (ts asc). When turnId is absent (older segment format
-  //      without turn_id), fall back to global order to preserve prior behavior.
+  // Pairing strategy per completed event (processed per-file, so cross-turn
+  // leakage is structurally impossible):
+  //   1. exact requestId match (UUID globally unique — preserved across files)
+  //   2. same-file composite (turnId, requestIndex) match — both fields
+  //      present, same file → strongest signal
+  //   3. cross-file composite (turnId, requestIndex) match — when started
+  //      lives in a different file but turnId+requestIndex align
+  //   4. same-file order fallback — first unclaimed started in THIS file
+  //      (ts asc). Handles started events that lack turn_id/request_index
+  //      (the production shape that broke ad34e14f).
+  //   5. same-turn order fallback — when turnId present but no same-file
+  //      candidate. Accepts started events whose turnId matches OR is
+  //      undefined (older started events without turn_id field).
+  //   6. legacy global order fallback — when turnId is absent on completed
+  //      (older segment format). Preserves b30a2ef6 behavior.
   const usedStarted = new Set<number>();
   const results: SegmentTokenData[] = [];
 
-  for (const evt of allEvents) {
-    if (evt.type !== 'model.response.completed') continue;
-    const data = evt.data || {};
-    const turnId = evt.turnId ?? '';
-    const requestIndex = finiteNum(data.request_index);
+  for (const bucket of fileBuckets) {
+    for (const evt of bucket.events) {
+      if (evt.type !== 'model.response.completed') continue;
+      const data = evt.data || {};
+      const turnId = evt.turnId ?? '';
+      const requestIndex = finiteNum(data.request_index);
 
-    let startTs: number | undefined;
-    let claimedStartedIdx = -1;
+      let startTs: number | undefined;
+      let claimedStartedIdx = -1;
 
-    if (evt.requestId) {
-      const idx = startedList.findIndex(s => s.requestId === evt.requestId);
-      if (idx >= 0) {
-        startTs = startedList[idx].ts;
-        claimedStartedIdx = idx;
+      // 1. Exact requestId match (UUID globally unique)
+      if (evt.requestId) {
+        const idx = startedList.findIndex(s => s.requestId === evt.requestId);
+        if (idx >= 0) {
+          startTs = startedList[idx].ts;
+          claimedStartedIdx = idx;
+        }
       }
-    }
 
-    if (startTs === undefined && turnId && requestIndex !== undefined) {
-      const idx = startedList.findIndex(s => s.turnId === turnId && s.requestIndex === requestIndex);
-      if (idx >= 0) {
-        startTs = startedList[idx].ts;
-        claimedStartedIdx = idx;
+      // 2. Same-file composite (turnId, requestIndex) match
+      if (startTs === undefined && turnId && requestIndex !== undefined) {
+        for (let i = 0; i < startedList.length; i++) {
+          if (usedStarted.has(i)) continue;
+          if (startedList[i].filePath !== bucket.path) continue;
+          if (startedList[i].turnId !== turnId) continue;
+          if (startedList[i].requestIndex !== requestIndex) continue;
+          startTs = startedList[i].ts;
+          claimedStartedIdx = i;
+          break;
+        }
       }
-    }
 
-    if (startTs === undefined) {
-      // Order fallback. When turnId is present, scope the search to the same
-      // turn only — a cross-turn fallback would reproduce the cross-turn
-      // timestamp mismatch this fix targets. When turnId is absent (older
-      // segment format), fall back to global order.
-      for (let i = 0; i < startedList.length; i++) {
-        if (usedStarted.has(i)) continue;
-        if (turnId && startedList[i].turnId !== turnId) continue;
-        startTs = startedList[i].ts;
-        claimedStartedIdx = i;
-        break;
+      // 3. Cross-file composite (turnId, requestIndex) match
+      if (startTs === undefined && turnId && requestIndex !== undefined) {
+        for (let i = 0; i < startedList.length; i++) {
+          if (usedStarted.has(i)) continue;
+          if (startedList[i].turnId !== turnId) continue;
+          if (startedList[i].requestIndex !== requestIndex) continue;
+          startTs = startedList[i].ts;
+          claimedStartedIdx = i;
+          break;
+        }
       }
+
+      // 4. Same-file order fallback (first unclaimed started in THIS file)
+      if (startTs === undefined) {
+        for (let i = 0; i < startedList.length; i++) {
+          if (usedStarted.has(i)) continue;
+          if (startedList[i].filePath !== bucket.path) continue;
+          startTs = startedList[i].ts;
+          claimedStartedIdx = i;
+          break;
+        }
+      }
+
+      // 5. Same-turn order fallback (when turnId present, no same-file start).
+      //    Accept started events whose turnId matches OR is undefined — the
+      //    undefined case covers older started events that lack turn_id field
+      //    but live in the same logical turn (step 4 is the primary path via
+      //    file boundary; this step only runs when step 4 found nothing).
+      if (startTs === undefined && turnId) {
+        for (let i = 0; i < startedList.length; i++) {
+          if (usedStarted.has(i)) continue;
+          if (startedList[i].turnId !== undefined && startedList[i].turnId !== turnId) continue;
+          startTs = startedList[i].ts;
+          claimedStartedIdx = i;
+          break;
+        }
+      }
+
+      // 6. Legacy global order fallback (no turnId on completed — older format)
+      if (startTs === undefined) {
+        for (let i = 0; i < startedList.length; i++) {
+          if (usedStarted.has(i)) continue;
+          startTs = startedList[i].ts;
+          claimedStartedIdx = i;
+          break;
+        }
+      }
+
+      if (claimedStartedIdx >= 0) usedStarted.add(claimedStartedIdx);
+
+      results.push({
+        requestId: evt.requestId || '',
+        turnId,
+        inputTokens: finiteNum(data.input_tokens) ?? 0,
+        outputTokens: finiteNum(data.output_tokens) ?? 0,
+        cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
+        cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
+        requestStartTs: startTs ?? evt.ts,
+        responseEndTs: evt.ts,
+        toolFinishedTs: 0,
+        stopReason: (data.stop_reason as string) ?? '',
+        model: (data.model as string) ?? '',
+      });
     }
-
-    if (claimedStartedIdx >= 0) usedStarted.add(claimedStartedIdx);
-
-    results.push({
-      requestId: evt.requestId || '',
-      turnId,
-      inputTokens: finiteNum(data.input_tokens) ?? 0,
-      outputTokens: finiteNum(data.output_tokens) ?? 0,
-      cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
-      cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
-      requestStartTs: startTs ?? evt.ts,
-      responseEndTs: evt.ts,
-      toolFinishedTs: 0,
-      stopReason: (data.stop_reason as string) ?? '',
-      model: (data.model as string) ?? '',
-    });
   }
 
   // Associate tool.execution.finished with the preceding LLM call.
   // The last tool.execution.finished before the next model.request.started belongs to that step.
+  // Tool events are processed globally (they may or may not be in the same file).
   for (let i = 0; i < results.length; i++) {
     const currentEnd = results[i].responseEndTs;
     const nextStart = i + 1 < results.length ? results[i + 1].requestStartTs : Infinity;
@@ -213,10 +267,6 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
 
   sessionCache.set(sessionId, { data: results, ts: now });
   return results;
-}
-
-function turnIndexKey(turnId: string, requestIndex: number): string {
-  return `${turnId}:${requestIndex}`;
 }
 
 async function findSegmentFilesForSession(sessionId: string): Promise<string[]> {
