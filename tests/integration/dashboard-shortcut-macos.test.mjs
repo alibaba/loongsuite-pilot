@@ -31,7 +31,16 @@ describe.skipIf(process.platform !== 'darwin')('native macOS shortcut adapter', 
 function run(argv) {
   try {
     const input = JSON.parse(argv[0]);
-    const system = createMacSystem(input.domain);
+    let faultInjected = false;
+    const system = createMacSystem(input.domain, input.corruptAfterWrite ? {
+      afterDockWrite: function (command, faultDomain, xmlString) {
+        if (faultInjected) return;
+        faultInjected = true;
+        const unexpected = $({ 'tile-type': 'file-tile', 'tile-data': { 'file-data': {
+          _CFURLString: 'file:///unexpected-entry', _CFURLStringType: 15 } } });
+        command('/usr/bin/defaults', ['write', faultDomain, 'persistent-others', '-array', xmlString(unexpected)]);
+      }
+    } : null);
     system.homePath = input.home;
     system.refreshDock = function () { return true; };
     // Keep the test's removed file in its temporary home, not in the user's Trash.
@@ -42,16 +51,16 @@ function run(argv) {
   } catch (error) { return JSON.stringify({ ok: false, error: String(error.message) }); }
 }`);
     request = { action: 'install', configPath: join(root, "配置 ' $() ;/config.json"), url: 'http://127.0.0.1:9123/',
-      iconPath: resolve('assets/dashboard-shortcut/AppIcon.icns'), iconVersion: 'a'.repeat(64) };
+      iconPath: resolve('assets/dashboard-shortcut/AppIcon.icns'), iconVersion: 'a'.repeat(64), operationId: randomUUID() };
     shortcut = join(root, 'Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc');
   });
   afterEach(() => {
     if (domain) defaults(['delete', domain]);
     if (root) rmSync(root, { recursive: true, force: true });
   });
-  function run(overrides = {}) {
+  function run(overrides = {}, options = {}) {
     return JSON.parse(execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', harness,
-      JSON.stringify({ domain, home: root, request: { ...request, ...overrides } })], { encoding: 'utf8' }));
+      JSON.stringify({ domain, home: root, request: { ...request, ...overrides }, ...options })], { encoding: 'utf8' }));
   }
   it('round-trips native plist data, installs a real custom icon, updates port and uninstalls', () => {
     const first = run();
@@ -98,6 +107,13 @@ function run(argv) {
     expect(run({ action: 'status' })).toMatchObject({ ok: true, result: { dockLocked: true, exists: false } });
     expect(run()).toMatchObject({ ok: false });
     expect(existsSync(shortcut)).toBe(false);
+  });
+  it('restores only the previous files-area layout when post-write verification fails', () => {
+    const result = run({}, { corruptAfterWrite: true });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toContain('previous files-area layout was restored');
+    expect(defaults(['export', domain, '-'])).toBe(initial);
+    expect(existsSync(join(root, 'Library/Application Support/LoongSuite Pilot/Shortcuts/Operation.lock'))).toBe(false);
   });
   it('runs the shipped scripts without build output or dependencies and updates the stored port only on install', () => {
     const pkg = join(root, 'package with spaces');

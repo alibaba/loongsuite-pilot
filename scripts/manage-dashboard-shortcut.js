@@ -10,6 +10,7 @@ function manageShortcut(request, system) {
   if (!['install', 'status', 'uninstall'].includes(action)) fail('Unknown shortcut action.');
   if (system.userName === 'root') fail('Run as the logged-in Mac user, without sudo.');
   if (typeof request.configPath !== 'string' || request.configPath[0] !== '/') fail('Expected an absolute configuration path.');
+  if (action !== 'status' && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(request.operationId || '')) fail('Expected a shortcut operation identifier.');
   if (action === 'install' && (!/^http:\/\/127\.0\.0\.1:[0-9]+\/$/.test(request.url || '')
     || Number(request.url.split(':')[2].slice(0, -1)) < 1
     || Number(request.url.split(':')[2].slice(0, -1)) > 65535)) fail('Expected a local Dashboard URL.');
@@ -42,7 +43,7 @@ function manageShortcut(request, system) {
   // Dock item automatically; status reports it so the user can remove it manually.
   if (action === 'uninstall' && !initial.managed) fail('The shortcut file is missing. Remove its orphaned Dock entry manually.');
 
-  return system.withLock(base, function () {
+  return system.withLock(base, request.operationId, function () {
     const current = inspect();
     if (current.file.kind !== 'absent' && !current.managed) fail('Shortcut ownership changed. No changes made.');
     if (current.matches > 1) fail('Multiple matching Dock entries exist. Remove duplicates manually before retrying.');
@@ -90,10 +91,11 @@ function manageShortcut(request, system) {
   });
 }
 
-function createMacSystem(domain) {
+function createMacSystem(domain, hooks) {
   ObjC.import('Foundation');
   ObjC.import('AppKit');
   domain = domain || 'com.apple.dock';
+  hooks = hooks || {};
   const fm = $.NSFileManager.defaultManager;
   const unwrap = value => ObjC.unwrap(value);
   // Objective-C nil is a truthy bridge object in JXA; inspect its unwrapped value.
@@ -193,16 +195,38 @@ function createMacSystem(domain) {
     }
     const latest = readDock();
     if (latest.locked || !latest.others.isEqual(before.others) || !latest.apps.isEqual(before.apps)) fail('The Dock changed concurrently. Retry the command.');
-    // Preserve NSData/bookmarks by serializing native plist objects, never JSON.
-    if (action === 'add') command('/usr/bin/defaults', ['write', domain, 'persistent-others', '-array-add', xmlString(newItem)]);
-    else {
+    function writeDockArray(items) {
       const args = ['write', domain, 'persistent-others', '-array'];
-      for (let i = 0; i < Number(expected.count); i++) args.push(xmlString(expected.objectAtIndex(i)));
+      for (let i = 0; i < Number(items.count); i++) args.push(xmlString(items.objectAtIndex(i)));
       command('/usr/bin/defaults', args);
     }
+    // Preserve NSData/bookmarks by serializing native plist objects, never JSON.
+    if (action === 'add') command('/usr/bin/defaults', ['write', domain, 'persistent-others', '-array-add', xmlString(newItem)]);
+    else writeDockArray(expected);
+    if (typeof hooks.afterDockWrite === 'function') hooks.afterDockWrite(command, domain, xmlString);
     const after = readDock();
-    if (!after.apps.isEqual(before.apps) || !after.others.isEqual(expected)) {
-      fail('Dock verification failed. Do not retry automatically; inspect the backup: ' + backupPath);
+    const targetCount = after.paths.filter(path => path === shortcutPath).length;
+    const expectedTargetCount = action === 'add' ? 1 : 0;
+    const expectedCount = Number(expected.count);
+    let unchangedEntries = Number(after.others.count) === expectedCount;
+    for (let i = 0; unchangedEntries && i < expectedCount; i++) {
+      // macOS may enrich the new target tile with GUID/bookmark fields.
+      if (action === 'add' && i === expectedCount - 1) continue;
+      unchangedEntries = Boolean(after.others.objectAtIndex(i).isEqual(expected.objectAtIndex(i)));
+    }
+    if (targetCount !== expectedTargetCount || !unchangedEntries) {
+      const rollbackBase = readDock();
+      if (!rollbackBase.apps.isEqual(after.apps) || !rollbackBase.others.isEqual(after.others)) {
+        fail('Dock verification failed and the Dock changed again; no automatic rollback was attempted. Inspect the backup: ' + backupPath);
+      }
+      try {
+        writeDockArray(before.others);
+        const restored = readDock();
+        if (!restored.others.isEqual(before.others)) throw new Error('rollback verification failed');
+      } catch (_) {
+        fail('Dock verification failed and the previous files-area layout could not be restored. Inspect the backup: ' + backupPath);
+      }
+      fail('Dock verification failed; the previous files-area layout was restored. Retry the command. Backup: ' + backupPath);
     }
     return backupPath;
   }
@@ -215,13 +239,16 @@ function createMacSystem(domain) {
       try { return { kind: type, value: ObjC.deepUnwrap(plist($.NSData.dataWithContentsOfFile(path))) }; }
       catch (_) { return { kind: type, value: null }; }
     },
-    withLock(base, fn) {
+    withLock(base, owner, fn) {
       directory(base);
       const lock = base + '/Operation.lock';
       if (!fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(lock, false, $({ NSFilePosixPermissions: 448 }), null)) {
-        fail('Another shortcut command may be running. If none is running, remove the empty lock directory: ' + lock);
+        fail('Another shortcut command may be running. If none is running, inspect the operation lock: ' + lock);
       }
-      try { return fn(); } finally { fm.removeItemAtPathError(lock, null); }
+      try {
+        write(lock + '/Owner', $(owner).dataUsingEncoding($.NSUTF8StringEncoding));
+        return fn();
+      } finally { fm.removeItemAtPathError(lock, null); }
     },
     validateIcon(path) {
       if (typeof path !== 'string' || !present($.NSImage.alloc.initWithContentsOfFile(path))) fail('The bundled shortcut icon is missing or invalid. Repair the Pilot installation.');

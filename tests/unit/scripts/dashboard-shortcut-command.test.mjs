@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadShortcutUrl, runShortcutCommand, shortcutConfigPath } from '../../../scripts/dashboard-shortcut.mjs';
+import { loadShortcutUrl, runNativeShortcut, runShortcutCommand, shortcutConfigPath } from '../../../scripts/dashboard-shortcut.mjs';
 import { loadConfig } from '../../../src/core/config-loader.ts';
 import { configJsonPath } from '../../../src/utils/data-dir.ts';
 
@@ -92,5 +92,34 @@ describe('shortcut command only', () => {
     deps.shortcut.mockRejectedValue(new Error('secret child output'));
     expect(await runShortcutCommand(['install'], deps)).toBe(1);
     expect(deps.stderr.mock.calls.flat().join('')).not.toContain('secret');
+  });
+});
+
+describe('native helper timeout cleanup', () => {
+  const ownId = '00000000-0000-4000-8000-000000000001';
+  const otherId = '00000000-0000-4000-8000-000000000002';
+  function timedOutHelper(home, owner) {
+    const lock = join(home, 'Library/Application Support/LoongSuite Pilot/Shortcuts/Operation.lock');
+    const fakeExecFile = vi.fn((_command, args, _options, callback) => {
+      const operationId = JSON.parse(args[3]).operationId;
+      void mkdir(lock, { recursive: true })
+        .then(() => writeFile(join(lock, 'Owner'), owner === 'own' ? operationId : otherId))
+        .then(() => callback(Object.assign(new Error('timed out'), { killed: true }), ''));
+    });
+    return { lock, fakeExecFile };
+  }
+  it('removes only the operation lock owned by the timed-out helper', async () => {
+    const home = join(root, 'timeout-home');
+    const { lock, fakeExecFile } = timedOutHelper(home, 'own');
+    await expect(runNativeShortcut('install', config, 'http://127.0.0.1:9001/',
+      { home, execFile: fakeExecFile, randomUUID: () => ownId, timeout: 1 })).rejects.toThrow('lock was removed');
+    await expect(lstat(lock)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('never removes a lock with another operation identifier', async () => {
+    const home = join(root, 'other-lock-home');
+    const { lock, fakeExecFile } = timedOutHelper(home, 'other');
+    await expect(runNativeShortcut('uninstall', config, undefined,
+      { home, execFile: fakeExecFile, randomUUID: () => ownId, timeout: 1 })).rejects.toThrow(lock);
+    await expect(lstat(lock)).resolves.toMatchObject({});
   });
 });

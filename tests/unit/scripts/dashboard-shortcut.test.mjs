@@ -14,13 +14,14 @@ beforeEach(() => {
   files = new Map();
   dockPaths = ['/Users/test/Downloads'];
   shortcutPath = '/Users/test/Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc';
-  request = { action: 'install', configPath: "/Users/test/配置 ' $() ;/config.json", url: 'http://127.0.0.1:9000/', iconVersion: 'a'.repeat(64), iconPath: '/package/icon.icns' };
+  request = { action: 'install', configPath: "/Users/test/配置 ' $() ;/config.json", url: 'http://127.0.0.1:9000/',
+    iconVersion: 'a'.repeat(64), iconPath: '/package/icon.icns', operationId: '00000000-0000-4000-8000-000000000001' };
   system = {
     homePath: '/Users/test', userName: 'test',
     checkParents: vi.fn(),
     readShortcut: vi.fn(path => files.get(path) || { kind: 'absent' }),
     readDock: vi.fn(() => ({ paths: [...dockPaths], locked: false })),
-    withLock: vi.fn((_base, fn) => fn()),
+    withLock: vi.fn((_base, _owner, fn) => fn()),
     validateIcon: vi.fn(),
     writeShortcut: vi.fn((path, value) => files.set(path, { kind: 'file', value })),
     setIcon: vi.fn(() => true),

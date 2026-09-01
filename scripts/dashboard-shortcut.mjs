@@ -1,8 +1,8 @@
 // One-shot macOS shortcut command, shipped directly in scripts/ without a build.
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile, rmdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,15 +25,40 @@ export async function loadShortcutUrl(configPath) {
 
 class ShortcutError extends Error {}
 
-async function runNativeShortcut(action, configPath, url) {
+async function cleanTimedOutLock(lockPath, operationId) {
+  const ownerPath = join(lockPath, 'Owner');
+  try {
+    const [lock, owner, value] = await Promise.all([lstat(lockPath), lstat(ownerPath), readFile(ownerPath, 'utf8')]);
+    if (!lock.isDirectory() || lock.isSymbolicLink() || !owner.isFile() || owner.isSymbolicLink() || value !== operationId) return false;
+    await unlink(ownerPath);
+    await rmdir(lockPath);
+    return true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return false;
+    try { await lstat(lockPath); return false; }
+    catch (lockError) { return lockError?.code === 'ENOENT'; }
+  }
+}
+
+export async function runNativeShortcut(action, configPath, url, dependencies = {}) {
   const script = fileURLToPath(new URL('./manage-dashboard-shortcut.js', import.meta.url));
   const iconPath = fileURLToPath(new URL('../assets/dashboard-shortcut/AppIcon.icns', import.meta.url));
   const iconVersion = action === 'install' ? createHash('sha256').update(await readFile(iconPath)).digest('hex') : undefined;
-  const request = JSON.stringify({ action, url, configPath, iconPath, iconVersion });
+  const operationId = (dependencies.randomUUID ?? randomUUID)();
+  const lockPath = join(dependencies.home ?? homedir(), 'Library/Application Support/LoongSuite Pilot/Shortcuts/Operation.lock');
+  const request = JSON.stringify({ action, url, configPath, iconPath, iconVersion, operationId });
   const output = await new Promise((resolveOutput, reject) => {
-    execFile('/usr/bin/osascript', ['-l', 'JavaScript', script, request],
-      { timeout: 20_000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
-        if (error) reject(error);
+    (dependencies.execFile ?? execFile)('/usr/bin/osascript', ['-l', 'JavaScript', script, request],
+      { timeout: dependencies.timeout ?? 20_000, maxBuffer: 1024 * 1024 }, async (error, stdout) => {
+        if (error?.killed || error?.code === 'ETIMEDOUT') {
+          if (action === 'status') reject(new ShortcutError('The macOS shortcut status check timed out; no changes were requested.'));
+          else {
+            const cleaned = await cleanTimedOutLock(lockPath, operationId);
+            reject(new ShortcutError(cleaned
+              ? 'The macOS shortcut helper timed out. Its operation lock was removed; retry the command.'
+              : 'The macOS shortcut helper timed out. Its operation lock was not removed: ' + lockPath));
+          }
+        } else if (error) reject(error);
         else resolveOutput(stdout);
       });
   });
