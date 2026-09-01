@@ -57,6 +57,7 @@ $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
+$OPEN_SOURCE_INSTALLER_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1"
 
 # >>> pilot-account-identity >>>
 # Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
@@ -246,6 +247,27 @@ function Resolve-CurrentVersion {
     $indexJs = Join-Path $PACKAGE_DIR "dist\index.js"
     if (Test-Path $indexJs) { return $PACKAGE_DIR }
     return $null
+}
+
+function Get-BuildEdition {
+    try {
+        $versionDir = Resolve-CurrentVersion
+        if (-not $versionDir) { return "" }
+
+        $probe = Join-Path $versionDir "dist\cli-probe.cjs"
+        if (-not (Test-Path -LiteralPath $probe)) { return "" }
+
+        $nodeBin = Resolve-Node
+        if (-not $nodeBin) { return "" }
+
+        return ([string](& $nodeBin $probe --build-edition 2>$null)).Trim()
+    } catch {
+        return ""
+    }
+}
+
+function Test-OpenSourceBuild {
+    return (Get-BuildEdition) -eq "opensource"
 }
 
 function Resolve-PreviousVersion {
@@ -1250,6 +1272,72 @@ function Cmd-Info {
     }
 }
 
+function Show-UpgradeUsage {
+    Write-Host "Usage: loongsuite-pilot upgrade [--version <version>]"
+    Write-Host ""
+    Write-Host "Upgrade the open-source edition to the latest release, or to a specific version."
+}
+
+function Cmd-Upgrade {
+    $version = ""
+    for ($i = 0; $i -lt $SubArgs.Count; $i++) {
+        $arg = [string]$SubArgs[$i]
+        if ($arg -in @("--version", "-Version")) {
+            if ($i + 1 -ge $SubArgs.Count -or -not $SubArgs[$i + 1]) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+            $i++
+            $version = [string]$SubArgs[$i]
+        } elseif ($arg -match '^--version=(.*)$') {
+            $version = [string]$Matches[1]
+            if (-not $version) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+        } elseif ($arg -in @("help", "--help", "-h")) {
+            Show-UpgradeUsage
+            return
+        } else {
+            Write-Host "Unknown upgrade option: $arg" -ForegroundColor Red
+            Show-UpgradeUsage
+            exit 1
+        }
+    }
+
+    if ($version -and $version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
+        Write-Host "Invalid version: $version (expected e.g. 1.6.0)" -ForegroundColor Red
+        exit 1
+    }
+
+    $tempRoot = if ($env:TEMP) { $env:TEMP } else { $DEFAULT_PILOT_DIR }
+    if (-not (Test-Path -LiteralPath $tempRoot)) {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    }
+    $installerFile = Join-Path $tempRoot ("loongsuite-pilot-installer-" + (Get-Random) + ".ps1")
+
+    try {
+        Invoke-WebRequest -Uri $OPEN_SOURCE_INSTALLER_URL -OutFile $installerFile -UseBasicParsing
+        $installerArgs = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $installerFile,
+            "upgrade",
+            "-DataDir", $DATA_DIR
+        )
+        if ($version) { $installerArgs += @("-Version", $version) }
+
+        $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+        $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+        & powershell.exe @installerArgs
+        $installerExit = $LASTEXITCODE
+    } finally {
+        Remove-Item -LiteralPath $installerFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($installerExit -ne 0) { exit $installerExit }
+}
+
 # ============================================================
 # CMD: rollback
 # ============================================================
@@ -1567,6 +1655,9 @@ function Cmd-Help {
     Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
+    if (Test-OpenSourceBuild) {
+        Write-Host "  upgrade [opts]  Upgrade to latest or --version <version> (open-source only)"
+    }
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  worker          Manage local Workers:"
     Write-Host "                    worker connect/list/status/disconnect/delete"
@@ -1586,6 +1677,15 @@ switch ($Command.ToLower()) {
     "deploy"             { Cmd-Deploy }
     "token-usage"        { Cmd-TokenUsage }
     "tokens"             { Cmd-TokenUsage }
+    "upgrade" {
+        if (Test-OpenSourceBuild) {
+            Cmd-Upgrade
+        } else {
+            Write-Host "Unknown command: upgrade"
+            Cmd-Help
+            exit 1
+        }
+    }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }
