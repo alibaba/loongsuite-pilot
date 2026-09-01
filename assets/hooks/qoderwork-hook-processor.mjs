@@ -119,11 +119,10 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   const firstRow = turns[0]?.[0] || contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentId });
-  const version = getStringValue(firstRow, 'version') || '';
 
   for (const turn of turns) {
     const turnId = getTurnIdForRows(turn);
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId);
+    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId);
     records.push(...turnRecords);
   }
 
@@ -182,7 +181,7 @@ function isPureSystemReminder(text) {
     && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId) {
+function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId) {
   const records = [];
 
   // Find the user prompt
@@ -205,7 +204,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
         time_unix_nano: timestampToUnixNanos(userRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, turnRows[0], runtimeConfig, cwd));
     }
   }
@@ -289,7 +287,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
     const assistantOutput = extractAssistantOutput(group);
-    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -397,7 +395,7 @@ function extractAssistantOutput(group) {
   return { outputParts, toolCalls };
 }
 
-function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -442,7 +440,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
     'user.id': userId,
     time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
-    version,
   };
   if (inputDelta) {
     llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
@@ -467,7 +464,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
       'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
       time_unix_nano: llmResponseTs,
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
   }
 
@@ -487,7 +483,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
       'user.id': userId,
       time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
 
     // Find matching tool_result
@@ -510,7 +505,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
         'user.id': userId,
         time_unix_nano: timestampToUnixNanos(resultRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, resultRow, runtimeConfig, cwd));
     }
   }

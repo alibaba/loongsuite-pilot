@@ -203,6 +203,7 @@ export class QoderWorkTraceInput extends BaseInput {
         if (!line.trim()) continue;
         try {
           const record = JSON.parse(line) as AgentActivityEntry;
+          delete record.version;
           if (record['event.name']) entries.push(record);
         } catch {
           this.logger.warn('invalid JSONL line');

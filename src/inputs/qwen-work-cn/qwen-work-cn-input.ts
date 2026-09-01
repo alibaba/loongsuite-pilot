@@ -40,8 +40,9 @@ export class QwenWorkCNInput extends BaseHookInput {
     if (typeof record['event.id'] !== 'string') return null;
     if (typeof record.time_unix_nano !== 'string') return null;
 
-    const version = record.version;
+    const version = record['agent.qwenworkcn.version'] ?? record.version;
     if (typeof version === 'string' && version) this.lastAgentVersion = version;
+    delete record.version;
 
     const entry = {
       ...record,

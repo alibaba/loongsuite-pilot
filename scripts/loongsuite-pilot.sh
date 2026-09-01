@@ -423,6 +423,7 @@ _node_is_app_bundle() {
 NODE_PIN_FILE="$CACHE_DIR/node-bin"
 
 resolve_node() {
+    local persist_pin="${1:-true}"
     # 1. Pinned file
     if [ -f "$NODE_PIN_FILE" ]; then
         local pinned
@@ -462,8 +463,10 @@ resolve_node() {
             # Auto-heal: update pin file
             local resolved
             resolved=$(_resolve_realpath "$candidate")
-            mkdir -p "$(dirname "$NODE_PIN_FILE")" 2>/dev/null || true
-            echo "$resolved" > "$NODE_PIN_FILE" 2>/dev/null || true
+            if [ "$persist_pin" = "true" ]; then
+                mkdir -p "$(dirname "$NODE_PIN_FILE")" 2>/dev/null || true
+                echo "$resolved" > "$NODE_PIN_FILE" 2>/dev/null || true
+            fi
             echo "$candidate"
             return 0
         fi
@@ -1268,6 +1271,51 @@ cmd_menubar() {
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
     exec "$node_bin" "$entry" menubar "$@"
+}
+
+cmd_dashboard() {
+    # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
+    case "${1:-}" in
+        shortcut) shift ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+    esac
+    local node_bin="" version_dir repo_dir entry config_path pin pinned
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        entry="$repo_dir/scripts/dashboard-shortcut.mjs"
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || {
+            echo "Pilot is not installed. Install Pilot before managing Dashboard shortcuts." >&2
+            return 1
+        }
+        entry="$version_dir/scripts/dashboard-shortcut.mjs"
+    fi
+    if [ ! -f "$entry" ]; then
+        echo "Dashboard shortcut command is missing. Upgrade or repair Pilot." >&2
+        return 1
+    fi
+    config_path="${AGENT_DATA_COLLECTION_CONFIG:-}"
+    config_path="${config_path#"${config_path%%[![:space:]]*}"}"
+    config_path="${config_path%"${config_path##*[![:space:]]}"}"
+    config_path="${config_path:-$CONFIG_FILE}"
+    case "$config_path" in '~') config_path="$HOME" ;; '~/'*) config_path="$HOME/${config_path#\~/}" ;; esac
+    # A custom --data-dir installer pins Node next to config.json, not the cache.
+    # Preserve spaces in the pinned path; never rewrite the pin on this path.
+    for pin in "$(dirname "$config_path")/node-bin" "$NODE_PIN_FILE"; do
+        if [ -r "$pin" ]; then
+            IFS= read -r pinned < "$pin" || true
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then
+        node_bin=$(resolve_node false) || {
+            echo "Pilot Node.js runtime not found. Repair the Pilot installation." >&2
+            return 1
+        }
+    fi
+    export AGENT_DATA_COLLECTION_CONFIG="$config_path"
+    exec "$node_bin" "$entry" "$@"
 }
 
 cmd_token_usage() {
@@ -2247,6 +2295,7 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
     echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
+    echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  worker ...      Manage local remote-controlled workers"
@@ -2263,6 +2312,7 @@ case "${1:-status}" in
     status)      cmd_status ;;
     info)        cmd_info ;;
     deploy)      shift; cmd_deploy "$@" ;;
+    dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
     menubar)     shift; cmd_menubar "$@" ;;

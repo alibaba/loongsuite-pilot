@@ -40,8 +40,11 @@ function readJsonl(name) {
 let tmpDir;
 let pilotDataDir;
 let pluginLoadSequence = 0;
+let previousWorkerName;
 
 beforeEach(async () => {
+  previousWorkerName = process.env.AGENTTEAMS_WORKER_NAME;
+  delete process.env.AGENTTEAMS_WORKER_NAME;
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
   pilotDataDir = path.join(tmpDir, 'pilot-data');
   fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
@@ -54,6 +57,8 @@ afterEach(async () => {
   delete process.env.LOONGSUITE_USER_ID;
   delete process.env.LOONGSUITE_PILOT_DEBUG;
   delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
+  else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
   vi.restoreAllMocks();
   await fs.promises.rm(tmpDir, { recursive: true, force: true });
 });
@@ -285,6 +290,37 @@ describe('OpenClaw plugin stateful pipeline', () => {
       expect(record['gen_ai.session.id']).not.toBe('env-session');
       expect(record['gen_ai.agent.name']).not.toBe('blocked');
     }
+  });
+
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', async () => {
+    process.env.AGENTTEAMS_WORKER_NAME = ' planner ';
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('planner');
+      expect(record.resourceAttributes).toEqual({
+        'agentteams.worker.name': 'planner',
+      });
+    }
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['too long', 'x'.repeat(513)],
+  ])('retains the default agent name for a %s worker name', async (_label, workerName) => {
+    process.env.AGENTTEAMS_WORKER_NAME = workerName;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('openclaw');
+      expect(record.resourceAttributes).toBeUndefined();
+    }
+    stderr.mockRestore();
   });
 
   it('attaches the user prompt to the first request and tool results to the next request', async () => {
