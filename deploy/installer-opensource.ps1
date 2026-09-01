@@ -270,6 +270,89 @@ function Get-ManagedNodePlatform {
     }
 }
 
+# >>> pilot-short-path >>>
+# 8.3 short paths: why every delete and move below goes through a helper.
+#
+# Windows hands out %TEMP% in 8.3 short form whenever the profile name does not fit 8.3,
+# which a dot in an account name is often enough to do: C:\Users\zhang.wang becomes
+# C:\Users\ZHANG~1.WAN, the four characters after the dot being one too many for an 8.3
+# extension. %USERPROFILE% stays long, so a single install sees both forms. Reading such a
+# path works everywhere (Test-Path, Get-Item, Get-ChildItem, Get-Content, Set-Content,
+# Add-Content, New-Item, Out-File and Copy-Item all resolve it, and so does a Move-Item
+# destination), but Remove-Item, Move-Item, Rename-Item, Set-Location and Push-Location
+# fail with
+#
+#     An object at the specified path C:\Users\ZHANG~1.WAN does not exist.
+#
+# naming the prefix their walk broke on rather than the path that was passed in.
+#
+# It is one guard in FileSystemProvider.NormalizeThePath, which is what the .NET stack
+# trace on the PSArgumentException names. That walk accumulates currentPath in the form you
+# typed it and, for each segment, compares the resolved item against it:
+#
+#     if (fsinfo.FullName.Length < currentPath.Length)
+#         throw NewArgumentException("path", ItemDoesNotExist, currentPath);
+#     if (fsinfo.Name.Length >= childName.Length)
+#         childName = fsinfo.Name;          // "Expand the short file name"
+#
+# The guard is aimed at a child name of two or more dots, which .NET resolves to the parent
+# and so hands back shorter. An 8.3 name longer than the name it stands for is the other way
+# to make resolved shorter than typed, and the guard cannot tell the two apart -- note that
+# the very next line expands a short name only when doing so would not shorten it.
+#
+# So the trigger is not "a segment is in 8.3 form". Measured on 5.1.26100 over 13 profile
+# names and 7 nesting cases, it is a length comparison on every prefix:
+#
+#     zhang.wang     -> ZHANG~1.WAN    11 > 10   throws
+#     abcd.wang      -> ABCD~1.WAN     10 >  9   throws
+#     ab.wang        -> ABxxxx~1.WAN   12 >  7   throws (<=2 chars of base get a hash)
+#     wang.zhang     -> WANG~1.ZHA     10 = 10   works
+#     zhangsan.wang  -> ZHANGS~1.WAN   12 < 13   works
+#     zhang.san      -> no short name at all     works
+#
+# It takes a short base with an over-long extension, which is why it looks rare in the
+# field. Depth is not irrelevant either: the first prefix whose typed length exceeds its
+# resolved length is the one that throws, so an earlier segment resolving much longer masks
+# a later offender (VERYLO~1\ZHANG~1.WAN is fine) while those same two segments in the other
+# order still throw (ZHANG~1.WAN\VERYLO~1 breaks on the first one). -LiteralPath behaves
+# identically to -Path, so quoting is not the fix, and neither is Convert-Path or
+# Resolve-Path -- both hand the short form straight back. Get-Item .FullName expands it.
+function Get-PilotLongPath {
+    param([string]$Path)
+    if (-not $Path) { return $Path }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.FullName) { return $item.FullName }
+    } catch {
+        # Not there, or not there yet -- a Move-Item destination is the common case. Only
+        # an existing directory can carry a short name, so expanding the parent is enough.
+        try {
+            $parent = Split-Path -Parent $Path
+            $leaf = Split-Path -Leaf $Path
+            if ($parent -and $leaf) {
+                $parentItem = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+                if ($parentItem.FullName) { return (Join-Path $parentItem.FullName $leaf) }
+            }
+        } catch {}
+    }
+    return $Path
+}
+
+# Best-effort delete, for cleanup only. Every caller is a catch or a finally, where an
+# exception is not merely unhelpful but destructive, so this has to be incapable of
+# raising one: -ErrorAction SilentlyContinue covers the ordinary non-terminating half (a
+# file a virus scanner still holds open) and the catch covers everything else, the
+# binding failure above included. Deliberately returns nothing -- a caller that needs to
+# know whether the path is gone asks Test-Path.
+function Remove-PilotPathQuietly {
+    param([string]$Path)
+    if (-not $Path) { return }
+    try {
+        Remove-Item -LiteralPath (Get-PilotLongPath $Path) -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+# <<< pilot-short-path <<<
+
 # >>> pilot-ascii-temp >>>
 # Temp root guaranteed to be ASCII, for the two tar.exe staging dirs only.
 #
@@ -302,6 +385,9 @@ function Get-PilotAsciiTempRoot {
     elseif ($env:TMP) { $root = $env:TMP }
     elseif ($env:SystemRoot) { $root = (Join-Path $env:SystemRoot "Temp") }
     if ($root -notmatch '[^\x20-\x7E]') {
+        # 8.3 TEMP (ZHANG~1.WAN) is ASCII, so this branch used to return it as-is
+        # and skip the long-name expand that Remove-Item / Move-Item need.
+        $root = Get-PilotLongPath $root
         $script:PILOT_ASCII_TEMP_ROOT = $root
         return $root
     }
@@ -325,6 +411,8 @@ function Get-PilotAsciiTempRoot {
         } catch {}
     }
     # Nothing writable: keep the old behaviour rather than failing outright.
+    # Same $root as the ASCII early return, so the same 8.3 expand applies.
+    $root = Get-PilotLongPath $root
     $script:PILOT_ASCII_TEMP_ROOT = $root
     return $root
 }
@@ -517,21 +605,21 @@ function Ensure-ManagedNode {
         if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $null }
         if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $null }
 
-        if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
+        if (Test-Path $nodeDir) { Remove-Item -LiteralPath (Get-PilotLongPath $nodeDir) -Recurse -Force }
         if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
         Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
         $nodeBin = Resolve-ManagedNodeBin $nodeDir
         if (-not $nodeBin) {
             Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
-            Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-PilotPathQuietly $nodeDir
             return $null
         }
         return $nodeBin
     } catch {
-        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $nodeDir
         return $null
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
 }
 
@@ -582,8 +670,11 @@ function Ensure-NodeModules {
         }
 
         Set-Content -Path (Join-Path $stagedModules ".pilot-modules-version") -Value $stamp
-        if (Test-Path $modulesDir) { Remove-Item $modulesDir -Recurse -Force }
-        Move-Item $stagedModules $modulesDir
+        if (Test-Path $modulesDir) { Remove-Item -LiteralPath (Get-PilotLongPath $modulesDir) -Recurse -Force }
+        # $stagedModules sits under the ASCII temp root, i.e. under whatever %TEMP%
+        # gave us, and Move-Item cannot see an 8.3 segment either -- without this the
+        # prebuilt tree silently lost every install on such a profile to npm install.
+        Move-Item (Get-PilotLongPath $stagedModules) $modulesDir
         # The move brought the ASCII root's ACL with it, which can leave the tree
         # unreadable to the non-elevated scheduled task -- see Reset-PilotInheritedAcl.
         # If that cannot be repaired, throw the prebuilt tree away rather than deploy
@@ -592,14 +683,14 @@ function Ensure-NodeModules {
         if (-not (Reset-PilotInheritedAcl $modulesDir)) {
             Msg "    ⚠️  预编译 node_modules 权限修复失败: $script:PILOT_LAST_ACL_ERR" `
                 "    ⚠️  Could not reset permissions on prebuilt node_modules: $script:PILOT_LAST_ACL_ERR"
-            Remove-Item $modulesDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-PilotPathQuietly $modulesDir
             return $false
         }
         return $true
     } catch {
         return $false
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
 }
 # <<< managed-node-runtime <<<
@@ -1306,7 +1397,7 @@ if (opts.selectedAgents) {
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
     $ErrorActionPreference = $prevEAP
-    Remove-Item -LiteralPath $cfgTmp -Force -ErrorAction SilentlyContinue
+    Remove-PilotPathQuietly $cfgTmp
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -2425,9 +2516,7 @@ function Cmd-Install {
         Write-Host ""
         Print-Summary "install"
     } finally {
-        if ($script:TMP_DIR -and (Test-Path $script:TMP_DIR)) {
-            Remove-Item $script:TMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
 
@@ -2508,9 +2597,7 @@ function Cmd-Upgrade {
             exit 1
         }
     } finally {
-        if ($script:TMP_DIR -and (Test-Path $script:TMP_DIR)) {
-            Remove-Item $script:TMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
 
@@ -2547,7 +2634,7 @@ fs.writeFileSync(process.argv[2], content);
         $rewriteExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
     if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
