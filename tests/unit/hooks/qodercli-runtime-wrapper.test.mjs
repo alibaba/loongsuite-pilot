@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-async function makeFixture(qodercliSource, withIntercept = true) {
+async function makeFixture(qodercliSource, withIntercept = true, qodercliName = 'qodercli') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-qoder-wrapper-'));
   tempDirs.push(root);
   const hooks = path.join(root, 'hooks');
@@ -27,12 +27,13 @@ async function makeFixture(qodercliSource, withIntercept = true) {
   if (withIntercept) {
     await fs.writeFile(path.join(hooks, 'qodercli-token-intercept.mjs'), 'export {};\n');
   }
-  const qodercli = path.join(bin, 'qodercli');
+  const qodercli = path.join(bin, qodercliName);
   await fs.writeFile(qodercli, qodercliSource, { mode: 0o755 });
   return {
     root,
     wrapper: path.join(hooks, 'qodercli-runtime-wrapper.sh'),
     bin,
+    qodercli,
   };
 }
 
@@ -82,6 +83,31 @@ printf '{"nodeOptions":"%s","bunOptions":"%s","arg":"%s"}\\n' "$NODE_OPTIONS" "$
     expect(output.bunOptions).toContain('qodercli-token-intercept.mjs');
     expect(output.bunOptions).toContain('/user/own.mjs');
     expect(output.arg).toBe('hello');
+  });
+
+  it('runs a bundled SDK .mjs entry through Node without requiring a shebang', async () => {
+    const fixture = await makeFixture(`
+console.log(JSON.stringify({
+  nodeOptions: process.env.NODE_OPTIONS,
+  bunOptions: process.env.BUN_OPTIONS || '',
+  args: process.argv.slice(2)
+}));
+`, true, 'qoder-worker-runtime.obf.mjs');
+    const result = spawnSync('sh', [fixture.wrapper, 'hello'], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_BIN: fixture.qodercli,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout.trim());
+    expect(output.nodeOptions).toContain('--import=');
+    expect(output.nodeOptions).toContain('qodercli-token-intercept.mjs');
+    expect(output.bunOptions).toBe('');
+    expect(output.args).toEqual(['hello']);
   });
 
   it('fails open when the intercept asset is missing', async () => {

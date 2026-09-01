@@ -987,6 +987,7 @@ export class Orchestrator extends EventEmitter {
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCnLogDir,
+      pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderCnTraceInput);
     entries.push(

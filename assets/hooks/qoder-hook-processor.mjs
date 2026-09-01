@@ -546,17 +546,16 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     // session_meta, other types: ignored
   }
 
-  // --- Phase 2.5 (qoder-cn only): Skip processing if transcript hasn't reached Stop ---
-  // For qoder-cn, only process the transcript when the Stop progress event has been
-  // written. A PostToolUse retry (which runs before Stop is written) would see an
-  // incomplete ReAct chain and produce partial events. The Stop retry (fired after
-  // the final assistant text is written) sees the complete chain and can correctly
-  // generate all llm.request events with proper input.messages_delta (including
-  // tool_result as input delta for step 2).
+  // --- Phase 2.5 (qoder-cn only): Skip processing until the transcript is terminal ---
+  // QoderCN does not guarantee that its progress Stop row is visible when the Stop
+  // hook process runs. In SDK --print mode the terminal assistant row and
+  // last-prompt marker can already be durable while progress Stop is appended only
+  // after the hook returns. Accept all terminal forms understood by the retry path;
+  // otherwise a complete managed-runtime turn is silently dropped forever.
   if (agentId === 'qoder-cn') {
-    const hasStop = progressEvents.some(pe => pe.hookEvent === 'Stop');
-    if (!hasStop) {
-      logDebug(agentId, `Transcript not yet complete (no Stop event in progress). Skipping processing.`);
+    const hasTerminalMarker = hasQoderCnTerminalMarker(progressEvents, parsed);
+    if (!hasTerminalMarker) {
+      logDebug(agentId, `Transcript not yet complete (no terminal marker). Skipping processing.`);
       return;
     }
     // A precise retry snapshot already contains the complete target Turn. Only
@@ -753,6 +752,15 @@ const TERMINAL_STOP_REASONS = new Set([
 
 function isTerminalStopReason(reason) {
   return typeof reason === 'string' && TERMINAL_STOP_REASONS.has(reason);
+}
+
+export function hasQoderCnTerminalMarker(progressEvents, rows) {
+  return progressEvents.some(event => event?.hookEvent === 'Stop')
+    || rows.some(row => row?.type === 'last-prompt')
+    || rows.some(row => (
+      row?.type === 'assistant'
+      && isTerminalStopReason(row?.message?.stop_reason)
+    ));
 }
 
 export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
