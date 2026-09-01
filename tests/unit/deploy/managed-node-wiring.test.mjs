@@ -121,7 +121,12 @@ describe('ps1 installer variants wire the managed node runtime', () => {
       expect(ps1).toMatch(/function Resolve-ManagedNodeBin\s*\{/);
       expect(ps1).toContain('Join-Path $NodeDir "node.exe"');
       const ensure = ps1.slice(ps1.indexOf('function Ensure-ManagedNode'), ps1.indexOf('function Ensure-NodeModules'));
-      expect(ensure.split('Remove-Item $nodeDir').length - 1).toBeGreaterThanOrEqual(3);
+      // Three wipes: the pre-extract one, the "archive held no node.exe" bail-out and the
+      // catch. None of them says `Remove-Item $nodeDir` any more -- that shape throws on
+      // an 8.3 path, see the pilot-short-path block and installer-short-path.test.mjs.
+      const wipes = (ensure.match(/Remove-PilotPathQuietly \$nodeDir\b/g) ?? []).length
+        + (ensure.match(/Remove-Item -LiteralPath \(Get-PilotLongPath \$nodeDir\)/g) ?? []).length;
+      expect(wipes).toBeGreaterThanOrEqual(3);
     });
   }
 });
