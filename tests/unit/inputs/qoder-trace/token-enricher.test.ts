@@ -234,4 +234,56 @@ describe('token-enricher enrichCliTurn', () => {
       expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
     });
   });
+
+  describe('Case 4: multi-turn cross-turn collision (AGE-1730 Step C regression)', () => {
+    it('pairs segments per-turn so turn-2:s1 does not steal turn-1:s1 timestamps', () => {
+      // Regression: gen_ai.step.id is `${turn_id}:s${request_index}`. Both
+      // turn-1 and turn-2 have a `:s1` step. The b30a2ef6 global order
+      // fallback parsed step numbers without turn scoping, so turn-2:s1
+      // and turn-1:s1 both matched as step#1 — turn 2 responses could
+      // be paired with turn 1 segments. Per-turn scoping (filter by
+      // stepId.startsWith(`${turnId}:s`)) prevents the cross-turn leak.
+      const entries: AgentActivityEntry[] = [
+        makeRequest({ 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.turn.id': 'turn-1', time_unix_nano: '1780000000000000000' }),
+        makeResponse({
+          'gen_ai.response.id': 'resp_t1_s1',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.turn.id': 'turn-1',
+          time_unix_nano: '1780000000000000000',
+        }),
+        makeRequest({ 'gen_ai.step.id': 'turn-2:s1', 'gen_ai.turn.id': 'turn-2', time_unix_nano: '1780000100000000000' }),
+        makeResponse({
+          'gen_ai.response.id': 'resp_t2_s1',
+          'gen_ai.step.id': 'turn-2:s1',
+          'gen_ai.turn.id': 'turn-2',
+          time_unix_nano: '1780000100000000000',
+        }),
+      ];
+      const segments: SegmentTokenData[] = [
+        makeSeg({
+          requestId: 'uuid-t1-s1',
+          turnId: 'turn-1',
+          requestStartTs: 1780000000000,
+          responseEndTs: 1780000002000,
+        }),
+        makeSeg({
+          requestId: 'uuid-t2-s1',
+          turnId: 'turn-2',
+          requestStartTs: 1780000100000,
+          responseEndTs: 1780000102000,
+        }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      // turn-1:s1 paired with seg[0] (turn-1)
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[1].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000000000) * 1_000_000n));
+      // turn-2:s1 paired with seg[1] (turn-2), NOT seg[0]
+      expect(entries[3]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[3].time_unix_nano).toBe(String(BigInt(1780000102000) * 1_000_000n));
+      expect(entries[2].time_unix_nano).toBe(String(BigInt(1780000100000) * 1_000_000n));
+    });
+  });
 });

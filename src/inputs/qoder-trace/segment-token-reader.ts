@@ -13,6 +13,7 @@ const CACHE_MAX_SIZE = 50;
 
 export interface SegmentTokenData {
   requestId: string;
+  turnId: string;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -24,6 +25,21 @@ export interface SegmentTokenData {
   model: string;
 }
 
+interface SegmentEvent {
+  type: string;
+  ts: number;
+  requestId?: string;
+  turnId?: string;
+  data?: Record<string, unknown>;
+}
+
+interface StartedEvent {
+  ts: number;
+  requestId?: string;
+  turnId?: string;
+  requestIndex?: number;
+}
+
 export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
   const cached = sessionCache.get(sessionId);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.data;
@@ -32,7 +48,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   if (files.length === 0) return [];
 
   // Collect all events in order to properly associate tool.execution.finished with LLM calls
-  const allEvents: Array<{ type: string; ts: number; requestId?: string; data?: Record<string, unknown> }> = [];
+  const allEvents: SegmentEvent[] = [];
 
   for (const filePath of files) {
     let content: string;
@@ -55,20 +71,30 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       if (!type) continue;
 
       const ts = parseTs(record.ts);
-      if (type === 'model.request.started' || type === 'model.response.completed' || type === 'tool.execution.finished') {
-        const requestId = record.request_id as string | undefined;
-        const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
-          ? record.data as Record<string, unknown>
-          : undefined;
-        allEvents.push({ type, ts, requestId: requestId || undefined, data });
+      if (type !== 'model.request.started' && type !== 'model.response.completed' && type !== 'tool.execution.finished') {
+        continue;
       }
+      const requestId = record.request_id as string | undefined;
+      const turnId = record.turn_id as string | undefined;
+      const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
+        ? record.data as Record<string, unknown>
+        : undefined;
+      allEvents.push({
+        type,
+        ts,
+        requestId: requestId || undefined,
+        turnId: turnId || undefined,
+        data,
+      });
     }
   }
 
-  // Build a complete map of started events, indexed by both requestId and
-  // request_index. Order-fallback below consumes started events that neither
-  // exact requestId nor request_index could place.
-  const startedList: Array<{ ts: number; requestId?: string; requestIndex?: number }> = [];
+  // Build a complete list of started events with their turn_id and request_index.
+  // request_index resets per turn, so the composite key `${turnId}:${requestIndex}`
+  // is what makes the lookup unambiguous in multi-turn sessions. The prior fix
+  // (b30a2ef6) used request_index alone as the key, which collided across turns
+  // and caused turn 2/3 LLM span timestamps to be sourced from turn 1.
+  const startedList: StartedEvent[] = [];
   for (const evt of allEvents) {
     if (evt.type !== 'model.request.started') continue;
     if (evt.ts <= 0) continue;
@@ -76,37 +102,39 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     startedList.push({
       ts: evt.ts,
       requestId: evt.requestId,
+      turnId: evt.turnId,
       requestIndex: requestIndex,
     });
   }
   startedList.sort((a, b) => a.ts - b.ts);
 
   const startedByRequestId = new Map<string, number>();
-  const startedByIndex = new Map<number, number>();
+  const startedByTurnIndex = new Map<string, number>();
   for (const s of startedList) {
     if (s.requestId && !startedByRequestId.has(s.requestId)) {
       startedByRequestId.set(s.requestId, s.ts);
     }
-    if (s.requestIndex !== undefined && !startedByIndex.has(s.requestIndex)) {
-      startedByIndex.set(s.requestIndex, s.ts);
+    if (s.turnId && s.requestIndex !== undefined && !startedByTurnIndex.has(turnIndexKey(s.turnId, s.requestIndex))) {
+      startedByTurnIndex.set(turnIndexKey(s.turnId, s.requestIndex), s.ts);
     }
   }
 
-  // Track which started events have been consumed by exact match (requestId or
-  // request_index) so the order fallback only uses genuinely unclaimed starts.
-  // Pairing strategy per completed event (in file order):
-  //   1. exact requestId match (prior behavior — preserved)
-  //   2. request_index match (segment-native field, fixes s5/s6 case where
-  //      completed.request_id differs from started.request_id but both carry
-  //      the same request_index)
-  //   3. order fallback: first unconsumed started event in ts asc order
-  //      (matches i-th completed ↔ i-th started when ids diverge entirely)
+  // Track which started events have been consumed so the order fallback only
+  // uses genuinely unclaimed starts. Pairing strategy per completed event:
+  //   1. exact requestId match (UUID globally unique — preserved)
+  //   2. composite (turnId, requestIndex) match — fixes the cross-turn collision
+  //      that occurred when request_index alone was used as the key
+  //   3. order fallback scoped to the same turn: first unclaimed started event
+  //      in the SAME turn (ts asc). When turnId is absent (older segment format
+  //      without turn_id), fall back to global order to preserve prior behavior.
   const usedStarted = new Set<number>();
   const results: SegmentTokenData[] = [];
 
   for (const evt of allEvents) {
     if (evt.type !== 'model.response.completed') continue;
     const data = evt.data || {};
+    const turnId = evt.turnId ?? '';
+    const requestIndex = finiteNum(data.request_index);
 
     let startTs: number | undefined;
     let claimedStartedIdx = -1;
@@ -119,23 +147,22 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       }
     }
 
-    if (startTs === undefined) {
-      const idx = finiteNum(data.request_index);
-      if (idx !== undefined) {
-        const startedIdx = startedList.findIndex(s => s.requestIndex === idx);
-        if (startedIdx >= 0) {
-          startTs = startedList[startedIdx].ts;
-          claimedStartedIdx = startedIdx;
-        }
+    if (startTs === undefined && turnId && requestIndex !== undefined) {
+      const idx = startedList.findIndex(s => s.turnId === turnId && s.requestIndex === requestIndex);
+      if (idx >= 0) {
+        startTs = startedList[idx].ts;
+        claimedStartedIdx = idx;
       }
     }
 
     if (startTs === undefined) {
-      // Order fallback: first unused started event in ts asc order. This handles
-      // the s5/s6 case where neither requestId nor request_index line up — the
-      // i-th completed event pairs with the i-th (unclaimed) started event.
+      // Order fallback. When turnId is present, scope the search to the same
+      // turn only — a cross-turn fallback would reproduce the cross-turn
+      // timestamp mismatch this fix targets. When turnId is absent (older
+      // segment format), fall back to global order.
       for (let i = 0; i < startedList.length; i++) {
         if (usedStarted.has(i)) continue;
+        if (turnId && startedList[i].turnId !== turnId) continue;
         startTs = startedList[i].ts;
         claimedStartedIdx = i;
         break;
@@ -146,6 +173,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
 
     results.push({
       requestId: evt.requestId || '',
+      turnId,
       inputTokens: finiteNum(data.input_tokens) ?? 0,
       outputTokens: finiteNum(data.output_tokens) ?? 0,
       cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
@@ -185,6 +213,10 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
 
   sessionCache.set(sessionId, { data: results, ts: now });
   return results;
+}
+
+function turnIndexKey(turnId: string, requestIndex: number): string {
+  return `${turnId}:${requestIndex}`;
 }
 
 async function findSegmentFilesForSession(sessionId: string): Promise<string[]> {

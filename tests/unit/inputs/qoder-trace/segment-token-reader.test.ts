@@ -28,6 +28,7 @@ interface SegmentLine {
   type: string;
   ts: number;
   request_id?: string;
+  turn_id?: string;
   data?: Record<string, unknown>;
 }
 
@@ -140,5 +141,69 @@ describe('segment-token-reader pairing', () => {
     const result = await readSegmentTokensForSession('sess-t4');
     expect(result).toHaveLength(1);
     expect(result[0].toolFinishedTs).toBe(1780000004000);
+  });
+
+  it('does not mismatch cross-turn timestamps when request_index resets per turn', async () => {
+    // Regression: AGE-1730 Step C. request_index resets per turn, so
+    // turn 1 and turn 2 both have request_index=0. The composite key
+    // (turnId, requestIndex) must keep them distinct — turn 2's s1
+    // start must be turn 2's started.ts, NOT turn 1's started.ts.
+    // Prior fix (b30a2ef6) used request_index alone as the map key,
+    // which collided across turns and caused turn 2/3 LLM span
+    // timestamps to be sourced from turn 1.
+    await writeSession('sess-mt1', [
+      // Turn 1: 2 LLM calls (request_index 0 and 1)
+      segLine({ type: 'model.request.started', ts: 1780000000000, request_id: 't1-r0-started', turn_id: 'turn-1', data: { request_index: 0 } }),
+      segLine({ type: 'model.response.completed', ts: 1780000001000, request_id: 't1-r0-completed', turn_id: 'turn-1', data: { request_index: 0, stop_reason: 'tool_use' } }),
+      segLine({ type: 'model.request.started', ts: 1780000002000, request_id: 't1-r1-started', turn_id: 'turn-1', data: { request_index: 1 } }),
+      segLine({ type: 'model.response.completed', ts: 1780000003000, request_id: 't1-r1-completed', turn_id: 'turn-1', data: { request_index: 1, stop_reason: 'end_turn' } }),
+      // Turn 2: 2 LLM calls (request_index 0 and 1) — SAME indices as turn 1
+      segLine({ type: 'model.request.started', ts: 1780000100000, request_id: 't2-r0-started', turn_id: 'turn-2', data: { request_index: 0 } }),
+      segLine({ type: 'model.response.completed', ts: 1780000101000, request_id: 't2-r0-completed', turn_id: 'turn-2', data: { request_index: 0, stop_reason: 'tool_use' } }),
+      segLine({ type: 'model.request.started', ts: 1780000102000, request_id: 't2-r1-started', turn_id: 'turn-2', data: { request_index: 1 } }),
+      segLine({ type: 'model.response.completed', ts: 1780000103000, request_id: 't2-r1-completed', turn_id: 'turn-2', data: { request_index: 1, stop_reason: 'end_turn' } }),
+    ]);
+
+    const result = await readSegmentTokensForSession('sess-mt1');
+    expect(result).toHaveLength(4);
+
+    // Turn 1 r0
+    expect(result[0].turnId).toBe('turn-1');
+    expect(result[0].requestStartTs).toBe(1780000000000);
+    expect(result[0].responseEndTs).toBe(1780000001000);
+    // Turn 1 r1
+    expect(result[1].turnId).toBe('turn-1');
+    expect(result[1].requestStartTs).toBe(1780000002000);
+    expect(result[1].responseEndTs).toBe(1780000003000);
+    // Turn 2 r0 — CRITICAL: must NOT be 1780000000000 (turn 1's start)
+    expect(result[2].turnId).toBe('turn-2');
+    expect(result[2].requestStartTs).toBe(1780000100000);
+    expect(result[2].responseEndTs).toBe(1780000101000);
+    // Turn 2 r1
+    expect(result[3].turnId).toBe('turn-2');
+    expect(result[3].requestStartTs).toBe(1780000102000);
+    expect(result[3].responseEndTs).toBe(1780000103000);
+  });
+
+  it('per-turn order fallback does not cross turns when turn_id present', async () => {
+    // When request_id mismatches AND no request_index, the order fallback
+    // must be scoped to the same turn. A turn-2 completed event must not
+    // claim a turn-1 started event (which is what the b30a2ef6 global
+    // order fallback would have done once turn-1's start was unclaimed).
+    await writeSession('sess-mt2', [
+      // Turn 1: started+completed with mismatched request_ids (forces order fallback)
+      segLine({ type: 'model.request.started', ts: 1780000000000, request_id: 't1-start', turn_id: 'turn-1' }),
+      segLine({ type: 'model.response.completed', ts: 1780000001000, request_id: 't1-end', turn_id: 'turn-1', data: { stop_reason: 'end_turn' } }),
+      // Turn 2: started+completed with mismatched request_ids
+      segLine({ type: 'model.request.started', ts: 1780000100000, request_id: 't2-start', turn_id: 'turn-2' }),
+      segLine({ type: 'model.response.completed', ts: 1780000101000, request_id: 't2-end', turn_id: 'turn-2', data: { stop_reason: 'end_turn' } }),
+    ]);
+
+    const result = await readSegmentTokensForSession('sess-mt2');
+    expect(result).toHaveLength(2);
+    expect(result[0].turnId).toBe('turn-1');
+    expect(result[0].requestStartTs).toBe(1780000000000);
+    expect(result[1].turnId).toBe('turn-2');
+    expect(result[1].requestStartTs).toBe(1780000100000);
   });
 });

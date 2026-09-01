@@ -155,10 +155,6 @@ function applyOrderFallback(
 ): void {
   if (unmatchedSegs.length === 0) return;
 
-  // Segments sorted by responseEndTs asc (model.response.completed order).
-  // Stable order ensures consistent pairing when ts ties.
-  const sortedSegs = [...unmatchedSegs].sort((a, b) => a.responseEndTs - b.responseEndTs);
-
   // Unclaimed llm.response entries grouped by step.id (preserving entry order
   // within a step for the multi-part response case).
   const stepToResponses = new Map<string, AgentActivityEntry[]>();
@@ -172,7 +168,82 @@ function applyOrderFallback(
     stepToResponses.set(stepId, list);
   }
 
-  // Sort step IDs by numeric step number. Format: `${turn}:s${n}`.
+  // Pairing is turn-scoped. gen_ai.step.id format is `${turnId}:s${n}`, so
+  // steps in different turns have the same numeric step number (turn1:s1 and
+  // turn2:s1 both parse as 1). Pairing seg[i] ↔ step s(i+1) globally would
+  // cross turns and reproduce the cross-turn timestamp mismatch the
+  // segment-token-reader fix targets. When seg.turnId is set, restrict pairing
+  // to steps in the same turn. When seg.turnId is empty (older segment format
+  // without turn_id), fall back to global order to preserve prior behavior.
+  const segsByTurn = new Map<string, SegmentTokenData[]>();
+  const legacySegs: SegmentTokenData[] = [];
+  for (const seg of unmatchedSegs) {
+    if (seg.turnId) {
+      const list = segsByTurn.get(seg.turnId) ?? [];
+      list.push(seg);
+      segsByTurn.set(seg.turnId, list);
+    } else {
+      legacySegs.push(seg);
+    }
+  }
+
+  for (const [turnId, segs] of segsByTurn) {
+    pairSegsWithStepsInTurn(segs, turnId, stepToResponses, claimedEntries, entries);
+  }
+  if (legacySegs.length > 0) {
+    pairSegsGlobally(legacySegs, stepToResponses, claimedEntries, entries);
+  }
+}
+
+function pairSegsWithStepsInTurn(
+  segs: SegmentTokenData[],
+  turnId: string,
+  stepToResponses: Map<string, AgentActivityEntry[]>,
+  claimedEntries: Set<AgentActivityEntry>,
+  entries: AgentActivityEntry[],
+): void {
+  // Segments sorted by responseEndTs asc (model.response.completed order).
+  const sortedSegs = [...segs].sort((a, b) => a.responseEndTs - b.responseEndTs);
+
+  // Steps in this turn, sorted by numeric step number.
+  const turnStepIds = [...stepToResponses.keys()]
+    .filter(stepId => stepId.startsWith(`${turnId}:s`))
+    .sort((a, b) => {
+      const an = parseStepNumber(a);
+      const bn = parseStepNumber(b);
+      if (an !== bn) return an - bn;
+      return a.localeCompare(b);
+    });
+
+  let stepCursor = 0;
+  for (const seg of sortedSegs) {
+    while (stepCursor < turnStepIds.length) {
+      const stepId = turnStepIds[stepCursor];
+      const list = stepToResponses.get(stepId);
+      if (!list || list.length === 0) {
+        stepCursor++;
+        continue;
+      }
+      const entry = list.shift()!;
+      claimedEntries.add(entry);
+      applySegmentToMatch(entries, seg, [entry]);
+      if (list.length === 0) stepToResponses.delete(stepId);
+      stepCursor++;
+      break;
+    }
+    // If no step left in this turn, leave the seg unmatched (no regression).
+  }
+}
+
+function pairSegsGlobally(
+  segs: SegmentTokenData[],
+  stepToResponses: Map<string, AgentActivityEntry[]>,
+  claimedEntries: Set<AgentActivityEntry>,
+  entries: AgentActivityEntry[],
+): void {
+  // Legacy path: segments without turn_id. Pair by global step order
+  // (preserves b30a2ef6 behavior for older segment formats).
+  const sortedSegs = [...segs].sort((a, b) => a.responseEndTs - b.responseEndTs);
   const sortedStepIds = [...stepToResponses.keys()].sort((a, b) => {
     const an = parseStepNumber(a);
     const bn = parseStepNumber(b);
@@ -182,7 +253,6 @@ function applyOrderFallback(
 
   let stepCursor = 0;
   for (const seg of sortedSegs) {
-    // Advance to the next step that still has unclaimed responses.
     while (stepCursor < sortedStepIds.length) {
       const stepId = sortedStepIds[stepCursor];
       const list = stepToResponses.get(stepId);
@@ -193,10 +263,10 @@ function applyOrderFallback(
       const entry = list.shift()!;
       claimedEntries.add(entry);
       applySegmentToMatch(entries, seg, [entry]);
-      if (list.length === 0) stepCursor++;
+      if (list.length === 0) stepToResponses.delete(stepId);
+      stepCursor++;
       break;
     }
-    // If no step left, leave remaining segs unmatched (no regression).
   }
 }
 
