@@ -89,7 +89,7 @@ export class QoderCliSessionInput extends BaseSessionInput {
     const model = stringValue(data.model) ?? UNKNOWN_MODEL;
     const responseId = stringValue(record.request_id);
     const turnId = stringValue(record.turn_id);
-    const requestIndex = finiteNumber(data.request_index);
+    const requestIndex = stepIndex(data.request_index);
     const stepId = buildStepId(turnId, requestIndex);
 
     const attributes: Record<string, JsonValue> = {
@@ -134,7 +134,8 @@ export class QoderCliSessionInput extends BaseSessionInput {
       base['gen_ai.usage.total_tokens'] = sumIfPresent(inputTokens, outputTokens);
       if (responseId) base['gen_ai.response.id'] = responseId;
       const stopReason = stringValue(data.stop_reason);
-      if (stopReason) base['gen_ai.response.finish_reasons'] = [normalizeFinishReason(stopReason)];
+      const finishReason = stopReason ? normalizeFinishReason(stopReason) : undefined;
+      if (finishReason) base['gen_ai.response.finish_reasons'] = [finishReason];
     }
 
     return buildAgentActivityEntry(base);
@@ -201,12 +202,54 @@ function extractSessionInfo(filePath: string): { sessionId: string; cwdKey: stri
 
 // Segment records carry Anthropic's native stop_reason, but
 // gen_ai.response.finish_reasons is the normalized OTel GenAI enum — the same
-// one the transcript hook emits, so both collection paths must agree. The raw
-// value stays reachable through attributes.stop_reason.
-const FINISH_REASON_ALIASES: Record<string, string> = { tool_use: 'tool_call' };
+// one the transcript hook emits, so both collection paths must agree, including
+// on which values are dropped. The raw value stays reachable through
+// attributes.stop_reason, which entry-builder prefixes to agent.stop_reason.
+// Duplicated rather than imported from scripts/validate-trace.mjs: that is a dev
+// validator, not a runtime dependency of the collector. A unit test asserts the
+// two sets stay equal, so the copy cannot drift the way `cancelled` did.
+export const VALID_FINISH_REASONS = new Set([
+  'stop',
+  'length',
+  'content_filter',
+  'tool_call',
+  'tool_calls',
+  'error',
+  'end_turn',
+  'max_tokens',
+  // Terminal in otlp-trace-flusher's TERMINAL_FINISH_REASONS and already emitted
+  // by the Codex and WorkBuddy paths, so it belongs in the enum.
+  'cancelled',
+]);
 
-function normalizeFinishReason(reason: string): string {
-  return FINISH_REASON_ALIASES[reason] ?? reason;
+const FINISH_REASON_ALIASES: Record<string, string> = {
+  tool_use: 'tool_call',
+  stop_sequence: 'stop',
+  refusal: 'stop',
+  model_context_window_exceeded: 'length',
+};
+
+export function normalizeFinishReason(reason: string): string | undefined {
+  const mapped = FINISH_REASON_ALIASES[reason] ?? reason;
+  // Unknown values are dropped, never coerced to `stop`: a mid-turn value such
+  // as pause_turn would then read as terminal and Signal A would flush the turn
+  // buffer early, trading a validator error for a fragmented trace.
+  return VALID_FINISH_REASONS.has(mapped) ? mapped : undefined;
+}
+
+// request_index comes from Qoder's JSON, so its runtime type is not ours to
+// guarantee. Returning undefined silently drops gen_ai.step.id and sends the
+// pair back to the converter's __no_step__ bucket (the AGE-1730 0-duration
+// symptom), while a non-integer would build a `turn:s1.5` that the converter's
+// :s(\d+)$ readers reject. Only the canonical decimal spelling is accepted, so
+// ' 2 ', '2.0' and '2e0' stay out.
+function stepIndex(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  }
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function buildStepId(

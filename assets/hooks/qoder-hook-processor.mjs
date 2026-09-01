@@ -732,6 +732,29 @@ export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
   return scanEndLine;
 }
 
+// Anthropic's stop_reason mixes turn-terminal values with mid-turn ones.
+// `tool_use` and `pause_turn` both mean the assistant resumes after a tool
+// result or a server-side pause, so neither ends the turn. Treating every
+// stop_reason as a boundary makes a mid-flight snapshot look finished, and
+// assessStableEofCandidate can then promote that prefix to a commit.
+// `stop_sequence` and `refusal` are terminal and must stay in this set: on real
+// transcripts stop_sequence is sometimes the turn's only terminal row, so
+// dropping it would turn an early commit into no commit at all.
+const TERMINAL_STOP_REASONS = new Set([
+  'end_turn',
+  'max_tokens',
+  'stop_sequence',
+  'refusal',
+  // Generic spellings, in case a future Qoder build normalizes before writing.
+  'stop',
+  'cancelled',
+  'error',
+]);
+
+function isTerminalStopReason(reason) {
+  return typeof reason === 'string' && TERMINAL_STOP_REASONS.has(reason);
+}
+
 export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
   const waiting = (reason, details = {}) => ({
     status: 'waiting',
@@ -770,6 +793,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
 
     let stopLine = -1;
     let stopSource = null;
+    let assistantStopLine = -1;
     for (let i = triggerPromptLine + 1; i < limit; i++) {
       const hookEvent = hookEventOf(rows[i]);
       if (hookEvent === 'Stop') {
@@ -777,17 +801,34 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
         stopSource = 'progress-stop';
         break;
       }
-      if (rows[i]?.type === 'assistant' && rows[i]?.message?.stop_reason) {
-        stopLine = i;
-        stopSource = 'assistant-stop-reason';
-        break;
+      if (
+        assistantStopLine < 0
+        && rows[i]?.type === 'assistant'
+        && isTerminalStopReason(rows[i]?.message?.stop_reason)
+      ) {
+        // Remember it but keep scanning: when a turn carries both signals the
+        // progress Stop is the boundary the pre-B3 path used, and it sits after
+        // the final assistant row.
+        assistantStopLine = i;
+        continue;
       }
       if (i >= triggerLimit && (
         hookEvent === 'UserPromptSubmit' ||
         isRealUserPrompt(rows[i])
       )) {
-        return waiting('next-prompt-before-stop');
+        // The next prompt ends this turn, so the search for a progress Stop must
+        // not cross it — otherwise it would adopt the *next* turn's Stop. The
+        // triggerLimit guard is what keeps this turn's own user row from reading
+        // as that next prompt: it sits just after the UserPromptSubmit progress
+        // row, inside the trigger snapshot. A terminal assistant row already seen
+        // is still a valid Stop; without one there is nothing to commit yet.
+        if (assistantStopLine < 0) return waiting('next-prompt-before-stop');
+        break;
       }
+    }
+    if (stopLine < 0 && assistantStopLine >= 0) {
+      stopLine = assistantStopLine;
+      stopSource = 'assistant-stop-reason';
     }
     if (stopLine < 0) return waiting('stop-not-found');
     logDebug(
@@ -1173,10 +1214,21 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.request.model': stepModel,
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
-        'gen_ai.response.finish_reasons': [finishReason],
+        ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
-        'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: outputParts,
+          ...(finishReason ? { finish_reason: finishReason } : {}),
+        }],
         'agent.source': 'qoder-transcript-hook',
+        // Raw vendor stop_reason, kept because normalizeFinishReason may map it
+        // onto a different enum value or drop it. Deliberately a single segment
+        // after `agent.`: AGENT_SCOPED_FIELD_RE in entry-builder.ts is
+        // /^agent\.[^.]+\..+$/ and both sls-flusher and jsonl-flusher serialise
+        // with dropAgentScopedFields: true, so an `agent.qoder.stop_reason`
+        // spelling would reach neither sink.
+        'agent.stop_reason': lastStopReason,
         // Accurate per-response timestamp from the transcript's first assistant record
         // (≈ SQLite gmt_create). Used only for token-enricher matching; dropped from
         // SLS/JSONL output as an agent-scoped field. Absent for CLI (no firstAssistantTs).
@@ -1388,13 +1440,47 @@ function extractToolResults(rows) {
 
 // The transcript carries Anthropic's native stop_reason values, but
 // gen_ai.response.finish_reasons / output.messages[].finish_reason are the
-// normalized OTel GenAI enum. validate-trace.mjs rejects anything outside
-// VALID_FINISH_REASONS, so vendor values must be mapped before they leave
-// the processor. Qoder's raw value stays available via agent.qoder.* fields.
-const FINISH_REASON_ALIASES = { tool_use: 'tool_call' };
+// normalized OTel GenAI enum shared with every other agent. Anthropic's
+// documented set is wider (stop_sequence, pause_turn, refusal,
+// model_context_window_exceeded), and validate-trace.mjs raises an *error* for
+// values outside VALID_FINISH_REASONS while only warning when the field is
+// absent — so an unmappable value is dropped rather than passed through. The raw
+// value stays on agent.stop_reason, which survives dropAgentScopedFields.
+// Exported so a test can pin it against the validator's set: this file is copied
+// into ~/.loongsuite-pilot/hooks and runs standalone, so it cannot import it.
+export const VALID_FINISH_REASONS = new Set([
+  'stop',
+  'length',
+  'content_filter',
+  'tool_call',
+  'tool_calls',
+  'error',
+  'end_turn',
+  'max_tokens',
+  // Terminal in otlp-trace-flusher's TERMINAL_FINISH_REASONS and already emitted
+  // by the Codex and WorkBuddy paths, so it belongs in the enum.
+  'cancelled',
+]);
 
-function normalizeFinishReason(reason) {
-  return FINISH_REASON_ALIASES[reason] ?? reason;
+// stop_sequence and refusal both end the turn, so they map onto values that
+// TERMINAL_FINISH_REASONS ({stop, end_turn, cancelled, error}) recognizes;
+// spelling refusal as `content_filter` would be more faithful but would leave
+// that turn's buffer without a Signal A closer.
+const FINISH_REASON_ALIASES = {
+  tool_use: 'tool_call',
+  stop_sequence: 'stop',
+  refusal: 'stop',
+  model_context_window_exceeded: 'length',
+};
+
+// Exported for direct unit coverage: the record path forces `end_turn` on the
+// last boundary, so a fixture cannot exercise the drop branch there.
+export function normalizeFinishReason(reason) {
+  const mapped = FINISH_REASON_ALIASES[reason] ?? reason;
+  // Unknown values are dropped, never coerced to `stop`: a mid-turn value such
+  // as pause_turn would then read as terminal and Signal A would flush the turn
+  // buffer early, trading a validator error for a fragmented trace.
+  return VALID_FINISH_REASONS.has(mapped) ? mapped : undefined;
 }
 
 function isMetaUser(row) {

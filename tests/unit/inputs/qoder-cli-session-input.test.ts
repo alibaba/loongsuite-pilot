@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
-import { QoderCliSessionInput } from '../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js';
+import { QoderCliSessionInput, VALID_FINISH_REASONS } from '../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js';
+import { VALID_FINISH_REASONS as VALIDATOR_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 class TestQoderCliSessionInput extends QoderCliSessionInput {
@@ -410,6 +411,109 @@ describe('QoderCliSessionInput', () => {
     expect(entryNoTurn?.['gen_ai.turn.id']).toBeUndefined();
     expect(entryNoIndex?.['gen_ai.step.id']).toBeUndefined();
     expect(entryNoIndex?.['gen_ai.turn.id']).toBe('turn-x');
+  });
+
+  it('maps the remaining terminal vendor stop_reasons onto the enum', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    // stop_sequence and refusal both end the turn, so they must land on a
+    // terminal enum value rather than being dropped: otlp-trace-flusher keys its
+    // turn-completion signal off finish_reasons, and an absent one leaves the
+    // turn buffer open until a later heuristic closes it.
+    for (const [vendor, expected] of [['stop_sequence', 'stop'], ['refusal', 'stop']]) {
+      const row = makeModelResponse({ requestId: `req-${vendor}`, seq: 1 });
+      (row.data as Record<string, unknown>).stop_reason = vendor;
+
+      const entry = await input.mapOnce(row, file);
+
+      expect(entry?.['gen_ai.response.finish_reasons']).toEqual([expected]);
+      expect(entry?.['agent.stop_reason']).toBe(vendor);
+    }
+  });
+
+  it('passes cancelled through because the trace validator and flusher both accept it', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    const row = makeModelResponse({ requestId: 'req-cancelled', seq: 1 });
+    (row.data as Record<string, unknown>).stop_reason = 'cancelled';
+
+    const entry = await input.mapOnce(row, file);
+
+    // Coercing this to `stop` would still satisfy the validator but would lose
+    // the interruption, which is the one thing a cancelled turn records.
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+  });
+
+  it('omits finish_reasons for mid-turn stop_reasons while keeping the raw value', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    // pause_turn means the model will resume, so mapping it to any member of
+    // TERMINAL_FINISH_REASONS would flush the turn early and split one turn into
+    // two traces. An absent finish reason is only a validator warning.
+    for (const reason of ['pause_turn', 'some_future_reason']) {
+      const row = makeModelResponse({ requestId: `req-${reason}`, seq: 1 });
+      (row.data as Record<string, unknown>).stop_reason = reason;
+
+      const entry = await input.mapOnce(row, file);
+
+      expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+      expect(entry?.['agent.stop_reason']).toBe(reason);
+    }
+  });
+
+  it('accepts a canonical decimal string request_index', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    // request_index arrives from Qoder's own JSON, so its runtime type is not
+    // ours to guarantee across builds. This is drift defence, not a reproduced
+    // failure: today's segments write it as a JSON number.
+    for (const raw of ['0', '2', '21']) {
+      const row = makeModelRequestStarted({ requestId: `req-${raw}`, turnId: 'turn-s', seq: 1 });
+      (row.data as Record<string, unknown>).request_index = raw;
+
+      const entry = await input.mapOnce(row, file);
+
+      expect(entry?.['gen_ai.step.id']).toBe(`turn-s:s${raw}`);
+    }
+  });
+
+  it('omits gen_ai.step.id for request_index spellings outside the canonical form', async () => {
+    const file = path.join(tmpDir, 'cwd-a', 'session-a', 'segments', 'a.jsonl');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const input = makeInput();
+
+    // A tolerant Number() would accept all of these. Padded and exponential
+    // spellings are dropped so one logical step cannot arrive under two step ids;
+    // fractional and negative values are dropped because the converter's
+    // :s(\d+)$ readers would not match the id they produce.
+    const rejected: unknown[] = [' 2 ', '2.0', '2e0', '+2', '02', '', 'abc', 1.5, -1, NaN, null, {}];
+
+    for (const [i, raw] of rejected.entries()) {
+      const row = makeModelRequestStarted({ requestId: `req-bad-${i}`, turnId: 'turn-s', seq: 1 });
+      (row.data as Record<string, unknown>).request_index = raw;
+
+      const entry = await input.mapOnce(row, file);
+
+      // turn.id still lands: only the step dimension is unknown.
+      expect(entry?.['gen_ai.step.id'], `request_index=${JSON.stringify(raw)}`).toBeUndefined();
+      expect(entry?.['gen_ai.turn.id']).toBe('turn-s');
+    }
+  });
+
+  it('keeps its finish-reason allowlist equal to the trace validator\'s', () => {
+    // The collector must not depend on scripts/validate-trace.mjs at runtime, so
+    // the set is duplicated. This asserts the duplicate cannot drift: an allowlist
+    // narrower than the validator's silently drops valid finish reasons, and a
+    // wider one emits values the validator rejects.
+    expect([...VALID_FINISH_REASONS].sort()).toEqual([...VALIDATOR_FINISH_REASONS].sort());
   });
 
   function makeInput(): TestQoderCliSessionInput {

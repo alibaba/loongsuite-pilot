@@ -610,16 +610,59 @@ describe('findTriggeredTurnWindow stop source variants (B3 P0)', () => {
     });
   });
 
-  it('case 3: does not double-trigger when both Stop progress and assistant stop_reason present', () => {
+  it('case 3: prefers the Stop progress row when both signals are present', () => {
     const result = findTriggeredTurnWindow(snapshot('transcript-both-stops.jsonl'), 5);
-    // Assistant stop_reason at row 3 is hit first; Stop progress at row 4 is
-    // never reached. Single stopLine, single complete result.
+    // Row 3 is an assistant `tool_use`, i.e. mid-turn: the model resumes after
+    // the tool result, so it is not a boundary. The scan remembers nothing and
+    // reaches the Stop progress row at 4, which is the authoritative boundary.
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 4,
+      endLine: 6,
+    });
+  });
+
+  it('case 4: skips mid-turn tool_use and stops at the terminal assistant row', () => {
+    // tool_use -> tool_result -> end_turn, the ReAct shape that dominates real
+    // transcripts. Accepting the first stop_reason would put stopLine at 3 while
+    // the turn actually ends at 5.
+    const result = findTriggeredTurnWindow(snapshot('transcript-react-tool-cycle.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 5,
+      endLine: 7,
+    });
+  });
+
+  it('case 5: treats stop_sequence as terminal', () => {
+    // stop_sequence is a genuine turn end and is sometimes a turn's only
+    // terminal row on real transcripts, so leaving it out of the terminal set
+    // would downgrade those turns from "collected early" to "never collected".
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-sequence.jsonl'), 4);
     expect(result).toEqual({
       status: 'complete',
       reason: 'last-prompt',
       startLine: 1,
       stopLine: 3,
-      endLine: 6,
+      endLine: 5,
+    });
+  });
+
+  it('case 6: keeps waiting when the turn only carries non-terminal stop reasons', () => {
+    // tool_use plus pause_turn: the assistant resumes in both cases, so there is
+    // no boundary yet. Committing here would emit a prefix of the turn once
+    // assessStableEofCandidate saw the same bytes twice.
+    const result = findTriggeredTurnWindow(snapshot('transcript-pause-turn.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'waiting',
+      reason: 'stop-not-found',
+      startLine: null,
+      stopLine: null,
+      endLine: null,
     });
   });
 });
