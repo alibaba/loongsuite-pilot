@@ -825,7 +825,7 @@ describe('ConfigLoader', () => {
       });
     });
 
-    it('keeps only AK when mode=ak and both credential sets are present', async () => {
+    it('disables multimodal when apiKey and access keys coexist', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
           storage: {
@@ -844,63 +844,10 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.multimodal?.storage.auth).toEqual({
-        mode: 'ak',
-        accessKeyId: 'ak',
-        accessKeySecret: 'sk',
-      });
+      expect(config.multimodal).toBeUndefined();
     });
 
-    it('keeps only apiKey when mode=apiKey and both credential sets are present', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        multimodal: {
-          storage: {
-            type: 'sls',
-            target: {
-              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-              project: 'my-project',
-            },
-            auth: {
-              mode: 'apiKey',
-              accessKeyId: 'ak',
-              accessKeySecret: 'sk',
-              apiKey: 'sls-api-key',
-            },
-          },
-        },
-      });
-      const config = await loadConfig();
-      expect(config.multimodal?.storage.auth).toEqual({
-        mode: 'apiKey',
-        apiKey: 'sls-api-key',
-      });
-    });
-
-    it('infers auth.mode=apiKey when mode is omitted and both credential sets are present', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        multimodal: {
-          storage: {
-            type: 'sls',
-            target: {
-              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-              project: 'my-project',
-            },
-            auth: {
-              accessKeyId: 'ak',
-              accessKeySecret: 'sk',
-              apiKey: 'sls-api-key',
-            },
-          },
-        },
-      });
-      const config = await loadConfig();
-      expect(config.multimodal?.storage.auth).toEqual({
-        mode: 'apiKey',
-        apiKey: 'sls-api-key',
-      });
-    });
-
-    it('loads sls with optional target.ossBucket', async () => {
+    it('ignores target.ossBucket when type=sls', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
           storage: {
@@ -919,13 +866,10 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.multimodal).toMatchObject({
-        storage: {
-          type: 'sls',
-          target: { ossBucket: 'user-bucket' },
-        },
-        storageBasePath: 'sls://my-project/logstore-multimodal',
-      });
+      expect(config.multimodal?.storage.type).toBe('sls');
+      if (config.multimodal?.storage.type === 'sls') {
+        expect(config.multimodal.storage.target).not.toHaveProperty('ossBucket');
+      }
     });
 
     it('disables multimodal when auth.mode cannot be inferred', async () => {

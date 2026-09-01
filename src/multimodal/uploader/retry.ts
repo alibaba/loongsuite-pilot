@@ -16,13 +16,22 @@ export const DEFAULT_MULTIMODAL_RETRY: RetryPolicy = {
 export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0 || signal?.aborted) return;
   await new Promise<void>(resolve => {
-    const timer = setTimeout(resolve, ms);
-    if (!signal) return;
-    const onAbort = () => {
+    let settled = false;
+    const timer = setTimeout(finish, ms);
+
+    function onAbort(): void {
+      finish();
+    }
+
+    function finish(): void {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolve();
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    signal?.addEventListener('abort', onAbort);
   });
 }
 

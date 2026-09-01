@@ -6,7 +6,7 @@ import {
   normalizeSlsEndpoint,
   resolveSlsObjectAuth,
   resolveMultimodalEventStorageBasePath,
-  parseOssBucketFromPresignedUrl,
+  bindPresignedPutUrl,
   slsGeneratePresignedUrl,
   slsPutObject,
   slsPutPresignedObject,
@@ -606,7 +606,7 @@ describe('sls-client (presign)', () => {
     expect(seen).toHaveLength(1);
   });
 
-  it('does not PUT when presign bucket or object path does not match', async () => {
+  it('does not PUT when presign origin does not match', async () => {
     const seen: string[] = [];
     vi.stubGlobal('fetch', async (url: string) => {
       seen.push(String(url));
@@ -625,11 +625,11 @@ describe('sls-client (presign)', () => {
       body: Buffer.from('hello'),
       contentType: 'image/png',
       timeoutMs: 1000,
-      expectedBucket: 'user-bucket',
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(result.ok).toBe(false);
     expect(result.retryable).toBe(false);
-    expect(result.error).toMatch(/bucket mismatch/);
+    expect(result.error).toMatch(/origin mismatch/);
     expect(seen).toHaveLength(1);
   });
 
@@ -661,7 +661,6 @@ describe('sls-client (presign)', () => {
       contentType: 'image/png',
       timeoutMs: 1000,
       signal: abort.signal,
-      expectedBucket: 'user-bucket',
     });
     abort.abort();
     releasePresign();
@@ -683,15 +682,28 @@ describe('sls-client (presign)', () => {
     expect(result.error).toMatch(/presigned URL is required/);
   });
 
-  it('parses virtual-hosted OSS bucket from a presigned URL', () => {
-    expect(parseOssBucketFromPresignedUrl(
-      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/k.png?Expires=1&Signature=secret',
-    )).toBe('user-bucket');
-    expect(parseOssBucketFromPresignedUrl(
-      'https://sls-multimodal-storage-cn-zhangjiakou-spe-01.oss-cn-zhangjiakou.aliyuncs.com/p/l/k',
-    )).toBe('sls-multimodal-storage-cn-zhangjiakou-spe-01');
-    expect(parseOssBucketFromPresignedUrl('https://oss.example/obj?sig=1')).toBeNull();
-    expect(parseOssBucketFromPresignedUrl('not-a-url')).toBeNull();
+  it('pins the sniffed origin when provided', () => {
+    const target = {
+      objectKey: '20260101/a.png',
+      project: 'p',
+      logstore: 'l',
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    };
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-attacker.example/p/l/20260101/a.png?sig=1',
+      target,
+    )).toMatchObject({ ok: false, error: expect.stringMatching(/origin mismatch/) });
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-cn-beijing.aliyuncs.com/p/l/20260101/a.png?sig=1',
+      target,
+    )).toMatchObject({ ok: false, error: expect.stringMatching(/origin mismatch/) });
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/20260101/a.png?sig=1',
+      target,
+    )).toEqual({
+      ok: true,
+      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/20260101/a.png?sig=1',
+    });
   });
 
   it('sniffs oss:// event prefix from one presign and does not PUT', async () => {
@@ -716,6 +728,7 @@ describe('sls-client (presign)', () => {
     expect(result).toEqual({
       ok: true,
       storageBasePath: 'oss://user-bucket/p/l',
+      origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toContain('/presign');
@@ -797,6 +810,7 @@ describe('sls-client (presign)', () => {
     expect(result).toEqual({
       ok: true,
       storageBasePath: 'oss://user-bucket/proj/logstore',
+      origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
   });
 
@@ -821,8 +835,31 @@ describe('sls-client (presign)', () => {
     expect(result).toEqual({
       ok: true,
       storageBasePath: 'oss://user-bucket/proj/logstore',
+      origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('disables delegatedOss when sniff origin region does not match the SLS endpoint', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      url: 'https://user-bucket.oss-cn-beijing.aliyuncs.com/proj/logstore/k?sig=1',
+    }), { status: 200 }));
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'delegatedOss',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/does not match SLS endpoint region \(cn-hangzhou\)/);
+    }
   });
 
   it('disables delegatedOss when target.ossBucket does not match sniff', async () => {
@@ -848,48 +885,4 @@ describe('sls-client (presign)', () => {
     }
   });
 
-  it('sniffs type=sls when ossBucket is set and keeps sls:// on match', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-    }), { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-          ossBucket: 'user-bucket',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('disables type=sls when target.ossBucket does not match sniff', async () => {
-    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
-      url: 'https://other-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-    }), { status: 200 }));
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-          ossBucket: 'user-bucket',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/does not match current landing bucket \(other-bucket\)/);
-    }
-  });
 });

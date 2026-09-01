@@ -188,13 +188,16 @@ export interface MultimodalApiKeyAuth {
   apiKey: string;
 }
 
-/** Discriminated auth after load. User config may include both sets; explicit mode wins, otherwise apiKey then AK. */
+/** Discriminated auth after load. User config must be exactly one complete credential set. */
 export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
 
 export interface MultimodalSlsTarget {
   endpoint: string;
   project: string;
   logstore: string;
+}
+
+export interface MultimodalDelegatedOssTarget extends MultimodalSlsTarget {
   /** Expected landing bucket. Not provisioned by Pilot. */
   ossBucket?: string;
 }
@@ -206,7 +209,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalDelegatedOssTarget; auth: MultimodalStorageAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**

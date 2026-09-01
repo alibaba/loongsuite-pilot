@@ -79,7 +79,7 @@ To store images from agent messages (inline base64, or local paths read then enc
 
 `type` is one of `sls`, `delegatedOss`, or `oss`. This is separate from the log `sls` flusher. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
 
-`auth` may include both an ApiKey and access keys. If `mode` is set, that credential set is used. If `mode` is omitted, `apiKey` is used when present, otherwise AK. Incomplete credentials leave image upload off; text collection continues.
+`auth` is one complete ApiKey or access-key set. If `mode` is omitted, Pilot infers it from that set.
 
 ### `type: sls`
 
@@ -179,11 +179,11 @@ Writes directly to OSS. AK only.
 | `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
 | `multimodal.storage.target.project` | SLS project. Required for `sls` and `delegatedOss`. |
 | `multimodal.storage.target.logstore` | Logstore for multimodal objects; defaults to `logstore-multimodal`. |
-| `multimodal.storage.target.ossBucket` | Optional. For `sls` and `delegatedOss`, checked against the landing bucket; a mismatch leaves image upload off. |
+| `multimodal.storage.target.ossBucket` | Optional. `delegatedOss` only; checked against the landing bucket. A mismatch leaves image upload off. |
 | `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. If omitted, inferred from the configured credentials. `type=oss` requires `ak`. |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
-| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. May be set together with AK; if `mode` is omitted, `apiKey` is preferred. |
+| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. Must not be set together with access keys. |
 
 If `multimodal.storage` is missing or invalid, text collection continues and images are not converted to `uri`.
 

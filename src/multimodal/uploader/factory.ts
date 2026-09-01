@@ -5,7 +5,7 @@ import { SlsUploader } from './sls-uploader.js';
 /** Build configured Uploader; throws if credentials missing. */
 export function createUploader(
   config: MultimodalRuntimeConfig,
-  opts?: { eventStorageBasePath?: string },
+  opts?: { expectedPresignOrigin?: string },
 ): Uploader {
   if (config.storage.type === 'oss') {
     return new OssUploader(config.storage);

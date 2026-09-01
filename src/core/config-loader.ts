@@ -396,17 +396,23 @@ function buildMultimodalSlsBackedStorage(
     throw new Error(`multimodal.storage.target requires endpoint and project when type=${type}`);
   }
   const auth = buildMultimodalStorageAuth(raw.auth);
-  const ossBucket = (raw.target?.ossBucket ?? '').trim();
-  return {
-    type,
-    target: {
-      endpoint: endpoint.replace(/\/+$/, ''),
-      project,
-      logstore,
-      ...(ossBucket ? { ossBucket } : {}),
-    },
-    auth,
+  const target = {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    project,
+    logstore,
   };
+  if (type === 'delegatedOss') {
+    const ossBucket = (raw.target?.ossBucket ?? '').trim();
+    return {
+      type,
+      target: {
+        ...target,
+        ...(ossBucket ? { ossBucket } : {}),
+      },
+      auth,
+    };
+  }
+  return { type, target, auth };
 }
 
 function buildMultimodalStorageAuth(
@@ -418,6 +424,9 @@ function buildMultimodalStorageAuth(
   const apiKey = (raw?.apiKey ?? '').trim();
   const hasAk = !!(accessKeyId && accessKeySecret);
   const hasApiKey = !!apiKey;
+  if (hasApiKey && (accessKeyId || accessKeySecret || securityToken)) {
+    throw new Error('multimodal.storage.auth cannot include both apiKey and access keys');
+  }
 
   const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
   if (mode === 'apiKey') {
@@ -444,11 +453,10 @@ function resolveMultimodalStorageAuthMode(
     return mode as MultimodalSlsAuthMode;
   }
   if (mode) throw new Error(`unsupported multimodal.storage.auth.mode: ${mode}`);
-  if (creds.hasApiKey) return 'apiKey';
-  if (creds.hasAk) return 'ak';
-  throw new Error(
-    'multimodal.storage.auth.mode is required when apiKey is missing and accessKeyId/accessKeySecret are incomplete',
-  );
+  if (creds.hasApiKey === creds.hasAk) {
+    throw new Error('multimodal.storage.auth requires exactly one complete credential set when mode is omitted');
+  }
+  return creds.hasApiKey ? 'apiKey' : 'ak';
 }
 
 /**

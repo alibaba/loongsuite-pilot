@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { normalizeOssEndpoint } from '../../../src/multimodal/resolve.js';
 import {
   buildV4PutRequest,
-  normalizeOssEndpoint,
   ossPutObject,
   parseOssStorageBasePath,
 } from '../../../src/multimodal/uploader/oss-client.js';

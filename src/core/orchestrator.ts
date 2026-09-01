@@ -256,7 +256,7 @@ export class Orchestrator extends EventEmitter {
           logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
         } else {
           const uploader = createUploader(multimodalConfig, {
-            eventStorageBasePath: eventBase.storageBasePath,
+            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
           });
           const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
           this.inputManager.setMultimodalProcessor(processor);

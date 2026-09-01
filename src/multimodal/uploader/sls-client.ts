@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { MultimodalRuntimeConfig, MultimodalStorageAuth } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
+import { normalizeOssEndpoint } from '../resolve.js';
 
 const logger = createLogger('SlsClient');
 
@@ -68,14 +69,17 @@ interface SlsHttpResult extends SlsResult {
   text?: string;
 }
 
-/** Virtual-hosted OSS host → bucket. Does not log or return query credentials. */
-export function parseOssBucketFromPresignedUrl(url: string): string | null {
+/** `{bucket}.{oss-regional-endpoint}` using the same host rules as normalizeOssEndpoint. */
+function parseAliyunOssVirtualHost(url: string): { bucket: string; region: string; origin: string } | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-    const match = parsed.hostname.toLowerCase().match(/^(.+?)\.oss[-.]/i);
-    const bucket = match?.[1]?.trim() ?? '';
-    return bucket || null;
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    const dot = host.indexOf('.');
+    if (dot <= 0) return null;
+    const bucket = host.slice(0, dot);
+    const endpoint = normalizeOssEndpoint(`${parsed.protocol}//${host.slice(dot + 1)}`);
+    return { bucket, region: endpoint.region, origin: parsed.origin };
   } catch {
     return null;
   }
@@ -521,10 +525,10 @@ export interface SlsPresignPutTarget {
   objectKey: string;
   project: string;
   logstore: string;
-  expectedBucket?: string;
+  expectedOrigin?: string;
 }
 
-/** Bind a presign URL to HTTPS (or loopback HTTP) and the expected OSS object. */
+/** Bind a presign URL to HTTPS (or loopback HTTP), optional origin, and object path. */
 export function bindPresignedPutUrl(
   url: string,
   target: SlsPresignPutTarget,
@@ -538,12 +542,8 @@ export function bindPresignedPutUrl(
   if (!isAllowedPresignUrl(parsed)) {
     return { ok: false, error: 'presign url must be https', retryable: false };
   }
-  const bucket = parseOssBucketFromPresignedUrl(url);
-  if (!bucket) {
-    return { ok: false, error: 'presign url missing oss bucket', retryable: false };
-  }
-  if (target.expectedBucket && bucket !== target.expectedBucket) {
-    return { ok: false, error: 'presign url bucket mismatch', retryable: false };
+  if (target.expectedOrigin && parsed.origin !== target.expectedOrigin) {
+    return { ok: false, error: 'presign url origin mismatch', retryable: false };
   }
   const pathname = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
   const expectedPath = `${target.project}/${target.logstore}/${target.objectKey}`;
@@ -555,7 +555,7 @@ export function bindPresignedPutUrl(
 
 /** ApiKey/AK presign PUT, then upload to the returned URL with no extra headers. */
 export async function slsPutViaPresignedHttp(
-  params: SlsPutObjectParams & { expectedBucket?: string },
+  params: SlsPutObjectParams & { expectedOrigin?: string },
 ): Promise<SlsResult> {
   if (params.signal?.aborted) {
     return { ok: false, error: 'aborted', retryable: false };
@@ -569,7 +569,7 @@ export async function slsPutViaPresignedHttp(
     objectKey: params.objectKey,
     project: params.project,
     logstore: params.logstore,
-    expectedBucket: params.expectedBucket,
+    expectedOrigin: params.expectedOrigin,
   });
   if (!bound.ok) return bound;
   return slsPutPresignedObject({
@@ -633,7 +633,7 @@ export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
 /** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
 export async function sniffSlsHttpEventStorageBasePath(
   params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'> & { timeoutMs?: number },
-): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; storageBasePath: string; origin: string } | { ok: false; error: string }> {
   const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
   const presign = await slsGeneratePresignedUrl({
     ...params,
@@ -650,33 +650,46 @@ export async function sniffSlsHttpEventStorageBasePath(
   } catch {
     return { ok: false, error: 'presign url is invalid' };
   }
-  const bucket = parseOssBucketFromPresignedUrl(presign.url);
-  if (!bucket) {
+  const oss = parseAliyunOssVirtualHost(presign.url);
+  if (!oss) {
     return { ok: false, error: 'presign url missing oss bucket' };
   }
   try {
     return {
       ok: true,
       storageBasePath: buildSlsHttpEventStorageBasePath({
-        ossBucket: bucket,
+        ossBucket: oss.bucket,
         project: params.project,
         logstore: params.logstore,
       }),
+      origin: oss.origin,
     };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
+function slsEndpointRegion(endpoint: string): string | null {
+  try {
+    const host = normalizeSlsEndpoint(endpoint).host.split(':')[0] ?? '';
+    const match = host.match(/^([a-z0-9-]+)\.log\.aliyuncs\.com(?:\.cn)?$/i);
+    const raw = match?.[1]?.toLowerCase() ?? '';
+    return raw.replace(/-(?:intranet|share)$/, '') || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * delegatedOss always sniffs one presign. If target.ossBucket is set (sls or delegatedOss),
- * the sniffed bucket must match or multimodal stays off.
+ * sls and oss use that prefix as-is. delegatedOss sniffs one presign;
+ * sniffed OSS origin region must match the SLS endpoint region.
+ * if target.ossBucket is set, the sniffed bucket must match or multimodal stays off.
  */
 export async function resolveMultimodalEventStorageBasePath(
   config: MultimodalRuntimeConfig,
-): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
-  if (config.storage.type === 'oss') {
+): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
+  if (config.storage.type !== 'delegatedOss') {
     const storageBasePath = (config.storageBasePath ?? '').trim();
     if (!storageBasePath) {
       return { ok: false, error: 'multimodal storageBasePath is required' };
@@ -685,16 +698,6 @@ export async function resolveMultimodalEventStorageBasePath(
   }
 
   const { target, auth } = config.storage;
-  const configuredBucket = target.ossBucket?.trim() ?? '';
-  const shouldSniff = config.storage.type === 'delegatedOss' || !!configuredBucket;
-  if (!shouldSniff) {
-    const storageBasePath = (config.storageBasePath ?? '').trim();
-    if (!storageBasePath) {
-      return { ok: false, error: 'multimodal storageBasePath is required' };
-    }
-    return { ok: true, storageBasePath };
-  }
-
   const sniffed = await sniffSlsHttpEventStorageBasePath({
     endpoint: target.endpoint,
     project: target.project,
@@ -704,6 +707,16 @@ export async function resolveMultimodalEventStorageBasePath(
   });
   if (!sniffed.ok) return sniffed;
 
+  const endpointRegion = slsEndpointRegion(target.endpoint);
+  const originRegion = parseAliyunOssVirtualHost(sniffed.origin)?.region;
+  if (!endpointRegion || !originRegion || endpointRegion !== originRegion) {
+    return {
+      ok: false,
+      error: `presign origin region (${originRegion || 'unknown'}) does not match SLS endpoint region (${endpointRegion || 'unknown'})`,
+    };
+  }
+
+  const configuredBucket = target.ossBucket?.trim() ?? '';
   if (configuredBucket) {
     const currentBucket = tryParseOssEventStorageBasePath(sniffed.storageBasePath)?.bucket ?? '';
     if (currentBucket !== configuredBucket) {
@@ -713,13 +726,5 @@ export async function resolveMultimodalEventStorageBasePath(
       };
     }
   }
-
-  if (config.storage.type === 'delegatedOss') {
-    return sniffed;
-  }
-  const storageBasePath = (config.storageBasePath ?? '').trim();
-  if (!storageBasePath) {
-    return { ok: false, error: 'multimodal storageBasePath is required' };
-  }
-  return { ok: true, storageBasePath };
+  return sniffed;
 }

@@ -9,7 +9,6 @@ import {
 import {
   slsPutObject,
   slsPutViaPresignedHttp,
-  tryParseOssEventStorageBasePath,
   tryParseSlsStorageBasePath,
 } from './sls-client.js';
 
@@ -19,7 +18,7 @@ const logger = createLogger('SlsUploader');
 export class SlsUploader implements Uploader {
   private readonly project: string;
   private readonly logstore: string;
-  private readonly expectedBucket?: string;
+  private readonly expectedOrigin?: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
   private readonly abort = new AbortController();
   private closed = false;
@@ -27,7 +26,7 @@ export class SlsUploader implements Uploader {
   constructor(
     private readonly storage: Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }>,
     storageBasePath: string,
-    opts?: { eventStorageBasePath?: string },
+    opts?: { expectedPresignOrigin?: string },
   ) {
     const parsed = tryParseSlsStorageBasePath(storageBasePath);
     this.project = storage.target.project || parsed?.project || '';
@@ -35,8 +34,7 @@ export class SlsUploader implements Uploader {
     if (!this.project || !this.logstore) {
       throw new Error('multimodal.storage.target requires project and logstore');
     }
-    const eventTarget = tryParseOssEventStorageBasePath(opts?.eventStorageBasePath ?? '');
-    this.expectedBucket = eventTarget?.bucket ?? storage.target.ossBucket;
+    this.expectedOrigin = opts?.expectedPresignOrigin;
   }
 
   async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
@@ -140,7 +138,7 @@ export class SlsUploader implements Uploader {
     return this.storage.type === 'delegatedOss'
       ? slsPutViaPresignedHttp({
         ...params,
-        expectedBucket: this.expectedBucket,
+        expectedOrigin: this.expectedOrigin,
       })
       : slsPutObject(params);
   }

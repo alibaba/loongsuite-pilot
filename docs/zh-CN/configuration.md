@@ -79,7 +79,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。这和日志用的 `sls` flusher 不是同一块配置。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
-`auth` 里可以同时写 ApiKey 和 AK。写了 `mode` 就用对应那一套；没写 `mode` 时，有 `apiKey` 用 ApiKey，否则用 AK。凭证不完整则不开启图片上传，文本采集照常。
+`auth` 填写一套完整的 ApiKey 或 AK。未填 `mode` 时按这套凭证推断。
 
 ### `type: sls`
 
@@ -179,11 +179,11 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 | `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
 | `multimodal.storage.target.project` | SLS Project。`sls` / `delegatedOss` 必填。 |
 | `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore；缺省 `logstore-multimodal`。 |
-| `multimodal.storage.target.ossBucket` | 可选。`sls` / `delegatedOss` 用来核对落地 Bucket；不一致则不开启图片上传。 |
+| `multimodal.storage.target.ossBucket` | 可选，仅 `delegatedOss`。用来核对落地 Bucket；不一致则不开启图片上传。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
-| `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。`type=oss` 必须是 `ak`。 |
+| `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。未填时按已填写的凭证推断。`type=oss` 必须是 `ak`。 |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
-| `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。可与 AK 同时写；未填 `mode` 时优先用 `apiKey`。 |
+| `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。不能与 AK 同时写。 |
 
 `multimodal.storage` 缺失或无效时，文本采集照常，图片不会转成 `uri`。
 

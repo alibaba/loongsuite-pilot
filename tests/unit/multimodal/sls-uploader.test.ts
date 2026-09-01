@@ -231,7 +231,7 @@ describe('SlsUploader', () => {
       ...sls,
       type: 'delegatedOss',
     }, 'sls://proj/logstore', {
-      eventStorageBasePath: 'oss://user-bucket/proj/logstore',
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     const uploading = uploader.upload({
       targetPath: '20260101/a.png',

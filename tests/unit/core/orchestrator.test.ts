@@ -669,6 +669,7 @@ describe('Orchestrator', () => {
       mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
         ok: true,
         storageBasePath: 'oss://user-bucket/proj/logstore',
+        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
       });
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
@@ -690,7 +691,7 @@ describe('Orchestrator', () => {
       expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
         storage: expect.objectContaining({ type: 'delegatedOss' }),
       }), {
-        eventStorageBasePath: 'oss://user-bucket/proj/logstore',
+        expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
       });
       expect(MockMultimodalProcessor).toHaveBeenCalledWith(
         'oss://user-bucket/proj/logstore',
