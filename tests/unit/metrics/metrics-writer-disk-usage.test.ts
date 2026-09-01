@@ -54,6 +54,7 @@ describe('MetricsWriter directory usage', () => {
     writer = new MetricsWriter({
       dataDir, version: '1.2.0', userId: 'test-user', alarmManager: alarms,
       getSnapshot: () => ({
+        rawInRecordsTotal: 0, rawInBytesTotal: 0, rawInMaxBatchBytes: 0,
         inEventsTotal: 0, inBytesTotal: 0, inputs: new Map(), flushers: new Map(),
         inputIdleMinutes: new Map(),
       }),

@@ -166,12 +166,20 @@ export abstract class BaseHookInput extends BaseInput {
       // newline; otherwise a transient half-line would be rejected as invalid
       // JSON and the persisted offset would skip its remaining bytes forever.
       const lastNewline = snapshot.lastIndexOf(0x0a);
-      if (lastNewline < 0) return { entries, offset };
+      if (lastNewline < 0) {
+        this.reportRawInput({ records: 0, bytes: 0, maxBatchBytes: buf.length });
+        return { entries, offset };
+      }
       const completeLength = lastNewline + 1;
       checkpointOffset = offset + completeLength;
       const text = snapshot.subarray(0, completeLength).toString('utf-8');
 
       const lines = text.split('\n').filter(l => l.trim().length > 0);
+      this.reportRawInput({
+        records: lines.length,
+        bytes: completeLength,
+        maxBatchBytes: buf.length,
+      });
 
       for (const line of lines) {
         try {

@@ -65,6 +65,22 @@ describe('InputManager', () => {
   });
 
   describe('registerInput and event dispatch (T030)', () => {
+    it('counts raw input independently from normalized entry emission', () => {
+      const input = new StubInput('raw-input');
+      manager.registerInput(input as any);
+
+      input.emit('raw-input-stats', { records: 3, bytes: 120, maxBatchBytes: 80 });
+      input.emit('raw-input-stats', { records: 2, bytes: 40, maxBatchBytes: 40 });
+
+      expect(manager.getInputCounters().get(input.id)).toMatchObject({
+        rawInRecords: 5,
+        rawInBytes: 160,
+        rawInMaxBatchBytes: 80,
+        inEvents: 0,
+        inBytes: 0,
+      });
+    });
+
     it('subscribes to entries events and calls flusher.sendBatch', async () => {
       const input = new StubInput('test-input');
       manager.registerInput(input as any);

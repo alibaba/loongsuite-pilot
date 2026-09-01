@@ -11,6 +11,17 @@ export interface InputOptions {
 }
 
 /**
+ * Raw source volume observed before parsing, filtering, deduplication, or
+ * normalization. `bytes` is the checkpointed source payload, while
+ * `maxBatchBytes` is the largest temporary read buffer used by this report.
+ */
+export interface RawInputStats {
+  records: number;
+  bytes: number;
+  maxBatchBytes: number;
+}
+
+/**
  * Upper bound on per-path ownership warnings remembered for dedup. The set is
  * keyed by path and the condition is stable, so in practice it holds a handful
  * of entries; the cap only guards against unbounded growth if a writer keeps
@@ -114,6 +125,11 @@ export abstract class BaseInput extends EventEmitter {
 
   protected setState(state: Partial<InputState>): void {
     this.stateStore.update(this.id, state);
+  }
+
+  /** Report one raw-source read without coupling it to normalized entries. */
+  protected reportRawInput(stats: RawInputStats): void {
+    this.emit('raw-input-stats', stats);
   }
 
   /** Whether an error is a permission failure (EACCES/EPERM) on a path. */

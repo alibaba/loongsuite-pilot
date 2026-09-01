@@ -5,7 +5,7 @@ import type {
   AgentsConfig,
   MaskConfig,
 } from '../types/index.js';
-import type { BaseInput } from '../inputs/base/base-input.js';
+import type { BaseInput, RawInputStats } from '../inputs/base/base-input.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
@@ -24,6 +24,12 @@ import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.
 const logger = createLogger('InputManager');
 
 export interface InputCounter {
+  /** Complete source records presented to parsing/transformation. */
+  rawInRecords: number;
+  /** Checkpointed source bytes before parsing/transformation. */
+  rawInBytes: number;
+  /** Largest temporary source-read buffer observed in this process run. */
+  rawInMaxBatchBytes: number;
   inEvents: number;
   inBytes: number;
   outEvents: number;
@@ -111,6 +117,9 @@ export class InputManager extends EventEmitter {
     }
     this.inputs.set(input.id, input);
     this.counters.set(input.id, {
+      rawInRecords: 0,
+      rawInBytes: 0,
+      rawInMaxBatchBytes: 0,
       inEvents: 0,
       inBytes: 0,
       outEvents: 0,
@@ -120,6 +129,9 @@ export class InputManager extends EventEmitter {
       type: input.collectionMethod,
       agentType: input.agentType,
       lastActiveTime: 0,
+    });
+    input.on('raw-input-stats', (stats: RawInputStats) => {
+      this.handleRawInputStats(input.id, stats);
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
@@ -135,6 +147,20 @@ export class InputManager extends EventEmitter {
       });
     });
     logger.info('input registered', { id: input.id });
+  }
+
+  private handleRawInputStats(inputId: string, stats: RawInputStats): void {
+    const counter = this.counters.get(inputId);
+    if (!counter) return;
+
+    const records = Number.isFinite(stats.records) ? Math.max(0, Math.trunc(stats.records)) : 0;
+    const bytes = Number.isFinite(stats.bytes) ? Math.max(0, Math.trunc(stats.bytes)) : 0;
+    const maxBatchBytes = Number.isFinite(stats.maxBatchBytes)
+      ? Math.max(0, Math.trunc(stats.maxBatchBytes))
+      : 0;
+    counter.rawInRecords += records;
+    counter.rawInBytes += bytes;
+    counter.rawInMaxBatchBytes = Math.max(counter.rawInMaxBatchBytes, maxBatchBytes);
   }
 
   async startInput(id: string): Promise<void> {

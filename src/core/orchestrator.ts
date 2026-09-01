@@ -1687,9 +1687,15 @@ export class Orchestrator extends EventEmitter {
 
     // Ingress only. The instance's egress is measured where the writes actually
     // happen — the flusher counters below — so it is not summed from the inputs.
+    let rawInRecordsTotal = 0;
+    let rawInBytesTotal = 0;
+    let rawInMaxBatchBytes = 0;
     let inEventsTotal = 0;
     let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
+      rawInRecordsTotal += counter.rawInRecords;
+      rawInBytesTotal += counter.rawInBytes;
+      rawInMaxBatchBytes = Math.max(rawInMaxBatchBytes, counter.rawInMaxBatchBytes);
       inEventsTotal += counter.inEvents;
       inBytesTotal += counter.inBytes;
     }
@@ -1766,6 +1772,9 @@ export class Orchestrator extends EventEmitter {
     }
 
     return {
+      rawInRecordsTotal,
+      rawInBytesTotal,
+      rawInMaxBatchBytes,
       inEventsTotal,
       inBytesTotal,
       inputs,

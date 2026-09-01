@@ -38,10 +38,13 @@ vi.mock('../../../src/internal/sender.js', () => ({
 
 function buildSnapshot(): DataflowSnapshot {
   return {
+    rawInRecordsTotal: 7,
+    rawInBytesTotal: 1536,
+    rawInMaxBatchBytes: 1024,
     inEventsTotal: 12,
     inBytesTotal: 2048,
     inputs: new Map([
-      ['test-input', { inEvents: 5, inBytes: 1024, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling', agent: 'test-agent', running: true }],
+      ['test-input', { rawInRecords: 7, rawInBytes: 1536, rawInMaxBatchBytes: 1024, inEvents: 5, inBytes: 1024, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling', agent: 'test-agent', running: true }],
     ]),
     flushers: new Map([
       ['sls:main', { kind: 'sls' as const, project: 'proj-a', logstore: 'store-a', mode: 'sls', bytesBasis: 'measured' as const, inEntries: 10, inBytes: 2048, outEntries: 9, outBytes: 1900, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00' }],
@@ -112,6 +115,9 @@ describe('MetricsWriter', () => {
     expect(entry.version).toBe('2.0.0');
     expect(entry.user_id).toBe('u1');
     expect(entry.metric_json.agent_count).toBe('1');
+    expect(entry.metric_json.raw_in_records).toBe('7');
+    expect(entry.metric_json.raw_in_bytes).toBe('1536');
+    expect(entry.metric_json.raw_in_max_batch_bytes).toBe('1024');
   });
 
   it('calls sendStatus with pilot_status topic on L1 write', async () => {
@@ -171,6 +177,9 @@ describe('MetricsWriter', () => {
 
     // Flat string fields throughout: nothing needs json_extract to be queried.
     expect(agent.agent).toBe('test-agent');
+    expect(agent.raw_in_records).toBe('7');
+    expect(agent.raw_in_bytes).toBe('1536');
+    expect(agent.raw_in_max_batch_bytes).toBe('1024');
     expect(agent.in_events).toBe('5');
     expect(flusher.flusher).toBe('sls');
     expect(flusher.project).toBe('proj-a');
@@ -197,6 +206,9 @@ describe('MetricsWriter', () => {
     // Both still report, at zero: the input is running, so its agent has gone
     // quiet rather than gone away, and the destination is still configured.
     expect(rows.map(r => r.type)).toEqual(['agent', 'flusher']);
+    expect(rows[0].raw_in_records).toBe('0');
+    expect(rows[0].raw_in_bytes).toBe('0');
+    expect(rows[0].raw_in_max_batch_bytes).toBe('1024');
     expect(rows[0].in_events).toBe('0');
     expect(rows[0].in_bytes).toBe('0');
     expect(rows[1].out_entries).toBe('0');

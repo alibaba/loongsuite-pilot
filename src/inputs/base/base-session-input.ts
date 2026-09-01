@@ -96,15 +96,23 @@ export abstract class BaseSessionInput extends BaseInput {
       const bytes = buf.subarray(0, bytesRead);
       const lastNewline = bytes.lastIndexOf(0x0a);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
-      if (lastNewline < 0) return [];
+      if (lastNewline < 0) {
+        this.reportRawInput({ records: 0, bytes: 0, maxBatchBytes: buf.length });
+        return [];
+      }
 
       const completeBytes = bytes.subarray(0, lastNewline + 1);
       const text = completeBytes.toString('utf-8');
       this.stateStore.setOffset(stateKey, offset + completeBytes.length);
 
       const entries: AgentActivityEntry[] = [];
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
+      const lines = text.split('\n').filter(line => line.trim().length > 0);
+      this.reportRawInput({
+        records: lines.length,
+        bytes: completeBytes.length,
+        maxBatchBytes: buf.length,
+      });
+      for (const line of lines) {
         try {
           const parsed = JSON.parse(line) as Record<string, unknown>;
           const entry = await this.processSessionLine(parsed, filePath);

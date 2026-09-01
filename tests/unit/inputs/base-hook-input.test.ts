@@ -73,6 +73,26 @@ describe('BaseHookInput', () => {
       expect(entries).toHaveLength(0);
       await input.stop();
     });
+
+    it('reports complete raw records and bytes even when no normalized entry survives', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      const payload = `not-json\n${JSON.stringify({ file_path: '/filtered.ts' })}\n`;
+      await fs.writeFile(logFile, payload);
+      input.transformFn = async () => null;
+
+      const rawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
+      input.on('raw-input-stats', stats => rawStats.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(rawStats).toEqual([{
+        records: 2,
+        bytes: Buffer.byteLength(payload),
+        maxBatchBytes: Buffer.byteLength(payload),
+      }]);
+    });
   });
 
   describe('byte offset incremental reading', () => {
@@ -114,11 +134,18 @@ describe('BaseHookInput', () => {
       await fs.writeFile(logFile, completeRecord.slice(0, splitAt));
 
       const firstEntries: AgentActivityEntry[] = [];
+      const firstRawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
       input.on('entries', (entries: AgentActivityEntry[]) => firstEntries.push(...entries));
+      input.on('raw-input-stats', stats => firstRawStats.push(stats));
       await input.start();
       await input.stop();
       expect(firstEntries).toHaveLength(0);
       expect(stateStore.get('test-hook').lastOffset).toBe(0);
+      expect(firstRawStats).toEqual([{
+        records: 0,
+        bytes: 0,
+        maxBatchBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+      }]);
 
       await fs.appendFile(logFile, `${completeRecord.slice(splitAt)}\n`);
       const nextInput = new TestHookInput({

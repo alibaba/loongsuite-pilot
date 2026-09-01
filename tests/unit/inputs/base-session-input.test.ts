@@ -86,6 +86,26 @@ describe('BaseSessionInput', () => {
       await input.stop();
     });
 
+    it('reports malformed and filtered lines as raw records before normalization', async () => {
+      const file = path.join(tmpDir, 'raw-stats.jsonl');
+      const payload = `not-json\n${JSON.stringify({ file_path: '/filtered.ts' })}\n`;
+      await fs.writeFile(file, payload);
+      input.discoverFn = async () => [file];
+      input.processLineFn = async () => null;
+
+      const rawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
+      input.on('raw-input-stats', stats => rawStats.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(rawStats).toEqual([{
+        records: 2,
+        bytes: Buffer.byteLength(payload),
+        maxBatchBytes: Buffer.byteLength(payload),
+      }]);
+    });
+
     it('should pass filePath to processSessionLine', async () => {
       const file = path.join(tmpDir, 'my-session.jsonl');
       await fs.writeFile(file, JSON.stringify({ x: 1 }) + '\n');
