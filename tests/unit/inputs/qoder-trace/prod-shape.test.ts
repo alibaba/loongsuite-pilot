@@ -144,4 +144,65 @@ describe('production-shape: started lacks turn_id', () => {
       }
     }
   });
+
+  it('tester Round 6 shape: 5 started + 5 completed per turn file, response.id mismatches UUID request_id', async () => {
+    // Reproduces tester Round 6 T1 session 303593aa shape:
+    //   - 1 segment file per turn (file boundary = turn boundary)
+    //   - 5 model.request.started + 5 model.response.completed per file
+    //   - started events LACK turn_id (production shape)
+    //   - started.request_id ≠ completed.request_id (s5/s6 case — UUID diverges)
+    //   - completed has turn_id + data.request_index
+    // segment-token-reader layer 1 (exact requestId) fails for all 5 pairs.
+    // Layers 2/3 (composite turnId+requestIndex) fail because started lacks turnId.
+    // Layer 4 (same-file order fallback) must claim the i-th unclaimed started
+    // for the i-th completed — NOT wrong-prioritize by claiming started #5 for
+    // completed #1. This test asserts requestStartTs = started.ts for all 5
+    // pairs in the file, proving layer 4 sequential pairing is correct.
+    const lines: string[] = [];
+    for (let r = 0; r < 5; r++) {
+      const startedTs = 1788260000000 + r * 7000;       // 7s gap per call
+      const completedTs = startedTs + 6400;              // ~6.4s LLM duration
+      lines.push(segLine({
+        type: 'model.request.started',
+        ts: startedTs,
+        request_id: `started-uuid-r${r}`,                 // ≠ completed.request_id
+        data: { request_index: r, model: 'claude-sonnet-4-5' },
+      }));
+      lines.push(segLine({
+        type: 'model.response.completed',
+        ts: completedTs,
+        request_id: `completed-uuid-r${r}`,              // ≠ started.request_id
+        turn_id: '303593aa-d7fb-44b7-a3fe-c6ca143be7bf',
+        data: {
+          request_index: r,
+          model: 'claude-sonnet-4-5',
+          stop_reason: r === 4 ? 'end_turn' : 'tool_use',
+          input_tokens: 1000 + r * 100,
+          output_tokens: 50 + r,
+        },
+      }));
+    }
+    await writeTurnFile('sess-r6', 1, lines);
+
+    const result = await readSegmentTokensForSession('sess-r6');
+    expect(result).toHaveLength(5);
+
+    for (let r = 0; r < 5; r++) {
+      const seg = result[r];
+      const expectedStart = 1788260000000 + r * 7000;
+      const expectedEnd = expectedStart + 6400;
+      // CRITICAL: requestStartTs must be started.ts (NOT completed.ts).
+      // If layer 4 wrong-prioritizes (claims started #5 for completed #1),
+      // requestStartTs would be 1788260028000 (started #4) for completed #0
+      // (expected 1788260000000). The assertion catches this.
+      expect(seg.requestStartTs).toBe(expectedStart);
+      expect(seg.responseEndTs).toBe(expectedEnd);
+      // duration > 0 (the runtime symptom was duration = 0)
+      expect(seg.responseEndTs - seg.requestStartTs).toBe(6400);
+      // turnId propagated from completed event
+      expect(seg.turnId).toBe('303593aa-d7fb-44b7-a3fe-c6ca143be7bf');
+      // requestId from completed event (s5/s6 case — completed's UUID)
+      expect(seg.requestId).toBe(`completed-uuid-r${r}`);
+    }
+  });
 });

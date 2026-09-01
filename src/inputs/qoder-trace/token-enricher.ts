@@ -172,9 +172,26 @@ function applyOrderFallback(
   // steps in different turns have the same numeric step number (turn1:s1 and
   // turn2:s1 both parse as 1). Pairing seg[i] ↔ step s(i+1) globally would
   // cross turns and reproduce the cross-turn timestamp mismatch the
-  // segment-token-reader fix targets. When seg.turnId is set, restrict pairing
-  // to steps in the same turn. When seg.turnId is empty (older segment format
-  // without turn_id), fall back to global order to preserve prior behavior.
+  // segment-token-reader fix targets.
+  //
+  // CRITICAL: seg.turn_id and OTLP gen_ai.turn.id come from DIFFERENT sources
+  // (qoder-cli's per-turn UUID vs hook processor's per-turn UUID) and do NOT
+  // match. Filtering stepToResponses by `${seg.turnId}:s` finds nothing in
+  // production (Round 6 regression): all unmatched segs stay unpaired,
+  // llm.request.time_unix_nano keeps the hook processor's `group[0].timestamp`
+  // fallback (= completed time), and duration collapses to 0.
+  //
+  // Fix: extract OTLP turn.id set from `entries` and filter stepToResponses by
+  // those prefixes. The caller (QoderTraceInput.collect) pre-scopes segs per
+  // OTLP turn by sequential order, so all unmatched segs passed in belong to
+  // the current OTLP turn. For multi-turn test entries (seg.turnId == OTLP
+  // turn.id), this still works — OTLP turn.id set includes seg.turnIds.
+  const otlpTurnIds = new Set<string>();
+  for (const entry of entries) {
+    const tid = entry['gen_ai.turn.id'] as string | undefined;
+    if (tid) otlpTurnIds.add(tid);
+  }
+
   const segsByTurn = new Map<string, SegmentTokenData[]>();
   const legacySegs: SegmentTokenData[] = [];
   for (const seg of unmatchedSegs) {
@@ -188,7 +205,7 @@ function applyOrderFallback(
   }
 
   for (const [turnId, segs] of segsByTurn) {
-    pairSegsWithStepsInTurn(segs, turnId, stepToResponses, claimedEntries, entries);
+    pairSegsWithStepsInTurn(segs, turnId, otlpTurnIds, stepToResponses, claimedEntries, entries);
   }
   if (legacySegs.length > 0) {
     pairSegsGlobally(legacySegs, stepToResponses, claimedEntries, entries);
@@ -198,6 +215,7 @@ function applyOrderFallback(
 function pairSegsWithStepsInTurn(
   segs: SegmentTokenData[],
   turnId: string,
+  otlpTurnIds: Set<string>,
   stepToResponses: Map<string, AgentActivityEntry[]>,
   claimedEntries: Set<AgentActivityEntry>,
   entries: AgentActivityEntry[],
@@ -205,8 +223,10 @@ function pairSegsWithStepsInTurn(
   // Segments sorted by responseEndTs asc (model.response.completed order).
   const sortedSegs = [...segs].sort((a, b) => a.responseEndTs - b.responseEndTs);
 
-  // Steps in this turn, sorted by numeric step number.
-  const turnStepIds = [...stepToResponses.keys()]
+  // Steps in this turn. Try seg.turnId prefix first (preserves Case 4 behavior
+  // where seg.turnId == OTLP turn.id). If empty, fall back to OTLP turn.id set
+  // from entries (prod-shape: seg.turnId ≠ OTLP turn.id).
+  let turnStepIds = [...stepToResponses.keys()]
     .filter(stepId => stepId.startsWith(`${turnId}:s`))
     .sort((a, b) => {
       const an = parseStepNumber(a);
@@ -214,6 +234,20 @@ function pairSegsWithStepsInTurn(
       if (an !== bn) return an - bn;
       return a.localeCompare(b);
     });
+
+  if (turnStepIds.length === 0 && otlpTurnIds.size > 0) {
+    turnStepIds = [...stepToResponses.keys()]
+      .filter(stepId => {
+        const prefix = stepId.slice(0, stepId.lastIndexOf(':s'));
+        return otlpTurnIds.has(prefix);
+      })
+      .sort((a, b) => {
+        const an = parseStepNumber(a);
+        const bn = parseStepNumber(b);
+        if (an !== bn) return an - bn;
+        return a.localeCompare(b);
+      });
+  }
 
   let stepCursor = 0;
   for (const seg of sortedSegs) {

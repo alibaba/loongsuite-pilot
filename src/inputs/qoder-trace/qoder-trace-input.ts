@@ -12,7 +12,7 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
-import { readSegmentTokensForSession } from './segment-token-reader.js';
+import { readSegmentTokensForSession, type SegmentTokenData } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
@@ -155,16 +155,34 @@ export class QoderTraceInput extends BaseInput {
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
     const cliTurns: AgentActivityEntry[][] = [];
+    // Segment turns are paired with OTLP turns by sequential order (ts asc).
+    // seg.turn_id and OTLP gen_ai.turn.id come from different sources and do NOT
+    // match (segment turn_id = qoder-cli's per-turn UUID; OTLP turn.id = hook
+    // processor's per-turn UUID). Both are per-session and time-ordered, so the
+    // i-th cli turn (per session, ts asc) pairs with the i-th segment turn group
+    // (per session, min responseEndTs asc). Without this scoping, T2's OTLP
+    // steps would steal T1's segments (T1 segs have lower responseEndTs, so they
+    // sort first and pair with whatever OTLP steps are present in entries).
+    const sessionSegGroups = new Map<string, SegmentTokenData[][]>();
+    const sessionCliTurnIdx = new Map<string, number>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
       if (variant === 'qoder-cli' && sessionId) {
         interceptData ??= await readInterceptData();
-        const segments = await readSegmentTokensForSession(sessionId);
+        let segGroups = sessionSegGroups.get(sessionId);
+        if (!segGroups) {
+          const allSegs = await readSegmentTokensForSession(sessionId);
+          segGroups = groupSegmentsByTurn(allSegs);
+          sessionSegGroups.set(sessionId, segGroups);
+        }
+        const turnIdx = sessionCliTurnIdx.get(sessionId) ?? 0;
+        sessionCliTurnIdx.set(sessionId, turnIdx + 1);
+        const turnSegs = segGroups[turnIdx] ?? [];
         enrichCliTurn(
           turnEntries,
-          segments,
+          turnSegs,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
@@ -322,4 +340,23 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+// Group segments by their segment turn_id, then sort groups by min responseEndTs
+// asc. Used to pair segment turns with OTLP turns by sequential order (ts asc)
+// since seg.turn_id and OTLP gen_ai.turn.id come from different sources and do
+// not match directly.
+function groupSegmentsByTurn(segments: SegmentTokenData[]): SegmentTokenData[][] {
+  const groupsByTurn = new Map<string, SegmentTokenData[]>();
+  for (const seg of segments) {
+    const tid = seg.turnId || '';
+    const list = groupsByTurn.get(tid) ?? [];
+    list.push(seg);
+    groupsByTurn.set(tid, list);
+  }
+  return [...groupsByTurn.values()].sort((a, b) => {
+    const aMin = a.reduce((m, s) => Math.min(m, s.responseEndTs || s.requestStartTs || Infinity), Infinity);
+    const bMin = b.reduce((m, s) => Math.min(m, s.responseEndTs || s.requestStartTs || Infinity), Infinity);
+    return aMin - bMin;
+  });
 }

@@ -294,6 +294,7 @@ const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.turn.id',
+  'gen_ai.step.id',
   'gen_ai.agent.scope',
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
