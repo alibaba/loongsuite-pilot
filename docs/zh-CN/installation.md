@@ -172,6 +172,30 @@ http://127.0.0.1:8765/
 
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
 
+### 手动启动和停止 macOS 菜单栏
+
+菜单栏默认随采集服务启动。菜单栏里的“退出”只会关闭菜单栏，采集服务继续运行；此时再次执行 `loongsuite-pilot start` 不会重新打开菜单栏。请执行：
+
+```bash
+loongsuite-pilot menubar start
+```
+
+该命令会向当前生效的 `config.json` 持久化 `"enableStatusBarApp": true`，然后只启动菜单栏，不会重启采集服务；菜单栏已运行时会提示现有进程，不重复启动。请在 macOS 桌面用户的终端执行，不要使用 `sudo`。
+
+如果提示采集服务未运行，请先执行 `loongsuite-pilot start`，等服务启动完成后重试。如果设置了 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false`，需先取消或改为 `true`。启动失败时查看数据目录下的 `logs/app-status-bar/` 日志。
+
+只关闭菜单栏、保留采集服务：
+
+```bash
+loongsuite-pilot menubar stop
+```
+
+采集服务未运行或菜单栏已被配置禁用时，也可用此命令清理残留的菜单栏进程；菜单栏已退出时会正常返回。命令会持久化 `"enableStatusBarApp": false`，下次启动采集服务时不会再自动打开菜单栏。
+
+环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 的优先级仍高于配置文件。如果它设置为启用，后续启动 Pilot 时仍可覆盖持久化的 `false`；命令检测到冲突时会给出警告。
+
+源码构建后也可执行 `node dist/index.js menubar start` 或 `node dist/index.js menubar stop`，无需安装新的系统命令。
+
 ### macOS Dashboard 快捷方式
 
 快捷方式**按需安装**：普通安装、升级和启动 Pilot 都不会创建快捷方式或修改程序坞。

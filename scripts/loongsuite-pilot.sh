@@ -1241,6 +1241,42 @@ cmd_deploy() {
     exec "$node_bin" "$entry" deploy "$@"
 }
 
+cmd_menubar() {
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "❌ The menu bar app is only supported on macOS." >&2
+        return 1
+    fi
+
+    local repo_dir version_dir entry node_bin
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    # A source checkout must not send a new command to an older installed runtime.
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        version_dir="$repo_dir"
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || true
+    fi
+    if [ -z "$version_dir" ]; then
+        version_dir="$repo_dir"
+    fi
+    entry="$version_dir/dist/index.js"
+    if [ ! -f "$entry" ]; then
+        echo "❌ loongsuite-pilot runtime entry not found; build or install Pilot first" >&2
+        return 1
+    fi
+    if ! grep -Fq 'Usage: loongsuite-pilot menubar <start|stop>' "$entry"; then
+        echo "❌ loongsuite-pilot runtime does not support the menubar command; upgrade Pilot or run 'npm run build' first" >&2
+        return 1
+    fi
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$entry" menubar "$@"
+}
+
 cmd_dashboard() {
     # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
     case "${1:-}" in
@@ -2261,6 +2297,8 @@ cmd_help() {
     echo "                    --require <ids>  comma-separated agent ids that must deploy"
     echo "                    --json           machine-readable result"
     echo "  token-usage     Show token usage TUI"
+    echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
+    echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
     echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
@@ -2281,6 +2319,7 @@ case "${1:-status}" in
     dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
+    menubar)     shift; cmd_menubar "$@" ;;
     span-attr)   shift; cmd_span_attr "$@" ;;
     worker)              shift; cmd_worker "$@" ;;
     agent)               shift; cmd_agent "$@" ;;

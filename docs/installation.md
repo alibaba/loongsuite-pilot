@@ -131,6 +131,28 @@ http://127.0.0.1:8765/
 The page reads `logs/metrics-summary.json` directly and does not run a second
 aggregation pipeline.
 
+### Start or stop the macOS menu bar app
+
+The menu bar app starts with the collector by default. Quitting it leaves collection running, so another `loongsuite-pilot start` does not reopen it. Use:
+
+```bash
+loongsuite-pilot menubar start
+```
+
+This persists `"enableStatusBarApp": true` in the active `config.json`, starts only the menu bar app, and reuses an existing instance. Run it in your macOS desktop terminal without `sudo`. The collector must already be running; otherwise run `loongsuite-pilot start`, wait for startup, and retry. If `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` disables the app, unset it or set it to `true` first. Startup logs are in `logs/app-status-bar/` under your data directory.
+
+To close only the menu bar app:
+
+```bash
+loongsuite-pilot menubar stop
+```
+
+Collection keeps running. This also works when the collector is stopped or the menu bar app is disabled, and succeeds if the app is already stopped. It persists `"enableStatusBarApp": false`, so the next collector startup leaves the app closed.
+
+`LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` keeps higher priority than the file. An environment value that enables the app can override the persisted `false` on future Pilot starts; the command prints a warning when it detects this conflict.
+
+After a source build, `node dist/index.js menubar start` and `node dist/index.js menubar stop` provide the same commands without installing a new launcher.
+
 ### macOS Dashboard shortcut
 
 Shortcut installation is **opt-in**. Normal Pilot installation, upgrades and

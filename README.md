@@ -205,11 +205,21 @@ macOS menu bar app:
 
 On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
 
+If you quit the menu bar app, reopen it without restarting collection:
+
+```bash
+loongsuite-pilot menubar start
+```
+
+Run this in your macOS desktop terminal without `sudo`. Pilot must already be running. The command persists `"enableStatusBarApp": true` in the active `config.json`; repeated calls reuse the running app.
+
+To close only the menu bar app, run `loongsuite-pilot menubar stop`. Collection keeps running, and stopping an already closed app succeeds. The command persists `"enableStatusBarApp": false`, so the next collector startup leaves it closed.
+
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
 </p>
 
-To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
+The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has higher priority than `config.json`. Unset a disabling value before `menubar start`; an enabling value can override the setting written by `menubar stop` on future Pilot starts.
 
 ## Documentation
 

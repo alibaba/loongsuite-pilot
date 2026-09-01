@@ -444,7 +444,9 @@ export class Orchestrator extends EventEmitter {
 
     await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
-    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
+    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
+      logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
+    });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
     await this.metricsSummaryWriter?.stop();
