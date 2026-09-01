@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   acquireRetryLock,
   assessStableEofCandidate,
@@ -571,6 +572,97 @@ describe('findTriggeredTurnWindow', () => {
       startLine: 0,
       stopLine: 3,
       endLine: 5,
+    });
+  });
+});
+
+// --- B3 P0 fix: stop detection must accept assistant message.stop_reason ---
+// Fixtures live in tests/fixtures/qoder/transcript-*.jsonl. Real-shape rows
+// derived from tester B3 diagnosis (comment 959f121d): qoder transcripts carry
+// `message.stop_reason` on the final assistant row of a turn; retry path used
+// to only recognise `progress Stop` rows and silently dropped such turns.
+describe('findTriggeredTurnWindow stop source variants (B3 P0)', () => {
+  const fixturesDir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../fixtures/qoder',
+  );
+  const snapshot = name => readTranscriptSnapshot(path.join(fixturesDir, name));
+
+  it('case 1: detects stop via Stop progress row (regression, old path not degraded)', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-progress-only.jsonl'), 4);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 4,
+      endLine: 6,
+    });
+  });
+
+  it('case 2: detects stop via assistant message.stop_reason when no Stop progress row', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-reason-only.jsonl'), 3);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 3,
+      endLine: 5,
+    });
+  });
+
+  it('case 3: prefers the Stop progress row when both signals are present', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-both-stops.jsonl'), 5);
+    // Row 3 is an assistant `tool_use`, i.e. mid-turn: the model resumes after
+    // the tool result, so it is not a boundary. The scan remembers nothing and
+    // reaches the Stop progress row at 4, which is the authoritative boundary.
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 4,
+      endLine: 6,
+    });
+  });
+
+  it('case 4: skips mid-turn tool_use and stops at the terminal assistant row', () => {
+    // tool_use -> tool_result -> end_turn, the ReAct shape that dominates real
+    // transcripts. Accepting the first stop_reason would put stopLine at 3 while
+    // the turn actually ends at 5.
+    const result = findTriggeredTurnWindow(snapshot('transcript-react-tool-cycle.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 5,
+      endLine: 7,
+    });
+  });
+
+  it('case 5: treats stop_sequence as terminal', () => {
+    // stop_sequence is a genuine turn end and is sometimes a turn's only
+    // terminal row on real transcripts, so leaving it out of the terminal set
+    // would downgrade those turns from "collected early" to "never collected".
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-sequence.jsonl'), 4);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 3,
+      endLine: 5,
+    });
+  });
+
+  it('case 6: keeps waiting when the turn only carries non-terminal stop reasons', () => {
+    // tool_use plus pause_turn: the assistant resumes in both cases, so there is
+    // no boundary yet. Committing here would emit a prefix of the turn once
+    // assessStableEofCandidate saw the same bytes twice.
+    const result = findTriggeredTurnWindow(snapshot('transcript-pause-turn.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'waiting',
+      reason: 'stop-not-found',
+      startLine: null,
+      stopLine: null,
+      endLine: null,
     });
   });
 });

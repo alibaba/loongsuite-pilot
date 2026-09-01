@@ -8,6 +8,7 @@ import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
 } from '../../../assets/hooks/shared/resource-context.mjs';
+import { VALID_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
@@ -483,5 +484,22 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(responses.map(record => record['gen_ai.response.finish_reasons'])).toEqual([
       ['tool_call'], ['tool_call'], ['end_turn'],
     ]);
+    // Every emitted finish reason must survive validate-trace.mjs, whose
+    // VALID_FINISH_REASONS is hand-maintained and rejects vendor spellings such
+    // as Anthropic's `tool_use`. Checking against the whole set (rather than the
+    // two literals above) also catches any future stop_reason that reaches the
+    // output unmapped, since the transcript can carry arbitrary vendor values.
+    // The set is imported rather than copied: a local copy is exactly how
+    // `cancelled` drifted out of the validator.
+    for (const record of responses) {
+      for (const reason of record['gen_ai.response.finish_reasons']) {
+        expect(VALID_FINISH_REASONS).toContain(reason);
+      }
+      // output.messages carries its own copy; validate-trace.mjs errors on that
+      // one specifically (rule schema.output_messages), so assert it too.
+      for (const message of record['gen_ai.output.messages'] ?? []) {
+        expect(VALID_FINISH_REASONS).toContain(message.finish_reason);
+      }
+    }
   });
 });

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
-import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, timestampToUnixNanos, type StandardAgentActivityOptions } from '../../normalization/entry-builder.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
   BaseSessionInput,
@@ -13,7 +13,10 @@ import {
 
 const DEFAULT_SESSION_DIR = '~/.qoder/logs/sessions';
 const SOURCE = 'qoder-cli-session-segment';
-const SUPPORTED_EVENT_TYPE = 'model.response.completed';
+const SUPPORTED_EVENT_TYPES = new Set([
+  'model.request.started',
+  'model.response.completed',
+]);
 const UNKNOWN_MODEL = 'unknown';
 
 export interface QoderCliSessionInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
@@ -24,8 +27,10 @@ export interface QoderCliSessionInputOptions extends Omit<SessionInputOptions, '
 /**
  * Qoder CLI — native session segment token usage input.
  *
- * Reads Qoder's own session segment JSONL files and emits only token usage
- * records from model response completion events.
+ * Reads Qoder's own session segment JSONL files and emits paired
+ * llm.request / llm.response records carrying top-level gen_ai.turn.id
+ * and gen_ai.step.id so the converter produces properly grouped,
+ * non-zero-duration LLM spans.
  */
 export class QoderCliSessionInput extends BaseSessionInput {
   readonly id = 'qoder-cli-session';
@@ -73,21 +78,23 @@ export class QoderCliSessionInput extends BaseSessionInput {
     record: Record<string, unknown>,
     filePath: string,
   ): Promise<AgentActivityEntry | null> {
-    if (record.type !== SUPPORTED_EVENT_TYPE) return null;
+    const type = stringValue(record.type);
+    if (!type || !SUPPORTED_EVENT_TYPES.has(type)) return null;
 
+    const isRequest = type === 'model.request.started';
     const data = asRecord(record.data);
     const sessionInfo = extractSessionInfo(filePath);
     const timestamp = parseTimestamp(record.ts);
-    const inputTokens = finiteNumber(data.input_tokens);
-    const outputTokens = finiteNumber(data.output_tokens);
-    const cacheReadTokens = finiteNumber(data.cache_read_input_tokens);
-    const cacheWriteTokens = finiteNumber(data.cache_creation_input_tokens);
+    const timeUnixNano = timestampToUnixNanos(timestamp);
     const model = stringValue(data.model) ?? UNKNOWN_MODEL;
     const responseId = stringValue(record.request_id);
+    const turnId = stringValue(record.turn_id);
+    const requestIndex = stepIndex(data.request_index);
+    const stepId = buildStepId(turnId, requestIndex);
 
     const attributes: Record<string, JsonValue> = {
       source: SOURCE,
-      'qoder.type': SUPPORTED_EVENT_TYPE,
+      'qoder.type': type,
       segment_file: filePath,
       segment_name: path.basename(filePath),
     };
@@ -95,28 +102,43 @@ export class QoderCliSessionInput extends BaseSessionInput {
     addIfPresent(attributes, 'seq', finiteNumber(record.seq));
     addIfPresent(attributes, 'level', stringValue(record.level));
     addIfPresent(attributes, 'request_id', responseId);
-    addIfPresent(attributes, 'turn_id', stringValue(record.turn_id));
+    addIfPresent(attributes, 'turn_id', turnId);
     addIfPresent(attributes, 'loop_id', stringValue(record.loop_id));
-    addIfPresent(attributes, 'request_index', finiteNumber(data.request_index));
+    addIfPresent(attributes, 'request_index', requestIndex);
     addIfPresent(attributes, 'stop_reason', stringValue(data.stop_reason));
     addIfPresent(attributes, 'content_block_count', finiteNumber(data.content_block_count));
 
-    return buildAgentActivityEntry({
+    const base: StandardAgentActivityOptions = {
       timestamp,
-      time_unix_nano: timestampToUnixNanos(timestamp),
+      time_unix_nano: timeUnixNano,
       'event.id': buildDeterministicEventId(filePath, record, responseId),
-      'event.name': 'llm.response',
+      'event.name': isRequest ? 'llm.request' : 'llm.response',
       'gen_ai.session.id': sessionInfo.sessionId,
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.request.model': model,
-      'gen_ai.response.model': model,
-      'gen_ai.usage.input_tokens': inputTokens,
-      'gen_ai.usage.output_tokens': outputTokens,
-      'gen_ai.usage.cache_read.input_tokens': cacheReadTokens,
-      'gen_ai.usage.cache_creation.input_tokens': cacheWriteTokens,
-      'gen_ai.usage.total_tokens': sumIfPresent(inputTokens, outputTokens),
       attributes,
-    });
+    };
+    if (turnId) base['gen_ai.turn.id'] = turnId;
+    if (stepId) base['gen_ai.step.id'] = stepId;
+
+    if (!isRequest) {
+      const inputTokens = finiteNumber(data.input_tokens);
+      const outputTokens = finiteNumber(data.output_tokens);
+      const cacheReadTokens = finiteNumber(data.cache_read_input_tokens);
+      const cacheWriteTokens = finiteNumber(data.cache_creation_input_tokens);
+      base['gen_ai.response.model'] = model;
+      base['gen_ai.usage.input_tokens'] = inputTokens;
+      base['gen_ai.usage.output_tokens'] = outputTokens;
+      base['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
+      base['gen_ai.usage.cache_creation.input_tokens'] = cacheWriteTokens;
+      base['gen_ai.usage.total_tokens'] = sumIfPresent(inputTokens, outputTokens);
+      if (responseId) base['gen_ai.response.id'] = responseId;
+      const stopReason = stringValue(data.stop_reason);
+      const finishReason = stopReason ? normalizeFinishReason(stopReason) : undefined;
+      if (finishReason) base['gen_ai.response.finish_reasons'] = [finishReason];
+    }
+
+    return buildAgentActivityEntry(base);
   }
 
   private stateKey(filePath: string): string {
@@ -176,6 +198,66 @@ function extractSessionInfo(filePath: string): { sessionId: string; cwdKey: stri
     sessionId: path.basename(sessionDir),
     cwdKey: path.basename(cwdDir),
   };
+}
+
+// Segment records carry Anthropic's native stop_reason, but
+// gen_ai.response.finish_reasons is the normalized OTel GenAI enum — the same
+// one the transcript hook emits, so both collection paths must agree, including
+// on which values are dropped. The raw value stays reachable through
+// attributes.stop_reason, which entry-builder prefixes to agent.stop_reason.
+// Duplicated rather than imported from scripts/validate-trace.mjs: that is a dev
+// validator, not a runtime dependency of the collector. A unit test asserts the
+// two sets stay equal, so the copy cannot drift the way `cancelled` did.
+export const VALID_FINISH_REASONS = new Set([
+  'stop',
+  'length',
+  'content_filter',
+  'tool_call',
+  'tool_calls',
+  'error',
+  'end_turn',
+  'max_tokens',
+  // Terminal in otlp-trace-flusher's TERMINAL_FINISH_REASONS and already emitted
+  // by the Codex and WorkBuddy paths, so it belongs in the enum.
+  'cancelled',
+]);
+
+const FINISH_REASON_ALIASES: Record<string, string> = {
+  tool_use: 'tool_call',
+  stop_sequence: 'stop',
+  refusal: 'stop',
+  model_context_window_exceeded: 'length',
+};
+
+export function normalizeFinishReason(reason: string): string | undefined {
+  const mapped = FINISH_REASON_ALIASES[reason] ?? reason;
+  // Unknown values are dropped, never coerced to `stop`: a mid-turn value such
+  // as pause_turn would then read as terminal and Signal A would flush the turn
+  // buffer early, trading a validator error for a fragmented trace.
+  return VALID_FINISH_REASONS.has(mapped) ? mapped : undefined;
+}
+
+// request_index comes from Qoder's JSON, so its runtime type is not ours to
+// guarantee. Returning undefined silently drops gen_ai.step.id and sends the
+// pair back to the converter's __no_step__ bucket (the AGE-1730 0-duration
+// symptom), while a non-integer would build a `turn:s1.5` that the converter's
+// :s(\d+)$ readers reject. Only the canonical decimal spelling is accepted, so
+// ' 2 ', '2.0' and '2e0' stay out.
+function stepIndex(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  }
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function buildStepId(
+  turnId: string | undefined,
+  requestIndex: number | undefined,
+): string | undefined {
+  if (!turnId || requestIndex === undefined) return undefined;
+  return `${turnId}:s${requestIndex}`;
 }
 
 function buildDeterministicEventId(
