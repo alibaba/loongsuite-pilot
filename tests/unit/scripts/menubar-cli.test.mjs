@@ -35,9 +35,10 @@ describe('menubar shell command', () => {
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  function makeEntry(packageDir, exitCode = 0) {
+  function makeEntry(packageDir, exitCode = 0, supportsMenubar = true) {
     mkdirSync(join(packageDir, 'dist'), { recursive: true });
     writeFileSync(join(packageDir, 'dist', 'index.js'), `
+      ${supportsMenubar ? '// Usage: loongsuite-pilot menubar <start|stop>' : ''}
       console.log(JSON.stringify({
         args: process.argv.slice(2),
         config: process.env.AGENT_DATA_COLLECTION_CONFIG,
@@ -79,6 +80,21 @@ describe('menubar shell command', () => {
     const result = run(['menubar', '--help']);
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout).args).toEqual(['menubar', '--help']);
+  });
+
+  it('rejects a stale source dist without starting the collector', () => {
+    makeEntry(root, 0, false);
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{}');
+    writeFileSync(join(root, 'dist', 'index.js'), `
+      const { writeFileSync } = require('node:fs');
+      writeFileSync(${JSON.stringify(join(root, 'collector.lock'))}, String(process.pid));
+    `);
+
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('runtime does not support the menubar command');
+    expect(() => readFileSync(join(root, 'collector.lock'))).toThrow();
   });
 
   it('rejects unsupported platforms before launching Node', () => {

@@ -1263,6 +1263,10 @@ cmd_menubar() {
         echo "❌ loongsuite-pilot runtime entry not found; build or install Pilot first" >&2
         return 1
     fi
+    if ! grep -Fq 'Usage: loongsuite-pilot menubar <start|stop>' "$entry"; then
+        echo "❌ loongsuite-pilot runtime does not support the menubar command; upgrade Pilot or run 'npm run build' first" >&2
+        return 1
+    fi
     node_bin=$(resolve_node) || {
         echo "❌ node runtime not found" >&2
         return 1

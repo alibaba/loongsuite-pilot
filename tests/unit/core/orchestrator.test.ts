@@ -327,6 +327,30 @@ describe('Orchestrator', () => {
       expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(false);
     });
 
+    it('reports a menu bar stop failure during orchestrator shutdown', async () => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      mockStatusBarStop.mockRejectedValueOnce(new Error('menu bar still running'));
+      const orch = new Orchestrator(makeConfig({
+        statusBar: {
+          enabled: true,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+
+      try {
+        await orch.start();
+        await expect(orch.stop()).resolves.toBeUndefined();
+        expect(mockLoggerWarn).toHaveBeenCalledWith(
+          'status bar app stop failed during orchestrator shutdown',
+          { error: 'Error: menu bar still running' },
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', platform);
+      }
+    });
+
     it('calls subsystems in correct order', async () => {
       const callOrder: string[] = [];
       mockEnsureDir.mockImplementation(async () => { callOrder.push('ensureDir'); });

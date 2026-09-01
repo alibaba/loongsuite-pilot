@@ -32,8 +32,12 @@ describe('StatusBarAppManager', () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const executablePath = '/test/LoongSuitePilotMenuBarApp';
 
-  function createManager() {
-    const manager = new StatusBarAppManager({ dataDir: tmpDir, packageVersion: '1.0.0' });
+  function createManager(processCommandReader?: (pid: number) => Promise<string | null>) {
+    const manager = new StatusBarAppManager({
+      dataDir: tmpDir,
+      packageVersion: '1.0.0',
+      processCommandReader,
+    });
     const internals = manager as unknown as ManagerInternals;
     return { manager, internals };
   }
@@ -44,6 +48,15 @@ describe('StatusBarAppManager', () => {
 
   async function writeRuntime(pid: number) {
     await fs.writeFile(runtimePath(), JSON.stringify({ executablePath, packageVersion: '1.0.0', pid }));
+  }
+
+  async function writeInstalledMenuBarBinary(cacheDir: string, version: string, bundle: string) {
+    const sourceDir = path.join(cacheDir, 'versions', version, 'app', 'macos-status-bar');
+    const binary = path.join(sourceDir, 'bin', bundle, 'LoongSuitePilotMenuBarApp');
+    await fs.mkdir(path.dirname(binary), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, 'Package.swift'), '');
+    await fs.writeFile(binary, '');
+    return binary;
   }
 
   beforeEach(async () => {
@@ -177,6 +190,29 @@ describe('StatusBarAppManager', () => {
     expect(JSON.parse(await fs.readFile(runtimePath(), 'utf8')).pid).toBe(54321);
   });
 
+  it.each([
+    ['/managed/LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', true],
+    ['/managed/LoongSuitePilotMenuBarApp --flag', '/managed/LoongSuitePilotMenuBarApp', true],
+    ['LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', false],
+    ['/old/LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', false],
+    ['/old/LoongSuitePilotMenuBarApp', '/old/LoongSuitePilotMenuBarApp', true],
+  ])('matches process command %j against executable %j as %j', async (command, expectedPath, expected) => {
+    const { internals } = createManager(async () => command as string);
+    vi.mocked(internals.isProcessRunning).mockRestore();
+
+    await expect(internals.isProcessRunning(54321, expectedPath as string)).resolves.toBe(expected);
+  });
+
+  it('refuses to spawn beside a same-named process outside this installation', async () => {
+    const { manager, internals } = createManager(async () => '/other/LoongSuitePilotMenuBarApp');
+    vi.spyOn(internals, 'resolveExecutable').mockReturnValue(executablePath);
+    vi.mocked(internals.findRunningPids).mockResolvedValue([54321]);
+    vi.mocked(internals.isProcessRunning).mockRestore();
+
+    await expect(manager.start()).rejects.toThrow('outside this Pilot installation');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('serializes collector and CLI launches with a shared lock', async () => {
     const { manager, internals } = createManager();
     vi.spyOn(internals, 'resolveExecutable').mockReturnValue(executablePath);
@@ -219,14 +255,25 @@ describe('StatusBarAppManager', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('does not hold the lifecycle lock while building a missing executable', async () => {
+    const { manager, internals } = createManager();
+    let finishBuild!: (value: string | null) => void;
+    vi.spyOn(internals, 'resolveExecutable').mockReturnValue(null);
+    vi.spyOn(internals, 'buildExecutable').mockReturnValue(new Promise(resolve => { finishBuild = resolve; }));
+
+    const start = manager.start();
+    await expect(createManager().manager.stop('orchestrator-shutdown')).resolves.toEqual({
+      status: 'already-stopped',
+      pids: [],
+    });
+    finishBuild(null);
+    await expect(start).resolves.toBeNull();
+  });
+
   it('resolves installed binaries from a cache directory separate from the data directory', async () => {
     const cacheDir = path.join(tmpDir, 'package cache');
-    const sourceDir = path.join(cacheDir, 'versions', 'v1', 'app', 'macos-status-bar');
-    const binary = path.join(sourceDir, 'bin', 'darwin-universal', 'LoongSuitePilotMenuBarApp');
-    await fs.mkdir(path.dirname(binary), { recursive: true });
+    const binary = await writeInstalledMenuBarBinary(cacheDir, 'v1', 'darwin-universal');
     await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
-    await fs.writeFile(path.join(sourceDir, 'Package.swift'), '');
-    await fs.writeFile(binary, '');
     vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheDir);
 
     expect(createManager().internals.resolveExecutable()).toBe(binary);
@@ -257,6 +304,40 @@ describe('StatusBarAppManager', () => {
 
     expect(await manager.stop('cli-request')).toEqual({ status: 'stopped', pids: [54321] });
     expect(vi.mocked(internals.sendSignal).mock.calls).toEqual([[54321, 'SIGTERM']]);
+  });
+
+  it('stops an orphan from a retained old installed version after the runtime record is lost', async () => {
+    const cacheDir = path.join(tmpDir, 'cache');
+    await writeInstalledMenuBarBinary(cacheDir, 'v2', 'darwin-universal');
+    const oldBinary = await writeInstalledMenuBarBinary(cacheDir, 'v1', 'darwin-arm64');
+    await fs.writeFile(path.join(cacheDir, 'current'), 'v2\n');
+    vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheDir);
+
+    const { manager, internals } = createManager();
+    vi.mocked(internals.findRunningPids).mockResolvedValue([54321]);
+    vi.mocked(internals.isProcessRunning).mockImplementation(async (_pid, candidate) => candidate === oldBinary);
+
+    await expect(manager.stop('cli-request')).resolves.toEqual({ status: 'stopped', pids: [54321] });
+    expect(internals.sendSignal).toHaveBeenCalledWith(54321, 'SIGTERM');
+  });
+
+  it('replaces an orphan from a retained old version instead of spawning a duplicate', async () => {
+    const cacheDir = path.join(tmpDir, 'cache');
+    const currentBinary = await writeInstalledMenuBarBinary(cacheDir, 'v2', 'darwin-universal');
+    const oldBinary = await writeInstalledMenuBarBinary(cacheDir, 'v1', 'darwin-arm64');
+    await fs.writeFile(path.join(cacheDir, 'current'), 'v2\n');
+    vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheDir);
+
+    const { manager, internals } = createManager();
+    vi.mocked(internals.findRunningPids).mockResolvedValue([54321]);
+    vi.mocked(internals.isProcessRunning).mockImplementation(async (pid, candidate) => (
+      (pid === 54321 && candidate === oldBinary)
+      || (pid === 12345 && candidate === currentBinary)
+    ));
+
+    await expect(manager.start()).resolves.toEqual({ status: 'started', pid: 12345 });
+    expect(internals.sendSignal).toHaveBeenCalledWith(54321, 'SIGTERM');
+    expect(spawn).toHaveBeenCalledWith(currentBinary, [], expect.any(Object));
   });
 
   it('does not signal a reused PID that no longer matches the recorded executable', async () => {
@@ -290,15 +371,17 @@ describe('StatusBarAppManager', () => {
     await expect(fs.access(path.join(tmpDir, 'status-bar-app-start.lock'))).rejects.toThrow();
   });
 
-  it('does not let a stop race an in-progress launch', async () => {
+  it('lets stop wait briefly for an in-progress launch and then clean it up', async () => {
     const { manager, internals } = createManager();
     vi.spyOn(internals, 'resolveExecutable').mockReturnValue(executablePath);
     vi.mocked(internals.isProcessRunning).mockResolvedValue(true);
 
     const first = manager.start();
-    await expect(createManager().manager.stop('cli-request')).rejects.toThrow('control lock');
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+    const stop = createManager().manager.stop('cli-request');
     await expect(first).resolves.toEqual({ status: 'started', pid: 12345 });
-    expect(internals.sendSignal).not.toHaveBeenCalled();
+    await expect(stop).resolves.toEqual({ status: 'stopped', pids: [12345] });
+    expect(internals.sendSignal).toHaveBeenCalledWith(12345, 'SIGTERM');
   });
 
   it('can replace an old version while holding the lifecycle lock', async () => {
