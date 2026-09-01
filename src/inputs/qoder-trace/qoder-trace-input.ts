@@ -18,6 +18,7 @@ import { readInterceptData, type InterceptData } from './intercept-token-reader.
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
+import { groupSegmentsByTurn, pickSegGroupByTimeOverlap } from './segment-turn-pairing.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -155,16 +156,17 @@ export class QoderTraceInput extends BaseInput {
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
     const cliTurns: AgentActivityEntry[][] = [];
-    // Segment turns are paired with OTLP turns by sequential order (ts asc).
-    // seg.turn_id and OTLP gen_ai.turn.id come from different sources and do NOT
-    // match (segment turn_id = qoder-cli's per-turn UUID; OTLP turn.id = hook
-    // processor's per-turn UUID). Both are per-session and time-ordered, so the
-    // i-th cli turn (per session, ts asc) pairs with the i-th segment turn group
-    // (per session, min responseEndTs asc). Without this scoping, T2's OTLP
-    // steps would steal T1's segments (T1 segs have lower responseEndTs, so they
-    // sort first and pair with whatever OTLP steps are present in entries).
+    // Segment turns are paired with OTLP turns by timestamp overlap
+    // (stateless). seg.turn_id (qoder-cli per-turn UUID) and OTLP
+    // gen_ai.turn.id (hook-processor per-turn UUID) come from different sources
+    // and do NOT match. A prior sequential-index approach (sessionCliTurnIdx)
+    // was stateful and reset per collect() call under incremental collection,
+    // so T2/T3 OTLP turns always picked segGroups[0] = T1's segments. TS overlap
+    // pairing is stateless: for each OTLP turn, pick the segment group whose
+    // [min requestStartTs, max responseEndTs] range overlaps with the OTLP
+    // turn's [min, max time_unix_nano] range. Picked groups are spliced out so
+    // subsequent turns in the same collect() call don't re-pick them.
     const sessionSegGroups = new Map<string, SegmentTokenData[][]>();
-    const sessionCliTurnIdx = new Map<string, number>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
@@ -177,9 +179,7 @@ export class QoderTraceInput extends BaseInput {
           segGroups = groupSegmentsByTurn(allSegs);
           sessionSegGroups.set(sessionId, segGroups);
         }
-        const turnIdx = sessionCliTurnIdx.get(sessionId) ?? 0;
-        sessionCliTurnIdx.set(sessionId, turnIdx + 1);
-        const turnSegs = segGroups[turnIdx] ?? [];
+        const turnSegs = pickSegGroupByTimeOverlap(segGroups, turnEntries);
         enrichCliTurn(
           turnEntries,
           turnSegs,
@@ -342,21 +342,7 @@ export class QoderTraceInput extends BaseInput {
   }
 }
 
-// Group segments by their segment turn_id, then sort groups by min responseEndTs
-// asc. Used to pair segment turns with OTLP turns by sequential order (ts asc)
-// since seg.turn_id and OTLP gen_ai.turn.id come from different sources and do
-// not match directly.
-function groupSegmentsByTurn(segments: SegmentTokenData[]): SegmentTokenData[][] {
-  const groupsByTurn = new Map<string, SegmentTokenData[]>();
-  for (const seg of segments) {
-    const tid = seg.turnId || '';
-    const list = groupsByTurn.get(tid) ?? [];
-    list.push(seg);
-    groupsByTurn.set(tid, list);
-  }
-  return [...groupsByTurn.values()].sort((a, b) => {
-    const aMin = a.reduce((m, s) => Math.min(m, s.responseEndTs || s.requestStartTs || Infinity), Infinity);
-    const bMin = b.reduce((m, s) => Math.min(m, s.responseEndTs || s.requestStartTs || Infinity), Infinity);
-    return aMin - bMin;
-  });
-}
+// Segment turn pairing helpers (groupSegmentsByTurn, pickSegGroupByTimeOverlap)
+// live in ./segment-turn-pairing.ts — pure logic, unit-testable without
+// loading the heavy QoderTraceInput module.
+

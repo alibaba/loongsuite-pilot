@@ -2,6 +2,9 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { readSegmentTokensForSession } from '../../../../src/inputs/qoder-trace/segment-token-reader.js';
+import { groupSegmentsByTurn, pickSegGroupByTimeOverlap } from '../../../../src/inputs/qoder-trace/segment-turn-pairing.js';
+import type { SegmentTokenData } from '../../../../src/inputs/qoder-trace/segment-token-reader.js';
+import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 // Inline mock to avoid path issues
 import { vi } from 'vitest';
@@ -204,5 +207,160 @@ describe('production-shape: started lacks turn_id', () => {
       // requestId from completed event (s5/s6 case — completed's UUID)
       expect(seg.requestId).toBe(`completed-uuid-r${r}`);
     }
+  });
+});
+
+// Round 8 #2 regression: seg.turn_id ≠ OTLP turn.id (completely different UUID
+// systems). Round 7's sessionCliTurnIdx was local to collect(), so under
+// incremental collection (one new turn per collect() call) it always picked
+// segGroups[0] = T1's group → T2/T3 LLM spans got T1's timestamps. Fix:
+// pickSegGroupByTimeOverlap is stateless — picks by TS overlap with OTLP turn's
+// [min,max time_unix_nano] range, not by sequential index.
+describe('production-shape: seg.turn_id ≠ OTLP turn.id — TS overlap pairing (Round 8 #2)', () => {
+  // Round 7 evidence UUIDs (truncated for readability).
+  const SEG_TURN_IDS = [
+    '62f13c94-023b-4a98-af7b-a8ec90d342ce',
+    'ab7e9bc9-1111-4aaa-bbbb-c9aaaaaaa111',
+    'eba366eb-2222-4ccc-dddd-e2bbbbbbb222',
+  ];
+  const OTLP_TURN_IDS = [
+    '8c2cbc8b-3903-489e-aa11-f1e425745832',
+    'a570818f-4903-489e-aa22-f2e425745833',
+    '870166f2-5903-489e-aa33-f3e425745834',
+  ];
+  // Round 7 evidence timestamps (T1 started ~11:51:11, T2 ~11:52:07, T3 ~11:53:10).
+  const T1_BASE = 1780000000000;
+  const T2_BASE = T1_BASE + 56_000;
+  const T3_BASE = T1_BASE + 119_000;
+  const TURN_BASES = [T1_BASE, T2_BASE, T3_BASE];
+
+  function makeSegGroup(turnId: string, base: number): SegmentTokenData[] {
+    const segs: SegmentTokenData[] = [];
+    for (let r = 0; r < 5; r++) {
+      const startedTs = base + r * 7000;
+      const completedTs = startedTs + 6400;
+      segs.push({
+        requestId: `seg-${turnId.slice(0, 8)}-r${r}`,
+        turnId,
+        inputTokens: 1000 + r * 100,
+        outputTokens: 50 + r,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: startedTs,
+        responseEndTs: completedTs,
+        toolFinishedTs: completedTs + 100,
+        stopReason: r === 4 ? 'end_turn' : 'tool_use',
+        model: 'claude-sonnet-4-5',
+      });
+    }
+    return segs;
+  }
+
+  function makeOtlpTurn(turnId: string, base: number): AgentActivityEntry[] {
+    const entries: AgentActivityEntry[] = [];
+    for (let r = 0; r < 5; r++) {
+      const startedTs = base + r * 7000;
+      const completedTs = startedTs + 6400;
+      entries.push({
+        'event.name': 'llm.request',
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s${r + 1}`,
+        time_unix_nano: String(BigInt(startedTs) * 1_000_000n),
+      } as AgentActivityEntry);
+      entries.push({
+        'event.name': 'llm.response',
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': `${turnId}:s${r + 1}`,
+        time_unix_nano: String(BigInt(completedTs) * 1_000_000n),
+      } as AgentActivityEntry);
+    }
+    return entries;
+  }
+
+  it('incremental collection: 3 separate collect() calls each pick own turn group', () => {
+    // Simulates the production regression scenario: each collect() call
+    // processes ONE new OTLP turn but re-reads ALL segments. Round 7's
+    // sessionCliTurnIdx reset per call → always picked segGroups[0] = T1.
+    // TS overlap pairing is stateless → picks correctly per call.
+    const allSegs = [
+      ...makeSegGroup(SEG_TURN_IDS[0], T1_BASE),
+      ...makeSegGroup(SEG_TURN_IDS[1], T2_BASE),
+      ...makeSegGroup(SEG_TURN_IDS[2], T3_BASE),
+    ];
+
+    for (let turn = 0; turn < 3; turn++) {
+      const segGroups = groupSegmentsByTurn(allSegs);
+      expect(segGroups).toHaveLength(3);
+      // Groups sorted by min responseEndTs asc → T1 < T2 < T3.
+      expect(segGroups[0][0].turnId).toBe(SEG_TURN_IDS[0]);
+      expect(segGroups[1][0].turnId).toBe(SEG_TURN_IDS[1]);
+      expect(segGroups[2][0].turnId).toBe(SEG_TURN_IDS[2]);
+
+      const otlpEntries = makeOtlpTurn(OTLP_TURN_IDS[turn], TURN_BASES[turn]);
+      const picked = pickSegGroupByTimeOverlap(segGroups, otlpEntries);
+
+      // CRITICAL #2 assertion: picked group must be THIS turn's, not T1's.
+      expect(picked).toHaveLength(5);
+      expect(picked[0].turnId).toBe(SEG_TURN_IDS[turn]);
+      // If this fails for turn ≥ 1, the regression is back (T1's group picked).
+
+      // CRITICAL #1 assertion: requestStartTs = started.ts (not completed.ts).
+      for (let r = 0; r < 5; r++) {
+        const expectedStart = TURN_BASES[turn] + r * 7000;
+        expect(picked[r].requestStartTs).toBe(expectedStart);
+        expect(picked[r].responseEndTs).toBe(expectedStart + 6400);
+        expect(picked[r].responseEndTs - picked[r].requestStartTs).toBe(6400);
+      }
+    }
+  });
+
+  it('batch collection: 3 turns in one collect() call — picked groups spliced out', () => {
+    // Simulates one collect() call that processes all 3 turns at once.
+    // pickSegGroupByTimeOverlap splices the picked group out of segGroups so
+    // the next turn in the same call doesn't re-pick it.
+    const allSegs = [
+      ...makeSegGroup(SEG_TURN_IDS[0], T1_BASE),
+      ...makeSegGroup(SEG_TURN_IDS[1], T2_BASE),
+      ...makeSegGroup(SEG_TURN_IDS[2], T3_BASE),
+    ];
+    const segGroups = groupSegmentsByTurn(allSegs);
+    expect(segGroups).toHaveLength(3);
+
+    const pickedTurnIds: string[] = [];
+    for (let turn = 0; turn < 3; turn++) {
+      const otlpEntries = makeOtlpTurn(OTLP_TURN_IDS[turn], TURN_BASES[turn]);
+      const picked = pickSegGroupByTimeOverlap(segGroups, otlpEntries);
+      expect(picked).toHaveLength(5);
+      expect(picked[0].turnId).toBe(SEG_TURN_IDS[turn]);
+      pickedTurnIds.push(picked[0].turnId);
+      // Each iteration shrinks segGroups by 1 (spliced out).
+      expect(segGroups.length).toBe(3 - turn - 1);
+    }
+    // All 3 unique turn IDs picked — no duplicates (T1 not picked 3×).
+    expect(new Set(pickedTurnIds).size).toBe(3);
+  });
+
+  it('no OTLP timestamps → falls back to first group (sequential order)', () => {
+    // Edge case: if OTLP entries lack time_unix_nano, pickSegGroupByTimeOverlap
+    // falls back to segGroups[0] (sorted by min responseEndTs asc = T1).
+    const allSegs = [
+      ...makeSegGroup(SEG_TURN_IDS[0], T1_BASE),
+      ...makeSegGroup(SEG_TURN_IDS[1], T2_BASE),
+    ];
+    const segGroups = groupSegmentsByTurn(allSegs);
+    const entriesWithoutTs: AgentActivityEntry[] = [
+      { 'event.name': 'llm.request', 'gen_ai.turn.id': OTLP_TURN_IDS[1] } as AgentActivityEntry,
+    ];
+    const picked = pickSegGroupByTimeOverlap(segGroups, entriesWithoutTs);
+    expect(picked[0].turnId).toBe(SEG_TURN_IDS[0]);
+  });
+
+  it('single group → returned without overlap check, segGroups emptied', () => {
+    const segGroups = groupSegmentsByTurn(makeSegGroup(SEG_TURN_IDS[0], T1_BASE));
+    expect(segGroups).toHaveLength(1);
+    const otlpEntries = makeOtlpTurn(OTLP_TURN_IDS[0], T1_BASE);
+    const picked = pickSegGroupByTimeOverlap(segGroups, otlpEntries);
+    expect(picked[0].turnId).toBe(SEG_TURN_IDS[0]);
+    expect(segGroups).toHaveLength(0);
   });
 });
