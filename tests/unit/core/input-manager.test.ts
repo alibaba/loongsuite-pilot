@@ -545,19 +545,46 @@ describe('InputManager', () => {
       expect(other['event.id']).toBe('input-other');
       expect(agentInput['event.name']).toBe('agent.input');
       expect(agentInput['event.id']).toBe(deriveAgentInputEventId('input-other'));
+      expect(other['gen_ai.turn.start']).toBe(true);
+      expect(agentInput['gen_ai.turn.start']).toBeUndefined();
+      expect(agentInput['gen_ai.turn.end']).toBeUndefined();
       expect(JSON.stringify(other)).toContain('[ACCESSKEY_MASKED]');
       expect(JSON.stringify(agentInput)).toContain('[ACCESSKEY_MASKED]');
       expect(JSON.stringify(other)).not.toContain(accessKey);
       expect(JSON.stringify(agentInput)).not.toContain(accessKey);
 
-      const stripIdentity = ({
-        'event.id': _eventId,
-        'event.name': _eventName,
-        ...rest
-      }: AgentActivityEntry) => rest;
-      expect(stripIdentity(agentInput)).toEqual(stripIdentity(other));
+      const stripDerivedFields = (entry: AgentActivityEntry) => {
+        const comparable = { ...entry };
+        delete comparable['event.id'];
+        delete comparable['event.name'];
+        delete comparable['gen_ai.turn.start'];
+        delete comparable['gen_ai.turn.end'];
+        return comparable;
+      };
+      expect(stripDerivedFields(agentInput)).toEqual(stripDerivedFields(other));
       expect(source['event.name']).toBe('other');
       expect(source['event.id']).toBe('input-other');
+    });
+
+    it('does not generate agent.input after content policy removes input fields', async () => {
+      const input = new StubInput('dual-write-content-policy');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
+      });
+      const source = buildTestEntry({
+        agentType: ClientType.Cursor,
+        'event.id': 'content-policy-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'secret prompt' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.name']).toBe('other');
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('gen_ai.input.messages_delta');
     });
 
     it('does not copy a non-input other event', async () => {

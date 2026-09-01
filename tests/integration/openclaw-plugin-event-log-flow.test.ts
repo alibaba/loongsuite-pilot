@@ -97,7 +97,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       'gen_ai.turn.end': true,
     });
     const turnStarts = records.filter(record => record['gen_ai.turn.start'] === true);
-    expect(turnStarts.map(record => record['event.name'])).toEqual(['other', 'agent.input']);
+    expect(turnStarts).toHaveLength(1);
+    expect(turnStarts[0]['event.name']).toBe('other');
     expect(records.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal?.['gen_ai.output.messages']).toBeUndefined();

@@ -29,8 +29,11 @@ export function expandAgentInputEvents(
     if (existingEventIds.has(derivedEventId)) continue;
 
     existingEventIds.add(derivedEventId);
+    const derivedEntry = { ...entry };
+    delete derivedEntry['gen_ai.turn.start'];
+    delete derivedEntry['gen_ai.turn.end'];
     expanded.push({
-      ...entry,
+      ...derivedEntry,
       'event.id': derivedEventId,
       'event.name': 'agent.input',
     });

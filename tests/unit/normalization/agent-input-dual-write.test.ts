@@ -49,19 +49,32 @@ describe('agent input compatibility dual-write', () => {
     expect(result[1]['event.name']).toBe('agent.input');
   });
 
-  it('changes only event.name and event.id on the derived event', () => {
+  it('preserves content while omitting turn boundaries from the derived event', () => {
     const source = makeEntry({
       'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
       trace_id: '0123456789abcdef0123456789abcdef',
       'gen_ai.turn.id': 'turn-1',
+      'gen_ai.turn.start': true,
+      'gen_ai.turn.end': true,
       custom: { nested: ['value'] },
     });
 
     const [, derived] = expandAgentInputEvents([source]);
-    const stripIdentity = ({ 'event.id': _eventId, 'event.name': _eventName, ...rest }: AgentActivityEntry) => rest;
+    const stripDerivedFields = (entry: AgentActivityEntry) => {
+      const comparable = { ...entry };
+      delete comparable['event.id'];
+      delete comparable['event.name'];
+      delete comparable['gen_ai.turn.start'];
+      delete comparable['gen_ai.turn.end'];
+      return comparable;
+    };
 
-    expect(stripIdentity(derived)).toEqual(stripIdentity(source));
+    expect(stripDerivedFields(derived)).toEqual(stripDerivedFields(source));
     expect(derived['event.id']).not.toBe(source['event.id']);
+    expect(derived['gen_ai.turn.start']).toBeUndefined();
+    expect(derived['gen_ai.turn.end']).toBeUndefined();
+    expect(source['gen_ai.turn.start']).toBe(true);
+    expect(source['gen_ai.turn.end']).toBe(true);
     expect(source['event.name']).toBe('other');
     expect(source['event.id']).toBe('source-event');
   });

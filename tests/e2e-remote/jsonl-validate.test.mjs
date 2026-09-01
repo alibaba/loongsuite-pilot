@@ -280,6 +280,26 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('turn_boundary_error=0');
   });
 
+  it('accepts a compatibility input pair with the turn boundary only on other', () => {
+    const inputMessages = [
+      { role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] },
+    ];
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      graphEntry('evt-input-other', 'other', {
+        'gen_ai.turn.start': true,
+        'gen_ai.input.messages_delta': inputMessages,
+      }),
+      graphEntry('evt-agent-input', 'agent.input', {
+        'gen_ai.input.messages_delta': inputMessages,
+      }),
+    ]);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('bad_event_name=0');
+    expect(r.out).toContain('turn_boundary_error=0');
+  });
+
   it('never prints prompt, tool payload, result, or user path values in validation errors', () => {
     const entries = validMultiToolGraph();
     entries[2]['gen_ai.tool.call.arguments'] =
