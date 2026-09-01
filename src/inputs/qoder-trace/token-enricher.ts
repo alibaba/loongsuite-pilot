@@ -27,98 +27,182 @@ export function enrichCliTurn(
     }
   }
 
+  // Pass 1: exact response.id match. Preserved as the preferred path — no
+  // regression for IDE/sqlite/intercept enrichment paths.
+  const claimedEntries = new Set<AgentActivityEntry>();
+  const unmatchedSegs: SegmentTokenData[] = [];
+
   for (const seg of segments) {
     const matches = entries.filter(e =>
       e['gen_ai.response.id'] === seg.requestId && e['event.name'] === 'llm.response',
     );
 
-    if (matches.length === 0) continue;
-
-    // Segment usage is a compatibility fallback only. New qodercli releases
-    // emit zero token fields in segments, while intercept observes the actual
-    // provider usage. Preserve any native usage already present on the entry.
-    const shouldUseSegmentTokens =
-      !hasPositiveEntryUsage(matches[0]) &&
-      (seg.inputTokens > 0 || seg.outputTokens > 0);
-
-    if (shouldUseSegmentTokens) {
-      matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
-      matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
-      matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
-      matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
-      matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
-
-      for (let i = 1; i < matches.length; i++) {
-        zeroUsage(matches[i]);
-      }
+    if (matches.length === 0) {
+      unmatchedSegs.push(seg);
+      continue;
     }
 
-    if (seg.stopReason && !matches[0]['gen_ai.response.finish_reasons']) {
-      matches[0]['gen_ai.response.finish_reasons'] = [seg.stopReason];
-    }
+    for (const m of matches) claimedEntries.add(m);
+    applySegmentToMatch(entries, seg, matches);
+  }
 
-    // Inject segment-derived timestamps and model for the entire step (unified clock source)
-    const stepId = matches[0]['gen_ai.step.id'];
-
-    // Inject real model name from segment (overrides 'auto' from hook-processor)
-    if (seg.model && seg.model !== 'unknown') {
-      matches[0]['gen_ai.request.model'] = seg.model;
-      matches[0]['gen_ai.response.model'] = seg.model;
-      const req = entries.find(e =>
-        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
-      );
-      if (req) req['gen_ai.request.model'] = seg.model;
-    }
-
-    // llm.request: use segment requestStartTs
-    if (seg.requestStartTs > 0) {
-      const req = entries.find(e =>
-        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
-      );
-      if (req) {
-        req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
-      }
-    }
-
-    // llm.response: use segment responseEndTs
-    if (seg.responseEndTs > 0) {
-      matches[0].time_unix_nano = String(BigInt(seg.responseEndTs) * 1_000_000n);
-    }
-
-    // Preserve per-tool hook timestamps when available. Segment timing has no
-    // tool ID, so it is only a fallback for legacy hook records.
-    if (stepId && seg.toolFinishedTs > 0) {
-      const toolCalls = entries.filter(e =>
-        e['event.name'] === 'tool.call' && e['gen_ai.step.id'] === stepId,
-      );
-      const toolResults = entries.filter(e =>
-        e['event.name'] === 'tool.result' && e['gen_ai.step.id'] === stepId,
-      );
-      const toolCallTs = String(BigInt(seg.responseEndTs) * 1_000_000n);
-      const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
-      const toolDurationMs = seg.responseEndTs > 0
-        ? seg.toolFinishedTs - seg.responseEndTs
-        : 0;
-      for (const tc of toolCalls) {
-        if (parseUnixNanos(tc.time_unix_nano) === undefined) {
-          tc.time_unix_nano = toolCallTs;
-        }
-      }
-      for (const tr of toolResults) {
-        if (parseUnixNanos(tr.time_unix_nano) === undefined) {
-          tr.time_unix_nano = toolResultTs;
-        }
-        if (tr['gen_ai.tool.call.duration'] === undefined && toolDurationMs > 0) {
-          (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
-        }
-      }
-    }
+  // Pass 2: order fallback. When response.id does not match (e.g. history has
+  // Anthropic message.id "resp_xxx" while segment request_id is a UUID), pair
+  // unmatched segments with unclaimed llm.response entries by step.id order.
+  // Segments are sorted by responseEndTs asc (model.response.completed order);
+  // steps are paired in numeric step order (segment i ↔ step s(i+1)). This is
+  // additive — only kicks in when exact match missed.
+  if (unmatchedSegs.length > 0) {
+    applyOrderFallback(entries, unmatchedSegs, claimedEntries);
   }
 
   // Intercept is the authoritative qodercli token source. Apply it last so an
   // exact response-id match overrides native/legacy segment usage, but never
   // guesses by order or timestamp when ids differ.
   applyInterceptUsage(entries, interceptTokens);
+}
+
+function applySegmentToMatch(
+  entries: AgentActivityEntry[],
+  seg: SegmentTokenData,
+  matches: AgentActivityEntry[],
+): void {
+  // Segment usage is a compatibility fallback only. New qodercli releases
+  // emit zero token fields in segments, while intercept observes the actual
+  // provider usage. Preserve any native usage already present on the entry.
+  const shouldUseSegmentTokens =
+    !hasPositiveEntryUsage(matches[0]) &&
+    (seg.inputTokens > 0 || seg.outputTokens > 0);
+
+  if (shouldUseSegmentTokens) {
+    matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
+    matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
+    matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
+    matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
+    matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
+
+    for (let i = 1; i < matches.length; i++) {
+      zeroUsage(matches[i]);
+    }
+  }
+
+  if (seg.stopReason && !matches[0]['gen_ai.response.finish_reasons']) {
+    matches[0]['gen_ai.response.finish_reasons'] = [seg.stopReason];
+  }
+
+  // Inject segment-derived timestamps and model for the entire step (unified clock source)
+  const stepId = matches[0]['gen_ai.step.id'];
+
+  // Inject real model name from segment (overrides 'auto' from hook-processor)
+  if (seg.model && seg.model !== 'unknown') {
+    matches[0]['gen_ai.request.model'] = seg.model;
+    matches[0]['gen_ai.response.model'] = seg.model;
+    const req = entries.find(e =>
+      e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+    );
+    if (req) req['gen_ai.request.model'] = seg.model;
+  }
+
+  // llm.request: use segment requestStartTs
+  if (seg.requestStartTs > 0) {
+    const req = entries.find(e =>
+      e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+    );
+    if (req) {
+      req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
+    }
+  }
+
+  // llm.response: use segment responseEndTs
+  if (seg.responseEndTs > 0) {
+    matches[0].time_unix_nano = String(BigInt(seg.responseEndTs) * 1_000_000n);
+  }
+
+  // Preserve per-tool hook timestamps when available. Segment timing has no
+  // tool ID, so it is only a fallback for legacy hook records.
+  if (stepId && seg.toolFinishedTs > 0) {
+    const toolCalls = entries.filter(e =>
+      e['event.name'] === 'tool.call' && e['gen_ai.step.id'] === stepId,
+    );
+    const toolResults = entries.filter(e =>
+      e['event.name'] === 'tool.result' && e['gen_ai.step.id'] === stepId,
+    );
+    const toolCallTs = String(BigInt(seg.responseEndTs) * 1_000_000n);
+    const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
+    const toolDurationMs = seg.responseEndTs > 0
+      ? seg.toolFinishedTs - seg.responseEndTs
+      : 0;
+    for (const tc of toolCalls) {
+      if (parseUnixNanos(tc.time_unix_nano) === undefined) {
+        tc.time_unix_nano = toolCallTs;
+      }
+    }
+    for (const tr of toolResults) {
+      if (parseUnixNanos(tr.time_unix_nano) === undefined) {
+        tr.time_unix_nano = toolResultTs;
+      }
+      if (tr['gen_ai.tool.call.duration'] === undefined && toolDurationMs > 0) {
+        (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
+      }
+    }
+  }
+}
+
+function applyOrderFallback(
+  entries: AgentActivityEntry[],
+  unmatchedSegs: SegmentTokenData[],
+  claimedEntries: Set<AgentActivityEntry>,
+): void {
+  if (unmatchedSegs.length === 0) return;
+
+  // Segments sorted by responseEndTs asc (model.response.completed order).
+  // Stable order ensures consistent pairing when ts ties.
+  const sortedSegs = [...unmatchedSegs].sort((a, b) => a.responseEndTs - b.responseEndTs);
+
+  // Unclaimed llm.response entries grouped by step.id (preserving entry order
+  // within a step for the multi-part response case).
+  const stepToResponses = new Map<string, AgentActivityEntry[]>();
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'llm.response') continue;
+    if (claimedEntries.has(entry)) continue;
+    const stepId = entry['gen_ai.step.id'];
+    if (!stepId) continue;
+    const list = stepToResponses.get(stepId) ?? [];
+    list.push(entry);
+    stepToResponses.set(stepId, list);
+  }
+
+  // Sort step IDs by numeric step number. Format: `${turn}:s${n}`.
+  const sortedStepIds = [...stepToResponses.keys()].sort((a, b) => {
+    const an = parseStepNumber(a);
+    const bn = parseStepNumber(b);
+    if (an !== bn) return an - bn;
+    return a.localeCompare(b);
+  });
+
+  let stepCursor = 0;
+  for (const seg of sortedSegs) {
+    // Advance to the next step that still has unclaimed responses.
+    while (stepCursor < sortedStepIds.length) {
+      const stepId = sortedStepIds[stepCursor];
+      const list = stepToResponses.get(stepId);
+      if (!list || list.length === 0) {
+        stepCursor++;
+        continue;
+      }
+      const entry = list.shift()!;
+      claimedEntries.add(entry);
+      applySegmentToMatch(entries, seg, [entry]);
+      if (list.length === 0) stepCursor++;
+      break;
+    }
+    // If no step left, leave remaining segs unmatched (no regression).
+  }
+}
+
+function parseStepNumber(stepId: string): number {
+  const m = /:s(\d+)$/.exec(stepId);
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function applyInterceptUsage(
@@ -225,7 +309,7 @@ export function enrichIdeTurn(
 
       if (bestEntry && bestDiff <= TIMESTAMP_THRESHOLD_MS) {
         used.add(bestEntry);
-        (bestEntry as Record<string, unknown>).__matched_gmt_create = row.gmtCreate;
+        (bestEntry as Record<string, unknown>)['__matched_gmt_create'] = row.gmtCreate;
 
         if (!bestEntry['gen_ai.response.id']) {
           bestEntry['gen_ai.response.id'] = row.messageId || requestId;
@@ -266,7 +350,7 @@ export function enrichIdeTurn(
   const matchedPairs: { entry: AgentActivityEntry; gmtCreate: number }[] = [];
   for (const entry of responseEntries) {
     if (!used.has(entry)) continue;
-    const gmtCreate = (entry as Record<string, unknown>).__matched_gmt_create as number | undefined;
+    const gmtCreate = (entry as Record<string, unknown>)['__matched_gmt_create'] as number | undefined;
     if (gmtCreate) matchedPairs.push({ entry, gmtCreate });
   }
   matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
@@ -495,7 +579,7 @@ function applySqliteRowsToIdeResponse(
   // absorbed multiple provider calls.
   const representative = rows[rows.length - 1];
   used.add(response);
-  (response as Record<string, unknown>).__matched_gmt_create = representative.gmtCreate;
+  (response as Record<string, unknown>)['__matched_gmt_create'] = representative.gmtCreate;
   response['gen_ai.request.id'] = requestId;
   (response as Record<string, unknown>)['agent.request_id'] = requestId;
   response['gen_ai.response.id'] = representative.messageId || requestId;

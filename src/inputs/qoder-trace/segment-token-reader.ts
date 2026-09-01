@@ -31,9 +31,6 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   const files = await findSegmentFilesForSession(sessionId);
   if (files.length === 0) return [];
 
-  const requestStarts = new Map<string, number>();
-  const results: SegmentTokenData[] = [];
-
   // Collect all events in order to properly associate tool.execution.finished with LLM calls
   const allEvents: Array<{ type: string; ts: number; requestId?: string; data?: Record<string, unknown> }> = [];
 
@@ -68,29 +65,97 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     }
   }
 
-  // Build results from ordered events
+  // Build a complete map of started events, indexed by both requestId and
+  // request_index. Order-fallback below consumes started events that neither
+  // exact requestId nor request_index could place.
+  const startedList: Array<{ ts: number; requestId?: string; requestIndex?: number }> = [];
   for (const evt of allEvents) {
-    if (evt.type === 'model.request.started' && evt.requestId && evt.ts > 0) {
-      requestStarts.set(evt.requestId, evt.ts);
+    if (evt.type !== 'model.request.started') continue;
+    if (evt.ts <= 0) continue;
+    const requestIndex = finiteNum(evt.data?.request_index);
+    startedList.push({
+      ts: evt.ts,
+      requestId: evt.requestId,
+      requestIndex: requestIndex,
+    });
+  }
+  startedList.sort((a, b) => a.ts - b.ts);
+
+  const startedByRequestId = new Map<string, number>();
+  const startedByIndex = new Map<number, number>();
+  for (const s of startedList) {
+    if (s.requestId && !startedByRequestId.has(s.requestId)) {
+      startedByRequestId.set(s.requestId, s.ts);
+    }
+    if (s.requestIndex !== undefined && !startedByIndex.has(s.requestIndex)) {
+      startedByIndex.set(s.requestIndex, s.ts);
+    }
+  }
+
+  // Track which started events have been consumed by exact match (requestId or
+  // request_index) so the order fallback only uses genuinely unclaimed starts.
+  // Pairing strategy per completed event (in file order):
+  //   1. exact requestId match (prior behavior — preserved)
+  //   2. request_index match (segment-native field, fixes s5/s6 case where
+  //      completed.request_id differs from started.request_id but both carry
+  //      the same request_index)
+  //   3. order fallback: first unconsumed started event in ts asc order
+  //      (matches i-th completed ↔ i-th started when ids diverge entirely)
+  const usedStarted = new Set<number>();
+  const results: SegmentTokenData[] = [];
+
+  for (const evt of allEvents) {
+    if (evt.type !== 'model.response.completed') continue;
+    const data = evt.data || {};
+
+    let startTs: number | undefined;
+    let claimedStartedIdx = -1;
+
+    if (evt.requestId) {
+      const idx = startedList.findIndex(s => s.requestId === evt.requestId);
+      if (idx >= 0) {
+        startTs = startedList[idx].ts;
+        claimedStartedIdx = idx;
+      }
     }
 
-    if (evt.type === 'model.response.completed' && evt.requestId) {
-      const data = evt.data || {};
-      const startTs = requestStarts.get(evt.requestId) ?? evt.ts;
-
-      results.push({
-        requestId: evt.requestId,
-        inputTokens: finiteNum(data.input_tokens) ?? 0,
-        outputTokens: finiteNum(data.output_tokens) ?? 0,
-        cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
-        cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
-        requestStartTs: startTs,
-        responseEndTs: evt.ts,
-        toolFinishedTs: 0,
-        stopReason: (data.stop_reason as string) ?? '',
-        model: (data.model as string) ?? '',
-      });
+    if (startTs === undefined) {
+      const idx = finiteNum(data.request_index);
+      if (idx !== undefined) {
+        const startedIdx = startedList.findIndex(s => s.requestIndex === idx);
+        if (startedIdx >= 0) {
+          startTs = startedList[startedIdx].ts;
+          claimedStartedIdx = startedIdx;
+        }
+      }
     }
+
+    if (startTs === undefined) {
+      // Order fallback: first unused started event in ts asc order. This handles
+      // the s5/s6 case where neither requestId nor request_index line up — the
+      // i-th completed event pairs with the i-th (unclaimed) started event.
+      for (let i = 0; i < startedList.length; i++) {
+        if (usedStarted.has(i)) continue;
+        startTs = startedList[i].ts;
+        claimedStartedIdx = i;
+        break;
+      }
+    }
+
+    if (claimedStartedIdx >= 0) usedStarted.add(claimedStartedIdx);
+
+    results.push({
+      requestId: evt.requestId || '',
+      inputTokens: finiteNum(data.input_tokens) ?? 0,
+      outputTokens: finiteNum(data.output_tokens) ?? 0,
+      cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
+      cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
+      requestStartTs: startTs ?? evt.ts,
+      responseEndTs: evt.ts,
+      toolFinishedTs: 0,
+      stopReason: (data.stop_reason as string) ?? '',
+      model: (data.model as string) ?? '',
+    });
   }
 
   // Associate tool.execution.finished with the preceding LLM call.
