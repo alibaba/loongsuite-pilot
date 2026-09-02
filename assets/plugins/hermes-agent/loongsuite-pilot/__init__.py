@@ -34,6 +34,7 @@ MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
 MAX_VALUE_DEPTH = 8
+MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 
@@ -140,6 +141,16 @@ def _resolve_user_id(sender_id: Any, config: Dict[str, Any]) -> str:
     if isinstance(config_user, str) and config_user:
         return config_user
     return _hostname()
+
+
+def _worker_name() -> Optional[str]:
+    raw = os.environ.get("AGENTTEAMS_WORKER_NAME")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or len(value) > MAX_RESOURCE_FIELD_VALUE_LENGTH:
+        return None
+    return value
 
 
 def _truncate(value: str) -> str:
@@ -428,7 +439,7 @@ def _common_fields(
     span_id: str,
 ) -> Dict[str, Any]:
     platform = session_state.get("platform") or "cli"
-    return {
+    fields: Dict[str, Any] = {
         "time_unix_nano": str(timestamp_ns),
         "observed_time_unix_nano": str(timestamp_ns),
         "event.id": _new_event_id(),
@@ -444,6 +455,13 @@ def _common_fields(
         "gen_ai.step.id": step_id,
         "gen_ai.agent.type": AGENT_TYPE,
     }
+    worker_name = _worker_name()
+    if worker_name:
+        fields["gen_ai.agent.name"] = worker_name
+        fields["resourceAttributes"] = {
+            "agentteams.worker.name": worker_name,
+        }
+    return fields
 
 
 def _usage_fields(payload: Dict[str, Any]) -> Dict[str, int]:

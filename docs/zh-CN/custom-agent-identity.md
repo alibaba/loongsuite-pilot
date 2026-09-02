@@ -15,12 +15,13 @@
 | Qwen Code CLI | `qwen-code-cli` | `qwen` |
 | Cursor CLI | `cursor-cli` | `cursor-agent` |
 | OpenClaw | `openclaw` | `openclaw` |
+| Hermes Agent | `hermes` | `hermes` |
 
 Cursor Desktop 不支持这组变量。
 
-OpenClaw 当前仅支持 `AGENTTEAMS_WORKER_NAME`，暂不支持
-`AGENTTEAMS_INSTANCE_ID`。如果 OpenClaw 运行在容器中，环境变量必须注入
-OpenClaw Gateway 所在的容器和进程；修改变量后需要重启或重建容器。
+OpenClaw 和 Hermes Agent 当前仅支持 `AGENTTEAMS_WORKER_NAME`，暂不支持
+`AGENTTEAMS_INSTANCE_ID`。如果它们运行在容器中，环境变量必须注入对应的
+Agent 容器和进程；修改变量后需要重启或重建容器。
 
 ## 设置环境变量
 
@@ -29,7 +30,7 @@ OpenClaw Gateway 所在的容器和进程；修改变量后需要重启或重建
 | `AGENTTEAMS_WORKER_NAME` | 设置 `gen_ai.agent.name`，并写入 Resource 属性 `agentteams.worker.name`。 |
 | `AGENTTEAMS_INSTANCE_ID` | 写入 Resource 属性 `agentteams.instance.id`，用于区分同一 Worker 的不同运行实例。 |
 
-建议两个变量一起设置：
+除 OpenClaw 和 Hermes Agent 外，建议两个变量一起设置：
 
 ```bash
 export AGENTTEAMS_WORKER_NAME=planner
