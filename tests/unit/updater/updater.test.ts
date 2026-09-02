@@ -181,6 +181,7 @@ describe('Updater', () => {
         return Promise.resolve({
           status: 'active',
           packageVersion: '1.0.2',
+          gitCommit: 'bbb',
           pid: process.pid,
           updatedAt: new Date().toISOString(),
         });
@@ -300,6 +301,17 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined); // versions dir exists
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
@@ -327,6 +339,7 @@ describe('Updater', () => {
         return Promise.resolve(runtimeReads === 1 ? null : {
           status: 'active',
           packageVersion: '1.0.2',
+          gitCommit: 'aaa',
           pid: process.pid,
           updatedAt: new Date().toISOString(),
         });
@@ -375,6 +388,47 @@ describe('Updater', () => {
       expect(pilotCommands()).not.toContain('schedule-updater-restart');
       expect(gc).not.toHaveBeenCalled();
       expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
+    it.each([
+      ['an old version', '1.0.1', 'old'],
+      ['an old build of the same version', '1.0.2', 'old'],
+    ])('restarts a live collector running %s', async (_case, packageVersion, gitCommit) => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve(runtimeReads <= 2 ? {
+          status: 'active',
+          packageVersion,
+          gitCommit,
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        } : {
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'aaa',
+          pid: process.ppid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+
+      await updater.check();
+
+      expect(pilotCommands()).toEqual(['restart-collector', 'schedule-updater-restart']);
+      expect((updater as any).consecutiveFailures).toBe(0);
     });
   });
 
@@ -973,6 +1027,7 @@ describe('Updater', () => {
         return Promise.resolve({
           status: 'active',
           packageVersion: '1.0.2',
+          gitCommit: 'bbb',
           pid: process.pid,
           updatedAt: new Date().toISOString(),
         });
@@ -1070,6 +1125,7 @@ describe('Updater', () => {
       const runtime = {
         status: 'active',
         packageVersion: '1.0.2',
+        gitCommit: 'bbb',
         pid: process.pid,
         updatedAt: new Date(now).toISOString(),
       };
@@ -1077,6 +1133,9 @@ describe('Updater', () => {
       expect((updater as any).collectorHealthFailure(
         { ...runtime, packageVersion: '1.0.1' }, '1.0.2', now, null,
       )).toContain('expected 1.0.2');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, gitCommit: 'aaa' }, '1.0.2', now, null, 'bbb',
+      )).toContain('expected bbb');
       expect((updater as any).collectorHealthFailure(
         { ...runtime, updatedAt: new Date(now - 1).toISOString() }, '1.0.2', now, null,
       )).toBe('runtime record predates restart');
@@ -1186,6 +1245,17 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined);
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
 

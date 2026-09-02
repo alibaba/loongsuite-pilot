@@ -115,12 +115,13 @@ describe('Updater integration (real filesystem)', () => {
     await fs.writeFile(path.join(testDir, 'current'), dirName + '\n');
   }
 
-  async function writeCollectorRuntime(version: string) {
+  async function writeCollectorRuntime(version: string, gitCommit = '') {
     const logsDir = path.join(testDir, 'logs');
     await fs.mkdir(logsDir, { recursive: true });
     await fs.writeFile(path.join(logsDir, 'runtime.json'), JSON.stringify({
       status: 'active',
       packageVersion: version,
+      ...(gitCommit ? { gitCommit } : {}),
       pid: process.pid,
       updatedAt: new Date().toISOString(),
     }));
@@ -265,7 +266,7 @@ describe('Updater integration (real filesystem)', () => {
   it('does NOT downgrade when remote version is older', async () => {
     const v2Dir = await createFakeVersion('1.0.2', 'bbb');
     await setCurrentPointer(v2Dir);
-    await writeCollectorRuntime('1.0.2');
+    await writeCollectorRuntime('1.0.2', 'bbb');
 
     // Remote says 1.0.1 (older)
     mockFetch.mockResolvedValueOnce({
@@ -295,7 +296,7 @@ describe('Updater integration (real filesystem)', () => {
       }),
     });
     mockExecFile.mockImplementation(async (_cmd: string, args: string[]) => {
-      if (args.includes('start-collector')) await writeCollectorRuntime('1.0.2');
+      if (args.includes('start-collector')) await writeCollectorRuntime('1.0.2', 'bbb');
       return { stdout: '', stderr: '' };
     });
     const updater = new Updater(makeConfig(), testDir);
