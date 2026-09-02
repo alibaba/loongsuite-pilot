@@ -4,6 +4,9 @@ import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
+import {
+  InputRuntimeAccumulator,
+} from './input-runtime-metrics.js';
 
 export interface InputOptions {
   stateStore: StateStore;
@@ -34,6 +37,7 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private _running = false;
+  private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
   /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
   private readonly ownershipWarned = new Set<string>();
 
@@ -95,6 +99,9 @@ export abstract class BaseInput extends EventEmitter {
   }
 
   private async runCycleOnce(): Promise<void> {
+    const runtime = new InputRuntimeAccumulator();
+    this.activeRuntimeAccumulator = runtime;
+    const collectStartedAt = runtime.now();
     try {
       const entries = await this.collect();
       if (entries.length > 0) {
@@ -105,6 +112,10 @@ export abstract class BaseInput extends EventEmitter {
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
       this.emit('collect-error', err);
+    } finally {
+      const collectDurationMs = runtime.now() - collectStartedAt;
+      this.activeRuntimeAccumulator = null;
+      this.emit('input-runtime-delta', runtime.finish(collectDurationMs));
     }
   }
 
@@ -114,6 +125,11 @@ export abstract class BaseInput extends EventEmitter {
 
   protected setState(state: Partial<InputState>): void {
     this.stateStore.update(this.id, state);
+  }
+
+  /** Current collect cycle's scalar-only observer. */
+  protected getInputRuntimeAccumulator(): InputRuntimeAccumulator | null {
+    return this.activeRuntimeAccumulator;
   }
 
   /** Whether an error is a permission failure (EACCES/EPERM) on a path. */

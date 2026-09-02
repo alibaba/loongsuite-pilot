@@ -73,6 +73,33 @@ describe('BaseHookInput', () => {
       expect(entries).toHaveLength(0);
       await input.stop();
     });
+
+    it('reports complete raw records and bytes even when no normalized entry survives', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      const validLine = JSON.stringify({ file_path: '/已过滤.ts' });
+      const payload = `not-json\n${validLine}\n`;
+      await fs.writeFile(logFile, payload);
+      input.transformFn = async () => null;
+
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        rawInMaxRecordBytes: Buffer.byteLength(`${validLine}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+    });
   });
 
   describe('byte offset incremental reading', () => {
@@ -114,11 +141,21 @@ describe('BaseHookInput', () => {
       await fs.writeFile(logFile, completeRecord.slice(0, splitAt));
 
       const firstEntries: AgentActivityEntry[] = [];
+      const firstRuntimeDeltas: Array<Record<string, number>> = [];
       input.on('entries', (entries: AgentActivityEntry[]) => firstEntries.push(...entries));
+      input.on('input-runtime-delta', stats => firstRuntimeDeltas.push(stats));
       await input.start();
       await input.stop();
       expect(firstEntries).toHaveLength(0);
       expect(stateStore.get('test-hook').lastOffset).toBe(0);
+      expect(firstRuntimeDeltas).toHaveLength(1);
+      expect(firstRuntimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+        rawInRecords: 0,
+        rawInBytes: 0,
+        rawInMaxBatchBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+      });
 
       await fs.appendFile(logFile, `${completeRecord.slice(splitAt)}\n`);
       const nextInput = new TestHookInput({

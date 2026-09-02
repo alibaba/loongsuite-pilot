@@ -86,6 +86,31 @@ describe('BaseSessionInput', () => {
       await input.stop();
     });
 
+    it('reports malformed and filtered lines as raw records before normalization', async () => {
+      const file = path.join(tmpDir, 'raw-stats.jsonl');
+      const payload = `not-json\n${JSON.stringify({ file_path: '/filtered.ts' })}\n`;
+      await fs.writeFile(file, payload);
+      input.discoverFn = async () => [file];
+      input.processLineFn = async () => null;
+
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+    });
+
     it('should pass filePath to processSessionLine', async () => {
       const file = path.join(tmpDir, 'my-session.jsonl');
       await fs.writeFile(file, JSON.stringify({ x: 1 }) + '\n');

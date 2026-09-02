@@ -6,6 +6,7 @@ import type {
   MaskConfig,
 } from '../types/index.js';
 import type { BaseInput } from '../inputs/base/base-input.js';
+import type { InputRuntimeDelta } from '../inputs/base/input-runtime-metrics.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
@@ -24,6 +25,28 @@ import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.
 const logger = createLogger('InputManager');
 
 export interface InputCounter {
+  /** Fixed, bounded source classification for this Input. */
+  sourceKind: 'primary';
+  /** Actual primary-source file read calls, including repeated scans. */
+  rawReadCalls: number;
+  /** Actual bytes returned by primary-source reads, including repeats. */
+  rawReadBytes: number;
+  /** Complete source records presented to parsing/transformation. */
+  rawInRecords: number;
+  /** Checkpointed source bytes before parsing/transformation. */
+  rawInBytes: number;
+  /** Largest temporary source-read buffer observed in the current report window. */
+  rawInMaxBatchBytes: number;
+  /** Largest committed complete record observed in the current report window. */
+  rawInMaxRecordBytes: number;
+  /** Largest source-size minus committed-offset value in the current window. */
+  rawBacklogBytesMax: number;
+  parseSuccessRecords: number;
+  parseFailedRecords: number;
+  /** Cumulative monotonic-clock read wall time. */
+  readDurationMs: number;
+  /** Cumulative non-read collect wall time; not pure CPU time. */
+  processDurationMs: number;
   inEvents: number;
   inBytes: number;
   outEvents: number;
@@ -111,6 +134,18 @@ export class InputManager extends EventEmitter {
     }
     this.inputs.set(input.id, input);
     this.counters.set(input.id, {
+      sourceKind: 'primary',
+      rawReadCalls: 0,
+      rawReadBytes: 0,
+      rawInRecords: 0,
+      rawInBytes: 0,
+      rawInMaxBatchBytes: 0,
+      rawInMaxRecordBytes: 0,
+      rawBacklogBytesMax: 0,
+      parseSuccessRecords: 0,
+      parseFailedRecords: 0,
+      readDurationMs: 0,
+      processDurationMs: 0,
       inEvents: 0,
       inBytes: 0,
       outEvents: 0,
@@ -120,6 +155,9 @@ export class InputManager extends EventEmitter {
       type: input.collectionMethod,
       agentType: input.agentType,
       lastActiveTime: 0,
+    });
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => {
+      this.handleInputRuntimeDelta(input.id, delta);
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
@@ -135,6 +173,39 @@ export class InputManager extends EventEmitter {
       });
     });
     logger.info('input registered', { id: input.id });
+  }
+
+  private handleInputRuntimeDelta(inputId: string, delta: InputRuntimeDelta): void {
+    const counter = this.counters.get(inputId);
+    if (!counter) return;
+
+    const count = (value: number): number => Number.isFinite(value)
+      ? Math.max(0, Math.trunc(value))
+      : 0;
+    const duration = (value: number): number => Number.isFinite(value)
+      ? Math.max(0, value)
+      : 0;
+
+    counter.rawReadCalls += count(delta.rawReadCalls);
+    counter.rawReadBytes += count(delta.rawReadBytes);
+    counter.rawInRecords += count(delta.rawInRecords);
+    counter.rawInBytes += count(delta.rawInBytes);
+    counter.rawInMaxBatchBytes = Math.max(
+      counter.rawInMaxBatchBytes,
+      count(delta.rawInMaxBatchBytes),
+    );
+    counter.rawInMaxRecordBytes = Math.max(
+      counter.rawInMaxRecordBytes,
+      count(delta.rawInMaxRecordBytes),
+    );
+    counter.rawBacklogBytesMax = Math.max(
+      counter.rawBacklogBytesMax,
+      count(delta.rawBacklogBytesMax),
+    );
+    counter.parseSuccessRecords += count(delta.parseSuccessRecords);
+    counter.parseFailedRecords += count(delta.parseFailedRecords);
+    counter.readDurationMs += duration(delta.readDurationMs);
+    counter.processDurationMs += duration(delta.processDurationMs);
   }
 
   async startInput(id: string): Promise<void> {
@@ -196,6 +267,22 @@ export class InputManager extends EventEmitter {
 
   getInputCounters(): Map<string, InputCounter> {
     return this.counters;
+  }
+
+  /**
+   * Snapshot cumulative counters and atomically open the next max-value window.
+   * JavaScript execution is single-threaded here, so cloning and reset cannot be
+   * interleaved with an emitted runtime delta.
+   */
+  takeInputCounterSnapshot(): Map<string, InputCounter> {
+    const snapshot = new Map<string, InputCounter>();
+    for (const [id, counter] of this.counters) {
+      snapshot.set(id, { ...counter });
+      counter.rawInMaxBatchBytes = 0;
+      counter.rawInMaxRecordBytes = 0;
+      counter.rawBacklogBytesMax = 0;
+    }
+    return snapshot;
   }
 
   getActiveInputIds(): string[] {

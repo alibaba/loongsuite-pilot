@@ -123,4 +123,5 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 - 在 [HTTP 输出](http-output.md) 配置自定义 HTTP 上报。
 - 在 [数据脱敏](masking.md) 配置密钥脱敏。
 - 在 [输出事件 Schema](output-event-schema.md) 查看字段。
+- 在 [Input 运行时指标](input-runtime-metrics.md) 了解读取、解析和标准事件产出的窗口统计。
 - 在 [新 Agent 接入](agent-onboarding.md) 增加新的 Agent 支持。

@@ -519,6 +519,25 @@ describe('Orchestrator', () => {
 
       expect(events).toContain('stopped');
     });
+
+    it('still shuts down the flusher and saves state when metrics stop fails', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const metricsWriter = (orch as any).metricsWriter;
+      const flusher = (orch as any).flusher;
+      vi.spyOn(metricsWriter, 'stop').mockRejectedValueOnce(new Error('snapshot exploded'));
+      const flusherShutdown = vi.spyOn(flusher, 'shutdown');
+      mockStateStoreSave.mockClear();
+
+      await expect(orch.stop()).resolves.toBeUndefined();
+
+      expect(flusherShutdown).toHaveBeenCalledOnce();
+      expect(mockStateStoreSave).toHaveBeenCalled();
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        'metrics writer stop failed during orchestrator shutdown',
+        { error: 'Error: snapshot exploded' },
+      );
+    });
   });
 
   describe('idempotency (T040)', () => {

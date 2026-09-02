@@ -229,6 +229,7 @@ export class QoderTraceInput extends BaseInput {
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -248,6 +249,7 @@ export class QoderTraceInput extends BaseInput {
       offset = 0;
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
@@ -255,21 +257,68 @@ export class QoderTraceInput extends BaseInput {
       // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
       // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.setState({ lastFile: logFileName, lastOffset: stat.size });
+      const readStartedAt = runtime?.now();
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
+      const snapshot = buf.subarray(0, bytesRead);
+      const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (lastNewline < 0) return [];
 
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      const completeLength = lastNewline + 1;
+      const completeBytes = snapshot.subarray(0, completeLength);
+      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
 
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let record: Record<string, unknown>;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            parseFailedRecords++;
+            continue;
+          }
+          record = parsed as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid JSONL line', { error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeLength,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
     } finally {
       await handle.close();
     }
