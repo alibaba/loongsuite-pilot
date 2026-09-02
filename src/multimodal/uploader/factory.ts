@@ -10,5 +10,8 @@ export function createUploader(
   if (config.storage.type === 'oss') {
     return new OssUploader(config.storage);
   }
+  if (config.storage.type === 'delegatedOss' && !(opts?.expectedPresignOrigin ?? '').trim()) {
+    throw new Error('delegatedOss requires expectedPresignOrigin');
+  }
   return new SlsUploader(config.storage, config.storageBasePath, opts);
 }

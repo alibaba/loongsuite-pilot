@@ -34,7 +34,13 @@ export class SlsUploader implements Uploader {
     if (!this.project || !this.logstore) {
       throw new Error('multimodal.storage.target requires project and logstore');
     }
-    this.expectedOrigin = opts?.expectedPresignOrigin;
+    if (storage.type === 'delegatedOss') {
+      const origin = (opts?.expectedPresignOrigin ?? '').trim();
+      if (!origin) {
+        throw new Error('delegatedOss requires expectedPresignOrigin');
+      }
+      this.expectedOrigin = origin;
+    }
   }
 
   async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
@@ -138,7 +144,7 @@ export class SlsUploader implements Uploader {
     return this.storage.type === 'delegatedOss'
       ? slsPutViaPresignedHttp({
         ...params,
-        expectedOrigin: this.expectedOrigin,
+        expectedOrigin: this.expectedOrigin!,
       })
       : slsPutObject(params);
   }

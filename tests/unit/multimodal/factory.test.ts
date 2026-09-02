@@ -54,8 +54,25 @@ describe('createUploader', () => {
         auth: slsAuth,
       },
       storageBasePath: 'sls://proj/logstore',
+    }, {
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(uploader).toBeInstanceOf(SlsUploader);
+  });
+
+  it('throws when delegatedOss is missing expectedPresignOrigin', () => {
+    expect(() => createUploader({
+      storage: {
+        type: 'delegatedOss',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: slsAuth,
+      },
+      storageBasePath: 'sls://proj/logstore',
+    })).toThrow(/requires expectedPresignOrigin/);
   });
 
   it('creates SlsUploader for apiKey mode', () => {

@@ -505,6 +505,7 @@ describe('sls-client (presign)', () => {
       body: Buffer.from('hello'),
       contentType: 'image/png',
       timeoutMs: 1000,
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(result).toMatchObject({ ok: true, requestId: 'oss-http' });
     expect(seen).toHaveLength(2);
@@ -574,6 +575,7 @@ describe('sls-client (presign)', () => {
       body: Buffer.from('hello'),
       contentType: 'image/png',
       timeoutMs: 1000,
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(result.ok).toBe(false);
     expect(result.statusCode).toBe(403);
@@ -599,6 +601,7 @@ describe('sls-client (presign)', () => {
       body: Buffer.from('hello'),
       contentType: 'image/png',
       timeoutMs: 1000,
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(result.ok).toBe(false);
     expect(result.retryable).toBe(false);
@@ -661,6 +664,7 @@ describe('sls-client (presign)', () => {
       contentType: 'image/png',
       timeoutMs: 1000,
       signal: abort.signal,
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     abort.abort();
     releasePresign();
@@ -682,13 +686,17 @@ describe('sls-client (presign)', () => {
     expect(result.error).toMatch(/presigned URL is required/);
   });
 
-  it('pins the sniffed origin when provided', () => {
+  it('requires a sniffed origin and pins it', () => {
     const target = {
       objectKey: '20260101/a.png',
       project: 'p',
       logstore: 'l',
       expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     };
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/20260101/a.png?sig=1',
+      { objectKey: '20260101/a.png', project: 'p', logstore: 'l', expectedOrigin: '' },
+    )).toMatchObject({ ok: false, error: expect.stringMatching(/origin is required/) });
     expect(bindPresignedPutUrl(
       'https://user-bucket.oss-attacker.example/p/l/20260101/a.png?sig=1',
       target,
@@ -704,6 +712,23 @@ describe('sls-client (presign)', () => {
       ok: true,
       url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/p/l/20260101/a.png?sig=1',
     });
+  });
+
+  it('rejects extra or encoded leading slashes on the presign object path', () => {
+    const target = {
+      objectKey: '20260101/a.png',
+      project: 'p',
+      logstore: 'l',
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    };
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com//p/l/20260101/a.png?sig=1',
+      target,
+    )).toMatchObject({ ok: false, error: expect.stringMatching(/object path mismatch/) });
+    expect(bindPresignedPutUrl(
+      'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/%2Fp/l/20260101/a.png?sig=1',
+      target,
+    )).toMatchObject({ ok: false, error: expect.stringMatching(/object path mismatch/) });
   });
 
   it('sniffs oss:// event prefix from one presign and does not PUT', async () => {
@@ -840,15 +865,15 @@ describe('sls-client (presign)', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('disables delegatedOss when sniff origin region does not match the SLS endpoint', async () => {
+  it('accepts delegatedOss when SLS uses an official -internal endpoint', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
-      url: 'https://user-bucket.oss-cn-beijing.aliyuncs.com/proj/logstore/k?sig=1',
+      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
     }), { status: 200 }));
     const result = await resolveMultimodalEventStorageBasePath({
       storage: {
         type: 'delegatedOss',
         target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          endpoint: 'https://cn-hangzhou-internal.log.aliyuncs.com',
           project: 'proj',
           logstore: 'logstore',
         },
@@ -856,10 +881,11 @@ describe('sls-client (presign)', () => {
       },
       storageBasePath: 'sls://proj/logstore',
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/does not match SLS endpoint region \(cn-hangzhou\)/);
-    }
+    expect(result).toEqual({
+      ok: true,
+      storageBasePath: 'oss://user-bucket/proj/logstore',
+      origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    });
   });
 
   it('disables delegatedOss when target.ossBucket does not match sniff', async () => {

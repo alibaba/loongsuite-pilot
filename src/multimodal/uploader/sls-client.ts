@@ -525,10 +525,10 @@ export interface SlsPresignPutTarget {
   objectKey: string;
   project: string;
   logstore: string;
-  expectedOrigin?: string;
+  expectedOrigin: string;
 }
 
-/** Bind a presign URL to HTTPS (or loopback HTTP), optional origin, and object path. */
+/** Bind a presign URL to HTTPS (or loopback HTTP), the sniffed origin, and object path. */
 export function bindPresignedPutUrl(
   url: string,
   target: SlsPresignPutTarget,
@@ -542,12 +542,15 @@ export function bindPresignedPutUrl(
   if (!isAllowedPresignUrl(parsed)) {
     return { ok: false, error: 'presign url must be https', retryable: false };
   }
-  if (target.expectedOrigin && parsed.origin !== target.expectedOrigin) {
+  if (!target.expectedOrigin.trim()) {
+    return { ok: false, error: 'presign url origin is required', retryable: false };
+  }
+  if (parsed.origin !== target.expectedOrigin) {
     return { ok: false, error: 'presign url origin mismatch', retryable: false };
   }
-  const pathname = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
+  const objectPath = presignObjectPath(parsed.pathname);
   const expectedPath = `${target.project}/${target.logstore}/${target.objectKey}`;
-  if (pathname !== expectedPath) {
+  if (objectPath !== expectedPath) {
     return { ok: false, error: 'presign url object path mismatch', retryable: false };
   }
   return { ok: true, url };
@@ -555,7 +558,7 @@ export function bindPresignedPutUrl(
 
 /** ApiKey/AK presign PUT, then upload to the returned URL with no extra headers. */
 export async function slsPutViaPresignedHttp(
-  params: SlsPutObjectParams & { expectedOrigin?: string },
+  params: SlsPutObjectParams & { expectedOrigin: string },
 ): Promise<SlsResult> {
   if (params.signal?.aborted) {
     return { ok: false, error: 'aborted', retryable: false };
@@ -578,6 +581,21 @@ export async function slsPutViaPresignedHttp(
     timeoutMs: params.timeoutMs,
     signal: params.signal,
   });
+}
+
+/** Single leading slash only. Rejects `//…` and `/%2F…` after decode. */
+function presignObjectPath(pathname: string): string | null {
+  if (!pathname.startsWith('/') || pathname.startsWith('//')) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname.slice(1));
+  } catch {
+    return null;
+  }
+  if (!decoded || decoded.startsWith('/') || decoded.split('/').some(part => part === '')) {
+    return null;
+  }
+  return decoded;
 }
 
 function isAllowedPresignUrl(parsed: URL): boolean {
@@ -669,21 +687,9 @@ export async function sniffSlsHttpEventStorageBasePath(
   }
 }
 
-function slsEndpointRegion(endpoint: string): string | null {
-  try {
-    const host = normalizeSlsEndpoint(endpoint).host.split(':')[0] ?? '';
-    const match = host.match(/^([a-z0-9-]+)\.log\.aliyuncs\.com(?:\.cn)?$/i);
-    const raw = match?.[1]?.toLowerCase() ?? '';
-    return raw.replace(/-(?:intranet|share)$/, '') || null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * sls and oss use that prefix as-is. delegatedOss sniffs one presign;
- * sniffed OSS origin region must match the SLS endpoint region.
+ * sls and oss use that prefix as-is. delegatedOss sniffs one presign and pins origin.
  * if target.ossBucket is set, the sniffed bucket must match or multimodal stays off.
  */
 export async function resolveMultimodalEventStorageBasePath(
@@ -706,15 +712,6 @@ export async function resolveMultimodalEventStorageBasePath(
     timeoutMs: SLS_STARTUP_TIMEOUT_MS,
   });
   if (!sniffed.ok) return sniffed;
-
-  const endpointRegion = slsEndpointRegion(target.endpoint);
-  const originRegion = parseAliyunOssVirtualHost(sniffed.origin)?.region;
-  if (!endpointRegion || !originRegion || endpointRegion !== originRegion) {
-    return {
-      ok: false,
-      error: `presign origin region (${originRegion || 'unknown'}) does not match SLS endpoint region (${endpointRegion || 'unknown'})`,
-    };
-  }
 
   const configuredBucket = target.ossBucket?.trim() ?? '';
   if (configuredBucket) {

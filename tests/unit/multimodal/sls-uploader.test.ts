@@ -80,6 +80,13 @@ describe('SlsUploader', () => {
     }, 'sls://only-project')).toThrow(/requires project and logstore/);
   });
 
+  it('throws when delegatedOss is missing expectedPresignOrigin', () => {
+    expect(() => new SlsUploader({
+      ...sls,
+      type: 'delegatedOss',
+    }, 'sls://proj/logstore')).toThrow(/requires expectedPresignOrigin/);
+  });
+
   it('rejects uploads after shutdown', async () => {
     const put = vi.spyOn(slsClient, 'slsPutObject').mockResolvedValue({
       ok: true,
@@ -143,7 +150,9 @@ describe('SlsUploader', () => {
         mode: 'apiKey',
         apiKey: 'edge-key',
       },
-    }, 'sls://proj/logstore');
+    }, 'sls://proj/logstore', {
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    });
     const ok = await uploader.upload({
       targetPath: '20260101/a.png',
       contentType: 'image/png',
@@ -169,7 +178,9 @@ describe('SlsUploader', () => {
     const uploader = new SlsUploader({
       ...sls,
       type: 'delegatedOss',
-    }, 'sls://proj/logstore');
+    }, 'sls://proj/logstore', {
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    });
     const ok = await uploader.upload({
       targetPath: '20260101/a.png',
       contentType: 'image/png',
