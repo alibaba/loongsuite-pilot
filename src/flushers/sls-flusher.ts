@@ -20,14 +20,17 @@ import {
   postWebtracking,
   postApiKeyLogStoreLogs,
   isRetryable,
-  classifySlsSendError,
-  formatSlsSendFailureMessage,
   RETRY_MAX_ATTEMPTS,
   RETRY_BASE_DELAY_MS,
   WEBTRACKING_TIMEOUT_MS,
   WEBTRACKING_MAX_BODY_BYTES,
   WEBTRACKING_MAX_LOGS,
+  RETRYABLE_STATUS_CODES,
 } from './sls-transport.js';
+import {
+  classifySlsSendError,
+  formatSlsSendFailureMessage,
+} from './sls-error-classifier.js';
 
 const HOSTNAME = os.hostname();
 
@@ -371,7 +374,22 @@ export class SlsFlusher extends BaseFlusher {
       }
     }
 
-    this.recordFinalSendFailure(endpoint, 'ak', lastErr, attempts);
+    logger.error('SLS send failed after retries', {
+      endpoint: endpoint.name,
+      error: String(lastErr),
+    });
+    this.alarmManager?.record(
+      'FLUSH_SEND_ALARM', '2',
+      formatSlsSendFailureMessage('ak', classifySlsSendError(lastErr), attempts),
+      { endpoint_name: endpoint.name },
+    );
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
+      this.alarmManager?.record(
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
+        { endpoint_name: endpoint.name },
+      );
+    }
     await this.persistFailedLogs(
       endpoint,
       logs.length,
@@ -445,7 +463,22 @@ export class SlsFlusher extends BaseFlusher {
       }
     }
 
-    this.recordFinalSendFailure(endpoint, 'apiKey', lastErr, attempts);
+    logger.error('SLS apiKey send failed after retries', {
+      endpoint: endpoint.name,
+      error: String(lastErr),
+    });
+    this.alarmManager?.record(
+      'FLUSH_SEND_ALARM', '2',
+      formatSlsSendFailureMessage('apiKey', classifySlsSendError(lastErr), attempts),
+      { endpoint_name: endpoint.name },
+    );
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
+      this.alarmManager?.record(
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
+        { endpoint_name: endpoint.name },
+      );
+    }
     await this.persistFailedLogs(
       endpoint,
       logs.length,
@@ -520,7 +553,11 @@ export class SlsFlusher extends BaseFlusher {
 
         if (!resp.ok) {
           const text = await resp.text();
-          throw new HttpError(resp.status, text);
+          const err = new HttpError(resp.status, text);
+          if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === this.resolvedRetryMaxAttempts - 1) {
+            throw err;
+          }
+          lastErr = err;
         } else {
           logger.debug('batch sent via webtracking', {
             project: endpoint.project,
@@ -531,7 +568,8 @@ export class SlsFlusher extends BaseFlusher {
         }
       } catch (err) {
         lastErr = err;
-        if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
+        if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
+        if (attempt === this.resolvedRetryMaxAttempts - 1) break;
       }
 
       const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
@@ -544,36 +582,24 @@ export class SlsFlusher extends BaseFlusher {
       await this.sleep(delay);
     }
 
-    this.recordFinalSendFailure(endpoint, 'webtracking', lastErr, attempts);
-    await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
-    return flushFailed(logs);
-  }
-
-  private recordFinalSendFailure(
-    endpoint: SlsEndpoint,
-    transport: 'ak' | 'apiKey' | 'webtracking',
-    error: unknown,
-    attempts: number,
-  ): void {
-    const classification = classifySlsSendError(error);
-    const message = formatSlsSendFailureMessage(transport, classification, attempts);
-    logger.error('SLS send failed after retries', {
+    logger.error('SLS webtracking send failed after retries', {
       endpoint: endpoint.name,
-      category: classification.category,
-      code: classification.code,
-      httpStatus: classification.httpStatus,
-      attempts,
+      error: String(lastErr),
     });
     this.alarmManager?.record(
-      'FLUSH_SEND_ALARM', '2', message,
+      'FLUSH_SEND_ALARM', '2',
+      formatSlsSendFailureMessage('webtracking', classifySlsSendError(lastErr), attempts),
       { endpoint_name: endpoint.name },
     );
-    if (classification.quota) {
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
       this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2', message,
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
         { endpoint_name: endpoint.name },
       );
     }
+    await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
+    return flushFailed(logs);
   }
 
   private async persistFailedLogs(

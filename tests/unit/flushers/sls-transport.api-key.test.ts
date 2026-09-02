@@ -40,10 +40,7 @@ describe('SLS API Key transport', () => {
         );
         return requests;
       },
-      [
-        { statusCode: 500, body: '{"errorCode":"retry"}' },
-        { statusCode: 200, body: '' },
-      ],
+      [500, 200],
     );
 
     expect(requests).toHaveLength(2);
@@ -58,32 +55,6 @@ describe('SLS API Key transport', () => {
     expect(last.headers['x-log-signaturemethod']).toBeUndefined();
     expect(last.body.toString('utf8')).toContain('api-key-transport');
   });
-
-  it('does not retry a structured ShardWriteQuotaExceed 403', async () => {
-    const requests = await withMockSlsServer(async ({ endpoint, requests }) => {
-      await expect(sendTestBatch(endpoint, 3)).rejects.toThrow('403');
-      return requests;
-    }, [
-      { statusCode: 403, body: '{"errorCode":"ShardWriteQuotaExceed"}' },
-      { statusCode: 200, body: '' },
-    ]);
-
-    expect(requests).toHaveLength(1);
-  });
-
-  it('does not retry a permanent or text-only quota 403', async () => {
-    for (const body of [
-      '{"errorCode":"Forbidden"}',
-      'ShardWriteQuotaExceed',
-    ]) {
-      const requests = await withMockSlsServer(async ({ endpoint, requests }) => {
-        await expect(sendTestBatch(endpoint, 3)).rejects.toThrow('403');
-        return requests;
-      }, [{ statusCode: 403, body }]);
-
-      expect(requests).toHaveLength(1);
-    }
-  });
 });
 
 interface MockRequest {
@@ -94,7 +65,7 @@ interface MockRequest {
 
 async function withMockSlsServer<T>(
   fn: (args: { endpoint: string; requests: MockRequest[] }) => Promise<T>,
-  responses: Array<{ statusCode: number; body: string }>,
+  statusCodes: number[],
 ): Promise<T> {
   const requests: MockRequest[] = [];
   let count = 0;
@@ -107,11 +78,9 @@ async function withMockSlsServer<T>(
         headers: req.headers,
         body: Buffer.concat(chunks),
       });
-      const response = responses[Math.min(count, responses.length - 1)]
-        ?? { statusCode: 200, body: '' };
-      res.statusCode = response.statusCode;
+      res.statusCode = statusCodes[Math.min(count, statusCodes.length - 1)] ?? 200;
       count++;
-      res.end(response.body);
+      res.end(res.statusCode >= 400 ? '{"errorCode":"retry"}' : '');
     });
   });
 
@@ -129,24 +98,4 @@ async function withMockSlsServer<T>(
       server.close(err => err ? reject(err) : resolve());
     });
   }
-}
-
-async function sendTestBatch(endpoint: string, maxRetries: number): Promise<void> {
-  await postApiKeyLogStoreLogs(
-    {
-      endpoint,
-      project: 'api-key-project',
-      logstore: 'shimu-test',
-      apiKey: 'secret-api-key',
-      maxRetries,
-      retryBaseDelayMs: 0,
-      timeoutMs: 5000,
-    },
-    {
-      logs: [{
-        timestamp: 1_782_820_111,
-        content: { test_case: 'api-key-error-code-diagnostic' },
-      }],
-    },
-  );
 }

@@ -153,11 +153,7 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 这些 JSONL 记录只包含 endpoint、错误摘要、batch 条数和 batch 字节数估算，不包含失败 batch payload、消息正文、请求 headers 或凭证，因此不能用于重放失败数据。日志按本地日期和单文件 10MiB 轮转，目录总量限制为 50MiB，同时遵循 `retention.slsFailedDays`（默认 7 天）。
 
-### 重试与失败诊断
-
-这一改动不调整重试策略。HTTP 403 仍按永久失败处理，包括结构化的 `ShardWriteQuotaExceed` 响应；原有可重试状态码和网络异常继续使用当前的有限次数与退避策略。
-
-最终失败继续使用现有告警类型。告警消息包含归一化分类、安全错误码或 HTTP 状态，以及实际尝试次数。网络失败还会带上外层错误和有深度限制的 `cause` 原始消息，例如 `SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3] detail="TypeError: fetch failed <- Error: getaddrinfo ENOTFOUND private.example"`。详情会压成单行、限制为 512 个 UTF-8 字节，并过滤常见凭证格式。HTTP 响应正文、请求头、凭证和业务 payload 不会进入远端告警。本地失败记录继续复用已有的 `error_code` 与 `http_status`；这一期不新增远端字段或索引。
+最终的 `FLUSH_SEND_ALARM` 告警消息会包含发送方式、归一化错误分类、结构化错误码、HTTP 状态、实际尝试次数，以及错误对象和 `cause` 链中的原始错误文本。错误原文不做脱敏或截断。这一诊断增强不改变重试判断、尝试次数或退避策略。
 
 调试 SLS 前，可以先通过本地 JSONL 确认采集本身是否正常：
 

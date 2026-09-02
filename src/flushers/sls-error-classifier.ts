@@ -1,10 +1,5 @@
-export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
-
 const MAX_CAUSE_DEPTH = 5;
-const MAX_CODE_LENGTH = 128;
-const MAX_STRUCTURED_BODY_LENGTH = 16 * 1024;
-const MAX_DETAIL_BYTES = 512;
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 
 const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN']);
 const CONNECTION_RESET_CODES = new Set(['ECONNRESET']);
@@ -46,26 +41,10 @@ export type SlsSendErrorCategory =
   | 'unknown';
 
 export interface SlsSendErrorClassification {
-  retryable: boolean;
-  quota: boolean;
   category: SlsSendErrorCategory;
   code: string;
   httpStatus: number;
   detail: string;
-}
-
-export class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly body: string,
-  ) {
-    super(`${status} ${body}`);
-  }
-}
-
-/** Preserve the pre-existing non-HTTP retry decision without inspecting nested diagnostics. */
-export function isLegacyRetryableError(error: unknown): boolean {
-  return isPreviouslyRetryableMessage(safeErrorString(error));
 }
 
 interface ExtractedEvidence {
@@ -76,32 +55,15 @@ interface ExtractedEvidence {
   detail: string;
 }
 
-/** Classify an SLS send failure without exposing untrusted error text. */
+/** Extract diagnostic evidence without making retry decisions. */
 export function classifySlsSendError(error: unknown): SlsSendErrorClassification {
   const evidence = extractEvidence(error);
-  if (evidence.httpStatus === 429) {
-    return {
-      retryable: true,
-      quota: true,
-      category: 'quota',
-      code: evidence.code || 'HTTP_429',
-      httpStatus: 429,
-      detail: '',
-    };
-  }
-
   const code = evidence.code || (evidence.httpStatus === 0
     ? codeFromLegacyMessage(evidence.message) || codeFromErrorName(evidence.name)
     : '');
-  const category = categoryForCode(code, evidence.httpStatus, evidence.name);
-  const retryable = evidence.httpStatus > 0
-    ? RETRYABLE_STATUS_CODES.has(evidence.httpStatus)
-    : isLegacyRetryableError(error);
 
   return {
-    retryable,
-    quota: false,
-    category,
+    category: categoryForCode(code, evidence.httpStatus, evidence.name),
     code: code || (evidence.httpStatus ? `HTTP_${evidence.httpStatus}` : 'UNKNOWN'),
     httpStatus: evidence.httpStatus,
     detail: evidence.detail,
@@ -121,7 +83,7 @@ export function formatSlsSendFailureMessage(
     ? ` status=${classification.httpStatus}`
     : '';
   const detail = classification.detail
-    ? ` detail=${JSON.stringify(classification.detail)}`
+    ? ` error=${JSON.stringify(classification.detail)}`
     : '';
   return `SLS ${safeTransport} send failed [category=${classification.category} code=${classification.code}${status} attempts=${safeAttempts}]${detail}`;
 }
@@ -165,17 +127,11 @@ function extractEvidence(error: unknown): ExtractedEvidence {
   }
 
   if (!message) message = safeErrorString(error);
-  const fallbackDetail = detailParts.length === 0 && (error instanceof Error || typeof error === 'string')
-    ? safeErrorString(error)
-    : '';
-  const detail = httpStatus === 0
-    ? normalizeErrorDetail(detailParts.join(' <- ') || fallbackDetail)
-    : '';
+  const detail = detailParts.join(' <- ') || safeErrorString(error);
   return { code, httpStatus, name, message, detail };
 }
 
 function structuredCodeFromBody(body: string): string {
-  if (body.length === 0 || body.length > MAX_STRUCTURED_BODY_LENGTH) return '';
   try {
     const parsed: unknown = JSON.parse(body);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return '';
@@ -187,8 +143,7 @@ function structuredCodeFromBody(body: string): string {
 }
 
 function normalizeCode(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CODE_LENGTH) return '';
-  return SAFE_CODE_PATTERN.test(value) ? value : '';
+  return typeof value === 'string' && SAFE_CODE_PATTERN.test(value) ? value : '';
 }
 
 function normalizeHttpStatus(value: unknown): number {
@@ -208,40 +163,8 @@ function safeErrorString(value: unknown): string {
   }
 }
 
-export function redactSensitiveErrorText(value: string): string {
-  return value
-    .replace(
-      /(\bauthorization\s*["']?\s*[:=]\s*["']?)(?:Bearer|Basic)\s+[^\s,"'}]+/gi,
-      '$1[REDACTED]',
-    )
-    .replace(
-      /(\bauthorization\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
-      '$1[REDACTED]',
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\bLTAI[A-Za-z0-9]{12,}\b/g, '[REDACTED_ACCESS_KEY]')
-    .replace(
-      /((?:access[_-]?key(?:[_-]?(?:id|secret))?|api[_-]?key)\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
-      '$1[REDACTED]',
-    )
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@');
-}
-
-function normalizeErrorDetail(value: string): string {
-  const oneLine = redactSensitiveErrorText(value)
-    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return truncateUtf8(oneLine, MAX_DETAIL_BYTES);
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  const bytes = Buffer.from(value, 'utf8');
-  if (bytes.length <= maxBytes) return value;
-  return bytes.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/u, '');
-}
-
 function categoryForCode(code: string, httpStatus: number, name: string): SlsSendErrorCategory {
+  if (httpStatus === 429) return 'quota';
   if (DNS_CODES.has(code)) return 'dns';
   if (CONNECTION_RESET_CODES.has(code)) return 'connection_reset';
   if (CONNECTION_REFUSED_CODES.has(code)) return 'connection_refused';
@@ -272,15 +195,4 @@ function codeFromLegacyMessage(message: string): string {
 
 function codeFromErrorName(name: string): string {
   return name === 'TimeoutError' || name === 'AbortError' ? name : '';
-}
-
-function isPreviouslyRetryableMessage(message: string): boolean {
-  return message.includes('ECONNRESET')
-    || message.includes('ETIMEDOUT')
-    || message.includes('ECONNREFUSED')
-    || message.includes('socket hang up')
-    || message.includes('network')
-    || message.includes('TimeoutError')
-    || message.includes('InternalServerError')
-    || message.includes('ServerBusy');
 }

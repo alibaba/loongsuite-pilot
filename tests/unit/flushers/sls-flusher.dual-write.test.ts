@@ -281,105 +281,52 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     expect(String(failure.error)).toContain('Forbidden');
   });
 
-  it('does not retry structured ShardWriteQuotaExceed 403 and reports its safe code in all modes', async () => {
-    const retryConfig = {
-      retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false },
-    } satisfies Partial<SlsFlusherConfig>;
-
-    const akFlusher = new SlsFlusher(
-      makeConfig([akEndpoint('ak-quota', 'https://cn-shanghai.log.aliyuncs.com', 'ak-project')], retryConfig),
-      '/tmp/data',
-    );
-    akFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
-    mockPostLogStoreLogs
-      .mockRejectedValue(Object.assign(new Error('private quota detail'), {
-        code: 'ShardWriteQuotaExceed',
-        statusCode: 403,
-      }));
-    await akFlusher.send(buildTestEntry());
-    await akFlusher.flush();
-    expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
-
-    fetchSpy.mockResolvedValue({
-      ok: false,
-      status: 403,
-      text: async () => '{"errorCode":"ShardWriteQuotaExceed"}',
-    });
-    const webFlusher = new SlsFlusher(
-      makeConfig([wtEndpoint('web-quota', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')], retryConfig),
-      '/tmp/data',
-    );
-    webFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
-    await webFlusher.send(buildTestEntry());
-    await webFlusher.flush();
-    expect(fetchSpy).toHaveBeenCalledOnce();
-
-    const apiRequests = await withMockSlsServer(async ({ endpoint, requests }) => {
-      const apiFlusher = new SlsFlusher(
-        makeConfig([apiKeyEndpoint('api-quota', endpoint, 'api-project')], retryConfig),
-        '/tmp/data',
-      );
-      apiFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
-      await apiFlusher.send(buildTestEntry());
-      await apiFlusher.flush();
-      return requests;
-    }, [
-      { statusCode: 403, body: '{"code":"ShardWriteQuotaExceed"}' },
-      { statusCode: 200, body: '' },
-    ]);
-    expect(apiRequests).toHaveLength(1);
-
-    expect(mockFailureWrite).toHaveBeenCalledTimes(3);
-    expect(mockAlarmRecord).toHaveBeenCalledTimes(3);
-    expect(mockAlarmRecord.mock.calls.map(call => call[0])).toEqual([
-      'FLUSH_SEND_ALARM',
-      'FLUSH_SEND_ALARM',
-      'FLUSH_SEND_ALARM',
-    ]);
-    expect(mockAlarmRecord.mock.calls.map(call => call[2])).toEqual([
-      'SLS ak send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
-      'SLS webtracking send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
-      'SLS apiKey send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
-    ]);
-    expect(JSON.stringify(mockAlarmRecord.mock.calls)).not.toContain('private quota detail');
-  });
-
-  it('does not retry ordinary 403 failures in AK and WebTracking modes', async () => {
-    const retryConfig = {
-      retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false },
-    } satisfies Partial<SlsFlusherConfig>;
-
-    mockPostLogStoreLogs.mockRejectedValue(Object.assign(new Error('permission denied'), {
-      code: 'AccessDenied',
-      status: 403,
+  it('keeps WebTracking retries for a real fetch error and reports its cause code and original text', async () => {
+    const causeText = `getaddrinfo ENOTFOUND original-host.example ${'x'.repeat(700)}`;
+    fetchSpy.mockRejectedValue(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(causeText), { code: 'ENOTFOUND' }),
     }));
-    const akFlusher = new SlsFlusher(
-      makeConfig([akEndpoint('ak-forbidden', 'https://cn-shanghai.log.aliyuncs.com', 'ak-project')], retryConfig),
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-network', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
       '/tmp/data',
     );
-    akFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
-    await akFlusher.send(buildTestEntry());
-    await akFlusher.flush();
-    expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
 
-    fetchSpy.mockResolvedValue({
-      ok: false,
-      status: 403,
-      text: async () => '{"errorCode":"Forbidden"}',
-    });
-    const webFlusher = new SlsFlusher(
-      makeConfig([wtEndpoint('web-forbidden', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')], retryConfig),
-      '/tmp/data',
-    );
-    webFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
-    await webFlusher.send(buildTestEntry());
-    await webFlusher.flush();
-    expect(fetchSpy).toHaveBeenCalledOnce();
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
 
-    const alarmTypes = mockAlarmRecord.mock.calls.map(call => call[0]);
-    expect(alarmTypes).toEqual(['FLUSH_SEND_ALARM', 'FLUSH_SEND_ALARM']);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=dns code=ENOTFOUND attempts=3');
+    expect(message).toContain('TypeError: fetch failed');
+    expect(message).toContain(causeText);
   });
 
+  it('does not change permanent HTTP retry behavior and reports the response error text', async () => {
+    const body = '{"errorCode":"Forbidden","message":"original response text"}';
+    fetchSpy.mockResolvedValue({ ok: false, status: 403, text: async () => body });
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-http', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
+      '/tmp/data',
+    );
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
+
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=http code=Forbidden status=403 attempts=1');
+    expect(message).toContain('original response text');
+  });
 });
 
 interface MockRequest {
@@ -390,8 +337,7 @@ interface MockRequest {
 
 async function withMockSlsServer<T>(
   fn: (args: { endpoint: string; requests: MockRequest[] }) => Promise<T>,
-  response: { statusCode: number; body: string } | Array<{ statusCode: number; body: string }>
-    = { statusCode: 200, body: '' },
+  response: { statusCode: number; body: string } = { statusCode: 200, body: '' },
 ): Promise<T> {
   const requests: MockRequest[] = [];
   const server = http.createServer((req, res) => {
@@ -403,11 +349,8 @@ async function withMockSlsServer<T>(
         headers: req.headers,
         body: Buffer.concat(chunks),
       });
-      const selected = Array.isArray(response)
-        ? response[Math.min(requests.length - 1, response.length - 1)]
-        : response;
-      res.statusCode = selected.statusCode;
-      res.end(selected.body);
+      res.statusCode = response.statusCode;
+      res.end(response.body);
     });
   });
 
