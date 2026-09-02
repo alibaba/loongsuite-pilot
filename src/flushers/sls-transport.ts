@@ -91,6 +91,7 @@ export function splitForWebtracking(
 }
 
 export function isRetryable(err: unknown): boolean {
+  if (err instanceof HttpError) return RETRYABLE_STATUS_CODES.has(err.status);
   return classifySlsSendError(err).retryable;
 }
 
