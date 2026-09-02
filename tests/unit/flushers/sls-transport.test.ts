@@ -106,6 +106,7 @@ describe('classifySlsSendError', () => {
         category: 'http',
         code: 'ShardWriteQuotaExceed',
         httpStatus: 403,
+        detail: '',
       });
     }
 
@@ -125,6 +126,7 @@ describe('classifySlsSendError', () => {
       category: 'http',
       code: 'ShardWriteQuotaExceed',
       httpStatus: 403,
+      detail: '',
     });
     expect(classifySlsSendError({ errorCode: 'ShardWriteQuotaExceed', status: '403' })).toMatchObject({
       retryable: false,
@@ -153,6 +155,7 @@ describe('classifySlsSendError', () => {
       category: 'quota',
       code: 'HTTP_429',
       httpStatus: 429,
+      detail: '',
     });
   });
 
@@ -186,6 +189,7 @@ describe('classifySlsSendError', () => {
       category: 'http',
       code: 'Forbidden',
       httpStatus: 403,
+      detail: '',
     });
   });
 
@@ -218,18 +222,30 @@ describe('classifySlsSendError', () => {
       category: 'unknown',
       code: 'UNKNOWN',
       httpStatus: 0,
+      detail: 'TypeError: fetch failed',
     });
   });
 
-  it('formats a fixed remote-safe message without raw error data', () => {
+  it('includes bounded network detail while redacting credential patterns', () => {
     const classification = classifySlsSendError(Object.assign(
       new Error('Authorization: Bearer secret and https://private.example'),
       { cause: Object.assign(new Error('certificate detail'), { code: 'ENOTFOUND' }) },
     ));
     const message = formatSlsSendFailureMessage('webtracking', classification, 3);
-    expect(message).toBe('SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3]');
+    expect(message).toBe(
+      'SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3]'
+      + ' detail="Error: Authorization: [REDACTED] and https://private.example <- Error: certificate detail"',
+    );
     expect(message).not.toContain('secret');
-    expect(message).not.toContain('private.example');
-    expect(message).not.toContain('certificate detail');
+    expect(message).toContain('private.example');
+    expect(message).toContain('certificate detail');
+  });
+
+  it('bounds and flattens network detail to 512 UTF-8 bytes', () => {
+    const classification = classifySlsSendError(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(`line one\n${'测'.repeat(400)}`), { code: 'ECONNRESET' }),
+    }));
+    expect(Buffer.byteLength(classification.detail, 'utf8')).toBeLessThanOrEqual(512);
+    expect(classification.detail).not.toContain('\n');
   });
 });

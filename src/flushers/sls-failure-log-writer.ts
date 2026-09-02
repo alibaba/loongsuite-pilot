@@ -3,7 +3,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
-import { classifySlsSendError } from './sls-error-classifier.js';
+import {
+  classifySlsSendError,
+  redactSensitiveErrorText,
+} from './sls-error-classifier.js';
 
 const logger = createLogger('SlsFailureLogWriter');
 
@@ -249,7 +252,7 @@ export function buildSlsFailureLogRecord(
     error_type: boundedString(errorObject.type, 128),
     error_code: boundedString(errorObject.code, 128),
     http_status: errorObject.httpStatus,
-    error_summary: truncateUtf8(redactErrorSummary(errorObject.summary), SLS_FAILURE_ERROR_SUMMARY_MAX_BYTES),
+    error_summary: truncateUtf8(redactSensitiveErrorText(errorObject.summary), SLS_FAILURE_ERROR_SUMMARY_MAX_BYTES),
     batch_count: boundedNonNegativeInteger(input.batchCount),
     batch_bytes: boundedNonNegativeInteger(input.batchBytes),
   };
@@ -293,17 +296,6 @@ function asErrorObject(error: unknown): {
     httpStatus: classification.httpStatus,
     summary,
   };
-}
-
-function redactErrorSummary(value: string): string {
-  return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\bLTAI[A-Za-z0-9]{12,}\b/g, '[REDACTED_ACCESS_KEY]')
-    .replace(
-      /((?:access[_-]?key(?:[_-]?(?:id|secret))?|api[_-]?key|authorization)\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
-      '$1[REDACTED]',
-    )
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@');
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

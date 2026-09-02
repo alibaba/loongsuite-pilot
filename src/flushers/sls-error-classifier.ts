@@ -3,6 +3,7 @@ export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_CAUSE_DEPTH = 5;
 const MAX_CODE_LENGTH = 128;
 const MAX_STRUCTURED_BODY_LENGTH = 16 * 1024;
+const MAX_DETAIL_BYTES = 512;
 const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 
 const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN']);
@@ -50,6 +51,7 @@ export interface SlsSendErrorClassification {
   category: SlsSendErrorCategory;
   code: string;
   httpStatus: number;
+  detail: string;
 }
 
 export class HttpError extends Error {
@@ -71,6 +73,7 @@ interface ExtractedEvidence {
   httpStatus: number;
   name: string;
   message: string;
+  detail: string;
 }
 
 /** Classify an SLS send failure without exposing untrusted error text. */
@@ -83,6 +86,7 @@ export function classifySlsSendError(error: unknown): SlsSendErrorClassification
       category: 'quota',
       code: evidence.code || 'HTTP_429',
       httpStatus: 429,
+      detail: '',
     };
   }
 
@@ -100,6 +104,7 @@ export function classifySlsSendError(error: unknown): SlsSendErrorClassification
     category,
     code: code || (evidence.httpStatus ? `HTTP_${evidence.httpStatus}` : 'UNKNOWN'),
     httpStatus: evidence.httpStatus,
+    detail: evidence.detail,
   };
 }
 
@@ -115,7 +120,10 @@ export function formatSlsSendFailureMessage(
   const status = classification.httpStatus > 0
     ? ` status=${classification.httpStatus}`
     : '';
-  return `SLS ${safeTransport} send failed [category=${classification.category} code=${classification.code}${status} attempts=${safeAttempts}]`;
+  const detail = classification.detail
+    ? ` detail=${JSON.stringify(classification.detail)}`
+    : '';
+  return `SLS ${safeTransport} send failed [category=${classification.category} code=${classification.code}${status} attempts=${safeAttempts}]${detail}`;
 }
 
 function extractEvidence(error: unknown): ExtractedEvidence {
@@ -123,6 +131,7 @@ function extractEvidence(error: unknown): ExtractedEvidence {
   let httpStatus = 0;
   let name = '';
   let message = '';
+  const detailParts: string[] = [];
   let current: unknown = error;
   const visited = new Set<object>();
 
@@ -131,8 +140,14 @@ function extractEvidence(error: unknown): ExtractedEvidence {
     visited.add(current);
     const value = current as Record<string, unknown>;
     try {
-      if (!name && typeof value.name === 'string') name = value.name;
-      if (!message && typeof value.message === 'string') message = value.message;
+      const currentName = typeof value.name === 'string' ? value.name : '';
+      const currentMessage = typeof value.message === 'string' ? value.message : '';
+      if (!name && currentName) name = currentName;
+      if (!message && currentMessage) message = currentMessage;
+      if (currentMessage) {
+        const part = currentName ? `${currentName}: ${currentMessage}` : currentMessage;
+        if (detailParts.at(-1) !== part) detailParts.push(part);
+      }
       if (!httpStatus) {
         httpStatus = normalizeHttpStatus(value.status) || normalizeHttpStatus(value.statusCode);
       }
@@ -150,7 +165,13 @@ function extractEvidence(error: unknown): ExtractedEvidence {
   }
 
   if (!message) message = safeErrorString(error);
-  return { code, httpStatus, name, message };
+  const fallbackDetail = detailParts.length === 0 && (error instanceof Error || typeof error === 'string')
+    ? safeErrorString(error)
+    : '';
+  const detail = httpStatus === 0
+    ? normalizeErrorDetail(detailParts.join(' <- ') || fallbackDetail)
+    : '';
+  return { code, httpStatus, name, message, detail };
 }
 
 function structuredCodeFromBody(body: string): string {
@@ -185,6 +206,39 @@ function safeErrorString(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+export function redactSensitiveErrorText(value: string): string {
+  return value
+    .replace(
+      /(\bauthorization\s*["']?\s*[:=]\s*["']?)(?:Bearer|Basic)\s+[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /(\bauthorization\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/\bLTAI[A-Za-z0-9]{12,}\b/g, '[REDACTED_ACCESS_KEY]')
+    .replace(
+      /((?:access[_-]?key(?:[_-]?(?:id|secret))?|api[_-]?key)\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@');
+}
+
+function normalizeErrorDetail(value: string): string {
+  const oneLine = redactSensitiveErrorText(value)
+    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return truncateUtf8(oneLine, MAX_DETAIL_BYTES);
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  return bytes.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/u, '');
 }
 
 function categoryForCode(code: string, httpStatus: number, name: string): SlsSendErrorCategory {

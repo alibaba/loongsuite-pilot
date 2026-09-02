@@ -157,7 +157,7 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 这一改动不调整重试策略。HTTP 403 仍按永久失败处理，包括结构化的 `ShardWriteQuotaExceed` 响应；原有可重试状态码和网络异常继续使用当前的有限次数与退避策略。
 
-最终失败继续使用现有告警类型。告警消息只包含归一化分类、安全错误码或 HTTP 状态，以及实际尝试次数，例如 `SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3]` 或 `SLS apiKey send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]`。远端告警不会带上原始响应体、URL、代理或证书详情、请求头、凭证和业务 payload。本地失败记录复用已有的 `error_code` 与 `http_status`，并可从有深度限制的 `Error.cause.code` 中提取错误码；这一期不新增远端字段或索引。
+最终失败继续使用现有告警类型。告警消息包含归一化分类、安全错误码或 HTTP 状态，以及实际尝试次数。网络失败还会带上外层错误和有深度限制的 `cause` 原始消息，例如 `SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3] detail="TypeError: fetch failed <- Error: getaddrinfo ENOTFOUND private.example"`。详情会压成单行、限制为 512 个 UTF-8 字节，并过滤常见凭证格式。HTTP 响应正文、请求头、凭证和业务 payload 不会进入远端告警。本地失败记录继续复用已有的 `error_code` 与 `http_status`；这一期不新增远端字段或索引。
 
 调试 SLS 前，可以先通过本地 JSONL 确认采集本身是否正常：
 
