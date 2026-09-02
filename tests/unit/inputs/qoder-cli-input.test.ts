@@ -89,6 +89,9 @@ describe('QoderCliInput', () => {
       'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
       'agent.source': 'qoder-transcript-hook',
       'agent.qoder.cwd': '/workspace/qoder-project',
+      'multica.issue.id': 'AGE-992',
+      'multica.user.id': 'staff-1',
+      'multica.api_token': 'blocked',
     }]);
 
     expect(entries).toHaveLength(1);
@@ -103,7 +106,10 @@ describe('QoderCliInput', () => {
       'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello' }] }],
       'agent.source': 'qoder-transcript-hook',
       'workspace.path': '/workspace/qoder-project',
+      'multica.issue.id': 'AGE-992',
+      'multica.user.id': 'staff-1',
     });
+    expect(entries[0]).not.toHaveProperty('multica.api_token');
   });
 
   it('maps IDE user rows to qoder llm.request entries', async () => {
