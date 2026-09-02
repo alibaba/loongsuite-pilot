@@ -1,8 +1,22 @@
 # LoongSuite Pilot
 
-[English](README.md) | 简体中文
+![LoongSuite](docs/_assets/img/loongsuite-logo.png)
 
-[快速开始](#快速开始) | [文档](#文档) | [新 Agent 接入](docs/zh-CN/agent-onboarding.md) | [许可证](#许可证)
+**面向 AI Coding Agent 的本地遥测采集器**
+
+[![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
+[![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.x-4F62AD)](https://opentelemetry.io/)
+
+[English](README.md) | **简体中文**
+
+[概览](#概览) | [快速开始](#快速开始) | [文档](#文档) | [社区](#社区) | [参与贡献](#参与贡献)
+
+---
+
+## 概览
 
 LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采集器。它可以发现本机已安装的支持 Agent，部署所需的 Hook 或插件，将不同 Agent 的活动数据归一化为统一的 GenAI 事件 Schema，并输出到本地日志、SLS、HTTP 或 Trace 后端。
 
@@ -11,8 +25,6 @@ LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采�
   <br>
   <em>内置本地 Dashboard —— 一眼查看多 Agent Token、会话、请求、工具调用、模型、服务商和仓库活动。</em>
 </p>
-
-## 为什么需要 LoongSuite Pilot？
 
 团队里常常会同时使用多个 AI Coding Agent，而每个 Agent 的本地数据格式、Hook 机制和日志结构都不一样。Pilot 提供一个统一的本机采集器，负责发现 Agent、采集活动、统一字段，并把数据送到适合分析、审计和可观测性的目标端。
 
@@ -24,7 +36,7 @@ Pilot 主要帮助回答这些问题：
 - 数据应该输出到哪里：本地文件、SLS、HTTP，还是 Trace？
 - 敏感 Prompt、工具参数和密钥在上报前如何控制？
 
-## 核心能力
+## 核心亮点
 
 | 能力 | Pilot 做什么 |
 |------|-------------|
@@ -214,7 +226,7 @@ loongsuite-pilot menubar start
 
 [开发者指南](docs/zh-CN/agent-onboarding.md) - 为新的 AI Coding Agent 增加采集支持
 
-## 从源码构建
+## 开发
 
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
@@ -236,6 +248,19 @@ npm test
 
 如需从本地构建包安装为后台服务，请参考 [安装指南](docs/zh-CN/installation.md)。
 
+## 参与贡献
+
+欢迎提交 Issue 和 Pull Request。提交变更前，请运行与 CI 一致的核心检查：
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+如需增加新的 AI Coding Agent 支持，请先阅读[新 Agent 接入指南](docs/zh-CN/agent-onboarding.md)。Bug 和功能建议可通过 [GitHub Issues](https://github.com/alibaba/loongsuite-pilot/issues) 提交。
+
 ## 社区
 
 欢迎反馈和建议，扫描下方二维码加入 LoongSuite Pilot 钉钉交流群。
@@ -244,13 +269,16 @@ npm test
 |----|
 | <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
 
-### 相关项目
+## LoongSuite 生态
 
-- [LoongCollector](https://github.com/alibaba/loongcollector) - 通用节点 Agent，提供日志采集、Prometheus 指标采集和基于 eBPF 的网络/安全采集
-- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - 面向 JS 系 AI Coding Agent 的 OpenTelemetry 可观测插件
-- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Python 应用进程 Agent
-- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Golang 编译期注入进程 Agent
-- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - Java GenAI 遥测工具库
+| 项目 | 定位 |
+| ---- | ---- |
+| [LoongCollector](https://github.com/alibaba/loongcollector) | 面向日志、指标、Trace、事件和 Profile 的高性能采集器。 |
+| [LoongSuite Java](https://github.com/alibaba/loongsuite-java) | 面向 Java instrumentation 的共享 GenAI 遥测工具库。 |
+| [LoongSuite Go](https://github.com/alibaba/loongsuite-go) | 面向 Go 应用的编译期自动埋点。 |
+| [LoongSuite Python](https://github.com/alibaba/loongsuite-python) | 面向 Python 和 GenAI 应用的 OpenTelemetry 自动埋点。 |
+| [LoongSuite JS](https://github.com/alibaba/loongsuite-js) | 面向 JavaScript AI Agent 的 OpenTelemetry 集成。 |
+| [LoongSuite Pilot](https://github.com/alibaba/loongsuite-pilot) | 面向 AI Coding Agent 的本地遥测采集器。 |
 
 ## 许可证
 
