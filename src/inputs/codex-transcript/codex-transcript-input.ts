@@ -8,6 +8,7 @@ import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../
 import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import {
   buildCodexTranscriptSegment,
   nextInputMessagesForStep,
@@ -300,6 +301,7 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   private async processFile(filePath: string): Promise<number> {
+    const runtime = this.getInputRuntimeAccumulator();
     let stat;
     try {
       stat = await fs.stat(filePath);
@@ -368,9 +370,14 @@ export class CodexTranscriptInput extends BaseInput {
         return 0;
       }
     }
+    runtime?.observeBacklog(Math.max(0, stat.size - checkpoint.scanOffset));
 
     if (checkpoint.ownerSessionMetaOffset === null) {
-      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(filePath, stat.size);
+      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
+        filePath,
+        stat.size,
+        runtime,
+      );
       checkpointChanged = true;
     }
     await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
@@ -501,20 +508,39 @@ export class CodexTranscriptInput extends BaseInput {
         terminalEndOffset = line.endOffset;
         return false;
       };
-      let scan = await scanJsonLines(filePath, scanStartOffset, scanEndOffset, processScannedLine);
+      let scan = await scanJsonLines(
+        filePath,
+        scanStartOffset,
+        scanEndOffset,
+        processScannedLine,
+        runtime,
+      );
 
       // A single JSONL record may exceed the byte budget. Read far enough to
       // consume one complete line so this file can make forward progress.
       if (scan.nextOffset === scanStartOffset && scanEndOffset < stat.size) {
-        scan = await scanJsonLines(filePath, scanStartOffset, stat.size, line => {
-          processScannedLine(line);
-          return false;
-        });
+        scan = await scanJsonLines(
+          filePath,
+          scanStartOffset,
+          stat.size,
+          line => {
+            processScannedLine(line);
+            return false;
+          },
+          runtime,
+        );
       }
       if (scan.nextOffset === scanStartOffset) break;
       checkpointChanged = true;
 
       const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
+      runtime?.observeCommittedBatch({
+        bytes: nextScanOffset - scanStartOffset,
+        records: scan.records,
+        parseSuccessRecords: scan.parseSuccessRecords,
+        parseFailedRecords: scan.parseFailedRecords,
+        maxRecordBytes: scan.maxRecordBytes,
+      });
       scannedBytes += nextScanOffset - scanStartOffset;
       let blocked = false;
 
@@ -719,10 +745,16 @@ export class CodexTranscriptInput extends BaseInput {
         diagnostics: emptySegmentRecoveryDiagnostics(),
       };
     }
-    const records = await readJsonLines(filePath, activeTurn.startOffset, endOffset);
+    const runtime = this.getInputRuntimeAccumulator();
+    const records = await readJsonLines(
+      filePath,
+      activeTurn.startOffset,
+      endOffset,
+      runtime,
+    );
     const metaRecord = checkpoint.ownerSessionMetaOffset === null
       ? null
-      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset);
+      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
     const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
@@ -880,7 +912,12 @@ export class CodexTranscriptInput extends BaseInput {
     const range = context.deltaRange;
     if (!range) return context;
 
-    const records = await readJsonLines(filePath, range.startOffset, range.endOffset);
+    const records = await readJsonLines(
+      filePath,
+      range.startOffset,
+      range.endOffset,
+      this.getInputRuntimeAccumulator(),
+    );
     const previous = extractCodexPartialTurn(
       records.items.map(item => item.record),
       meta,
@@ -907,7 +944,11 @@ export class CodexTranscriptInput extends BaseInput {
     if (ownerSessionMetaOffset === null) return;
     const threadId = sessionIdFromTranscriptPath(filePath);
     if (this.subagentLinker.hasThread(threadId)) return;
-    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset);
+    const record = await readJsonLineAt(
+      filePath,
+      ownerSessionMetaOffset,
+      this.getInputRuntimeAccumulator(),
+    );
     const meta = record ? extractCodexTranscriptMeta(record) : null;
     if (meta) {
       this.transcriptMetaByPath.set(filePath, meta);
@@ -928,10 +969,22 @@ export class CodexTranscriptInput extends BaseInput {
       }
       const checkpoint = this.readCheckpoint(this.stateKey(filePath));
       const ownerOffset = checkpoint?.inode === stat.ino
-        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(filePath, stat.size)
-        : await findOwnerSessionMetaOffset(filePath, stat.size);
+        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(
+            filePath,
+            stat.size,
+            this.getInputRuntimeAccumulator(),
+          )
+        : await findOwnerSessionMetaOffset(
+            filePath,
+            stat.size,
+            this.getInputRuntimeAccumulator(),
+          );
       if (ownerOffset === null) continue;
-      const record = await readJsonLineAt(filePath, ownerOffset);
+      const record = await readJsonLineAt(
+        filePath,
+        ownerOffset,
+        this.getInputRuntimeAccumulator(),
+      );
       const meta = record ? extractCodexTranscriptMeta(record) : null;
       if (!meta) continue;
       this.transcriptMetaByPath.set(filePath, meta);
@@ -1564,6 +1617,7 @@ export class CodexTranscriptInput extends BaseInput {
       bootstrap.recoveryTurnId,
       bootstrap.searchOffset,
       fileSize,
+      this.getInputRuntimeAccumulator(),
     );
     if (located.startOffset === null) {
       checkpoint.forkBootstrap = {
@@ -1643,8 +1697,13 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return;
     }
-    const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size);
-    const ownerSessionMetaOffset = await findOwnerSessionMetaOffset(filePath, scanOffset);
+    const runtime = this.getInputRuntimeAccumulator();
+    const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size, runtime);
+    const ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
+      filePath,
+      scanOffset,
+      runtime,
+    );
     this.saveCheckpoint(key, {
       inode: stat.ino,
       scanOffset,
@@ -1692,12 +1751,19 @@ export class CodexTranscriptInput extends BaseInput {
       if (terminalTurnIdFor(line.record, payload) === candidate?.turnId) candidate = null;
     };
 
-    let scan = await scanJsonLines(filePath, searchOffset, scanEnd, processLine);
+    const runtime = this.getInputRuntimeAccumulator();
+    let scan = await scanJsonLines(filePath, searchOffset, scanEnd, processLine, runtime);
     if (scan.nextOffset === searchOffset && scanEnd < baselineEnd) {
-      scan = await scanJsonLines(filePath, searchOffset, baselineEnd, line => {
-        processLine(line);
-        return false;
-      });
+      scan = await scanJsonLines(
+        filePath,
+        searchOffset,
+        baselineEnd,
+        line => {
+          processLine(line);
+          return false;
+        },
+        runtime,
+      );
     }
 
     if (scan.nextOffset < baselineEnd) {
@@ -1749,7 +1815,7 @@ export class CodexTranscriptInput extends BaseInput {
       if (terminalTurnId === activeTurn?.turnId) {
         activeTurn = null;
       }
-    });
+    }, this.getInputRuntimeAccumulator());
     const baselineActiveTurn = activeTurn as CodexActiveTranscriptTurn | null;
     if (baselineActiveTurn) baselineActiveTurn.startOffset = nextOffset;
     this.saveCheckpoint(key, {
@@ -2207,7 +2273,12 @@ async function canonicalDirectoryPath(directoryPath: string): Promise<string> {
   }
 }
 
-async function readJsonLines(filePath: string, startOffset: number, endOffset: number): Promise<{
+async function readJsonLines(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<{
   items: JsonLine[];
   nextOffset: number;
 }> {
@@ -2215,16 +2286,25 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
   const items: JsonLine[] = [];
   const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
     items.push(line);
-  });
+  }, runtime);
   return { items, nextOffset };
 }
 
-async function lastCompleteJsonlOffset(filePath: string, fileSize: number): Promise<number> {
+async function lastCompleteJsonlOffset(
+  filePath: string,
+  fileSize: number,
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<number> {
   if (fileSize <= 0) return 0;
   const handle = await fs.open(filePath, 'r');
   try {
     const lastByte = Buffer.alloc(1);
-    if ((await handle.read(lastByte, 0, 1, fileSize - 1)).bytesRead === 1 && lastByte[0] === 0x0a) {
+    const lastByteReadStartedAt = runtime?.now();
+    const lastByteRead = await handle.read(lastByte, 0, 1, fileSize - 1);
+    if (runtime && lastByteReadStartedAt !== undefined) {
+      runtime.observeRead(lastByteRead.bytesRead, 1, runtime.now() - lastByteReadStartedAt);
+    }
+    if (lastByteRead.bytesRead === 1 && lastByte[0] === 0x0a) {
       return fileSize;
     }
     let position = fileSize;
@@ -2232,7 +2312,11 @@ async function lastCompleteJsonlOffset(filePath: string, fileSize: number): Prom
       const length = Math.min(READ_CHUNK_SIZE, position);
       position -= length;
       const chunk = Buffer.alloc(length);
+      const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(chunk, 0, length, position);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, length, runtime.now() - readStartedAt);
+      }
       if (bytesRead <= 0) break;
       const newline = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
       if (newline >= 0) return position + newline + 1;
@@ -2248,19 +2332,42 @@ async function scanJsonLines(
   startOffset: number,
   endOffset: number,
   onLine: (line: JsonLine) => void | false | Promise<void | false>,
-): Promise<{ nextOffset: number }> {
-  if (endOffset <= startOffset) return { nextOffset: startOffset };
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<{
+  nextOffset: number;
+  records: number;
+  parseSuccessRecords: number;
+  parseFailedRecords: number;
+  maxRecordBytes: number;
+}> {
+  if (endOffset <= startOffset) {
+    return {
+      nextOffset: startOffset,
+      records: 0,
+      parseSuccessRecords: 0,
+      parseFailedRecords: 0,
+      maxRecordBytes: 0,
+    };
+  }
   const handle = await fs.open(filePath, 'r');
   try {
     let nextOffset = startOffset;
     let position = startOffset;
     let pending = Buffer.alloc(0);
     let pendingStartOffset = startOffset;
+    let records = 0;
+    let parseSuccessRecords = 0;
+    let parseFailedRecords = 0;
+    let maxRecordBytes = 0;
 
     while (position < endOffset) {
       const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
       const chunk = Buffer.alloc(length);
+      const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(chunk, 0, length, position);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, length, runtime.now() - readStartedAt);
+      }
       if (bytesRead <= 0) break;
       position += bytesRead;
 
@@ -2274,21 +2381,33 @@ async function scanJsonLines(
         if (newline < 0) break;
         const text = data.subarray(cursor, newline).toString('utf8').trim();
         if (text) {
+          records++;
+          maxRecordBytes = Math.max(maxRecordBytes, newline - cursor + 1);
           try {
-            const record = JSON.parse(text);
+            const record: unknown = JSON.parse(text);
             if (record && typeof record === 'object' && !Array.isArray(record)) {
+              parseSuccessRecords++;
               const keepGoing = await onLine({
                 startOffset: dataStartOffset + cursor,
                 endOffset: dataStartOffset + newline + 1,
-                record,
+                record: record as Record<string, unknown>,
               });
               if (keepGoing === false) {
                 nextOffset = dataStartOffset + newline + 1;
-                return { nextOffset };
+                return {
+                  nextOffset,
+                  records,
+                  parseSuccessRecords,
+                  parseFailedRecords,
+                  maxRecordBytes,
+                };
               }
+            } else {
+              parseFailedRecords++;
             }
           } catch {
             // Invalid completed lines are ignored but their bytes are consumed.
+            parseFailedRecords++;
           }
         }
         nextOffset = dataStartOffset + newline + 1;
@@ -2299,7 +2418,13 @@ async function scanJsonLines(
       pendingStartOffset = dataStartOffset + cursor;
     }
 
-    return { nextOffset };
+    return {
+      nextOffset,
+      records,
+      parseSuccessRecords,
+      parseFailedRecords,
+      maxRecordBytes,
+    };
   } finally {
     await handle.close();
   }
@@ -2308,6 +2433,7 @@ async function scanJsonLines(
 async function findOwnerSessionMetaOffset(
   filePath: string,
   endOffset: number,
+  runtime?: InputRuntimeAccumulator | null,
 ): Promise<number | null> {
   let ownerOffset: number | null = null;
   let sawSessionMeta = false;
@@ -2320,7 +2446,7 @@ async function findOwnerSessionMetaOffset(
     sawSessionMeta = true;
     ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
     return undefined;
-  });
+  }, runtime);
   return ownerOffset;
 }
 
@@ -2334,6 +2460,7 @@ async function findTurnStartOffset(
   recoveryTurnId: string | undefined,
   startOffset: number,
   fileSize: number,
+  runtime?: InputRuntimeAccumulator | null,
 ): Promise<{
   startOffset: number | null;
   nextOffset: number;
@@ -2378,7 +2505,7 @@ async function findTurnStartOffset(
       return false;
     }
     return undefined;
-  });
+  }, runtime);
   return {
     startOffset: turnStartOffset,
     nextOffset,
@@ -2404,14 +2531,22 @@ function selectOwnerSessionMetaOffset(
   return currentOffset ?? line.startOffset;
 }
 
-async function readJsonLineAt(filePath: string, offset: number): Promise<Record<string, unknown> | null> {
+async function readJsonLineAt(
+  filePath: string,
+  offset: number,
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<Record<string, unknown> | null> {
   const handle = await fs.open(filePath, 'r');
   try {
     const chunks: Buffer[] = [];
     let position = offset;
     for (let attempt = 0; attempt < 16; attempt++) {
       const buffer = Buffer.alloc(64 * 1024);
+      const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buffer.length, runtime.now() - readStartedAt);
+      }
       if (bytesRead === 0) break;
       const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
       chunks.push(buffer.subarray(0, newline >= 0 ? newline : bytesRead));

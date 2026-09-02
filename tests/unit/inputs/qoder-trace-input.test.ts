@@ -1942,3 +1942,67 @@ describe('QoderTraceInput bootstrap history filtering', () => {
     }
   });
 });
+
+describe('QoderTraceInput runtime metrics', () => {
+  it('separates physical reads from complete unique records and preserves a half line', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-runtime-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const current = JSON.stringify(makeEntry({ 'event.id': 'current' }));
+      const later = JSON.stringify(makeEntry({
+        'event.id': 'later',
+        'gen_ai.turn.id': 'turn-2',
+      }));
+      const splitAt = Math.floor(later.length / 2);
+      const completePrefix = `not-json\n${current}\n`;
+      await fs.writeFile(logFile, completePrefix + later.slice(0, splitAt));
+
+      const stateStore = new MockStateStore();
+      stateStore.set('qoder-trace', {
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+      const deltas: any[] = [];
+      input.on('input-runtime-delta', delta => deltas.push(delta));
+
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0]).toMatchObject({
+        sourceKind: 'primary',
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completePrefix + later.slice(0, splitAt)),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(completePrefix),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+      expect(deltas[0].rawInMaxRecordBytes).toBe(Buffer.byteLength(`${current}\n`));
+      expect(stateStore.get('qoder-trace').lastOffset).toBe(Buffer.byteLength(completePrefix));
+
+      await fs.appendFile(logFile, `${later.slice(splitAt)}\n`);
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(2);
+      expect(deltas[1]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(`${later}\n`),
+        rawInRecords: 1,
+        rawInBytes: Buffer.byteLength(`${later}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 0,
+      });
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

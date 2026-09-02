@@ -44,7 +44,17 @@ function buildSnapshot(): DataflowSnapshot {
     inEventsTotal: 12,
     inBytesTotal: 2048,
     inputs: new Map([
-      ['test-input', { rawInRecords: 7, rawInBytes: 1536, rawInMaxBatchBytes: 1024, inEvents: 5, inBytes: 1024, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling', agent: 'test-agent', running: true }],
+      ['test-input', {
+        sourceKind: 'primary' as const,
+        rawReadCalls: 2, rawReadBytes: 2048,
+        rawInRecords: 7, rawInBytes: 1536,
+        rawInMaxBatchBytes: 1024, rawInMaxRecordBytes: 512, rawBacklogBytesMax: 1024,
+        parseSuccessRecords: 6, parseFailedRecords: 1,
+        readDurationMs: 4, processDurationMs: 8,
+        inEvents: 5, inBytes: 1024, outFailed: 0,
+        lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00',
+        type: 'polling', agent: 'test-agent', running: true,
+      }],
     ]),
     flushers: new Map([
       ['sls:main', { kind: 'sls' as const, project: 'proj-a', logstore: 'store-a', mode: 'sls', bytesBasis: 'measured' as const, inEntries: 10, inBytes: 2048, outEntries: 9, outBytes: 1900, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00' }],
@@ -161,14 +171,13 @@ describe('MetricsWriter', () => {
     // make a call count assertion race.
     await (writer as any).writeL2();
 
-    // Both row types share the pilot_pipeline topic and are told apart by
-    // `type`; the snapshot has one agent with traffic and one destination.
+    // All row types share pilot_pipeline and are distinguished by `type`.
     const rows = mockSendStatus.mock.calls
       .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
       .map((c: unknown[]) => c[1] as Record<string, string>);
-    expect(rows.map(r => r.type)).toEqual(['agent', 'flusher']);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher']);
 
-    const [agent, flusher] = rows;
+    const [agent, input, flusher] = rows;
     // Host identity ships with every flow row, so grouping by machine needs no
     // join back to pilot_status.
     expect(agent.hostname).toBe(os.hostname());
@@ -181,6 +190,10 @@ describe('MetricsWriter', () => {
     expect(agent.raw_in_bytes).toBe('1536');
     expect(agent.raw_in_max_batch_bytes).toBe('1024');
     expect(agent.in_events).toBe('5');
+    expect(input.input_name).toBe('test-input');
+    expect(input.source_kind).toBe('primary');
+    expect(input.raw_read_bytes).toBe('2048');
+    expect(input.parse_failed_records).toBe('1');
     expect(flusher.flusher).toBe('sls');
     expect(flusher.project).toBe('proj-a');
     expect(flusher.logstore).toBe('store-a');
@@ -203,16 +216,16 @@ describe('MetricsWriter', () => {
     const rows = mockSendStatus.mock.calls
       .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
       .map((c: unknown[]) => c[1] as Record<string, string>);
-    // Both still report, at zero: the input is running, so its agent has gone
-    // quiet rather than gone away, and the destination is still configured.
-    expect(rows.map(r => r.type)).toEqual(['agent', 'flusher']);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher']);
     expect(rows[0].raw_in_records).toBe('0');
     expect(rows[0].raw_in_bytes).toBe('0');
     expect(rows[0].raw_in_max_batch_bytes).toBe('1024');
     expect(rows[0].in_events).toBe('0');
     expect(rows[0].in_bytes).toBe('0');
-    expect(rows[1].out_entries).toBe('0');
-    expect(rows[1].out_bytes).toBe('0');
+    expect(rows[1].raw_read_bytes).toBe('0');
+    expect(rows[1].parse_failed_records).toBe('0');
+    expect(rows[2].out_entries).toBe('0');
+    expect(rows[2].out_bytes).toBe('0');
   });
 
   it('mirrors each L2 row type to its own file on stop (final flush)', async () => {
@@ -238,6 +251,11 @@ describe('MetricsWriter', () => {
     expect(agent.agent).toBe('test-agent');
     expect(agent.in_events).toBe('5');
 
+    const input = firstLine('pilot-input-metrics.jsonl');
+    expect(input.type).toBe('input');
+    expect(input.input_name).toBe('test-input');
+    expect(input.raw_read_calls).toBe('2');
+
     const flusher = firstLine('pilot-flusher-metrics.jsonl');
     expect(flusher.type).toBe('flusher');
     expect(flusher.flusher).toBe('sls');
@@ -245,8 +263,44 @@ describe('MetricsWriter', () => {
     expect(flusher.out_entries).toBe('9');
   });
 
+  it('takes a fresh final snapshot after an in-flight dataflow cycle', async () => {
+    const getSnapshot = vi.fn(buildSnapshot);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot,
+    });
+    vi.useRealTimers();
+
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const original = (writer as any).collectAndWriteDataflow.bind(writer);
+    let cycleCount = 0;
+    vi.spyOn(writer as any, 'collectAndWriteDataflow').mockImplementation(async () => {
+      cycleCount++;
+      if (cycleCount === 1) await firstBlocked;
+      await original();
+    });
+
+    const inFlight = (writer as any).writeDataflow() as Promise<void>;
+    const stopping = writer.stop();
+    await Promise.resolve();
+    expect(cycleCount).toBe(1);
+
+    releaseFirst();
+    await inFlight;
+    await stopping;
+
+    expect(cycleCount).toBe(2);
+    expect(getSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('does not write the L2 file when snapshot has no inputs/flushers', async () => {
     const emptySnapshot: DataflowSnapshot = {
+      rawInRecordsTotal: 0, rawInBytesTotal: 0, rawInMaxBatchBytes: 0,
       inEventsTotal: 0, inBytesTotal: 0,
       inputs: new Map(),
       flushers: new Map(),
@@ -266,6 +320,7 @@ describe('MetricsWriter', () => {
 
     const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
     expect(fs.existsSync(path.join(metricDir, 'pilot-agent-metrics.jsonl'))).toBe(false);
+    expect(fs.existsSync(path.join(metricDir, 'pilot-input-metrics.jsonl'))).toBe(false);
     expect(fs.existsSync(path.join(metricDir, 'pilot-flusher-metrics.jsonl'))).toBe(false);
   });
 

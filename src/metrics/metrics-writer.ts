@@ -13,8 +13,7 @@ import type { ProcessLiveness } from '../utils/pid-utils.js';
 
 const logger = createLogger('MetricsWriter');
 
-const L1_INTERVAL_MS = 600_000;
-const L2_INTERVAL_MS = 600_000;
+const DATAFLOW_INTERVAL_MS = 600_000;
 const ALARM_FLUSH_INTERVAL_MS = 30_000;
 const CPU_THRESHOLD_PERCENT = 80;
 const CPU_ALARM_CONSECUTIVE_SAMPLES = 3;
@@ -56,8 +55,8 @@ export class MetricsWriter {
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
-  private l1Timer: ReturnType<typeof setInterval> | null = null;
-  private l2Timer: ReturnType<typeof setInterval> | null = null;
+  private dataflowWritePromise: Promise<void> | null = null;
+  private dataflowTimer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
   private userIdAlarmEmitted = false;
   private startupAlarmEmitted = false;
@@ -96,46 +95,58 @@ export class MetricsWriter {
     await ensureDir(this.logsDir);
     this.diskUsageSampler.start();
 
-    this.l1Timer = setInterval(() => void this.writeL1(), L1_INTERVAL_MS);
-    this.l1Timer.unref();
-    this.l2Timer = setInterval(() => void this.writeL2(), L2_INTERVAL_MS);
-    this.l2Timer.unref();
+    this.dataflowTimer = setInterval(
+      () => void this.writeDataflow(),
+      DATAFLOW_INTERVAL_MS,
+    );
+    this.dataflowTimer.unref();
 
     if (this.alarmManager) {
       this.alarmTimer = setInterval(() => void this.writeAlarms(), ALARM_FLUSH_INTERVAL_MS);
       this.alarmTimer.unref();
     }
 
-    await this.writeL1();
-    // Prime L2 too: without it a run shorter than L2_INTERVAL_MS reports a healthy
-    // heartbeat and no pipeline data at all.
-    void this.writeL2();
+    await this.writeDataflow();
     logger.info('metrics-writer started');
   }
 
   async stop(): Promise<void> {
     this.diskUsageSampler.stop();
-    if (this.l1Timer) {
-      clearInterval(this.l1Timer);
-      this.l1Timer = null;
-    }
-    if (this.l2Timer) {
-      clearInterval(this.l2Timer);
-      this.l2Timer = null;
+    if (this.dataflowTimer) {
+      clearInterval(this.dataflowTimer);
+      this.dataflowTimer = null;
     }
     if (this.alarmTimer) {
       clearInterval(this.alarmTimer);
       this.alarmTimer = null;
     }
-    await this.writeL1();
-    await this.writeL2();
+    // If a timer cycle is in flight, let it finish and then take a fresh final
+    // snapshot. Reusing only the in-flight promise could miss counters produced
+    // while that cycle was writing its rows.
+    if (this.dataflowWritePromise) await this.dataflowWritePromise;
+    await this.writeDataflow();
     await this.writeAlarms();
     logger.info('metrics-writer stopped');
   }
 
-  private async writeL1(): Promise<void> {
+  private writeDataflow(): Promise<void> {
+    if (this.dataflowWritePromise) return this.dataflowWritePromise;
+    this.dataflowWritePromise = this.collectAndWriteDataflow()
+      .finally(() => {
+        this.dataflowWritePromise = null;
+      });
+    return this.dataflowWritePromise;
+  }
+
+  private async collectAndWriteDataflow(): Promise<void> {
+    const snapshot = this.getSnapshot();
+    await this.writeL1(snapshot);
+    await this.writeL2(snapshot);
+  }
+
+  private async writeL1(sharedSnapshot?: DataflowSnapshot): Promise<void> {
     try {
-      const snapshot = this.getSnapshot();
+      const snapshot = sharedSnapshot ?? this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
       const disk = this.diskUsageSampler.getSnapshot();
       metrics.metric_json.disk_dir_status = disk.status;
@@ -399,32 +410,35 @@ export class MetricsWriter {
    * of rows — which is exactly what the priming write in start() would do
    * against the first timer tick or the final flush in stop().
    */
-  private writeL2(): Promise<void> {
+  private writeL2(sharedSnapshot?: DataflowSnapshot): Promise<void> {
     if (this.l2WritePromise) return this.l2WritePromise;
 
-    this.l2WritePromise = this.collectAndWriteL2()
+    this.l2WritePromise = this.collectAndWriteL2(sharedSnapshot)
       .finally(() => {
         this.l2WritePromise = null;
       });
     return this.l2WritePromise;
   }
 
-  private async collectAndWriteL2(): Promise<void> {
+  private async collectAndWriteL2(sharedSnapshot?: DataflowSnapshot): Promise<void> {
     try {
-      const snapshot = this.getSnapshot();
+      const snapshot = sharedSnapshot ?? this.getSnapshot();
 
-      // One cycle, two row types on the same topic: a row per agent that carried
-      // data, a row per write destination. They share one window and one drain, so
-      // they must ship together — telling them apart is what `type` is for.
+      // One cycle, three row types on the same topic. They share one snapshot
+      // and one drain, so input maxima and flow deltas describe the same window.
       const l2 = this.collector.collectL2(snapshot);
       if (l2) {
         // Same as L1: the collect drained the counters, so send first and let the
         // local mirror be the thing that can fail.
         for (const row of l2.agents) sendStatus('pilot_pipeline', flattenToStrings(row));
+        for (const row of l2.inputs) sendStatus('pilot_pipeline', flattenToStrings(row));
         for (const row of l2.flushers) sendStatus('pilot_pipeline', flattenToStrings(row));
 
         for (const row of l2.agents) {
           await appendLine(path.join(this.logsDir, 'pilot-agent-metrics.jsonl'), JSON.stringify(row));
+        }
+        for (const row of l2.inputs) {
+          await appendLine(path.join(this.logsDir, 'pilot-input-metrics.jsonl'), JSON.stringify(row));
         }
         for (const row of l2.flushers) {
           await appendLine(path.join(this.logsDir, 'pilot-flusher-metrics.jsonl'), JSON.stringify(row));

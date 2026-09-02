@@ -77,21 +77,28 @@ describe('BaseHookInput', () => {
     it('reports complete raw records and bytes even when no normalized entry survives', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
-      const payload = `not-json\n${JSON.stringify({ file_path: '/filtered.ts' })}\n`;
+      const validLine = JSON.stringify({ file_path: '/已过滤.ts' });
+      const payload = `not-json\n${validLine}\n`;
       await fs.writeFile(logFile, payload);
       input.transformFn = async () => null;
 
-      const rawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
-      input.on('raw-input-stats', stats => rawStats.push(stats));
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
 
       await input.start();
       await input.stop();
 
-      expect(rawStats).toEqual([{
-        records: 2,
-        bytes: Buffer.byteLength(payload),
-        maxBatchBytes: Buffer.byteLength(payload),
-      }]);
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        rawInMaxRecordBytes: Buffer.byteLength(`${validLine}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
     });
   });
 
@@ -134,18 +141,21 @@ describe('BaseHookInput', () => {
       await fs.writeFile(logFile, completeRecord.slice(0, splitAt));
 
       const firstEntries: AgentActivityEntry[] = [];
-      const firstRawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
+      const firstRuntimeDeltas: Array<Record<string, number>> = [];
       input.on('entries', (entries: AgentActivityEntry[]) => firstEntries.push(...entries));
-      input.on('raw-input-stats', stats => firstRawStats.push(stats));
+      input.on('input-runtime-delta', stats => firstRuntimeDeltas.push(stats));
       await input.start();
       await input.stop();
       expect(firstEntries).toHaveLength(0);
       expect(stateStore.get('test-hook').lastOffset).toBe(0);
-      expect(firstRawStats).toEqual([{
-        records: 0,
-        bytes: 0,
-        maxBatchBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
-      }]);
+      expect(firstRuntimeDeltas).toHaveLength(1);
+      expect(firstRuntimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+        rawInRecords: 0,
+        rawInBytes: 0,
+        rawInMaxBatchBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+      });
 
       await fs.appendFile(logFile, `${completeRecord.slice(splitAt)}\n`);
       const nextInput = new TestHookInput({

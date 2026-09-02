@@ -4,21 +4,13 @@ import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
+import {
+  InputRuntimeAccumulator,
+} from './input-runtime-metrics.js';
 
 export interface InputOptions {
   stateStore: StateStore;
   pollIntervalMs?: number;
-}
-
-/**
- * Raw source volume observed before parsing, filtering, deduplication, or
- * normalization. `bytes` is the checkpointed source payload, while
- * `maxBatchBytes` is the largest temporary read buffer used by this report.
- */
-export interface RawInputStats {
-  records: number;
-  bytes: number;
-  maxBatchBytes: number;
 }
 
 /**
@@ -45,6 +37,7 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private _running = false;
+  private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
   /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
   private readonly ownershipWarned = new Set<string>();
 
@@ -106,6 +99,9 @@ export abstract class BaseInput extends EventEmitter {
   }
 
   private async runCycleOnce(): Promise<void> {
+    const runtime = new InputRuntimeAccumulator();
+    this.activeRuntimeAccumulator = runtime;
+    const collectStartedAt = runtime.now();
     try {
       const entries = await this.collect();
       if (entries.length > 0) {
@@ -116,6 +112,10 @@ export abstract class BaseInput extends EventEmitter {
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
       this.emit('collect-error', err);
+    } finally {
+      const collectDurationMs = runtime.now() - collectStartedAt;
+      this.activeRuntimeAccumulator = null;
+      this.emit('input-runtime-delta', runtime.finish(collectDurationMs));
     }
   }
 
@@ -127,9 +127,9 @@ export abstract class BaseInput extends EventEmitter {
     this.stateStore.update(this.id, state);
   }
 
-  /** Report one raw-source read without coupling it to normalized entries. */
-  protected reportRawInput(stats: RawInputStats): void {
-    this.emit('raw-input-stats', stats);
+  /** Current collect cycle's scalar-only observer. */
+  protected getInputRuntimeAccumulator(): InputRuntimeAccumulator | null {
+    return this.activeRuntimeAccumulator;
   }
 
   /** Whether an error is a permission failure (EACCES/EPERM) on a path. */

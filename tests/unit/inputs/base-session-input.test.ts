@@ -93,17 +93,22 @@ describe('BaseSessionInput', () => {
       input.discoverFn = async () => [file];
       input.processLineFn = async () => null;
 
-      const rawStats: Array<{ records: number; bytes: number; maxBatchBytes: number }> = [];
-      input.on('raw-input-stats', stats => rawStats.push(stats));
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
 
       await input.start();
       await input.stop();
 
-      expect(rawStats).toEqual([{
-        records: 2,
-        bytes: Buffer.byteLength(payload),
-        maxBatchBytes: Buffer.byteLength(payload),
-      }]);
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
     });
 
     it('should pass filePath to processSessionLine', async () => {

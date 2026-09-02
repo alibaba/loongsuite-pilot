@@ -43,6 +43,7 @@ export abstract class BaseSessionInput extends BaseInput {
   }
 
   private async processFile(filePath: string): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const stateKey = `${this.id}:${filePath}`;
     let stat;
     try {
@@ -73,6 +74,7 @@ export abstract class BaseSessionInput extends BaseInput {
       this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     let handle: FileHandle;
     try {
@@ -92,35 +94,71 @@ export abstract class BaseSessionInput extends BaseInput {
     }
     try {
       const buf = Buffer.alloc(stat.size - offset);
+      const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
       const bytes = buf.subarray(0, bytesRead);
       const lastNewline = bytes.lastIndexOf(0x0a);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
       if (lastNewline < 0) {
-        this.reportRawInput({ records: 0, bytes: 0, maxBatchBytes: buf.length });
         return [];
       }
 
       const completeBytes = bytes.subarray(0, lastNewline + 1);
-      const text = completeBytes.toString('utf-8');
       this.stateStore.setOffset(stateKey, offset + completeBytes.length);
 
       const entries: AgentActivityEntry[] = [];
-      const lines = text.split('\n').filter(line => line.trim().length > 0);
-      this.reportRawInput({
-        records: lines.length,
-        bytes: completeBytes.length,
-        maxBatchBytes: buf.length,
-      });
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
+
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let parsed: Record<string, unknown>;
         try {
-          const parsed = JSON.parse(line) as Record<string, unknown>;
+          const value: unknown = JSON.parse(line);
+          if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            parseFailedRecords++;
+            continue;
+          }
+          parsed = value as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid session line', { file: filePath, error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.processSessionLine(parsed, filePath);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeBytes.length,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
       return entries;
     } finally {
       await handle.close();

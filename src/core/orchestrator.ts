@@ -443,7 +443,6 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.pipelineManager?.stop();
-    await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
       logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
     });
@@ -462,6 +461,9 @@ export class Orchestrator extends EventEmitter {
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // The final dataflow window must observe the last serialized collect and
+    // entry queue drain, while the flusher counters are still available.
+    await this.metricsWriter?.stop();
     await this.flusher?.shutdown();
     await this.stateStore?.save();
 
@@ -1682,7 +1684,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {
-    const inputCounters = this.inputManager.getInputCounters();
+    const inputCounters = this.inputManager.takeInputCounterSnapshot();
     const activeIds = this.inputManager.getActiveInputIds();
 
     // Ingress only. The instance's egress is measured where the writes actually
