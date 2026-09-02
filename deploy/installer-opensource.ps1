@@ -384,12 +384,21 @@ function Get-PilotAsciiTempRoot {
     if ($env:TEMP) { $root = $env:TEMP }
     elseif ($env:TMP) { $root = $env:TMP }
     elseif ($env:SystemRoot) { $root = (Join-Path $env:SystemRoot "Temp") }
-    if ($root -notmatch '[^\x20-\x7E]') {
-        # 8.3 TEMP (ZHANG~1.WAN) is ASCII, so this branch used to return it as-is
-        # and skip the long-name expand that Remove-Item / Move-Item need.
-        $root = Get-PilotLongPath $root
-        $script:PILOT_ASCII_TEMP_ROOT = $root
-        return $root
+    # 8.3 TEMP (ZHANG~1.WAN) is ASCII, so a charset check on $root used to
+    # return it as-is and skip the long-name expand that Remove-Item /
+    # Move-Item need. Expanding is still required -- but only keep the
+    # expanded form when it is still ASCII. A CJK profile (short base +
+    # over-long extension) hands out an ASCII 8.3 TEMP that Get-PilotLongPath
+    # turns back into the long CJK path; tar.exe then fails with
+    # "Failed to open 'C:\Users\??.HOST\...'". In that case keep $root as
+    # the 8.3 form, try the machine-wide ASCII candidates below, and if
+    # none of those are writable return the 8.3 so tar still has a path
+    # it can open. Remove-Item / Move-Item callers wrap Get-PilotLongPath
+    # themselves.
+    $expanded = Get-PilotLongPath $root
+    if ($expanded -notmatch '[^\x20-\x7E]') {
+        $script:PILOT_ASCII_TEMP_ROOT = $expanded
+        return $expanded
     }
     $candidates = @()
     if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot "Temp") }
@@ -410,11 +419,15 @@ function Get-PilotAsciiTempRoot {
             return $candidate
         } catch {}
     }
-    # Nothing writable: keep the old behaviour rather than failing outright.
-    # Same $root as the ASCII early return, so the same 8.3 expand applies.
-    $root = Get-PilotLongPath $root
-    $script:PILOT_ASCII_TEMP_ROOT = $root
-    return $root
+    # Nothing writable: prefer the original ASCII 8.3 over the expanded CJK
+    # long name. If $root itself is already CJK there is no ASCII option
+    # left; return $expanded (same as $root) rather than failing here.
+    if ($root -notmatch '[^\x20-\x7E]') {
+        $script:PILOT_ASCII_TEMP_ROOT = $root
+        return $root
+    }
+    $script:PILOT_ASCII_TEMP_ROOT = $expanded
+    return $expanded
 }
 
 # Re-inherit the destination's ACL on a tree that was Move-Item'd out of the ASCII root.

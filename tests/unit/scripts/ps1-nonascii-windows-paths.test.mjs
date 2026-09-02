@@ -259,6 +259,7 @@ describe('non-ASCII Windows account names survive every .ps1 boundary', () => {
   it('the ASCII temp root is probed for writability and never used for secrets', () => {
     const variants = ['deploy/installer.ps1', 'deploy/installer-inner.ps1',
                       'deploy/installer-opensource.ps1'].filter(existsSync);
+    const withExpanded = [];
     for (const file of variants) {
       const block = blockOf(read(file), 'pilot-ascii-temp');
       expect(block, file).toBeTruthy();
@@ -271,10 +272,25 @@ describe('non-ASCII Windows account names survive every .ps1 boundary', () => {
       // Config payloads carry the SLS AccessKeySecret and the CMS license key, so they
       // keep going to $DataDir; this root can be C:\Windows\Temp.
       expect(read(file)).not.toMatch(/\$cfgTmp = Join-Path \(Get-PilotAsciiTempRoot\)/);
+      // Expanding an ASCII 8.3 TEMP is required for Remove-Item, but the long
+      // name has to be re-checked: a CJK profile's 8.3 is ASCII and
+      // Get-PilotLongPath turns it back into CJK, which tar.exe cannot open.
+      if (/\$expanded = Get-PilotLongPath \$root/.test(code)) {
+        withExpanded.push(file);
+        expect(code, file).toMatch(/\$expanded -notmatch/);
+      }
     }
-    if (variants.length > 0) {
-      // The block is shared verbatim, same reason as the identity helpers.
-      const blocks = variants.map(f => blockOf(read(f), 'pilot-ascii-temp'));
+    // Internal copies must have the CJK-safe expand. The public installer
+    // may lag until the GitHub PR lands and syncs back; on the GitHub tree
+    // it is the only variant, so it must have it.
+    for (const f of ['deploy/installer.ps1', 'deploy/installer-inner.ps1']) {
+      if (variants.includes(f)) expect(withExpanded, f).toContain(f);
+    }
+    if (!variants.includes('deploy/installer.ps1') && variants.includes('deploy/installer-opensource.ps1')) {
+      expect(withExpanded).toContain('deploy/installer-opensource.ps1');
+    }
+    if (withExpanded.length > 0) {
+      const blocks = withExpanded.map(f => blockOf(read(f), 'pilot-ascii-temp'));
       expect(new Set(blocks).size).toBe(1);
     }
   });
