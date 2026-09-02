@@ -1316,8 +1316,18 @@ function Cmd-Upgrade {
     }
     $installerFile = Join-Path $tempRoot ("loongsuite-pilot-installer-" + (Get-Random) + ".ps1")
 
+    $installerExit = 1
     try {
-        Invoke-WebRequest -Uri $OPEN_SOURCE_INSTALLER_URL -OutFile $installerFile -UseBasicParsing
+        # Windows PowerShell 5.1 may still default to TLS 1.0. Match the
+        # open-source installer's best-effort TLS 1.2 compatibility handling;
+        # the assignment can be blocked under Constrained Language Mode.
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        try {
+            Invoke-WebRequest -Uri $OPEN_SOURCE_INSTALLER_URL -OutFile $installerFile -UseBasicParsing
+        } catch {
+            Write-Host "Failed to download the open-source installer: $_" -ForegroundColor Red
+            exit 1
+        }
         $installerArgs = @(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
@@ -1332,7 +1342,17 @@ function Cmd-Upgrade {
         & powershell.exe @installerArgs
         $installerExit = $LASTEXITCODE
     } finally {
-        Remove-Item -LiteralPath $installerFile -Force -ErrorAction SilentlyContinue
+        # Cleanup must not replace the installer's real success/failure result.
+        # In particular, some 8.3-short %TEMP% paths make the FileSystem
+        # provider throw a terminating normalization error that SilentlyContinue
+        # cannot suppress.
+        try {
+            if (Test-Path -LiteralPath $installerFile -ErrorAction SilentlyContinue) {
+                Remove-Item -LiteralPath $installerFile -Force -ErrorAction Stop
+            }
+        } catch {
+            Write-Warning "Failed to remove temporary installer: $_"
+        }
     }
 
     if ($installerExit -ne 0) { exit $installerExit }

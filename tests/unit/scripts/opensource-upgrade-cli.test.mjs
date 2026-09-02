@@ -46,10 +46,11 @@ async function builtEdition(proprietary) {
   return result.stdout.trim();
 }
 
-function shellFixture(edition) {
+function shellFixture(edition, { customCache = false, customData = false } = {}) {
   const root = makeTemporaryRoot('pilot-upgrade-cli-');
   const profile = path.join(root, 'profile');
-  const cacheDir = path.join(profile, '.loongsuite-pilot');
+  const cacheDir = customCache ? path.join(root, 'custom-cache') : path.join(profile, '.loongsuite-pilot');
+  const dataDir = customData ? path.join(root, 'custom-data') : cacheDir;
   const versionDir = path.join(cacheDir, 'versions', 'test-version');
   const fakeBin = path.join(root, 'bin');
   const tempDir = path.join(root, 'tmp');
@@ -89,7 +90,7 @@ INSTALLER
   const env = {
     ...process.env,
     HOME: profile,
-    LOONGSUITE_PILOT_DATA_DIR: cacheDir,
+    LOONGSUITE_PILOT_DATA_DIR: dataDir,
     LOONGSUITE_PILOT_CACHE_DIR: cacheDir,
     PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     TMPDIR: tempDir,
@@ -100,6 +101,7 @@ INSTALLER
 
   return {
     curlArgs,
+    dataDir,
     installerArgs,
     run(...args) {
       return spawnSync('bash', [shellCli, ...args], {
@@ -214,6 +216,25 @@ describeShellRuntime('open-source upgrade shell command', () => {
     expect(fs.existsSync(fixture.curlArgs)).toBe(false);
   });
 
+  it('rejects a custom cache directory before downloading on Unix', () => {
+    const fixture = shellFixture('opensource', { customCache: true });
+    const result = fixture.run('upgrade');
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('does not yet support a custom cache directory');
+    expect(fs.existsSync(fixture.curlArgs)).toBe(false);
+  });
+
+  it('still supports a custom data directory when the cache directory is default', () => {
+    const fixture = shellFixture('opensource', { customData: true });
+    const result = fixture.run('upgrade');
+
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(fixture.installerArgs, 'utf8')).toBe(
+      `upgrade\n--data-dir\n${fixture.dataDir}\n`,
+    );
+  });
+
   it('rejects the command for proprietary or unidentified builds', () => {
     for (const edition of ['proprietary', '']) {
       const fixture = shellFixture(edition);
@@ -237,6 +258,18 @@ describe('open-source upgrade PowerShell contract', () => {
     expect(script).toContain('$env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR');
     expect(script).toContain('$installerArgs += @("-Version", $version)');
     expect(script).toContain('"upgrade" {');
+  });
+
+  it('protects the initial download and preserves the installer exit result during cleanup', () => {
+    const script = fs.readFileSync(powershellCli, 'utf8');
+    const upgrade = script.slice(script.indexOf('function Cmd-Upgrade'), script.indexOf('# CMD: rollback'));
+
+    expect(upgrade).toContain('$installerExit = 1');
+    expect(upgrade).toContain('[Net.SecurityProtocolType]::Tls12');
+    expect(upgrade).toContain('Failed to download the open-source installer');
+    expect(upgrade).toContain('Remove-Item -LiteralPath $installerFile -Force -ErrorAction Stop');
+    expect(upgrade).toContain('Write-Warning "Failed to remove temporary installer: $_"');
+    expect(upgrade).not.toContain('Remove-Item -LiteralPath $installerFile -Force -ErrorAction SilentlyContinue');
   });
 });
 

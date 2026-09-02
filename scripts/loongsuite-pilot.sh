@@ -1338,6 +1338,19 @@ cmd_upgrade() {
         return 1
     fi
 
+    # The published Unix installer still stores version pointers and packages
+    # under the default ~/.loongsuite-pilot tree. Passing a custom cache env to
+    # it would either upgrade a stale default install or report success without
+    # changing the version this CLI actually uses, so fail closed until the
+    # installer supports a custom cache directory end to end.
+    local default_cache_dir="$HOME/.loongsuite-pilot"
+    if [ "$CACHE_DIR" != "$default_cache_dir" ]; then
+        echo "❌ Manual upgrade does not yet support a custom cache directory on macOS/Linux." >&2
+        echo "   Current cache directory: $CACHE_DIR" >&2
+        echo "   Supported cache directory: $default_cache_dir" >&2
+        return 1
+    fi
+
     local installer_file
     installer_file=$(mktemp "${TMPDIR:-/tmp}/loongsuite-pilot-installer.XXXXXX") || {
         echo "❌ Failed to create temporary installer file" >&2
