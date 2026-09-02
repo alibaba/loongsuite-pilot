@@ -261,10 +261,18 @@ export class Updater {
           remote: target.version,
           channel,
         });
+        const activeVersion = local?.version || target.version;
+        const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
+        if (collectorRecovered) {
+          void this.metrics?.writeEvent('collector_restarted', {
+            latest_version: activeVersion,
+          });
+        }
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
         await this.gcOldVersions();
         await this.writeHeartbeat();
+        if (collectorRecovered) await this.scheduleUpdaterRestart();
         return;
       }
 
@@ -1118,16 +1126,16 @@ export class Updater {
     command: 'restart-collector' | 'start-collector' | 'schedule-updater-restart',
   ): Promise<void> {
     const bin = this.paths.loongsuitePilotBin;
+    const commandArgs = command === 'restart-collector'
+      ? [command, '--defer-updater-restart']
+      : [command];
     let result: { stdout: string; stderr: string };
     if (process.platform === 'win32') {
       result = await execFileAsync('powershell.exe', [
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, command,
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, ...commandArgs,
       ], { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
     } else {
-      const args = command === 'restart-collector'
-        ? [command, '--defer-updater-restart']
-        : [command];
-      result = await execFileAsync(bin, args, { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
+      result = await execFileAsync(bin, commandArgs, { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
     }
     const output = (result.stdout || '').trim();
     if (output) logger.info(`${command} output`, { output });
@@ -1138,16 +1146,37 @@ export class Updater {
       await this.runCollectorCommand('start-collector');
     } catch (recoveryErr) {
       throw new Error(
-        `collector restart failed (${String(cause)}); start-only recovery also failed (${String(recoveryErr)})`,
+        `collector restart failed (${this.formatCommandFailure(cause)}); `
+          + `start-only recovery also failed (${this.formatCommandFailure(recoveryErr)})`,
       );
     }
   }
 
+  private formatCommandFailure(error: unknown): string {
+    const err = error as {
+      message?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+      code?: unknown;
+      killed?: unknown;
+      signal?: unknown;
+    };
+    const fields = [`error=${String(err?.message ?? error)}`];
+    if (err?.stdout !== undefined && String(err.stdout).trim()) {
+      fields.push(`stdout=${JSON.stringify(String(err.stdout).trim())}`);
+    }
+    if (err?.stderr !== undefined && String(err.stderr).trim()) {
+      fields.push(`stderr=${JSON.stringify(String(err.stderr).trim())}`);
+    }
+    if (err?.code !== undefined) fields.push(`code=${String(err.code)}`);
+    if (err?.killed !== undefined) fields.push(`killed=${String(err.killed)}`);
+    if (err?.signal !== undefined) fields.push(`signal=${String(err.signal)}`);
+    return fields.join(', ');
+  }
+
   private async scheduleUpdaterRestart(): Promise<void> {
-    // The Windows restart-collector command owns its delayed updater handoff.
-    // POSIX defers that handoff until collector health and success bookkeeping
+    // Defer the updater handoff until collector health and success bookkeeping
     // are complete, otherwise a slow startup could kill this verification.
-    if (process.platform === 'win32') return;
     try {
       await this.runCollectorCommand('schedule-updater-restart');
     } catch (err) {
@@ -1157,6 +1186,22 @@ export class Updater {
 
   private async readCollectorRuntime(): Promise<CollectorRuntimeRecord | null> {
     return readJsonFile<CollectorRuntimeRecord>(this.paths.collectorRuntimeFile);
+  }
+
+  private async recoverCurrentCollectorIfNeeded(targetVersion: string): Promise<boolean> {
+    const runtime = await this.readCollectorRuntime();
+    const healthFailure = this.collectorHealthFailure(runtime, targetVersion, 0, null);
+    if (!healthFailure) return false;
+
+    logger.warn('current version is installed but collector is unhealthy; attempting start-only recovery', {
+      targetVersion,
+      error: healthFailure,
+    });
+    const recoveryStartedAt = Date.now();
+    await this.startCollectorForRecovery(new Error(healthFailure));
+    await this.waitForCollectorHealth(targetVersion, recoveryStartedAt, null);
+    logger.info('collector recovered and healthy', { targetVersion });
+    return true;
   }
 
   private async waitForCollectorHealth(

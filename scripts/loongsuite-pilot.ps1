@@ -388,14 +388,17 @@ function Stop-OrphanProcesses {
     # core type, so it stays CLM-safe.
     param([string]$Match = "collector-daemon|updater-daemon")
     $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
+    # Query Win32_Process once. The old Get-Process pipeline issued one CIM query per
+    # node process, so a machine with many IDE/agent runtimes paid N WMI round trips on
+    # every upgrade. CommandLine and ProcessId already come from this single result set.
+    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
-                $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                $cmdLine = [string]$_.CommandLine
                 ($cmdLine -match $Match) -and $cmdLine.ToLower().Contains($ownRoot)
             } catch { $false }
         } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
 }
 
@@ -579,7 +582,7 @@ sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 }
 
 function Install-CollectorTask {
-    param([string]$nodeBin)
+    param([string]$nodeBin, [switch]$SkipCleanup)
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
     if (-not (Test-Path $entry)) {
         Write-Host "Bootstrap script missing: $entry"
@@ -612,12 +615,14 @@ function Install-CollectorTask {
     # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
     # new registration -- so without this reap the orphan keeps running alongside the new
     # instance and both write the same output (duplicate-collection incident root cause).
-    Stop-OrphanProcesses -Match "collector-daemon"
+    if (-not $SkipCleanup) {
+        Stop-OrphanProcesses -Match "collector-daemon"
 
-    # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
-    # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
-    try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
-    try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
+        # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+    }
 
     return (Register-PilotTask `
         -taskName $TASK_NAME_COLLECTOR `
@@ -857,10 +862,101 @@ function Cmd-Restart {
     Cmd-Start
 }
 
+# Start the collector without stopping it or scanning for processes. This command is
+# the updater's recovery path after restart-collector times out: the timed-out command
+# may already have completed the stop half, so running another restart would extend the
+# collection gap. If a partial upgrade deleted the scheduled task, recreate only that
+# missing task without the destructive cleanup used by normal registration.
+function Cmd-StartCollector {
+    if ((Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)) {
+        Write-Host "collector is already running"
+        return
+    }
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    if (Get-TaskExists $TASK_NAME_COLLECTOR) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            Write-Host "collector start requested (Task Scheduler)"
+            return
+        } catch {
+            Write-Host "Task Scheduler start failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Error "Service manager failed to start collector"
+            exit 1
+        }
+    }
+
+    try {
+        $ok = Install-CollectorTask $nodeBin -SkipCleanup
+        if ($ok) {
+            Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Write-Host "collector task restored and start requested (Task Scheduler)"
+            return
+        }
+    } catch {
+        Write-Host "Collector task recovery failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # A missing task can be the result of an interrupted activation. Keep collection
+    # available even when task repair is denied; the updater's runtime/PID validation
+    # decides whether this detached fallback really became healthy.
+    $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
+    if (-not (Test-Path $entry)) {
+        Write-Error "Bootstrap script missing"
+        exit 1
+    }
+    $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+    Write-Host "collector start requested (background fallback)" -ForegroundColor Yellow
+}
+
+function Schedule-UpdaterRestart {
+    Ensure-Dirs
+    $handoffScript = Join-Path $BOOTSTRAP_DIR "restart-updater-delayed.ps1"
+    $escapedBin = ([string]$LOONGSUITE_PILOT_BIN).Replace("'", "''")
+    $escapedLog = ([string]$UPDATER_LOG_FILE).Replace("'", "''")
+    @(
+        "Start-Sleep -Seconds 10",
+        "& '$escapedBin' restart-updater *>> '$escapedLog'"
+    ) | Set-Content -LiteralPath $handoffScript -Encoding Unicode
+
+    # Start-Process creates an independent process instead of a PowerShell job owned by
+    # this invocation. It therefore survives long enough to stop/relaunch the updater
+    # after the current health check and bookkeeping have completed.
+    $handoffArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$handoffScript`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $handoffArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+    Write-Host "updater restart scheduled"
+}
+
 # ============================================================
 # CMD: restart-collector (used by updater after deploying a new version)
 # ============================================================
 function Cmd-RestartCollector {
+    param([string[]]$Options = @())
+    $deferUpdaterRestart = $false
+    foreach ($option in $Options) {
+        if ($option -eq "--defer-updater-restart") {
+            $deferUpdaterRestart = $true
+        } else {
+            Write-Error "Unknown restart-collector option: $option"
+            exit 1
+        }
+    }
+
     # Stop collector only (leave updater running)
     $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
@@ -966,11 +1062,9 @@ function Cmd-RestartCollector {
         }
     }
 
-    # Schedule updater restart in background (equivalent to setsid on Linux)
-    Start-Job -ScriptBlock {
-        Start-Sleep -Seconds 10
-        & $using:LOONGSUITE_PILOT_BIN restart-updater
-    } | Out-Null
+    if (-not $deferUpdaterRestart) {
+        Schedule-UpdaterRestart
+    }
 }
 
 # ============================================================
@@ -1589,7 +1683,9 @@ switch ($Command.ToLower()) {
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }
-    "restart-collector"  { Cmd-RestartCollector }
+    "start-collector"    { Cmd-StartCollector }
+    "restart-collector"  { Cmd-RestartCollector -Options $SubArgs }
+    "schedule-updater-restart" { Schedule-UpdaterRestart }
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }
