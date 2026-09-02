@@ -1,5 +1,5 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalOssConfig, UploadItem, Uploader } from '../types.js';
+import type { MultimodalStorage, UploadItem, Uploader } from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import { ossPutObject, parseOssStorageBasePath } from './oss-client.js';
 import {
@@ -14,13 +14,13 @@ export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private readonly abort = new AbortController();
   private closed = false;
 
   constructor(
-    private readonly oss: MultimodalOssConfig,
-    private readonly storageBasePath: string,
+    private readonly storage: Extract<MultimodalStorage, { type: 'oss' }>,
   ) {
-    const parsed = parseOssStorageBasePath(storageBasePath);
+    const parsed = parseOssStorageBasePath(storage.target.storageBasePath);
     this.bucket = parsed.bucket;
     this.prefix = parsed.prefix;
   }
@@ -50,20 +50,21 @@ export class OssUploader implements Uploader {
       }
 
       const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
-        if (this.closed) {
+        if (this.closed || this.abort.signal.aborted) {
           return { ok: false as const, retryable: false, error: 'uploader closed' };
         }
         const put = await ossPutObject({
-          endpoint: this.oss.endpoint,
+          endpoint: this.storage.target.endpoint,
           bucket: this.bucket,
           objectKey,
-          accessKeyId: this.oss.accessKeyId,
-          accessKeySecret: this.oss.accessKeySecret,
-          securityToken: this.oss.securityToken,
+          accessKeyId: this.storage.auth.accessKeyId,
+          accessKeySecret: this.storage.auth.accessKeySecret,
+          securityToken: this.storage.auth.securityToken,
           body: item.data!,
           contentType: item.contentType,
           timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,
           meta: item.meta,
+          signal: this.abort.signal,
         });
         if (put.ok) return { ok: true as const, value: true };
         return {
@@ -72,7 +73,7 @@ export class OssUploader implements Uploader {
           error: put.error,
           statusCode: put.statusCode,
         };
-      });
+      }, { signal: this.abort.signal });
 
       if (!result.ok) {
         logger.warn('oss upload failed', {
@@ -108,6 +109,7 @@ export class OssUploader implements Uploader {
       return;
     }
     this.closed = true;
+    this.abort.abort();
     this.successKeys.clear();
   }
 }

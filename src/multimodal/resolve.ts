@@ -411,3 +411,40 @@ export function joinStorageUri(storageBasePath: string, targetPath: string): str
   const rel = targetPath.replace(/^\/+/, '');
   return `${base}/${rel}`;
 }
+
+const REGIONAL_OSS_ENDPOINT_RE = /^oss-(?<region>[a-z0-9-]+?)(?:-internal)?\.aliyuncs\.com(?:\.cn)?$/;
+
+export interface OssEndpoint {
+  scheme: string;
+  host: string;
+  region: string;
+}
+
+export function normalizeOssEndpoint(endpoint: string): OssEndpoint {
+  let raw = (endpoint || '').trim();
+  if (!raw) throw new Error('OSS endpoint is required');
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+
+  const parsed = new URL(raw);
+  if (parsed.username || parsed.password || (parsed.pathname && parsed.pathname !== '/')
+    || parsed.search || parsed.hash) {
+    throw new Error('OSS endpoint must be a standard regional endpoint without path/query/credentials');
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  if (host.startsWith('oss-accelerate.')) {
+    throw new Error('OSS accelerate endpoints are not supported');
+  }
+  const match = REGIONAL_OSS_ENDPOINT_RE.exec(host);
+  const region = match?.groups?.region;
+  if (!region) {
+    throw new Error('OSS endpoint must be a standard regional aliyuncs.com endpoint');
+  }
+
+  const port = parsed.port ? `:${parsed.port}` : '';
+  return {
+    scheme: parsed.protocol.replace(':', ''),
+    host: `${host}${port}`,
+    region,
+  };
+}

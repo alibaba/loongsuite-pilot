@@ -204,6 +204,29 @@ vi.mock('../../../src/metrics/alarm-manager.js', () => ({
   })),
 }));
 
+const {
+  mockResolveMultimodalEventStorageBasePath,
+  mockCreateUploader,
+  MockMultimodalProcessor,
+} = vi.hoisted(() => ({
+  mockResolveMultimodalEventStorageBasePath: vi.fn(),
+  mockCreateUploader: vi.fn(),
+  MockMultimodalProcessor: vi.fn(),
+}));
+
+vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/multimodal/index.js')>();
+  return {
+    ...actual,
+    resolveMultimodalEventStorageBasePath: (...args: unknown[]) => (
+      mockResolveMultimodalEventStorageBasePath(...args)
+    ),
+    createUploader: (...args: unknown[]) => mockCreateUploader(...args),
+    MultimodalProcessor: MockMultimodalProcessor,
+  };
+});
+
+import { InputManager } from '../../../src/core/input-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
@@ -602,6 +625,106 @@ describe('Orchestrator', () => {
       handler('cursor-hook', 'shutdown');
       expect(mockAlarmRecord).not.toHaveBeenCalled();
 
+      await orch.stop();
+    });
+  });
+
+  describe('multimodal startup wiring', () => {
+    const fakeUploader = { upload: vi.fn(), shutdown: vi.fn() };
+    const agentsWantMultimodal = {
+      codex: {
+        enabled: true,
+        captureMessageContent: true,
+        multimodal: { uploadMode: 'input' as const },
+      },
+    };
+    const delegatedOss = {
+      storage: {
+        type: 'delegatedOss' as const,
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: {
+          mode: 'ak' as const,
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    };
+
+    let setProcessor: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockCreateUploader.mockReturnValue(fakeUploader);
+      MockMultimodalProcessor.mockImplementation((base: string) => ({
+        storageBasePath: base,
+        shutdown: vi.fn().mockResolvedValue(undefined),
+      }));
+      setProcessor = vi.spyOn(InputManager.prototype, 'setMultimodalProcessor');
+    });
+
+    afterEach(() => {
+      setProcessor.mockRestore();
+    });
+
+    it('does not install a processor when event-base resolution fails', async () => {
+      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
+        ok: false,
+        error: 'presign failed',
+      });
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: delegatedOss,
+      }));
+
+      await orch.start();
+
+      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
+      expect(mockCreateUploader).not.toHaveBeenCalled();
+      expect(MockMultimodalProcessor).not.toHaveBeenCalled();
+      expect(setProcessor).not.toHaveBeenCalled();
+      await orch.stop();
+    });
+
+    it('installs a processor when event-base resolution succeeds', async () => {
+      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
+        ok: true,
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+      });
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: {
+          ...delegatedOss,
+          storage: {
+            ...delegatedOss.storage,
+            target: {
+              ...delegatedOss.storage.target,
+              ossBucket: 'user-bucket',
+            },
+          },
+        },
+      }));
+
+      await orch.start();
+
+      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
+      expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
+        storage: expect.objectContaining({ type: 'delegatedOss' }),
+      }), {
+        expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+      });
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        'oss://user-bucket/proj/logstore',
+        fakeUploader,
+      );
+      expect(setProcessor).toHaveBeenCalledTimes(1);
+      expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+      });
       await orch.stop();
     });
   });

@@ -76,6 +76,7 @@ import {
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
+  resolveMultimodalEventStorageBasePath,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -250,11 +251,21 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const uploader = createUploader(multimodalConfig);
-        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
-        this.inputManager.setMultimodalProcessor(processor);
-        this.multimodalProcessor = processor;
-        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
+        if (!eventBase.ok) {
+          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
+        } else {
+          const uploader = createUploader(multimodalConfig, {
+            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
+          });
+          const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
+          this.inputManager.setMultimodalProcessor(processor);
+          this.multimodalProcessor = processor;
+          logger.info('multimodal processor enabled', {
+            type: multimodalConfig.storage.type,
+            storageBasePath: eventBase.storageBasePath,
+          });
+        }
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }
