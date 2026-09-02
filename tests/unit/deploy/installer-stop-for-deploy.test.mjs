@@ -65,6 +65,9 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
     // The CLI is how autostart_remove happens. Pid fallback is for a missing CLI,
     // not the overlay path.
     expect(code).toMatch(/command -v loongsuite-pilot/);
+    // Unix hold IS this stop. Swallowing it hides a still-live updater/GC window.
+    expect(code).not.toMatch(/run_pilot_cli stop\s+2>\/dev\/null/);
+    expect(code).toMatch(/Could not stop the service/);
   });
 
   it('passes the installer data dir into every CLI verb after stop', () => {
@@ -92,9 +95,11 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
   });
 
   it('restores autostart after a failed overlay, except in container mode', () => {
-    // stop deletes LaunchAgent/systemd unit files. Windows Enable-in-finally is
-    // reversible; Unix restore is `start`, which re-registers autostart. A
-    // docker build layer must not launch a daemon.
+    // stop deletes LaunchAgent/systemd unit files. Unix restore is `start`,
+    // which re-registers autostart. That is safe because deploy_package
+    // publishes `current` only after node_modules + postinstall: abort still
+    // points at the previous complete version (or nothing, on a fresh install).
+    // A docker build layer must not launch a daemon.
     const code = codeOf(blockOf(read(patched[0]), 'pilot-stop-for-deploy'));
     expect(code).toMatch(/restore_pilot_after_deploy\(\)/);
     expect(code).toMatch(/INSTALL_MODE:-host/);
@@ -102,6 +107,26 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
     // Swallowing start hides the only signal that autostart did not come back.
     expect(code).not.toMatch(/run_pilot_cli start\s+>\/dev\/null/);
     expect(code).toMatch(/Could not restore autostart/);
+  });
+
+  it('deploy_package publishes current only after postinstall', () => {
+    // Overlay restore is `start`. If current already named the new dir, abort
+    // would launch a collector with no hooks / no node_modules.
+    for (const file of SH_INSTALLERS.filter(existsSync)) {
+      const fn = fnOf(read(file), 'deploy_package');
+      const writeAt = fn.indexOf('echo "$dir_name" > "$current_file.tmp"');
+      const postAt = fn.indexOf('scripts/postinstall.js');
+      const npmFailAt = fn.indexOf('Dependency installation failed');
+      expect(writeAt, `${file}: current pointer write missing`).toBeGreaterThan(-1);
+      expect(postAt, `${file}: postinstall missing`).toBeGreaterThan(-1);
+      expect(npmFailAt, `${file}: npm failure path missing`).toBeGreaterThan(-1);
+      expect(writeAt, `${file}: current published before postinstall`).toBeGreaterThan(postAt);
+      expect(writeAt, `${file}: current published before npm install`).toBeGreaterThan(npmFailAt);
+      expect(fn.slice(npmFailAt, writeAt), `${file}: npm failure does not return before current write`)
+        .toMatch(/return 1/);
+      expect(fn.slice(postAt, writeAt), `${file}: postinstall failure does not return before current write`)
+        .toMatch(/return 1/);
+    }
   });
 
   it('cmd_install and cmd_upgrade both call it before deploy_package', () => {

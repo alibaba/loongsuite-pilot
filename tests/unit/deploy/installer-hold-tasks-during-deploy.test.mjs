@@ -73,7 +73,7 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     // Elevated first installs leave the tasks owned by Administrators; the same
     // Access is denied that blocks schtasks /Delete would also block Disable.
     // Swallowing that is required -- a denied hold must not turn a working reinstall
-    // into a failed one. Restart-StaleCollector still covers that machine.
+    // into a failed one.
     const code = codeOf(blockOf(read(patched[0]), TAG));
     expect(code).toMatch(/Disable-ScheduledTask[\s\S]*catch/);
     expect(code).not.toMatch(/Disable-ScheduledTask[\s\S]*exit 1/);

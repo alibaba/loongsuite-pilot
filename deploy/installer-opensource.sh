@@ -1889,7 +1889,10 @@ stop_pilot_for_deploy() {
     msg "==> 停止服务..." "==> Stopping service..."
     if [ -n "$cli" ]; then
         PILOT_HELD_FOR_DEPLOY=1
-        run_pilot_cli stop 2>/dev/null || true
+        if ! run_pilot_cli stop; then
+            msg "    ⚠️  无法停止服务，覆盖安装期间 updater 可能仍会 GC" \
+                "    ⚠️  Could not stop the service; updater may still GC during this overlay"
+        fi
     fi
     # Leftovers: no CLI on PATH, or an updater the CLI did not track.
     stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid"
