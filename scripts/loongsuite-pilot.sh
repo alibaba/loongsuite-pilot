@@ -27,6 +27,7 @@ UPDATER_PLIST="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
 SYSTEMD_SYSTEM_UNIT_DIR="/etc/systemd/system"
 LOONGSUITE_PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 INIT_TYPE_FILE="$DATA_DIR/init-type"
+CURRENT_USER_ID="$(id -u)"
 
 validate_current_user() {
     whoami
@@ -115,6 +116,7 @@ sync_installed_scripts_from_version() {
 process_matches_installed_entry() {
     local pid="$1"
     local kind="$2"
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
     local expected_entry=""
     local expected_arg=""
     local expected_process=""
@@ -142,10 +144,27 @@ process_matches_installed_entry() {
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
-
     local process_name
-    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    if [ -r "/proc/$pid/status" ] && [ -r "/proc/$pid/comm" ]; then
+        # Linux procfs already contains the fields that ps reads. Read them in
+        # this shell so a large set of Node candidates does not spawn two ps
+        # processes per PID.
+        local status_key=""
+        local process_uid=""
+        while read -r status_key process_uid _; do
+            if [ "$status_key" = "Uid:" ]; then
+                break
+            fi
+            process_uid=""
+        done < "/proc/$pid/status"
+        [ "$process_uid" = "$current_user_id" ] || return 1
+        IFS= read -r process_name < "/proc/$pid/comm" || return 1
+    else
+        # macOS has no procfs. Keep the existing ps fallback, which also covers
+        # Linux installations where procfs is unavailable or restricted.
+        [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$current_user_id" ] || return 1
+        process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    fi
     process_name="${process_name##*/}"
     case "$expected_process:$process_name" in
         node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
@@ -198,6 +217,7 @@ process_matches_installed_entry() {
 
 find_current_user_processes() {
     local kind="$1"
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
     local pid=""
     local process_name=""
     while read -r pid process_name; do
@@ -207,7 +227,26 @@ find_current_user_processes() {
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
-    done < <(ps -U "$(id -u)" -o pid= -o ucomm= 2>/dev/null || true)
+    done < <(ps -U "$current_user_id" -o pid= -o ucomm= 2>/dev/null || true)
+}
+
+# Enumerate collector daemons and their shell wrappers from one process-table
+# snapshot. The generic helper above remains useful when callers need one kind,
+# but cleanup must not scan the same large process table once per kind.
+find_current_user_collector_processes() {
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
+    local pid=""
+    local process_name=""
+    local kind=""
+    while read -r pid process_name; do
+        process_name="${process_name##*/}"
+        case "$process_name" in
+            node|nodejs) kind=collector ;;
+            bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
+            *) continue ;;
+        esac
+        process_matches_installed_entry "$pid" "$kind" && printf '%s %s\n' "$pid" "$kind"
+    done < <(ps -U "$current_user_id" -o pid= -o ucomm= 2>/dev/null || true)
 }
 
 find_installed_collector_pid() {
@@ -252,10 +291,7 @@ stop_installed_collector_processes() {
                 matched=true
                 kill "$pid" 2>/dev/null || true
             fi
-        done < <({
-            find_current_user_processes collector-wrapper | while read -r pid; do echo "$pid collector-wrapper"; done
-            find_current_user_processes collector | while read -r pid; do echo "$pid collector"; done
-        } | sort -u)
+        done < <(find_current_user_collector_processes | sort -u)
         [ "$matched" = true ] || return 0
         sleep 0.2
     done
@@ -753,9 +789,141 @@ cmd_stop() {
     echo "✅ loongsuite-pilot stopped"
 }
 
+# Start the collector without stopping or scanning for existing processes. This
+# is intentionally separate from restart-collector so the updater can recover
+# after a timed-out restart that already stopped the managed service.
+start_collector_after_stop() {
+    local target_user
+    target_user=$(whoami)
+    local sys_unit="loongsuite-pilot-${target_user}.service"
+    local initd_script="/etc/init.d/loongsuite-pilot-${target_user}"
+    local init_type=""
+    if [ -f "$INIT_TYPE_FILE" ]; then
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local _started=false
+    case "$(uname -s)" in
+        Darwin)
+            if launchctl list "$SERVICE_LABEL" &>/dev/null; then
+                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
+                echo "✅ collector started (launchd)"
+                _started=true
+            fi
+            ;;
+        Linux)
+            case "$init_type" in
+                systemd-user)
+                    if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
+                        systemctl --user start loongsuite-pilot.service &>/dev/null
+                        echo "✅ collector started (systemd user-level)"
+                        _started=true
+                    fi
+                    ;;
+                systemd-system|systemd)
+                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
+                        maybe_sudo systemctl start "$sys_unit" &>/dev/null
+                        echo "✅ collector started (systemd system-level)"
+                        _started=true
+                    fi
+                    ;;
+                initd)
+                    if [ -f "$initd_script" ]; then
+                        maybe_sudo "$initd_script" start &>/dev/null
+                        echo "✅ collector started (init.d)"
+                        _started=true
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+    if [ "$_started" = true ]; then
+        sleep 1
+        if ! is_running; then
+            echo "⚠️  service manager reported success but collector process not found"
+            _started=false
+        fi
+    fi
+    if [ "$_started" = false ]; then
+        # Self-healing: try to register a proper service for degraded (nohup/unknown) installs
+        case "$init_type" in
+            nohup|unknown|"")
+                local _new_init
+                _new_init=$(detect_init_system "false")
+                if [ "$_new_init" != "none" ]; then
+                    if autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
+                        sleep 1
+                        if is_running; then
+                            echo "✅ collector self-healed: registered as $_new_init"
+                            _started=true
+                        else
+                            echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
+                        fi
+                    fi
+                fi
+                if [ "$_started" = false ]; then
+                    local entry="$BOOTSTRAP_DIR/collector-daemon.js"
+                    if [ ! -f "$entry" ]; then
+                        echo "❌ Bootstrap script missing"
+                        return 1
+                    fi
+                    local node_bin
+                    node_bin=$(resolve_node) || {
+                        echo "❌ node runtime not found" >&2
+                        return 1
+                    }
+                    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+                    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
+                    echo "$!" > "$PID_FILE"
+                    echo "⚠️  collector started (nohup fallback, self-heal failed)"
+                fi
+                ;;
+            *)
+                echo "❌ Service manager failed to start collector (init_type=$init_type)" >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    if ! is_running; then
+        echo "❌ collector process not found after start" >&2
+        return 1
+    fi
+}
+
+cmd_start_collector() {
+    if is_running; then
+        echo "✅ collector is already running (PID $(cat "$PID_FILE"))"
+        return 0
+    fi
+    start_collector_after_stop
+}
+
+schedule_updater_restart() {
+    # Run in a new process group so stopping the updater service cannot kill the
+    # delayed restart process along with its parent.
+    local restart_bin="$LOONGSUITE_PILOT_BIN"
+    local restart_log="$UPDATER_LOG_FILE"
+    if command -v setsid &>/dev/null; then
+        setsid bash -c 'sleep 10 && "$0" restart-updater' "$restart_bin" >> "$restart_log" 2>&1 &
+    else
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bash -c 'sleep 10 && "$0" restart-updater' "$restart_bin" >> "$restart_log" 2>&1 &
+    fi
+}
+
 # Restart only the collector (used by updater after deploying a new version)
 cmd_restart_collector() {
     cleanup_legacy_monitor_processes
+    local defer_updater_restart=false
+    if [ "${1:-}" = "--defer-updater-restart" ]; then
+        defer_updater_restart=true
+    elif [ -n "${1:-}" ]; then
+        echo "Unknown restart-collector option: $1" >&2
+        return 1
+    fi
     local target_user
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-${target_user}.service"
@@ -789,106 +957,10 @@ cmd_restart_collector() {
     stop_installed_collector_processes
 
     sleep 1
+    start_collector_after_stop
 
-    ensure_dirs
-    sync_bootstrap_scripts
-
-    local _restarted=false
-    case "$(uname -s)" in
-        Darwin)
-            if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-                echo "✅ collector restarted (launchd)"
-                _restarted=true
-            fi
-            ;;
-        Linux)
-            case "$init_type" in
-                systemd-user)
-                    if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
-                        systemctl --user start loongsuite-pilot.service &>/dev/null
-                        echo "✅ collector restarted (systemd user-level)"
-                        _restarted=true
-                    fi
-                    ;;
-                systemd-system|systemd)
-                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        maybe_sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ collector restarted (systemd system-level)"
-                        _restarted=true
-                    fi
-                    ;;
-                initd)
-                    if [ -f "$initd_script" ]; then
-                        maybe_sudo "$initd_script" start &>/dev/null
-                        echo "✅ collector restarted (init.d)"
-                        _restarted=true
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
-    if [ "$_restarted" = true ]; then
-        sleep 1
-        if ! is_running; then
-            echo "⚠️  service manager reported success but collector process not found"
-            _restarted=false
-        fi
-    fi
-    if [ "$_restarted" = false ]; then
-        # Self-healing: try to register a proper service for degraded (nohup/unknown) installs
-        case "$init_type" in
-            nohup|unknown|"")
-                local _new_init
-                _new_init=$(detect_init_system "false")
-                if [ "$_new_init" != "none" ]; then
-                    if autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
-                        sleep 1
-                        if is_running; then
-                            echo "✅ collector self-healed: registered as $_new_init"
-                            _restarted=true
-                        else
-                            echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
-                        fi
-                    fi
-                fi
-                if [ "$_restarted" = false ]; then
-                    local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-                    if [ ! -f "$entry" ]; then
-                        echo "❌ Bootstrap script missing"
-                        exit 1
-                    fi
-                    local node_bin
-                    node_bin=$(resolve_node) || {
-                        echo "❌ node runtime not found" >&2
-                        exit 1
-                    }
-                    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-                    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
-                    echo "$!" > "$PID_FILE"
-                    echo "⚠️  collector restarted (nohup fallback, self-heal failed)"
-                fi
-                ;;
-            *)
-                echo "❌ Service manager failed to restart collector (init_type=$init_type)" >&2
-                exit 1
-                ;;
-        esac
-    fi
-
-    if ! is_running; then
-        echo "❌ collector process not found after restart" >&2
-        exit 1
-    fi
-
-    # Schedule updater restart in a NEW process group so that
-    # "launchctl stop / systemctl stop" of the updater won't kill this subprocess.
-    local _restart_bin="$LOONGSUITE_PILOT_BIN"
-    local _restart_log="$UPDATER_LOG_FILE"
-    if command -v setsid &>/dev/null; then
-        setsid bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
-    else
-        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
+    if [ "$defer_updater_restart" = false ]; then
+        schedule_updater_restart
     fi
 }
 
@@ -2445,7 +2517,9 @@ case "${1:-status}" in
         fi
         ;;
     rollback)            cmd_rollback ;;
-    restart-collector)   cmd_restart_collector ;;
+    start-collector)     cmd_start_collector ;;
+    restart-collector)   shift; cmd_restart_collector "$@" ;;
+    schedule-updater-restart) schedule_updater_restart ;;
     restart-updater)     cmd_restart_updater ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;

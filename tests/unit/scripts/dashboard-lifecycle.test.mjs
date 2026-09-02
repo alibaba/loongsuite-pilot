@@ -77,10 +77,13 @@ describe('dashboard service lifecycle', () => {
       runtimeSh.indexOf('is_pid_file_running()'),
     );
 
+    expect(processLookup).toContain('[ -r "/proc/$pid/status" ]');
+    expect(processLookup).toContain('done < "/proc/$pid/status"');
     expect(processLookup).toContain('[ -r "/proc/$pid/cmdline" ]');
     expect(processLookup).toContain('[ "$argv_entry" = "$expected_entry" ]');
-    expect(processLookup).toContain('ps -U "$(id -u)" -o pid= -o ucomm=');
+    expect(processLookup).toContain('ps -U "$current_user_id" -o pid= -o ucomm=');
     expect(processLookup).toContain('find_current_user_processes collector');
+    expect(processLookup).toContain('find_current_user_collector_processes()');
     expect(processLookup).toContain('node:node|node:nodejs');
     expect(processLookup).toContain('[[ "$command_line" == *" $expected_suffix" ]]');
     expect(processLookup).toContain('process_matches_installed_entry "$pid" collector');
@@ -103,8 +106,9 @@ describe('dashboard service lifecycle', () => {
       runtimeSh.indexOf('cmd_restart_updater()'),
     );
 
-    expect(stopHelper).toContain('find_current_user_processes collector-wrapper');
-    expect(stopHelper).toContain('find_current_user_processes collector');
+    expect(stopHelper).toContain('find_current_user_collector_processes');
+    expect(stopHelper).not.toContain('find_current_user_processes collector-wrapper');
+    expect(stopHelper).not.toContain('find_current_user_processes collector |');
     expect(stopHelper).toContain('process_matches_installed_entry "$pid" "$kind"');
     expect(stopHelper).toContain('for attempt in 1 2 3 4 5');
     expect(stopCommand).toContain('stop_installed_collector_processes');
@@ -113,6 +117,32 @@ describe('dashboard service lifecycle', () => {
     expect(restartCommand).toContain('stop_pid_file "$PID_FILE" collector');
     expect(runtimeSh).not.toContain('pkill -f "loongsuite-pilot/bin/collector-daemon"');
     expect(runtimeSh).not.toContain('pkill -f "loongsuite-pilot/bin/updater-daemon"');
+  });
+
+  it('does not launch per-PID ps commands on the Linux procfs path', () => {
+    const matcher = runtimeSh.slice(
+      runtimeSh.indexOf('process_matches_installed_entry()'),
+      runtimeSh.indexOf('find_current_user_processes()'),
+    );
+    const procfsStart = matcher.indexOf('if [ -r "/proc/$pid/status" ]');
+    const procfsBranch = matcher.slice(procfsStart, matcher.indexOf('    else', procfsStart));
+
+    expect(procfsBranch).toContain('done < "/proc/$pid/status"');
+    expect(procfsBranch).toContain('read -r process_name < "/proc/$pid/comm"');
+    expect(procfsBranch).not.toContain('ps -p');
+  });
+
+  it('provides a start-only updater recovery path without stop or process scans', () => {
+    const startOnly = runtimeSh.slice(
+      runtimeSh.indexOf('cmd_start_collector()'),
+      runtimeSh.indexOf('# Restart only the collector'),
+    );
+    const dispatch = runtimeSh.slice(runtimeSh.indexOf('# ---- Dispatch ----'));
+
+    expect(startOnly).toContain('start_collector_after_stop');
+    expect(startOnly).not.toContain('stop_pid_file');
+    expect(startOnly).not.toContain('stop_installed_collector_processes');
+    expect(dispatch).toContain('start-collector)');
   });
 
   it('rejects a reused PID and repairs it from the real Node argv entry', async () => {

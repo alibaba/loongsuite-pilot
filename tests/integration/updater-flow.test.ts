@@ -115,6 +115,17 @@ describe('Updater integration (real filesystem)', () => {
     await fs.writeFile(path.join(testDir, 'current'), dirName + '\n');
   }
 
+  async function writeCollectorRuntime(version: string) {
+    const logsDir = path.join(testDir, 'logs');
+    await fs.mkdir(logsDir, { recursive: true });
+    await fs.writeFile(path.join(logsDir, 'runtime.json'), JSON.stringify({
+      status: 'active',
+      packageVersion: version,
+      pid: process.pid,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
   async function readPointer(name: string): Promise<string | null> {
     try {
       return (await fs.readFile(path.join(testDir, name), 'utf-8')).trim();
@@ -254,6 +265,7 @@ describe('Updater integration (real filesystem)', () => {
   it('does NOT downgrade when remote version is older', async () => {
     const v2Dir = await createFakeVersion('1.0.2', 'bbb');
     await setCurrentPointer(v2Dir);
+    await writeCollectorRuntime('1.0.2');
 
     // Remote says 1.0.1 (older)
     mockFetch.mockResolvedValueOnce({
@@ -270,6 +282,34 @@ describe('Updater integration (real filesystem)', () => {
     // Should NOT have attempted download
     expect(mockFetch).toHaveBeenCalledTimes(1); // only manifest, no download
     expect(await readPointer('current')).toBe('1.0.2_bbb');
+  });
+
+  it('recovers the collector on an already-current version before clearing failure state', async () => {
+    const currentDir = await createFakeVersion('1.0.2', 'bbb');
+    await setCurrentPointer(currentDir);
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve({
+        version: '1.0.2', git_commit: 'bbb',
+        package_url: 'https://example.com/pkg.tar.gz',
+      }),
+    });
+    mockExecFile.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('start-collector')) await writeCollectorRuntime('1.0.2');
+      return { stdout: '', stderr: '' };
+    });
+    const updater = new Updater(makeConfig(), testDir);
+    (updater as any).consecutiveFailures = 3;
+
+    await updater.check();
+
+    const commands = mockExecFile.mock.calls
+      .map(([, args]: [string, string[]]) => args.find((arg) => [
+        'start-collector', 'schedule-updater-restart',
+      ].includes(arg)))
+      .filter(Boolean);
+    expect(commands).toEqual(['start-collector', 'schedule-updater-restart']);
+    expect((updater as any).consecutiveFailures).toBe(0);
   });
 
   // ─── GC preserves current + previous ──────────────────
@@ -334,5 +374,35 @@ describe('Updater integration (real filesystem)', () => {
     const updater = new Updater(makeConfig(), testDir);
     const local = await (updater as any).readLocalVersion();
     expect(local).toEqual({ version: '0.9.0', gitCommit: 'legacy' });
+  });
+
+  it('recovers a timed-out collector restart through start-only and verifies runtime health', async () => {
+    mockExecFile.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('restart-collector')) {
+        throw new Error('Command timed out after 30000ms');
+      }
+      if (args.includes('start-collector')) {
+        const logsDir = path.join(testDir, 'logs');
+        await fs.mkdir(logsDir, { recursive: true });
+        await fs.writeFile(path.join(logsDir, 'runtime.json'), JSON.stringify({
+          status: 'active',
+          packageVersion: '1.0.2',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        }));
+      }
+      return { stdout: '', stderr: '' };
+    });
+    const updater = new Updater(makeConfig(), testDir);
+
+    await (updater as any).restartCollector('1.0.2', false);
+
+    const commands = mockExecFile.mock.calls
+      .map(([, args]: [string, string[]]) => args.find((arg) => [
+        'restart-collector', 'start-collector',
+      ].includes(arg)))
+      .filter(Boolean);
+    expect(commands).toContain('restart-collector');
+    expect(commands).toContain('start-collector');
   });
 });
