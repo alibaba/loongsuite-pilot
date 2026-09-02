@@ -120,7 +120,7 @@ Automatic working-directory collection covers Claude Code, Codex, Cursor / Curso
 
 For `hermes` the prompt is read from the provider request body observed at `pre_api_request`, because `conversation_history` never replays system messages. Provider shapes are normalized to the same parts array: OpenAI-compatible `messages[]` entries with role `system` / `developer`, Responses API top-level `instructions`, Anthropic and Bedrock top-level `system` (string or block list), and Gemini `systemInstruction.parts[].text`. A blank or absent prompt yields no field.
 
-To preserve the complete input view sent to the model, `hermes` also prepends the same parts as a `role: "system"` message to `gen_ai.input.messages` on every `llm.request`. It appears only once in `gen_ai.input.messages_delta`, on the turn's first request, and is not appended again on later requests. Consequently, downstream OTLP LLM spans and the turn-level AGENT span both include the system message in `gen_ai.input.messages`. `gen_ai.input.messages_hash` is computed from the complete input including this system message.
+For `hermes`, system instructions remain only in `gen_ai.system_instructions`; they are not synthesized into `gen_ai.input.messages` or `gen_ai.input.messages_delta`. This keeps the established business-turn input and `gen_ai.input.messages_hash` semantics unchanged for LLM, AGENT, and ENTRY spans.
 
 ## Multimodal Message Parts
 

@@ -631,14 +631,9 @@ describe('Hermes Agent native plugin', () => {
       [{ type: 'text', content: 'Developer rule.' }],
       undefined,
     ]);
-    expect(requests.map(request => request['gen_ai.input.messages']?.[0])).toEqual([
-      { role: 'system', parts: [{ type: 'text', content: 'You are a careful assistant.' }] },
-      { role: 'system', parts: [{ type: 'text', content: 'Follow the house rules.' }] },
-      { role: 'system', parts: [{ type: 'text', content: 'Bedrock block prompt.' }] },
-      { role: 'system', parts: [{ type: 'text', content: 'Gemini instruction.' }] },
-      { role: 'system', parts: [{ type: 'text', content: 'Developer rule.' }] },
-      undefined,
-    ]);
+    expect(requests.every(request =>
+      !(request['gen_ai.input.messages'] || []).some(message => message.role === 'system')))
+      .toBe(true);
     expect(requests.every(request =>
       !(request['gen_ai.input.messages_delta'] || []).some(message => message.role === 'system')))
       .toBe(true);
@@ -646,8 +641,6 @@ describe('Hermes Agent native plugin', () => {
       role: 'user',
       parts: [{ type: 'text', content: 'Report the available tool surface.' }],
     });
-    expect(new Set(requests.slice(0, 5).map(request => request['gen_ai.input.messages_hash'])).size)
-      .toBe(5);
   });
 
   it('normalizes Hermes Responses API top-level instructions', () => {
@@ -678,16 +671,16 @@ describe('Hermes Agent native plugin', () => {
     expect(request['gen_ai.system_instructions']).toEqual([
       { type: 'text', content: instructions },
     ]);
-    expect(request['gen_ai.input.messages'][0]).toEqual({
-      role: 'system',
-      parts: [{ type: 'text', content: instructions }],
-    });
+    expect(request['gen_ai.input.messages']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
     expect(request['gen_ai.input.messages_delta']).toEqual([{
       role: 'user',
       parts: [{ type: 'text', content: 'Report the available tool surface.' }],
     }]);
     expect(request['gen_ai.input.messages_hash'])
-      .not.toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
+      .toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
     expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
   });
 

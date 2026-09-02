@@ -572,20 +572,6 @@ def _messages(messages: List[Any], capture_content: bool) -> List[Dict[str, Any]
     return output
 
 
-def _with_system_message(
-    messages: List[Dict[str, Any]],
-    system_instructions: Any,
-) -> List[Dict[str, Any]]:
-    if not isinstance(system_instructions, list) or not system_instructions:
-        return messages
-    # Keep the system prompt visible in the complete provider input while
-    # preserving the existing turn-message bound. The same content remains in
-    # gen_ai.system_instructions for direct querying.
-    history_limit = max(0, MAX_TURN_MESSAGES - 1)
-    history = messages[-history_limit:] if history_limit else []
-    return [{"role": "system", "parts": system_instructions}] + history
-
-
 def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     history = payload.get("conversation_history")
     if not isinstance(history, list):
@@ -771,11 +757,10 @@ def _build_records(
         pre = api.get("pre") or {}
         tool_definitions = pre.get("tool_definitions")
         system_instructions = pre.get("system_instructions")
-        input_messages = _with_system_message(
-            _messages(input_source, capture), system_instructions
-        )
-        # The delta feeds the business-level ENTRY/AGENT input. Keep provider
-        # system context in the complete LLM input and system_instructions only.
+        # System instructions are provider configuration, not turn messages.
+        # Keep them in their dedicated field so they do not alter the existing
+        # input, delta, or input-hash semantics.
+        input_messages = _messages(input_source, capture)
         input_delta = _messages(delta_source, capture)
         output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))

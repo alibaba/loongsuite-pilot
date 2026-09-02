@@ -152,14 +152,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       JSON.stringify(record['gen_ai.system_instructions'])
         === JSON.stringify([{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }])))
       .toBe(true);
-    expect(requestRecords.every(record => {
-      const messages = record['gen_ai.input.messages'];
-      return Array.isArray(messages)
-        && JSON.stringify(messages[0]) === JSON.stringify({
-          role: 'system',
-          parts: [{ type: 'text', content: EXPECTED_SYSTEM_PROMPT }],
-        });
-    })).toBe(true);
+    expect(requestRecords.every(record =>
+      !(record['gen_ai.input.messages'] as Array<{ role?: string }> | undefined)
+        ?.some(message => message.role === 'system'))).toBe(true);
     expect(requestRecords.every(record =>
       !(record['gen_ai.input.messages_delta'] as Array<{ role?: string }> | undefined)
         ?.some(message => message.role === 'system'))).toBe(true);
@@ -234,8 +229,8 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
           role?: string;
           parts?: Array<{ content?: string }>;
         }>;
-        return messages[0]?.role === 'system'
-          && messages[0]?.parts?.[0]?.content === EXPECTED_SYSTEM_PROMPT;
+        return messages[0]?.role === 'user'
+          && !messages.some(message => message.role === 'system');
       })).toBe(true);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;

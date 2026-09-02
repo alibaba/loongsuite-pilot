@@ -99,9 +99,8 @@ export interface AgentActivityEntry {
   'gen_ai.skill.description'?: string;
   'gen_ai.skill.version'?: string;
   /**
-   * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
-   * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。
-   * 仅 Codex 端有值；Claude transcript 不含此数据。
+   * 模型的 system instructions（MessagePart[] 数组形式）。不同 Agent 从各自真实的
+   * transcript、Hook 或 provider 请求中采集；未暴露时不应根据普通会话消息推断。
    */
   'gen_ai.system_instructions'?: JsonValue;
   /**
