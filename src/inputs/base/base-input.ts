@@ -4,9 +4,11 @@ import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
-import {
-  InputRuntimeAccumulator,
-} from './input-runtime-metrics.js';
+import { InputRuntimeAccumulator } from './input-runtime-metrics.js';
+import type {
+  InputCollectionBatch,
+  InputEntriesMetadata,
+} from '../../metrics/trace-runtime-types.js';
 
 export interface InputOptions {
   stateStore: StateStore;
@@ -36,6 +38,7 @@ export abstract class BaseInput extends EventEmitter {
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
+  private pendingCollectionMetadata: InputEntriesMetadata | undefined;
   private _running = false;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
   /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
@@ -75,8 +78,8 @@ export abstract class BaseInput extends EventEmitter {
     this.logger.info('stopped');
   }
 
-  /** Override to implement collection logic; return agent activity entries. */
-  protected abstract collect(): Promise<AgentActivityEntry[]>;
+  /** Override to implement collection logic; metadata is optional and diagnostics-only. */
+  protected abstract collect(): Promise<AgentActivityEntry[] | InputCollectionBatch>;
 
   getAgentVersion?(): string;
 
@@ -88,6 +91,18 @@ export abstract class BaseInput extends EventEmitter {
   /** Request an immediate serialized collection cycle from an input-owned watcher. */
   protected requestCollection(): void {
     if (this._running) void this.runCycle();
+  }
+
+  /** Emit entries together with optional source-read diagnostics. */
+  protected emitEntries(entries: AgentActivityEntry[], metadata?: InputEntriesMetadata): void {
+    if (entries.length > 0 || (metadata?.sourceReads?.length ?? 0) > 0) {
+      this.emit('entries', entries, metadata);
+    }
+  }
+
+  /** Attach diagnostics to the current collect() result without changing its array return type. */
+  protected setCollectionMetadata(metadata: InputEntriesMetadata | undefined): void {
+    this.pendingCollectionMetadata = metadata;
   }
 
   private runCycle(): Promise<void> {
@@ -103,9 +118,13 @@ export abstract class BaseInput extends EventEmitter {
     this.activeRuntimeAccumulator = runtime;
     const collectStartedAt = runtime.now();
     try {
-      const entries = await this.collect();
-      if (entries.length > 0) {
-        this.emit('entries', entries);
+      this.pendingCollectionMetadata = undefined;
+      const collected = await this.collect();
+      const entries = Array.isArray(collected) ? collected : collected.entries;
+      const metadata = Array.isArray(collected) ? this.pendingCollectionMetadata : collected.metadata;
+      this.pendingCollectionMetadata = undefined;
+      if (entries.length > 0 || (metadata?.sourceReads?.length ?? 0) > 0) {
+        this.emitEntries(entries, metadata);
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
       await this.stateStore.save();
@@ -114,6 +133,7 @@ export abstract class BaseInput extends EventEmitter {
       this.emit('collect-error', err);
     } finally {
       const collectDurationMs = runtime.now() - collectStartedAt;
+      this.pendingCollectionMetadata = undefined;
       this.activeRuntimeAccumulator = null;
       this.emit('input-runtime-delta', runtime.finish(collectDurationMs));
     }

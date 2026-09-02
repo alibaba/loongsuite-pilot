@@ -92,6 +92,8 @@ import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
+import { createRuntimeIdentity, type RuntimeIdentity } from '../metrics/runtime-identity.js';
+import { TraceRuntimeObserver } from '../metrics/trace-runtime-observer.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -177,6 +179,8 @@ export class Orchestrator extends EventEmitter {
   private dashboardServer: DashboardServer | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
+  private runtimeIdentity!: RuntimeIdentity;
+  private traceRuntimeObserver!: TraceRuntimeObserver;
   private isRunning = false;
   /** Shared multimodal processor (null when disabled). */
   private multimodalProcessor: MultimodalProcessor | null = null;
@@ -201,6 +205,14 @@ export class Orchestrator extends EventEmitter {
     await ensureDir(path.join(this.dataDir, 'logs'));
     await cleanStaleTmpFiles(path.join(this.dataDir, 'logs'));
 
+    const version = readInstalledVersion(this.dataDir);
+    this.runtimeIdentity = createRuntimeIdentity({
+      version,
+      userId: this.config.userId,
+      dataDir: this.dataDir,
+    });
+    this.traceRuntimeObserver = new TraceRuntimeObserver({ identity: this.runtimeIdentity });
+
     // 2. Load state & agent-control config
     this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'input-state.json'));
     await this.stateStore.load();
@@ -218,7 +230,6 @@ export class Orchestrator extends EventEmitter {
     this.flusher = await this.buildFlusher(this.readPackageVersion());
 
     // 4. Build InputManager & AlarmManager
-    const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
     this.inputManager = new InputManager();
@@ -371,6 +382,8 @@ export class Orchestrator extends EventEmitter {
       // configured, and the updater exits immediately on that config — so a missing pid
       // there is the expected state, not a fault.
       autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
+      runtimeIdentity: this.runtimeIdentity,
+      traceRuntimeObserver: this.traceRuntimeObserver,
     });
     await this.metricsWriter.start();
 
@@ -478,18 +491,19 @@ export class Orchestrator extends EventEmitter {
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
-    // The final dataflow window must observe the last serialized collect and
-    // entry queue drain, while the flusher counters are still available.
+    // Flushers release any remaining turn buffers during shutdown. Stop the
+    // metrics writer afterwards so its final trace-runtime drain includes those
+    // forced releases; endpoint counters remain readable after shutdown.
+    await this.flusher?.shutdown();
     try {
       await this.metricsWriter?.stop();
     } catch (err) {
       // Metrics are best-effort. A failed final snapshot must not prevent the
-      // data flusher from draining or the checkpoint store from being saved.
+      // checkpoint store from being saved.
       logger.warn('metrics writer stop failed during orchestrator shutdown', {
         error: String(err),
       });
     }
-    await this.flusher?.shutdown();
     await this.stateStore?.save();
 
     this.isRunning = false;
@@ -773,6 +787,8 @@ export class Orchestrator extends EventEmitter {
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
+          undefined,
+          this.traceRuntimeObserver,
         );
         flushers.push(r);
       }

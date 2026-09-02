@@ -1,6 +1,7 @@
 import { BaseFlusher } from './base-flusher.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import type { FlusherBatchContext, FlusherEntryContext } from '../metrics/trace-runtime-types.js';
 
 const logger = createLogger('MultiFlusher');
 
@@ -21,9 +22,9 @@ export class MultiFlusher extends BaseFlusher {
     return this.flushers;
   }
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  async send(entry: AgentActivityEntry, context?: FlusherEntryContext): Promise<void> {
     const results = await Promise.allSettled(
-      this.flushers.map(r => r.send(entry)),
+      this.flushers.map(r => r.send(entry, context)),
     );
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === 'rejected') {
@@ -36,9 +37,9 @@ export class MultiFlusher extends BaseFlusher {
     }
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], context?: FlusherBatchContext): Promise<void> {
     const results = await Promise.allSettled(
-      this.flushers.map(r => r.sendBatch(entries)),
+      this.flushers.map(r => r.sendBatch(entries, context)),
     );
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === 'rejected') {

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
+import { createRuntimeIdentity } from '../../../src/metrics/runtime-identity.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
 
@@ -99,6 +100,44 @@ describe('MetricsCollector', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('preserves an injected process identity for status correlation', () => {
+    const runtimeIdentity = createRuntimeIdentity({
+      version: '1.0.0',
+      userId: 'test-user',
+      dataDir: tmpDir,
+      now: new Date('2026-09-02T00:00:00.000Z'),
+    });
+    const injected = new MetricsCollector({
+      version: '1.0.0',
+      userId: 'test-user',
+      dataDir: tmpDir,
+      runtimeIdentity,
+    });
+
+    const result = injected.collectL1(buildSnapshot());
+    expect(result.instance_id).toBe(runtimeIdentity.instanceId);
+    expect(result.run_id).toBe(runtimeIdentity.runId);
+    expect(result.start_time).toBe(runtimeIdentity.startTime);
+  });
+
+  it('keeps instance identity stable while changing run identity after restart', () => {
+    const first = createRuntimeIdentity({
+      version: '1.0.0',
+      userId: 'test-user',
+      dataDir: tmpDir,
+      now: new Date('2026-09-02T00:00:00.000Z'),
+    });
+    const restarted = createRuntimeIdentity({
+      version: '1.0.0',
+      userId: 'test-user',
+      dataDir: tmpDir,
+      now: new Date('2026-09-02T00:00:01.000Z'),
+    });
+
+    expect(restarted.instanceId).toBe(first.instanceId);
+    expect(restarted.runId).not.toBe(first.runId);
   });
 
   describe('collectL1', () => {

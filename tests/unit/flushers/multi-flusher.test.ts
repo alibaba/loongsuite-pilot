@@ -43,6 +43,24 @@ describe('MultiFlusher', () => {
       f2.shouldFail = true;
       await expect(multi.sendBatch([buildTestEntry()])).resolves.toBeUndefined();
     });
+
+    it('forwards the same optional runtime context to every child', async () => {
+      const entries = [buildTestEntry(), buildTestEntry()];
+      const context = {
+        inputName: 'codex-transcript',
+        entryLogicalBytes: [11, 12],
+        sourceReads: [{
+          agentType: 'codex',
+          turnId: 'session:turn',
+          bytes: 20,
+          basis: 'bytes_read' as const,
+        }],
+      };
+      await multi.sendBatch(entries, context);
+
+      expect(f1.batchContexts[0]).toBe(context);
+      expect(f2.batchContexts[0]).toBe(context);
+    });
   });
 
   describe('send — single entry dispatch', () => {

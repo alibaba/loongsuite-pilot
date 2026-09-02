@@ -1,4 +1,8 @@
 import type { AgentActivityEntry } from '../types/index.js';
+import type {
+  FlusherBatchContext,
+  FlusherEntryContext,
+} from '../metrics/trace-runtime-types.js';
 
 /**
  * Abstract base for all data output flushers.
@@ -7,8 +11,8 @@ import type { AgentActivityEntry } from '../types/index.js';
 export abstract class BaseFlusher {
   abstract readonly name: string;
 
-  abstract send(entry: AgentActivityEntry): Promise<void>;
-  abstract sendBatch(entries: AgentActivityEntry[]): Promise<void>;
+  abstract send(entry: AgentActivityEntry, context?: FlusherEntryContext): Promise<void>;
+  abstract sendBatch(entries: AgentActivityEntry[], context?: FlusherBatchContext): Promise<void>;
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;
 

@@ -10,11 +10,15 @@ import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
+import type { RuntimeIdentity } from './runtime-identity.js';
+import type { TraceRuntimeObserver } from './trace-runtime-observer.js';
 
 const logger = createLogger('MetricsWriter');
 
 const DATAFLOW_INTERVAL_MS = 600_000;
 const ALARM_FLUSH_INTERVAL_MS = 30_000;
+const TRACE_DETAIL_INTERVAL_MS = 30_000;
+const TRACE_WINDOW_INTERVAL_MS = 600_000;
 const CPU_THRESHOLD_PERCENT = 80;
 const CPU_ALARM_CONSECUTIVE_SAMPLES = 3;
 const MEMORY_SOFT_THRESHOLD_MB = 512;
@@ -46,6 +50,8 @@ export interface MetricsWriterOptions {
   cmsWorkspace?: string;
   autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
+  runtimeIdentity?: RuntimeIdentity;
+  traceRuntimeObserver?: TraceRuntimeObserver;
 }
 
 export class MetricsWriter {
@@ -54,10 +60,13 @@ export class MetricsWriter {
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
+  private readonly traceRuntimeObserver: TraceRuntimeObserver | null;
   private l2WritePromise: Promise<void> | null = null;
   private dataflowWritePromise: Promise<void> | null = null;
   private dataflowTimer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
+  private traceDetailTimer: ReturnType<typeof setInterval> | null = null;
+  private traceWindowTimer: ReturnType<typeof setInterval> | null = null;
   private userIdAlarmEmitted = false;
   private startupAlarmEmitted = false;
   private cpuHighSamples = 0;
@@ -82,6 +91,7 @@ export class MetricsWriter {
       cmsWorkspace: opts.cmsWorkspace,
       autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
+      runtimeIdentity: opts.runtimeIdentity,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
@@ -89,6 +99,7 @@ export class MetricsWriter {
       dataDir: opts.dataDir,
       onSample: (sample) => this.checkDiskUsage(sample),
     });
+    this.traceRuntimeObserver = opts.traceRuntimeObserver ?? null;
   }
 
   async start(): Promise<void> {
@@ -105,6 +116,18 @@ export class MetricsWriter {
       this.alarmTimer = setInterval(() => void this.writeAlarms(), ALARM_FLUSH_INTERVAL_MS);
       this.alarmTimer.unref();
     }
+    if (this.traceRuntimeObserver) {
+      this.traceDetailTimer = setInterval(
+        () => void this.writeTraceRuntimeDetails(),
+        TRACE_DETAIL_INTERVAL_MS,
+      );
+      this.traceDetailTimer.unref();
+      this.traceWindowTimer = setInterval(
+        () => void this.writeTraceRuntimeWindows(),
+        TRACE_WINDOW_INTERVAL_MS,
+      );
+      this.traceWindowTimer.unref();
+    }
 
     await this.writeDataflow();
     logger.info('metrics-writer started');
@@ -120,13 +143,54 @@ export class MetricsWriter {
       clearInterval(this.alarmTimer);
       this.alarmTimer = null;
     }
+    if (this.traceDetailTimer) {
+      clearInterval(this.traceDetailTimer);
+      this.traceDetailTimer = null;
+    }
+    if (this.traceWindowTimer) {
+      clearInterval(this.traceWindowTimer);
+      this.traceWindowTimer = null;
+    }
     // If a timer cycle is in flight, let it finish and then take a fresh final
     // snapshot. Reusing only the in-flight promise could miss counters produced
     // while that cycle was writing its rows.
     if (this.dataflowWritePromise) await this.dataflowWritePromise;
     await this.writeDataflow();
     await this.writeAlarms();
+    await this.writeTraceRuntimeDetails();
+    await this.writeTraceRuntimeWindows();
     logger.info('metrics-writer stopped');
+  }
+
+  private async writeTraceRuntimeDetails(): Promise<void> {
+    if (!this.traceRuntimeObserver) return;
+    try {
+      this.traceRuntimeObserver.checkLifetimeThresholds();
+      for (const record of this.traceRuntimeObserver.drainDetails()) {
+        try {
+          sendStatus('pilot_trace_runtime', flattenToStrings(record));
+        } catch (err) {
+          logger.warn('Trace runtime detail send failed', { error: String(err) });
+        }
+      }
+    } catch (err) {
+      logger.warn('Trace runtime detail collection failed', { error: String(err) });
+    }
+  }
+
+  private async writeTraceRuntimeWindows(): Promise<void> {
+    if (!this.traceRuntimeObserver) return;
+    try {
+      for (const record of this.traceRuntimeObserver.collectWindows()) {
+        try {
+          sendStatus('pilot_trace_runtime', flattenToStrings(record));
+        } catch (err) {
+          logger.warn('Trace runtime window send failed', { error: String(err) });
+        }
+      }
+    } catch (err) {
+      logger.warn('Trace runtime window collection failed', { error: String(err) });
+    }
   }
 
   private writeDataflow(): Promise<void> {

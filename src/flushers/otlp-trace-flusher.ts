@@ -36,6 +36,15 @@ import {
   ReservedToolSpanIdGenerator,
   type ToolSpanIdReservations,
 } from './tool-span-id-reservation.js';
+import type {
+  FlusherBatchContext,
+  FlusherEntryContext,
+  SourceReadMeasurement,
+  TraceMemorySample,
+  TraceProcessSummary,
+  TraceReleaseReason,
+} from '../metrics/trace-runtime-types.js';
+import type { TraceRuntimeObserver } from '../metrics/trace-runtime-observer.js';
 
 const logger = createLogger('otlp-trace-flusher');
 
@@ -64,10 +73,26 @@ interface TurnBuffer {
   keySource: 'turn_id' | 'trace_id' | 'session_id' | 'ephemeral';
   keyValue: string;
   agentType: string;
+  inputName: string;
   sessionId?: string;
+  turnId?: string;
+  traceId?: string;
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
+  releaseReason: TraceReleaseReason;
+  boundarySignal: string;
+}
+
+interface TraceConversionOutcome {
+  convertedSpanCount?: number;
+  convertDurationMs?: number;
+  exportStartedAtMs?: number;
+  exportEndedAtMs?: number;
+  memoryBeforeConvert?: TraceMemorySample;
+  memoryAfterConvert?: TraceMemorySample;
+  convertFailed: boolean;
+  exportFailed: boolean;
 }
 
 interface AgentConvertState {
@@ -250,6 +275,11 @@ export type OtlpExporterFactory = (opts: {
   compression: CompressionAlgorithm;
   name: string;
 }) => TraceExporterLike;
+
+export interface TraceRuntimeInstrumentation {
+  monotonicNow?: () => number;
+  memoryUsage?: () => TraceMemorySample;
+}
 
 interface ResolvedOtlpEndpoint {
   name: string;
@@ -482,6 +512,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly resourceAttributeKeys: string[];
   private readonly spanAttributePassthroughPrefixes: string[];
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
+  private traceRuntimeObserver?: TraceRuntimeObserver;
+  private readonly runtimeNow: () => number;
+  private readonly runtimeMemoryUsage: () => TraceMemorySample;
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
@@ -498,6 +531,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     cfg: OtlpTraceFlusherConfig,
     globalAttributesProvider?: GlobalAttributesProvider,
     exporterFactory?: OtlpExporterFactory,
+    traceRuntimeObserver?: TraceRuntimeObserver,
+    runtimeInstrumentation?: TraceRuntimeInstrumentation,
   ) {
     super();
     if (!cfg.endpoints || cfg.endpoints.length === 0) {
@@ -509,6 +544,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.cfg = cfg;
     this.globalAttributesProvider = globalAttributesProvider;
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
+    this.traceRuntimeObserver = traceRuntimeObserver;
+    this.runtimeNow = runtimeInstrumentation?.monotonicNow ?? (() => performance.now());
+    this.runtimeMemoryUsage = runtimeInstrumentation?.memoryUsage ?? (() => {
+      const usage = process.memoryUsage();
+      return { rssBytes: usage.rss, heapUsedBytes: usage.heapUsed };
+    });
     this.endpoints = cfg.endpoints.map((ep, i) => ({
       name: ep.name || `otlp-${i}`,
       url: resolveEndpointUrl(ep.endpoint),
@@ -555,7 +596,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   // --- Public API (BaseFlusher) ---
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  setTraceRuntimeObserver(observer: TraceRuntimeObserver | undefined): void {
+    this.traceRuntimeObserver = observer;
+  }
+
+  async send(entry: AgentActivityEntry, context?: FlusherEntryContext): Promise<void> {
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -576,6 +621,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         });
         return;
       }
+      if (context?.sourceReads) this.observeSourceReads(context.inputName, context.sourceReads);
       await this.convertAndExport(agentType, [entry]);
       return;
     }
@@ -595,6 +641,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
+      buf.releaseReason = 'group_successor';
+      buf.boundarySignal = 'group_key_change';
       this.triggerFlush(buf, false);
     }
 
@@ -609,6 +657,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         .slice(0, overflow);
       for (const b of candidates) {
         b.completed = true;
+        b.releaseReason = 'buffer_limit';
+        b.boundarySignal = 'max_turn_buffers';
         this.triggerFlush(b, false);
       }
     }
@@ -620,17 +670,42 @@ export class OtlpTraceFlusher extends BaseFlusher {
         keySource: source,
         keyValue: value,
         agentType,
+        inputName: context?.inputName ?? 'unknown',
         sessionId: incomingSessionId,
+        turnId: stringValue(entry['gen_ai.turn.id']),
+        traceId: stringValue(entry['trace_id']),
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
+        releaseReason: 'forced',
+        boundarySignal: 'flush',
       };
       this.turnBuffers.set(key, buf);
+      this.observe(() => this.traceRuntimeObserver?.openTurn({
+        bufferKey: key,
+        agentType,
+        inputName: buf!.inputName,
+        sessionId: buf!.sessionId,
+        turnId: buf!.turnId,
+        traceId: buf!.traceId,
+      }));
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
+    if (buf.inputName === 'unknown' && context?.inputName) buf.inputName = context.inputName;
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
+    const logicalBytes = context?.entryLogicalBytes;
+    this.observe(() => this.traceRuntimeObserver?.append(
+      key,
+      Number.isFinite(logicalBytes) ? logicalBytes! : 0,
+      {
+        sessionId: incomingSessionId,
+        turnId: stringValue(entry['gen_ai.turn.id']),
+        traceId: stringValue(entry['trace_id']),
+      },
+    ));
+    if (context?.sourceReads) this.observeSourceReads(context.inputName, context.sourceReads);
 
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
@@ -640,30 +715,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
       buf.completed = true;
+      buf.releaseReason = 'terminal';
+      buf.boundarySignal = this.terminalBoundarySignal(entry);
       if (!this._deferSignalA) {
         this.triggerFlush(buf);
       }
     }
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], context?: FlusherBatchContext): Promise<void> {
+    const sizes = context?.entryLogicalBytes;
+    const validSizes = sizes === undefined || sizes.length === entries.length;
+    if (!validSizes) {
+      logger.warn('Trace runtime batch byte alignment invalid; skipping byte attribution', {
+        inputName: context?.inputName,
+        entries: entries.length,
+        byteValues: sizes?.length,
+      });
+    }
     // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
     // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
     this._deferSignalA = true;
     try {
-      for (const entry of entries) {
-        await this.send(entry);
+      for (let i = 0; i < entries.length; i++) {
+        await this.send(entries[i], context ? {
+          inputName: context.inputName,
+          ...(validSizes && sizes ? { entryLogicalBytes: sizes[i] } : {}),
+        } : undefined);
       }
     } finally {
       this._deferSignalA = false;
     }
+    if (context?.sourceReads) this.observeSourceReads(context.inputName, context.sourceReads);
     // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
     await this.flushCompleted();
   }
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
-      buf.completed = true;
+      if (!buf.completed) {
+        buf.completed = true;
+        buf.releaseReason = 'forced';
+        buf.boundarySignal = 'flush';
+      }
     }
     await this.flushCompleted();
     while (this.inFlightExports.size > 0) {
@@ -679,7 +773,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.idleTimer = undefined;
     }
 
-    await this.flush();
+    for (const buf of this.turnBuffers.values()) {
+      if (!buf.completed) {
+        buf.completed = true;
+        buf.releaseReason = 'shutdown_incomplete';
+        buf.boundarySignal = 'process_shutdown';
+      }
+    }
+    await this.flushCompleted();
+    while (this.inFlightExports.size > 0) {
+      await Promise.allSettled([...this.inFlightExports]);
+    }
+    this.flushedTurnKeys.clear();
 
     const exportShutdowns = [...this.agentExportStates.values()].flatMap(
       (s) => s.exporters.map((e) => e.exporter.shutdown()),
@@ -772,6 +877,60 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return { source: 'ephemeral', value: ephemeralId, key: `ephemeral:${ephemeralId}` };
   }
 
+  private terminalBoundarySignal(entry: AgentActivityEntry): string {
+    const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? ''));
+    if (agentType === 'codex') {
+      return entry['agent.codex.turn_status'] === 'interrupted'
+        ? 'codex.turn_aborted'
+        : 'codex.task_complete';
+    }
+    if (agentType === 'openclaw') return 'openclaw.llm_output';
+    if (agentType === 'grok-build') return 'grok.turn_terminal';
+    const reasons = entry['gen_ai.response.finish_reasons'];
+    if (Array.isArray(reasons)) {
+      const reason = reasons.find(value => typeof value === 'string');
+      if (reason) return `finish_reason.${reason}`;
+    }
+    return 'gen_ai.turn.end';
+  }
+
+  private observeSourceReads(inputName: string, sourceReads: readonly SourceReadMeasurement[]): void {
+    for (const measurement of sourceReads) {
+      const bufferKey = measurement.turnId
+        ? `turn:${measurement.turnId}`
+        : measurement.traceId && VALID_TRACE_ID_RE.test(measurement.traceId)
+          ? `trace:${measurement.traceId}`
+          : measurement.sessionId
+            ? `session:${measurement.sessionId}`
+            : undefined;
+      this.observe(() => this.traceRuntimeObserver?.recordSourceRead(
+        inputName,
+        { ...measurement, agentType: normalizeAgentType(measurement.agentType) },
+        bufferKey,
+      ));
+    }
+  }
+
+  private observe(callback: () => void): void {
+    try {
+      callback();
+    } catch (err) {
+      logger.warn('Trace runtime observer callback failed; continuing', { error: String(err) });
+    }
+  }
+
+  private sampleRuntimeMemory(): TraceMemorySample {
+    try {
+      const sample = this.runtimeMemoryUsage();
+      return {
+        rssBytes: Number.isFinite(sample.rssBytes) ? sample.rssBytes : 0,
+        heapUsedBytes: Number.isFinite(sample.heapUsedBytes) ? sample.heapUsedBytes : 0,
+      };
+    } catch {
+      return { rssBytes: 0, heapUsedBytes: 0 };
+    }
+  }
+
   private triggerFlush(buf: TurnBuffer, markFlushed = true): void {
     if (markFlushed) {
       this.flushedTurnKeys.add(buf.key);
@@ -808,14 +967,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    await this.convertAndExport(buf.agentType, buf.records);
+    const processing = await this.convertAndExport(buf.agentType, buf.records);
+    this.observe(() => this.traceRuntimeObserver?.releaseTurn(buf.key, {
+      releaseReason: buf.releaseReason,
+      boundarySignal: buf.boundarySignal,
+      processing,
+    }));
   }
 
   private async convertAndExport(
     agentType: string,
     records: AgentActivityEntry[],
-  ): Promise<void> {
-    if (records.length === 0) return;
+  ): Promise<TraceProcessSummary> {
+    if (records.length === 0) return { result: 'success' };
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
@@ -824,7 +988,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const serviceNames = [...new Set(
       this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
-    await Promise.all(
+    const outcomes = await Promise.all(
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
         const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
@@ -836,10 +1000,28 @@ export class OtlpTraceFlusher extends BaseFlusher {
           resourceIdentity,
           convertKey,
         ));
-        this.convertLocks.set(convertKey, current.catch(() => {}));
+        this.convertLocks.set(convertKey, current.then(() => undefined, () => undefined));
         return current;
       }),
     );
+    const convertFailed = outcomes.some(outcome => outcome.convertFailed);
+    const exportFailed = !convertFailed && outcomes.some(outcome => outcome.exportFailed);
+    const exportStarts = outcomes
+      .map(outcome => outcome.exportStartedAtMs)
+      .filter((value): value is number => value !== undefined);
+    const exportEnds = outcomes
+      .map(outcome => outcome.exportEndedAtMs)
+      .filter((value): value is number => value !== undefined);
+    return {
+      result: convertFailed ? 'convert_failed' : exportFailed ? 'export_failed' : 'success',
+      convertedSpanCount: maxDefined(outcomes.map(outcome => outcome.convertedSpanCount)),
+      convertDurationMs: sumDefined(outcomes.map(outcome => outcome.convertDurationMs)),
+      ...(exportStarts.length > 0 && exportEnds.length > 0
+        ? { exportDurationMs: Math.max(...exportEnds) - Math.min(...exportStarts) }
+        : {}),
+      memoryBeforeConvert: outcomes.find(outcome => outcome.memoryBeforeConvert)?.memoryBeforeConvert,
+      memoryAfterConvert: [...outcomes].reverse().find(outcome => outcome.memoryAfterConvert)?.memoryAfterConvert,
+    };
   }
 
   private async doConvertAndExport(
@@ -849,7 +1031,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
-  ): Promise<void> {
+  ): Promise<TraceConversionOutcome> {
     const convertState = this.getOrCreateConvertState(
       agentType,
       serviceName,
@@ -861,6 +1043,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
+    const outcome: TraceConversionOutcome = { convertFailed: false, exportFailed: false };
+    outcome.memoryBeforeConvert = this.sampleRuntimeMemory();
+    const convertStartedAtMs = this.runtimeNow();
 
     try {
       try {
@@ -952,14 +1137,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // not exported, pollutes subsequent sessions". Resetting here keeps
         // each convert attempt's span set isolated.
         inMem.reset();
-        return;
+        outcome.convertDurationMs = this.runtimeNow() - convertStartedAtMs;
+        outcome.memoryAfterConvert = this.sampleRuntimeMemory();
+        outcome.convertFailed = true;
+        return outcome;
       }
 
       await provider.forceFlush();
       const spans = inMem.getFinishedSpans();
       inMem.reset();
+      outcome.convertDurationMs = this.runtimeNow() - convertStartedAtMs;
+      outcome.memoryAfterConvert = this.sampleRuntimeMemory();
+      outcome.convertedSpanCount = spans.length;
 
-      if (spans.length === 0) return;
+      if (spans.length === 0) return outcome;
       applyQoderWorkStepTiming(records, spans);
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
@@ -977,9 +1168,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         await this.writeDebugLog(agentType, spans);
       }
 
-      await this.exportInBatches(exportState, agentType, spans);
+      outcome.exportStartedAtMs = this.runtimeNow();
+      outcome.exportFailed = !(await this.exportInBatches(exportState, agentType, spans));
+      outcome.exportEndedAtMs = this.runtimeNow();
+      return outcome;
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
+      if (outcome.convertDurationMs === undefined) {
+        outcome.convertDurationMs = this.runtimeNow() - convertStartedAtMs;
+        outcome.memoryAfterConvert = this.sampleRuntimeMemory();
+        outcome.convertFailed = true;
+      } else {
+        outcome.exportFailed = true;
+        if (outcome.exportStartedAtMs !== undefined) outcome.exportEndedAtMs = this.runtimeNow();
+      }
+      return outcome;
     } finally {
       convertState.active -= 1;
       this.evictConvertStates();
@@ -990,7 +1193,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exportState: AgentExportState,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const maxBytes = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
     const batches: ReadableSpan[][] = [];
     let current: ReadableSpan[] = [];
@@ -1015,11 +1218,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out per-endpoint in parallel: each backend drains its own batches
     // sequentially, but backends run concurrently — so a slow/hung backend
     // only delays itself, not the healthy ones (no head-of-line blocking).
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       exportState.exporters.map(({ name, exporter }) =>
         this.exportBatchesToEndpoint(exporter, name, agentType, batches),
       ),
     );
+    return results.every(result => result.status === 'fulfilled' && result.value);
   }
 
   private async exportBatchesToEndpoint(
@@ -1027,10 +1231,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     batches: ReadableSpan[][],
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let success = true;
     for (const batch of batches) {
-      await this.doExport(exporter, endpointName, agentType, batch);
+      success = (await this.doExport(exporter, endpointName, agentType, batch)) && success;
     }
+    return success;
   }
 
   private doExport(
@@ -1038,7 +1244,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const counter = this.endpointCounters.get(endpointName);
     const startMs = Date.now();
     // Sized once and reused on the success path: in and out must measure the
@@ -1051,7 +1257,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
     // Never rejects: a failing backend is isolated + persisted, not propagated.
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       exporter.export(spans, (result) => {
         if (counter) counter.totalDelayMs += Date.now() - startMs;
         if (result.code !== ExportResultCode.SUCCESS) {
@@ -1067,7 +1273,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           counter.outBytes += batchBytes;
           counter.lastFlushTime = formatTime(new Date());
         }
-        resolve();
+        resolve(result.code === ExportResultCode.SUCCESS);
       });
     });
   }
@@ -1653,10 +1859,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
         buf.completed = true;
+        buf.releaseReason = 'idle_timeout';
+        buf.boundarySignal = 'turn_idle_timeout';
         this.triggerFlush(buf);
       }
     }
   }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function maxDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? Math.max(...defined) : undefined;
+}
+
+function sumDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  return defined.length > 0 ? defined.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
 function hasTerminalFinishReason(finishReasons: unknown): boolean {

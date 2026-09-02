@@ -5,6 +5,11 @@ import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
+import { createRuntimeIdentity } from '../../../src/metrics/runtime-identity.js';
+import {
+  TRACE_RUNTIME_SIZE_THRESHOLDS,
+  TraceRuntimeObserver,
+} from '../../../src/metrics/trace-runtime-observer.js';
 
 const fsMockState = { blockAccessSync: false };
 
@@ -166,6 +171,86 @@ describe('MetricsWriter', () => {
       ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
     );
     expect(legacy).toHaveLength(0);
+  });
+
+  it('writes Trace runtime details and windows only to the internal runtime topic', async () => {
+    const runtimeIdentity = createRuntimeIdentity({
+      version: '2.0.0',
+      userId: 'u1',
+      dataDir: tmpDir,
+    });
+    const observer = new TraceRuntimeObserver({ identity: runtimeIdentity });
+    observer.openTurn({
+      bufferKey: 'turn:s:t',
+      agentType: 'codex',
+      inputName: 'codex-transcript',
+      sessionId: 's',
+      turnId: 's:t',
+    });
+    observer.append('turn:s:t', TRACE_RUNTIME_SIZE_THRESHOLDS[0]);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      runtimeIdentity,
+      traceRuntimeObserver: observer,
+    });
+
+    await (writer as any).writeL1();
+    await (writer as any).writeTraceRuntimeDetails();
+    await (writer as any).writeTraceRuntimeWindows();
+
+    const runtimeRows = mockSendStatus.mock.calls
+      .filter((call: unknown[]) => call[0] === 'pilot_trace_runtime')
+      .map((call: unknown[]) => call[1] as Record<string, string>);
+    expect(runtimeRows.map(row => row.record_type)).toEqual(['turn', 'window']);
+    expect(runtimeRows[0]).toMatchObject({
+      schema_version: '1',
+      run_id: runtimeIdentity.runId,
+      instance_id: runtimeIdentity.instanceId,
+      threshold_kind: 'buffer_logical_bytes',
+    });
+    const statusRow = mockSendStatus.mock.calls
+      .find((call: unknown[]) => call[0] === 'pilot_status')?.[1] as Record<string, string>;
+    expect(runtimeRows[0]).toMatchObject({
+      run_id: statusRow.run_id,
+      instance_id: statusRow.instance_id,
+    });
+    expect(Math.abs(Number(runtimeRows[0].__time__) - Number(statusRow.__time__)))
+      .toBeLessThanOrEqual(1);
+    expect(mockSendStatus.mock.calls.some((call: unknown[]) =>
+      call[0] !== 'pilot_trace_runtime'
+      && (call[1] as Record<string, string>).threshold_kind !== undefined,
+    )).toBe(false);
+  });
+
+  it('isolates an internal Trace runtime send failure', async () => {
+    const runtimeIdentity = createRuntimeIdentity({
+      version: '2.0.0',
+      userId: 'u1',
+      dataDir: tmpDir,
+    });
+    const observer = new TraceRuntimeObserver({ identity: runtimeIdentity });
+    observer.openTurn({
+      bufferKey: 'turn:s:t',
+      agentType: 'codex',
+      inputName: 'codex-transcript',
+    });
+    observer.append('turn:s:t', TRACE_RUNTIME_SIZE_THRESHOLDS[0]);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      runtimeIdentity,
+      traceRuntimeObserver: observer,
+    });
+    mockSendStatus.mockImplementationOnce(() => {
+      throw new Error('internal sender unavailable');
+    });
+
+    await expect((writer as any).writeTraceRuntimeDetails()).resolves.toBeUndefined();
   });
 
   it('sends one row per agent and per destination on L2 flush', async () => {
