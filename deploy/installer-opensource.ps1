@@ -105,7 +105,7 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 # ============================================================
 # Validate install options
 # ============================================================
-if ($PSBoundParameters.ContainsKey('DashboardPort')) {
+if ($PSBoundParameters.Keys -contains 'DashboardPort') {
     if ($DashboardPort -notmatch '\A[0-9]{1,5}\z' -or [int]$DashboardPort -lt 1 -or [int]$DashboardPort -gt 65535) {
         Write-Error "-DashboardPort must be an integer between 1 and 65535"
         exit 1
