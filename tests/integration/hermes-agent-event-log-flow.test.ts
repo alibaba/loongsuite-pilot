@@ -5,7 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { convertEventLogToReadableSpans, type EventLogRecord } from '@loongsuite/otel-util-genai';
 import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
+import { InputManager } from '../../src/core/input-manager.js';
+import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
+import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
 
 const PLUGIN_PATH = path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
@@ -30,7 +33,7 @@ describe('Hermes Agent plugin to trace flow', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-hermes-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
-      userId: 'fixture-user',
+      userId: 'plugin-config-user',
       agents: { 'hermes-agent': { captureMessageContent: true } },
     }));
 
@@ -62,6 +65,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       env: {
         ...process.env,
         LOONGSUITE_PILOT_DATA_DIR: root,
+        LOONGSUITE_PILOT_USER_ID: '',
+        LOONGSUITE_USER_ID: '',
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES: '',
         PYTHONDONTWRITEBYTECODE: '1',
       },
       encoding: 'utf8',
@@ -73,7 +79,18 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       sessionDir: path.join(root, 'logs', 'hermes-agent'),
       pollIntervalMs: 60_000,
     });
-    const records = await input.collectOnce();
+    const flusher = new MockFlusher();
+    const manager = new InputManager();
+    manager.setAgentsConfig({ [ClientType.Hermes]: { captureMessageContent: true } });
+    manager.setConfiguredUserId('collector-config-user');
+    manager.setUserId('collector-fallback-user');
+    manager.setFlusher(flusher);
+    manager.registerInput(input);
+    await manager.startInput(input.id);
+    await manager.stopInput(input.id);
+
+    expect(flusher.batchCalls).toHaveLength(1);
+    const records = flusher.batchCalls[0];
     expect(records.map(record => record['event.name'])).toEqual([
       'llm.request',
       'llm.response',
@@ -82,6 +99,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       'llm.request',
       'llm.response',
     ]);
+    expect(records.every(record => record['user.id'] === 'fixture-user')).toBe(true);
+    expect(records.every(record =>
+      !('agent.pilot.invocation.user.id' in record))).toBe(true);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
@@ -115,6 +135,8 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       expect(parents.filter(item => item.kind === 'LLM').every(item => item.parent === 'STEP')).toBe(true);
       expect(parents).toContainEqual({ kind: 'TOOL', parent: 'STEP' });
       expect(new Set(converted.spans.map(span => span.spanContext().traceId)).size).toBe(1);
+      expect(converted.spans.every(span =>
+        span.attributes['gen_ai.user.id'] === 'fixture-user')).toBe(true);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

@@ -329,6 +329,7 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
 - 它们会转换为 event log 中的标准身份字段（`gen_ai.session.id` 和 `user.id`），并成为所有类型 trace span 上的标准属性（`gen_ai.session.id` 和 `gen_ai.user.id`）。无需配置 `spanAttributePassthroughPrefixes`。
 - 按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
 - 一期支持 OpenCode、Claude Code、Qoder/Qoder-CN 和 OpenClaw。Codex 和 Qwen Code CLI 仍会拒绝这两个保留 key。
+- Hermes 额外支持按次调用的 `gen_ai.user.id`。OpenClaw 与 Hermes 在没有显式按次身份和 Pilot 用户环境变量时，会使用 channel 原生 `senderId` / `sender_id`；随后才回退到插件配置和 hostname。
 - 除这两个精确 key 之外，其他 `gen_ai.*` 和 `user.*` 字段仍为保留字段并会被丢弃。
 
 **OpenCode 内置属性（`opencode.message.id`）。** OpenCode 插件会在其 `llm.request`、`llm.response`、`tool.call`、`tool.result` 记录上自动打上 `opencode.message.id`（opencode 的 assistant 消息 id）——无需启动器 env 变量。要让它出现在 span 上，只需列出 `opencode.` 前缀；随后它会出现在 ENTRY / AGENT / STEP / LLM / TOOL span 上（LLM、TOOL 取各自记录的值，ENTRY / AGENT / STEP 取 turn 级值）：
