@@ -8,6 +8,7 @@ import {
   estimateStringRecordBytes,
   safeEndpointFilePrefix,
 } from '../../../src/flushers/sls-failure-log-writer.js';
+import { HttpError } from '../../../src/flushers/sls-transport.js';
 
 function failureInput(overrides: Record<string, unknown> = {}) {
   return {
@@ -130,6 +131,54 @@ describe('SlsFailureLogWriter', () => {
 });
 
 describe('SLS failure metadata helpers', () => {
+  it('extracts nested transport code/status without changing the record shape', () => {
+    const error = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('private socket detail'), {
+        code: 'ECONNRESET',
+        statusCode: 503,
+      }),
+    });
+    const record = buildSlsFailureLogRecord(
+      failureInput({ error }),
+      new Date('2026-07-20T00:00:00Z'),
+    );
+
+    expect(record.error_code).toBe('ECONNRESET');
+    expect(record.http_status).toBe(503);
+    expect(Object.keys(record).sort()).toEqual([
+      'batch_bytes',
+      'batch_count',
+      'endpoint',
+      'error_code',
+      'error_summary',
+      'error_type',
+      'http_status',
+      'kind',
+      'logstore',
+      'mode',
+      'project',
+      'schema_version',
+      'ts',
+    ]);
+  });
+
+  it('extracts structured SLS code/status into existing fields only', () => {
+    const record = buildSlsFailureLogRecord(
+      failureInput({
+        error: new HttpError(
+          403,
+          '{"errorCode":"ShardWriteQuotaExceed","message":"Bearer private-token"}',
+        ),
+      }),
+      new Date('2026-07-20T00:00:00Z'),
+    );
+
+    expect(record.error_code).toBe('ShardWriteQuotaExceed');
+    expect(record.http_status).toBe(403);
+    expect(record.error_summary).not.toContain('private-token');
+    expect(record).not.toHaveProperty('error_category');
+  });
+
   it('bounds error summaries by UTF-8 bytes', () => {
     const record = buildSlsFailureLogRecord(
       failureInput({ error: new Error('错'.repeat(4_000)) }),

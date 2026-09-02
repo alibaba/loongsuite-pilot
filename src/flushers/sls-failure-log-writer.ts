@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
+import { classifySlsSendError } from './sls-error-classifier.js';
 
 const logger = createLogger('SlsFailureLogWriter');
 
@@ -281,18 +282,15 @@ function asErrorObject(error: unknown): {
   httpStatus: number;
   summary: string;
 } {
-  const value = typeof error === 'object' && error !== null
-    ? error as Record<string, unknown>
-    : null;
-  const status = Number(value?.status ?? value?.statusCode ?? 0);
+  const classification = classifySlsSendError(error);
   const type = error instanceof Error
     ? error.name || error.constructor.name
     : typeof error;
   const summary = error instanceof Error ? error.message : String(error ?? 'unknown error');
   return {
     type: type || 'Error',
-    code: typeof value?.code === 'string' ? value.code : '',
-    httpStatus: Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0,
+    code: classification.code === 'UNKNOWN' ? '' : classification.code,
+    httpStatus: classification.httpStatus,
     summary,
   };
 }

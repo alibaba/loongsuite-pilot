@@ -7,6 +7,22 @@ import {
   SlsFailureLogWriter,
   type SlsFailureLogInput,
 } from './sls-failure-log-writer.js';
+import {
+  HttpError,
+  RETRYABLE_STATUS_CODES,
+  classifySlsSendError,
+} from './sls-error-classifier.js';
+
+export {
+  HttpError,
+  RETRYABLE_STATUS_CODES,
+  classifySlsSendError,
+  formatSlsSendFailureMessage,
+} from './sls-error-classifier.js';
+export type {
+  SlsSendErrorCategory,
+  SlsSendErrorClassification,
+} from './sls-error-classifier.js';
 
 const logger = createLogger('SlsTransport');
 
@@ -15,14 +31,6 @@ export const WEBTRACKING_MAX_BODY_BYTES = 2_800_000;
 export const WEBTRACKING_MAX_LOGS = 4096;
 export const RETRY_MAX_ATTEMPTS = 3;
 export const RETRY_BASE_DELAY_MS = 1000;
-
-export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
-
-export class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
-    super(`${status} ${body}`);
-  }
-}
 
 export interface SlsTransportConfig {
   endpoint: string;
@@ -83,18 +91,7 @@ export function splitForWebtracking(
 }
 
 export function isRetryable(err: unknown): boolean {
-  if (err instanceof HttpError) return RETRYABLE_STATUS_CODES.has(err.status);
-  const msg = String(err);
-  return (
-    msg.includes('ECONNRESET') ||
-    msg.includes('ETIMEDOUT') ||
-    msg.includes('ECONNREFUSED') ||
-    msg.includes('socket hang up') ||
-    msg.includes('network') ||
-    msg.includes('TimeoutError') ||
-    msg.includes('InternalServerError') ||
-    msg.includes('ServerBusy')
-  );
+  return classifySlsSendError(err).retryable;
 }
 
 export async function postWebtracking(
@@ -151,13 +148,13 @@ export async function postApiKeyLogStoreLogs(
       }
 
       const err = new HttpError(resp.status, resp.body);
-      if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === maxRetries - 1) {
+      if (!isRetryable(err) || attempt === maxRetries - 1) {
         throw err;
       }
       lastErr = err;
     } catch (err) {
       lastErr = err;
-      if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
+      if (err instanceof HttpError && !isRetryable(err)) break;
       if (attempt === maxRetries - 1) break;
     }
 
@@ -265,7 +262,7 @@ async function postWebtrackingChunk(
         const text = await resp.text();
         const err = new HttpError(resp.status, text);
         if (
-          !RETRYABLE_STATUS_CODES.has(resp.status) ||
+          !isRetryable(err) ||
           attempt === maxRetries - 1
         ) {
           throw err;
@@ -281,7 +278,7 @@ async function postWebtrackingChunk(
       }
     } catch (err) {
       lastErr = err;
-      if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status))
+      if (err instanceof HttpError && !isRetryable(err))
         break;
       if (attempt === maxRetries - 1) break;
     }

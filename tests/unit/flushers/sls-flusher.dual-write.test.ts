@@ -11,6 +11,7 @@ import * as crypto from 'node:crypto';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
 const mockFailureWrite = vi.fn().mockResolvedValue(true);
+const mockAlarmRecord = vi.fn();
 
 // Track each ALY client constructor call so we can assert on per-endpoint instances.
 const akClientCtorCalls: Array<{ endpoint: string; accessKeyId: string }> = [];
@@ -73,7 +74,10 @@ function apiKeyEndpoint(name: string, url: string, project: string): SlsEndpoint
   };
 }
 
-function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
+function makeConfig(
+  endpoints: SlsEndpoint[],
+  overrides: Partial<SlsFlusherConfig> = {},
+): SlsFlusherConfig {
   const primary = endpoints[0];
   return {
     enabled: true,
@@ -86,14 +90,17 @@ function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
     batchMaxSize: 20,
     flushIntervalMs: 99999,
     serviceNamePrefix: '',
+    ...overrides,
   };
 }
 
 describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPostLogStoreLogs.mockReset().mockResolvedValue(undefined);
+    mockFailureWrite.mockReset().mockResolvedValue(true);
+    fetchSpy.mockReset().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
     akClientCtorCalls.length = 0;
-    fetchSpy.mockClear();
   });
 
   afterEach(() => {
@@ -273,6 +280,106 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     expect(failure.batchBytes).toBeGreaterThan(0);
     expect(String(failure.error)).toContain('Forbidden');
   });
+
+  it('does not retry structured ShardWriteQuotaExceed 403 and reports its safe code in all modes', async () => {
+    const retryConfig = {
+      retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false },
+    } satisfies Partial<SlsFlusherConfig>;
+
+    const akFlusher = new SlsFlusher(
+      makeConfig([akEndpoint('ak-quota', 'https://cn-shanghai.log.aliyuncs.com', 'ak-project')], retryConfig),
+      '/tmp/data',
+    );
+    akFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
+    mockPostLogStoreLogs
+      .mockRejectedValue(Object.assign(new Error('private quota detail'), {
+        code: 'ShardWriteQuotaExceed',
+        statusCode: 403,
+      }));
+    await akFlusher.send(buildTestEntry());
+    await akFlusher.flush();
+    expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => '{"errorCode":"ShardWriteQuotaExceed"}',
+    });
+    const webFlusher = new SlsFlusher(
+      makeConfig([wtEndpoint('web-quota', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')], retryConfig),
+      '/tmp/data',
+    );
+    webFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
+    await webFlusher.send(buildTestEntry());
+    await webFlusher.flush();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+
+    const apiRequests = await withMockSlsServer(async ({ endpoint, requests }) => {
+      const apiFlusher = new SlsFlusher(
+        makeConfig([apiKeyEndpoint('api-quota', endpoint, 'api-project')], retryConfig),
+        '/tmp/data',
+      );
+      apiFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
+      await apiFlusher.send(buildTestEntry());
+      await apiFlusher.flush();
+      return requests;
+    }, [
+      { statusCode: 403, body: '{"code":"ShardWriteQuotaExceed"}' },
+      { statusCode: 200, body: '' },
+    ]);
+    expect(apiRequests).toHaveLength(1);
+
+    expect(mockFailureWrite).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord.mock.calls.map(call => call[0])).toEqual([
+      'FLUSH_SEND_ALARM',
+      'FLUSH_SEND_ALARM',
+      'FLUSH_SEND_ALARM',
+    ]);
+    expect(mockAlarmRecord.mock.calls.map(call => call[2])).toEqual([
+      'SLS ak send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
+      'SLS webtracking send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
+      'SLS apiKey send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]',
+    ]);
+    expect(JSON.stringify(mockAlarmRecord.mock.calls)).not.toContain('private quota detail');
+  });
+
+  it('does not retry ordinary 403 failures in AK and WebTracking modes', async () => {
+    const retryConfig = {
+      retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false },
+    } satisfies Partial<SlsFlusherConfig>;
+
+    mockPostLogStoreLogs.mockRejectedValue(Object.assign(new Error('permission denied'), {
+      code: 'AccessDenied',
+      status: 403,
+    }));
+    const akFlusher = new SlsFlusher(
+      makeConfig([akEndpoint('ak-forbidden', 'https://cn-shanghai.log.aliyuncs.com', 'ak-project')], retryConfig),
+      '/tmp/data',
+    );
+    akFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
+    await akFlusher.send(buildTestEntry());
+    await akFlusher.flush();
+    expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => '{"errorCode":"Forbidden"}',
+    });
+    const webFlusher = new SlsFlusher(
+      makeConfig([wtEndpoint('web-forbidden', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')], retryConfig),
+      '/tmp/data',
+    );
+    webFlusher.setAlarmManager({ record: mockAlarmRecord } as any);
+    await webFlusher.send(buildTestEntry());
+    await webFlusher.flush();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+
+    const alarmTypes = mockAlarmRecord.mock.calls.map(call => call[0]);
+    expect(alarmTypes).toEqual(['FLUSH_SEND_ALARM', 'FLUSH_SEND_ALARM']);
+  });
+
 });
 
 interface MockRequest {
@@ -283,7 +390,8 @@ interface MockRequest {
 
 async function withMockSlsServer<T>(
   fn: (args: { endpoint: string; requests: MockRequest[] }) => Promise<T>,
-  response: { statusCode: number; body: string } = { statusCode: 200, body: '' },
+  response: { statusCode: number; body: string } | Array<{ statusCode: number; body: string }>
+    = { statusCode: 200, body: '' },
 ): Promise<T> {
   const requests: MockRequest[] = [];
   const server = http.createServer((req, res) => {
@@ -295,8 +403,11 @@ async function withMockSlsServer<T>(
         headers: req.headers,
         body: Buffer.concat(chunks),
       });
-      res.statusCode = response.statusCode;
-      res.end(response.body);
+      const selected = Array.isArray(response)
+        ? response[Math.min(requests.length - 1, response.length - 1)]
+        : response;
+      res.statusCode = selected.statusCode;
+      res.end(selected.body);
     });
   });
 

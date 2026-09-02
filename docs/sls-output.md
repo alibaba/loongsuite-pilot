@@ -153,6 +153,12 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
+### Retry and failure diagnostics
+
+This change does not alter the retry policy. HTTP 403 remains permanent, including structured `ShardWriteQuotaExceed` responses, while existing retryable statuses and network failures keep their current bounded attempts and backoff.
+
+Final failures continue to use the existing alarm types. Their message contains only a normalized category, safe code or HTTP status, and the actual attempt count, for example `SLS webtracking send failed [category=dns code=ENOTFOUND attempts=3]` or `SLS apiKey send failed [category=http code=ShardWriteQuotaExceed status=403 attempts=1]`. Raw response bodies, URLs, proxy or certificate details, headers, credentials, and payloads are not copied into remote alarm messages. The local failure record reuses its existing `error_code` and `http_status` fields, including a bounded nested `Error.cause.code`; no new remote field or index is added.
+
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
 ```bash
