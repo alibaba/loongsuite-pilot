@@ -68,6 +68,18 @@ describe('isRetryable', () => {
     expect(isRetryable(new Error('some random error'))).toBe(false);
     expect(isRetryable('string error')).toBe(false);
   });
+
+  it('does not expand retry behavior based on a nested diagnostic code', () => {
+    const outer = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('private detail'), { code: 'ECONNRESET' }),
+    });
+    expect(isRetryable(outer)).toBe(false);
+    expect(classifySlsSendError(outer)).toMatchObject({
+      retryable: false,
+      code: 'ECONNRESET',
+      category: 'connection_reset',
+    });
+  });
 });
 
 describe('classifySlsSendError', () => {
@@ -189,7 +201,7 @@ describe('classifySlsSendError', () => {
     expect(classifySlsSendError({ code: 'unsafe code with spaces' }).code).toBe('UNKNOWN');
     expect(classifySlsSendError({ code: `E${'X'.repeat(128)}` }).code).toBe('UNKNOWN');
     expect(classifySlsSendError(new TypeError('fetch failed'))).toEqual({
-      retryable: true,
+      retryable: false,
       quota: false,
       category: 'unknown',
       code: 'UNKNOWN',

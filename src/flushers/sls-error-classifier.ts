@@ -87,11 +87,7 @@ export function classifySlsSendError(error: unknown): SlsSendErrorClassification
   const category = categoryForCode(code, evidence.httpStatus, evidence.name);
   const retryable = evidence.httpStatus > 0
     ? RETRYABLE_STATUS_CODES.has(evidence.httpStatus)
-    : isPreviouslyRetryableCode(code)
-      || evidence.name === 'TimeoutError'
-      || evidence.name === 'AbortError'
-      || isPreviouslyRetryableMessage(evidence.message)
-      || (evidence.name === 'TypeError' && evidence.message === 'fetch failed');
+    : isPreviouslyRetryableMessage(safeErrorString(error));
 
   return {
     retryable,
@@ -196,15 +192,6 @@ function categoryForCode(code: string, httpStatus: number, name: string): SlsSen
   if (PROXY_CODES.has(code) || httpStatus === 407) return 'proxy';
   if (httpStatus > 0 || code === 'InternalServerError' || code === 'ServerBusy') return 'http';
   return 'unknown';
-}
-
-function isPreviouslyRetryableCode(code: string): boolean {
-  return code === 'ECONNRESET'
-    || code === 'ETIMEDOUT'
-    || code === 'ECONNREFUSED'
-    || code === 'TimeoutError'
-    || code === 'InternalServerError'
-    || code === 'ServerBusy';
 }
 
 function codeFromLegacyMessage(message: string): string {
