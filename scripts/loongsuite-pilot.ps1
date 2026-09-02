@@ -923,25 +923,23 @@ function Cmd-RestartCollector {
     }
 
     if (-not $restarted) {
-        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        # init-type is shared by collector/updater. Re-register this daemon's task
+        # even when it already says "taskscheduler" because the task may be absent.
         $initType = ""
         if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
-        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
-        if ($initType -in @("background", "unknown", "")) {
-            try {
-                $ok = Install-CollectorTask $nodeBin
-                if ($ok) {
-                    Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-                    Start-Sleep -Seconds 1
-                    if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
-                        Write-Host "collector self-healed: registered with Task Scheduler"
-                        $restarted = $true
-                    }
+        try {
+            $ok = Install-CollectorTask $nodeBin
+            if ($ok) {
+                Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                Start-Sleep -Seconds 1
+                if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    Write-Host "collector self-healed: registered with Task Scheduler"
+                    $restarted = $true
                 }
-            } catch {
-                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
             }
+        } catch {
+            Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
         if (-not $restarted) {
             if ($initType -in @("background", "unknown", "")) {
@@ -1022,25 +1020,23 @@ function Cmd-RestartUpdater {
     }
 
     if (-not $restarted) {
-        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        # init-type is shared by collector/updater. Re-register this daemon's task
+        # even when it already says "taskscheduler" because the task may be absent.
         $initType = ""
         if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
-        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
-        if ($initType -in @("background", "unknown", "")) {
-            try {
-                $ok = Install-UpdaterTask $nodeBin
-                if ($ok) {
-                    Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-                    Start-Sleep -Seconds 1
-                    if (Get-TaskRunning $TASK_NAME_UPDATER) {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
-                        Write-Host "updater self-healed: registered with Task Scheduler"
-                        $restarted = $true
-                    }
+        try {
+            $ok = Install-UpdaterTask $nodeBin
+            if ($ok) {
+                Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                Start-Sleep -Seconds 1
+                if (Get-TaskRunning $TASK_NAME_UPDATER) {
+                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    Write-Host "updater self-healed: registered with Task Scheduler"
+                    $restarted = $true
                 }
-            } catch {
-                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
             }
+        } catch {
+            Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
         if (-not $restarted) {
             if ($initType -in @("background", "unknown", "")) {
