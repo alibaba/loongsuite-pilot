@@ -277,9 +277,18 @@ def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
 
     output: List[Dict[str, Any]] = []
     for value in tools[:MAX_COLLECTION_ITEMS]:
-        definition = _tool_definition(value)
-        if definition is not None:
-            output.append(definition)
+        declarations: Any = None
+        if isinstance(value, dict):
+            declarations = value.get("functionDeclarations")
+            if not isinstance(declarations, list):
+                declarations = value.get("function_declarations")
+        candidates = declarations if isinstance(declarations, list) else [value]
+        for candidate in candidates:
+            definition = _tool_definition(candidate)
+            if definition is not None:
+                output.append(definition)
+                if len(output) >= MAX_COLLECTION_ITEMS:
+                    return output
     return output
 
 

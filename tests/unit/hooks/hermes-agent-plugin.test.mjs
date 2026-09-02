@@ -554,11 +554,25 @@ describe('Hermes Agent native plugin', () => {
           }],
         },
       },
+      {
+        // Hermes 0.19 `_translate_tools_to_gemini()` sends one wrapper with
+        // the native Gemini declarations under `functionDeclarations`.
+        tools: [{
+          functionDeclarations: [{
+            name: 'grep_files',
+            description: 'Search files.',
+            parameters: { type: 'object', properties: { query: { type: 'string' } } },
+          }, {
+            name: 'list_directory',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          }],
+        }],
+      },
       { tools: [null, {}, { function: {} }] },
     ));
     const requests = records.filter(record => record['event.name'] === 'llm.request');
 
-    expect(requests).toHaveLength(5);
+    expect(requests).toHaveLength(6);
     expect(requests.map(request => request['gen_ai.tool.definitions'])).toEqual([
       [{
         type: 'function',
@@ -583,6 +597,16 @@ describe('Hermes Agent native plugin', () => {
         name: 'lookup',
         description: 'Look up a value.',
         parameters: { type: 'object', properties: { key: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'grep_files',
+        description: 'Search files.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }, {
+        type: 'function',
+        name: 'list_directory',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
       }],
       undefined,
     ]);
