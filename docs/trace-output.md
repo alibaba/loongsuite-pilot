@@ -327,9 +327,10 @@ Notes:
   ```
 
 - The values become the canonical event-log identity fields (`gen_ai.session.id` and `user.id`) and the standard trace-span attributes (`gen_ai.session.id` and `gen_ai.user.id`) on every span kind. No `spanAttributePassthroughPrefixes` entry is required.
-- Invocation identity wins over the configured user id and agent-native identity. Native turn and step ids are not changed.
+- Explicit per-invocation identity wins over the configured user id and agent-native identity. Native turn and step ids are not changed.
 - Phase-one support covers OpenCode, Claude Code, Qoder/Qoder-CN, and OpenClaw. Codex and Qwen Code CLI continue to reject these reserved keys.
-- Hermes additionally supports per-invocation `gen_ai.user.id`. When no explicit invocation identity or Pilot user environment variable is present, OpenClaw and Hermes use the channel-native `senderId` / `sender_id`, then fall back to plugin configuration and the hostname.
+- Hermes additionally supports per-invocation `gen_ai.user.id`. For OpenClaw and Hermes, the final user-id precedence is: explicit `gen_ai.user.id` in `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` → `LOONGSUITE_PILOT_USER_ID` / `LOONGSUITE_USER_ID` → channel-native `senderId` / `sender_id` (carried through the invocation transport field, so it wins over the collector-configured user id) → collector-configured user id → producer plugin configuration / hostname fallback. In a standard installation, the collector and plugin fallbacks normally read the same `config.json`.
+- Other supported agents retain the generic precedence and do not promote an agent-native identity above the collector-configured user id.
 - All other `gen_ai.*` and `user.*` keys remain reserved and are dropped.
 
 **Built-in OpenCode attribute (`opencode.message.id`).** The OpenCode plugin always stamps `opencode.message.id` (the opencode assistant-message id) on its `llm.request`, `llm.response`, `tool.call` and `tool.result` records — no launcher env var required. To surface it on spans, just list the `opencode.` prefix; it then appears on ENTRY / AGENT / STEP / LLM / TOOL spans (LLM and TOOL take the value from their own records; ENTRY / AGENT / STEP take the turn-level value):

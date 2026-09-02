@@ -61,6 +61,7 @@ describe('OtlpTraceFlusher - conversion', () => {
       'gen_ai.turn.id': 'openclaw-turn',
       'user.id': 'collector-user',
       'agent.openclaw.hook': 'before_model_resolve',
+      'agent.openclaw.user.id.source': 'hostname',
       'gen_ai.input.messages_delta': [],
     } as unknown as AgentActivityEntry;
     const senderKnown = {
@@ -69,6 +70,9 @@ describe('OtlpTraceFlusher - conversion', () => {
       'user.id': 'channel-sender',
       'agent.openclaw.hook': 'before_agent_run',
       'agent.openclaw.sender.id': 'channel-sender',
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'channel-account',
+      'agent.openclaw.channel.id': 'channel-conversation',
       'agent.openclaw.user.id.source': 'sender',
     } as unknown as AgentActivityEntry;
     const terminal = {
@@ -81,7 +85,14 @@ describe('OtlpTraceFlusher - conversion', () => {
 
     const convertedRecords = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
     expect(convertedRecords.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.sender.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.channel'] === 'telegram')).toBe(true);
     expect(early['user.id']).toBe('collector-user');
+    expect(early['agent.openclaw.user.id.source']).toBe('hostname');
   });
 
   it('does not replace an explicit OpenClaw environment identity with sender metadata', async () => {

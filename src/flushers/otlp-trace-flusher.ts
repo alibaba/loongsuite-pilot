@@ -106,29 +106,55 @@ function prepareOpenClawIdentityRecords(records: AgentActivityEntry[]): {
   metadata: OpenClawIdentityMetadata;
 } {
   const metadata: OpenClawIdentityMetadata = {};
-  let senderUserId: string | undefined;
+  let senderIdentity: OpenClawIdentityMetadata | undefined;
 
   for (const record of records) {
-    metadata.senderId ??= nonEmptyString(record['agent.openclaw.sender.id']);
+    const recordSenderId = nonEmptyString(record['agent.openclaw.sender.id']);
+    metadata.senderId ??= recordSenderId;
     metadata.channel ??= nonEmptyString(record['agent.openclaw.channel']);
     metadata.accountId ??= nonEmptyString(record['agent.openclaw.account.id']);
     metadata.channelId ??= nonEmptyString(record['agent.openclaw.channel.id']);
     metadata.userIdSource ??= nonEmptyString(record['agent.openclaw.user.id.source']);
-    if (
-      record['agent.openclaw.user.id.source'] === 'sender'
-      && typeof record['agent.openclaw.sender.id'] === 'string'
-      && record['agent.openclaw.sender.id'].length > 0
-    ) {
-      senderUserId = record['agent.openclaw.sender.id'];
+    if (record['agent.openclaw.user.id.source'] === 'sender' && recordSenderId) {
+      // Keep the selected sender and its provenance metadata atomic. Otherwise
+      // an earlier config/hostname fallback can survive as the turn-wide source
+      // even after user.id has been reconciled to a later sender.
+      senderIdentity = {
+        senderId: recordSenderId,
+        channel: nonEmptyString(record['agent.openclaw.channel']),
+        accountId: nonEmptyString(record['agent.openclaw.account.id']),
+        channelId: nonEmptyString(record['agent.openclaw.channel.id']),
+        userIdSource: 'sender',
+      };
     }
   }
 
-  if (!senderUserId) return { records, metadata };
+  if (!senderIdentity?.senderId) return { records, metadata };
+  const senderUserId = senderIdentity.senderId;
+  const reconciledMetadata: OpenClawIdentityMetadata = {
+    senderId: senderUserId,
+    channel: senderIdentity.channel ?? metadata.channel,
+    accountId: senderIdentity.accountId ?? metadata.accountId,
+    channelId: senderIdentity.channelId ?? metadata.channelId,
+    userIdSource: 'sender',
+  };
+  const reconciledFields = {
+    'user.id': senderUserId,
+    'agent.openclaw.sender.id': senderUserId,
+    ...(reconciledMetadata.channel
+      ? { 'agent.openclaw.channel': reconciledMetadata.channel }
+      : {}),
+    ...(reconciledMetadata.accountId
+      ? { 'agent.openclaw.account.id': reconciledMetadata.accountId }
+      : {}),
+    ...(reconciledMetadata.channelId
+      ? { 'agent.openclaw.channel.id': reconciledMetadata.channelId }
+      : {}),
+    'agent.openclaw.user.id.source': 'sender',
+  };
   return {
-    records: records.map(record => record['user.id'] === senderUserId
-      ? record
-      : { ...record, 'user.id': senderUserId }),
-    metadata,
+    records: records.map(record => ({ ...record, ...reconciledFields })),
+    metadata: reconciledMetadata,
   };
 }
 
