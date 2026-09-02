@@ -18,6 +18,47 @@ const CACHE_MAX_SIZE = 50;
 // An unreadable segment file is reported once per on-disk state, so a sustained
 // failure does not emit one line per poll cycle.
 const warnedScans = new Map<string, string>();
+// The sessions root is shared by every session, so its failure is reported on
+// the transition into the failure instead of once per session per cycle.
+let rootUnreadableReported = false;
+
+// The CLI appends to these files while pilot is reading them, so a read can lose
+// a race that the next attempt wins: a partially flushed file, a momentary
+// EMFILE, or a directory replaced between listing and opening. Retrying inside
+// the same cycle is the only place the hook evidence for this batch still
+// exists - the hook offset has already advanced by the time enrichment runs, so
+// a failure that outlives this window leaves those turns on the hook clock
+// permanently. That offset constraint is pre-existing and deliberately left
+// alone here; this window only closes the genuinely momentary failures.
+const TRANSIENT_READ_RETRY_DELAYS_MS = [25, 75] as const;
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// A path that does not exist is a stable answer rather than a lost race: qoder
+// may never have run on this machine, or the file was rotated away after it was
+// listed. Retrying that would burn the backoff on every cycle and report an
+// absence as a failure.
+function isMissingPath(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+// Returns a discriminated result rather than throwing or returning undefined so
+// a successful read of a falsy value stays distinguishable from a failure.
+async function readWithRetry<T>(read: () => Promise<T>): Promise<{ value: T } | { error: unknown }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= TRANSIENT_READ_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (attempt > 0) await delay(TRANSIENT_READ_RETRY_DELAYS_MS[attempt - 1]);
+    try {
+      return { value: await read() };
+    } catch (err) {
+      lastError = err;
+      if (isMissingPath(err)) break;
+    }
+  }
+  return { error: lastError };
+}
 
 interface SegmentFileScan {
   files: string[];
@@ -71,14 +112,13 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   const allEvents: Array<{ type: string; ts: number; requestId?: string; loopId?: string; data?: Record<string, unknown> }> = [];
 
   for (const filePath of files) {
-    let content: string;
-    try {
-      content = await fs.readFile(filePath, 'utf-8');
-    } catch (err) {
+    const read = await readWithRetry(() => fs.readFile(filePath, 'utf-8'));
+    if ('error' in read) {
       complete = false;
-      warnUnreadableOnce(sessionId, scan.fingerprint, filePath, err);
+      warnUnreadableOnce(sessionId, scan.fingerprint, filePath, read.error);
       continue;
     }
+    const content = read.value;
 
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
@@ -110,6 +150,15 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     }
   }
 
+  // Anchors are looked up while walking forward, so an event that lands in a
+  // later file than the one it anchors would otherwise be invisible when its
+  // completion is processed. Files are read in name order, which is not
+  // guaranteed to be timestamp order across a session's segment files. Sorting
+  // is stable, so events sharing a millisecond keep their on-disk order, and
+  // unparseable timestamps (ts === 0) sort first where every anchor writer
+  // already rejects them.
+  allEvents.sort((a, b) => a.ts - b.ts);
+
   // Build results from ordered events
   for (const evt of allEvents) {
     if (evt.type === 'model.request.started' && evt.requestId && evt.ts > 0) {
@@ -128,7 +177,17 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
 
     if (evt.type === 'model.response.completed' && evt.requestId) {
       const data = evt.data || {};
-      const startTs = resolveRequestStart(evt, requestStarts, attemptFailures, loopStarts);
+      const start = resolveRequestStart(evt, requestStarts, attemptFailures, loopStarts);
+
+      // The failure anchor is one-shot: it bounds the retry that replaced that
+      // attempt, not any later request of the same iteration. Leaving it in the
+      // map would hand an already-consumed instant to a second completion of
+      // this loop, producing a span that spans the earlier call it is not part
+      // of. Only an actual consumer clears it, so a completion that resolved
+      // exactly leaves the anchor for the retry it really belongs to.
+      if (start.anchor === 'attempt_failed' && evt.loopId) {
+        attemptFailures.delete(evt.loopId);
+      }
 
       results.push({
         requestId: evt.requestId,
@@ -136,7 +195,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
         outputTokens: finiteNum(data.output_tokens) ?? 0,
         cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
         cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
-        requestStartTs: startTs,
+        requestStartTs: start.ts,
         responseEndTs: evt.ts,
         toolFinishedTs: 0,
         stopReason: (data.stop_reason as string) ?? '',
@@ -196,24 +255,26 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
  * LLM span manufactured by enrichment rather than one merely left un-enriched.
  *
  * Anchors are tried tightest first. 0 means "unknown" and is returned instead of
- * a degenerate value so the enricher leaves the hook clock in place.
+ * a degenerate value so the enricher leaves the hook clock in place. The anchor
+ * that was used is reported back so the caller can tell an exact measurement
+ * from an inferred upper bound.
  */
 function resolveRequestStart(
   evt: { requestId?: string; loopId?: string; ts: number },
   requestStarts: Map<string, number>,
   attemptFailures: Map<string, number>,
   loopStarts: Map<string, number>,
-): number {
+): { ts: number; anchor: 'exact' | 'attempt_failed' | 'loop_iteration' | 'none' } {
   if (evt.requestId) {
     const exact = requestStarts.get(evt.requestId);
-    if (exact !== undefined) return exact;
+    if (exact !== undefined) return { ts: exact, anchor: 'exact' };
   }
 
   if (!evt.loopId) {
     logger.warn('segment completion carries no loop_id to anchor its start', {
       requestId: evt.requestId,
     });
-    return 0;
+    return { ts: 0, anchor: 'none' };
   }
 
   const failedAttempt = attemptFailures.get(evt.loopId);
@@ -221,7 +282,7 @@ function resolveRequestStart(
     logger.debug('anchored a retried request on the attempt it replaced', {
       requestId: evt.requestId, loopId: evt.loopId,
     });
-    return failedAttempt;
+    return { ts: failedAttempt, anchor: 'attempt_failed' };
   }
 
   const loopStart = loopStarts.get(evt.loopId);
@@ -229,13 +290,13 @@ function resolveRequestStart(
     logger.debug('anchored a request on its loop iteration', {
       requestId: evt.requestId, loopId: evt.loopId,
     });
-    return loopStart;
+    return { ts: loopStart, anchor: 'loop_iteration' };
   }
 
   logger.warn('segment completion has no start anchor; leaving its span on the hook clock', {
     requestId: evt.requestId, loopId: evt.loopId,
   });
-  return 0;
+  return { ts: 0, anchor: 'none' };
 }
 
 function warnUnreadableOnce(sessionId: string, fingerprint: string, filePath: string, err: unknown): void {
@@ -248,18 +309,31 @@ function warnUnreadableOnce(sessionId: string, fingerprint: string, filePath: st
 
 async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {
   const files: string[] = [];
-  let cwdDirs: Dirent[];
-  try {
-    cwdDirs = await fs.readdir(getSessionsDir(), { withFileTypes: true });
-  } catch {
+  const root = await readWithRetry(() => fs.readdir(getSessionsDir(), { withFileTypes: true }));
+  if ('error' in root) {
+    // A root we cannot list makes every session look segment-less, which is
+    // indistinguishable from the legitimate empty result below - and used to be
+    // completely silent, leaving no trace of why a batch kept the hook clock.
+    // An absent root is not that case: it is the normal state on a machine where
+    // only the IDE ever ran, so it stays silent.
+    if (!isMissingPath(root.error) && !rootUnreadableReported) {
+      rootUnreadableReported = true;
+      logger.warn('qoder sessions root unreadable; affected turns keep the hook clock', {
+        dir: getSessionsDir(), error: String(root.error),
+      });
+    }
     return { files: [], fingerprint: '' };
   }
+  rootUnreadableReported = false;
+  const cwdDirs = root.value;
 
   for (const cwdDir of cwdDirs) {
     if (!cwdDir.isDirectory()) continue;
     const segDir = path.join(getSessionsDir(), cwdDir.name, sessionId, 'segments');
     let entries: Dirent[];
     try {
+      // Most cwd directories hold other sessions, so a miss here is the norm and
+      // must stay silent rather than being retried as a transient failure.
       entries = await fs.readdir(segDir, { withFileTypes: true });
     } catch {
       continue;

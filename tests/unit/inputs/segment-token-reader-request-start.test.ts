@@ -22,11 +22,11 @@ function nextSessionId(): string {
   return `session-${sessionCounter}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function writeSegments(sessionId: string, lines: object[]): Promise<void> {
+async function writeSegments(sessionId: string, lines: object[], name = 'segment-0.jsonl'): Promise<void> {
   const dir = path.join(tmpHome, '.qoder', 'logs', 'sessions', 'Users-someone-project', sessionId, 'segments');
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(
-    path.join(dir, 'segment-0.jsonl'),
+    path.join(dir, name),
     lines.map(l => JSON.stringify(l)).join('\n') + '\n',
     'utf-8',
   );
@@ -133,5 +133,45 @@ describe('readSegmentTokensForSession request start anchoring', () => {
     for (const seg of await readSegmentTokensForSession(sessionId)) {
       expect(seg.requestStartTs).not.toBe(seg.responseEndTs);
     }
+  });
+
+  // The failure bounds the one retry that replaced that attempt. Handing the same
+  // instant to a later request of the same iteration would date that request
+  // before a call that had already completed, so the anchor is consumed once.
+  it('does not reuse a failure anchor for a later request of the same iteration', async () => {
+    const sessionId = nextSessionId();
+    await writeSegments(sessionId, [
+      { type: 'loop.iteration.started', loop_id: 'turn-1:1', ts: 1_780_000_000_000 },
+      { type: 'model.request.started', request_id: 'req-first', loop_id: 'turn-1:1', ts: 1_780_000_000_002 },
+      { type: 'model.request.attempt_failed', request_id: 'req-first', loop_id: 'turn-1:1', ts: 1_780_000_060_026 },
+      completed('req-retry', 'turn-1:1', 1_780_000_068_125),
+      // a second unanchored request in the same iteration
+      completed('req-later', 'turn-1:1', 1_780_000_075_000),
+    ]);
+
+    const segs = await readSegmentTokensForSession(sessionId);
+    const retry = segs.find(s => s.requestId === 'req-retry');
+    const later = segs.find(s => s.requestId === 'req-later');
+
+    expect(retry?.requestStartTs).toBe(1_780_000_060_026);
+    expect(later?.requestStartTs).not.toBe(1_780_000_060_026);
+  });
+
+  // Files are read in name order, which is not guaranteed to be timestamp order.
+  // Without a global sort the started event would still be unseen when its own
+  // completion is processed, and an exactly-anchored request would be demoted to
+  // a fallback anchor.
+  it('anchors exactly when the start lands in a later-named file', async () => {
+    const sessionId = nextSessionId();
+    await writeSegments(sessionId, [
+      completed('req-a', 'turn-1:1', 1_780_000_009_000),
+    ], 'segment-0.jsonl');
+    await writeSegments(sessionId, [
+      { type: 'loop.iteration.started', loop_id: 'turn-1:1', ts: 1_780_000_000_000 },
+      { type: 'model.request.started', request_id: 'req-a', loop_id: 'turn-1:1', ts: 1_780_000_000_004 },
+    ], 'segment-1.jsonl');
+
+    const [seg] = await readSegmentTokensForSession(sessionId);
+    expect(seg.requestStartTs).toBe(1_780_000_000_004);
   });
 });
