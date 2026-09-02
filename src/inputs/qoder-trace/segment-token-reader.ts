@@ -2,6 +2,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
 import { resolveHome } from '../../utils/fs-utils.js';
+import { createLogger } from '../../utils/logger.js';
+
+const logger = createLogger('SegmentTokenReader');
 
 function getSessionsDir(): string {
   return resolveHome('~/.qoder/logs/sessions');
@@ -12,6 +15,9 @@ const sessionCache = new Map<string, { data: SegmentTokenData[]; fingerprint: st
 // decides whether the cached data is still valid.
 const CACHE_IDLE_MS = 60_000;
 const CACHE_MAX_SIZE = 50;
+// An unreadable segment file is reported once per on-disk state, so a sustained
+// failure does not emit one line per poll cycle.
+const warnedScans = new Map<string, string>();
 
 interface SegmentFileScan {
   files: string[];
@@ -51,16 +57,26 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   const files = scan.files;
 
   const requestStarts = new Map<string, number>();
+  // loop_id is 1:1 with a CLI loop iteration, so it joins a completion back to
+  // the iteration that issued it without any time-proximity guessing.
+  const loopStarts = new Map<string, number>();
+  const attemptFailures = new Map<string, number>();
   const results: SegmentTokenData[] = [];
 
+  // A file we could not open leaves this scan missing whole requests, which must
+  // not be cached behind a fingerprint that claims the data is current.
+  let complete = true;
+
   // Collect all events in order to properly associate tool.execution.finished with LLM calls
-  const allEvents: Array<{ type: string; ts: number; requestId?: string; data?: Record<string, unknown> }> = [];
+  const allEvents: Array<{ type: string; ts: number; requestId?: string; loopId?: string; data?: Record<string, unknown> }> = [];
 
   for (const filePath of files) {
     let content: string;
     try {
       content = await fs.readFile(filePath, 'utf-8');
-    } catch {
+    } catch (err) {
+      complete = false;
+      warnUnreadableOnce(sessionId, scan.fingerprint, filePath, err);
       continue;
     }
 
@@ -77,12 +93,19 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       if (!type) continue;
 
       const ts = parseTs(record.ts);
-      if (type === 'model.request.started' || type === 'model.response.completed' || type === 'tool.execution.finished') {
+      if (
+        type === 'model.request.started'
+        || type === 'model.response.completed'
+        || type === 'tool.execution.finished'
+        || type === 'loop.iteration.started'
+        || type === 'model.request.attempt_failed'
+      ) {
         const requestId = record.request_id as string | undefined;
+        const loopId = record.loop_id as string | undefined;
         const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
           ? record.data as Record<string, unknown>
           : undefined;
-        allEvents.push({ type, ts, requestId: requestId || undefined, data });
+        allEvents.push({ type, ts, requestId: requestId || undefined, loopId: loopId || undefined, data });
       }
     }
   }
@@ -93,9 +116,19 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       requestStarts.set(evt.requestId, evt.ts);
     }
 
+    if (evt.type === 'loop.iteration.started' && evt.loopId && evt.ts > 0) {
+      loopStarts.set(evt.loopId, evt.ts);
+    }
+
+    // A retry reaches the model under a fresh request id, so the failure of the
+    // attempt it replaces is the closest thing to that retry's own start.
+    if (evt.type === 'model.request.attempt_failed' && evt.loopId && evt.ts > 0) {
+      attemptFailures.set(evt.loopId, evt.ts);
+    }
+
     if (evt.type === 'model.response.completed' && evt.requestId) {
       const data = evt.data || {};
-      const startTs = requestStarts.get(evt.requestId) ?? evt.ts;
+      const startTs = resolveRequestStart(evt, requestStarts, attemptFailures, loopStarts);
 
       results.push({
         requestId: evt.requestId,
@@ -116,7 +149,12 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   // The last tool.execution.finished before the next model.request.started belongs to that step.
   for (let i = 0; i < results.length; i++) {
     const currentEnd = results[i].responseEndTs;
-    const nextStart = i + 1 < results.length ? results[i + 1].requestStartTs : Infinity;
+    const next = i + 1 < results.length ? results[i + 1] : undefined;
+    // An unresolved start would collapse the window to nothing and drop the tool
+    // timings that belong to this step.
+    const nextStart = next
+      ? (next.requestStartTs > 0 ? next.requestStartTs : next.responseEndTs)
+      : Infinity;
 
     let lastToolFinish = 0;
     for (const evt of allEvents) {
@@ -130,15 +168,82 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   // Evict idle entries and enforce max size
   const now = Date.now();
   for (const [key, entry] of sessionCache) {
-    if (key !== sessionId && now - entry.ts > CACHE_IDLE_MS) sessionCache.delete(key);
+    if (key !== sessionId && now - entry.ts > CACHE_IDLE_MS) {
+      sessionCache.delete(key);
+      warnedScans.delete(key);
+    }
   }
   if (sessionCache.size >= CACHE_MAX_SIZE && !sessionCache.has(sessionId)) {
     const oldest = [...sessionCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
     if (oldest) sessionCache.delete(oldest[0]);
   }
 
-  sessionCache.set(sessionId, { data: results, fingerprint: scan.fingerprint, ts: now });
+  // An incomplete parse is still returned, but never cached: the fingerprint
+  // describes the current on-disk state, so caching it would serve the same gap
+  // to every remaining turn of this batch instead of retrying the read.
+  if (complete) {
+    sessionCache.set(sessionId, { data: results, fingerprint: scan.fingerprint, ts: now });
+  }
   return results;
+}
+
+/**
+ * Resolve the instant a completed request began.
+ *
+ * A retried request emits model.response.completed under a fresh request id but
+ * no matching model.request.started, so the exact lookup misses. Falling back to
+ * the completion instant made requestStartTs === responseEndTs - a zero-width
+ * LLM span manufactured by enrichment rather than one merely left un-enriched.
+ *
+ * Anchors are tried tightest first. 0 means "unknown" and is returned instead of
+ * a degenerate value so the enricher leaves the hook clock in place.
+ */
+function resolveRequestStart(
+  evt: { requestId?: string; loopId?: string; ts: number },
+  requestStarts: Map<string, number>,
+  attemptFailures: Map<string, number>,
+  loopStarts: Map<string, number>,
+): number {
+  if (evt.requestId) {
+    const exact = requestStarts.get(evt.requestId);
+    if (exact !== undefined) return exact;
+  }
+
+  if (!evt.loopId) {
+    logger.warn('segment completion carries no loop_id to anchor its start', {
+      requestId: evt.requestId,
+    });
+    return 0;
+  }
+
+  const failedAttempt = attemptFailures.get(evt.loopId);
+  if (failedAttempt !== undefined) {
+    logger.debug('anchored a retried request on the attempt it replaced', {
+      requestId: evt.requestId, loopId: evt.loopId,
+    });
+    return failedAttempt;
+  }
+
+  const loopStart = loopStarts.get(evt.loopId);
+  if (loopStart !== undefined) {
+    logger.debug('anchored a request on its loop iteration', {
+      requestId: evt.requestId, loopId: evt.loopId,
+    });
+    return loopStart;
+  }
+
+  logger.warn('segment completion has no start anchor; leaving its span on the hook clock', {
+    requestId: evt.requestId, loopId: evt.loopId,
+  });
+  return 0;
+}
+
+function warnUnreadableOnce(sessionId: string, fingerprint: string, filePath: string, err: unknown): void {
+  if (warnedScans.get(sessionId) === fingerprint) return;
+  warnedScans.set(sessionId, fingerprint);
+  logger.warn('segment file unreadable; affected turns keep the hook clock', {
+    sessionId, filePath, error: String(err),
+  });
 }
 
 async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {

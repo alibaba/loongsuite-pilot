@@ -105,4 +105,30 @@ describe('readSegmentTokensForSession cache invalidation', () => {
   it('returns nothing when the session has no segments directory', async () => {
     expect(await readSegmentTokensForSession(nextSessionId())).toEqual([]);
   });
+
+  // A file we could not open still has a valid size+mtime stamp, so caching that
+  // parse would pin the gap behind a fingerprint claiming the data is current.
+  // collect() calls this once per turn, so every remaining turn of the batch
+  // would inherit the same missing requests until the CLI happened to append.
+  // root ignores file modes, so the denial cannot be staged there.
+  it.skipIf(process.getuid?.() === 0)(
+    'does not cache a parse that could not read every file',
+    async () => {
+      const sessionId = nextSessionId();
+      await writeSegments(sessionId, requestPair('req-a', 1_780_000_000_000, 1_780_000_005_000, 100));
+      const blocked = await writeSegments(
+        sessionId,
+        requestPair('req-b', 1_780_000_010_000, 1_780_000_016_000, 250),
+        'segment-1.jsonl',
+      );
+
+      await fs.chmod(blocked, 0o000);
+      const during = await readSegmentTokensForSession(sessionId);
+      expect(during.map(s => s.requestId)).toEqual(['req-a']);
+
+      await fs.chmod(blocked, 0o644);
+      const after = await readSegmentTokensForSession(sessionId);
+      expect(after.map(s => s.requestId)).toEqual(['req-a', 'req-b']);
+    },
+  );
 });

@@ -88,15 +88,18 @@ export function enrichCliTurn(
     // two into a negative-duration span - and would stamp tool.call with
     // BigInt(0), i.e. 1970. Exact-id pairing accepts such a segment for its
     // usage, so this is reachable; the timestamp pass rejects it outright.
-    if (seg.responseEndTs > 0) {
+    //
+    // requestStartTs === responseEndTs is rejected for the same reason: a
+    // request whose start could not be anchored would otherwise be published as
+    // an instantaneous span, which is worse than leaving it on the hook clock
+    // because it looks like a measurement rather than a gap.
+    if (seg.responseEndTs > 0 && seg.requestStartTs > 0 && seg.requestStartTs < seg.responseEndTs) {
       // llm.request: use segment requestStartTs
-      if (seg.requestStartTs > 0) {
-        const req = entries.find(e =>
-          e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
-        );
-        if (req) {
-          req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
-        }
+      const req = entries.find(e =>
+        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+      );
+      if (req) {
+        req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
       }
 
       // llm.response: use segment responseEndTs
