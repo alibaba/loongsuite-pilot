@@ -285,6 +285,28 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     // No tokens were enriched (no session id to look up)
     expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
   });
+
+  it('preserves safe invocation attributes on canonical Qoder CN records', async () => {
+    const record = buildEntry({
+      event: 'llm.response',
+      turn: 'custom-attribute-turn',
+      step: 'custom-attribute-turn:s1',
+      session: '',
+      ts: 1_780_000_021_000,
+    });
+    record['multica.issue.id'] = 'AGE-992';
+    record['multica.user.id'] = 'staff-1';
+    record['multica.api_token'] = 'blocked';
+    await writeHookJsonl(logDir, [record]);
+
+    const entries = await collectOnce();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'multica.issue.id': 'AGE-992',
+      'multica.user.id': 'staff-1',
+    });
+    expect(entries[0]).not.toHaveProperty('multica.api_token');
+  });
 });
 
 // --- Test helpers ---

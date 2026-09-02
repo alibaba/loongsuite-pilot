@@ -282,7 +282,12 @@ export class QoderTraceInput extends BaseInput {
   // ─── Record transformation (canonical passthrough) ──────────────────────────
 
   private async transformRecord(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
-    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
+    const canonicalEntry = buildCanonicalHookEntry(
+      record,
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
       return canonicalEntry;
