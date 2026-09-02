@@ -67,14 +67,11 @@ grep -E '"tag":"(Orchestrator|HookWatchdog|LogRetention)"' \
 
 ## 第 2 步：Input 注册与 agent 发现状态
 
-pilot 当前注册 21 个 Input，每个 Input 对应一条数据采集链路。部分新链路为 trace 聚合链路，启用后会自动压制同 agent 的旧 hook / sqlite / log fallback：
+pilot 注册多条 Input，每个 Input 对应一条数据采集链路。部分 trace 聚合链路启用后会自动压制同 agent 的旧 hook / sqlite / log fallback；`qoder-trace` 是特例，它的 fallback Input 已删除，它就是 Qoder 的唯一链路。
 
 | Input ID | agentType | 数据源 | 触发条件 |
 |----------|-----------|-------|---------|
-| `qoder-sqlite` | `qoder` | Qoder IDE SQLite token usage | Qoder DB 文件存在，且 `qoder-trace` 未启用 |
-| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合 | `~/.loongsuite-pilot/logs/qoder/history/`、Qoder 本地数据或 `~/.qoder/shared_client/cache/db/local.db` 可用 |
-| `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在，且 `qoder-trace` 未启用 |
-| `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在，且 `qoder-trace` 未启用 |
+| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合（Qoder IDE、Qoder CLI、JetBrains 均由它采集） | `~/.loongsuite-pilot/logs/qoder/history/`、Qoder 本地数据或 `~/.qoder/shared_client/cache/db/local.db` 可用 |
 | `qoder-cn` | `qoder-cn` | Qoder CN IDE history + ai_tracker | QoderCN 应用数据根目录存在，且 `qoder-cn-trace` 未启用 |
 | `qoder-cn-sqlite` | `qoder-cn` | Qoder CN SQLite token usage | QoderCN `SharedClientCache/cache/db/local.db` 存在，且 `qoder-cn-trace` 未启用 |
 | `qoder-cn-trace` | `qoder-cn` | Qoder CN hook / SQLite trace 聚合 | QoderCN history 或本地数据可用 |

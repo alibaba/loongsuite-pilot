@@ -52,7 +52,7 @@
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only（复用 Qoder 采集） | 复用 Qoder Input | `inputs/qoder*/` | `agents.d/qoder-jetbrains.json` |
 | Qoder Work | `qoder-work` | Hook | `BaseSqliteInput` / `BaseHookInput` | `inputs/qoder-work*/` | `agents.d/qoder-work.json` |
 | Qoder Work CN | `qoder-work-cn` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-work*/` | `agents.d/qoder-work-cn.json` |
-| Qoder CLI | `qoder` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-cli*/` | `agents.d/qoder.json` |
+| Qoder CLI | `qoder` | Hook | `BaseInput`（qoder-trace 单路：合并 Hook JSONL + native session 片段 + SQLite token） | `inputs/qoder-trace/` | `agents.d/qoder.json` |
 | Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
 | Cursor CLI | `cursor-cli` | 复用 Cursor Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor-cli.json` |
 | Claude Code | `claude-code` | Hook | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |

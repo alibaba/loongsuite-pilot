@@ -37,10 +37,12 @@ Flusher → SLS / JSONL / HTTP
 
 | Input ID | agentType | 目标应用 | DB 路径（macOS） | DB 路径（Linux） | 目标表 | 关键列 | 过滤条件 |
 |----------|-----------|---------|-----------------|-----------------|-------|-------|---------|
-| `qoder-sqlite` | `qoder` | Qoder IDE | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/cache/db/local.db` | `chat_message` | `token_info`（JSON） | `token_info IS NOT NULL AND token_info != '' AND json_valid(token_info)` |
+| `qoder-trace` | `qoder` | Qoder IDE | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/cache/db/local.db` | `chat_message` | `token_info`（JSON） | `token_info IS NOT NULL AND token_info != '' AND json_valid(token_info)` |
 | `qoder-cn-sqlite` | `qoder-cn` | Qoder CN | `~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderCN/SharedClientCache/cache/db/local.db` | `chat_message` | `token_info`（JSON） | `token_info IS NOT NULL AND token_info != '' AND json_valid(token_info)` |
 | `qoder-work-sqlite` | `qoder-work` | Qoder Work | `~/Library/Application Support/QoderWork/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
 | `qoder-work-cn-sqlite` | `qoder-work-cn` | Qoder Work CN | `~/Library/Application Support/QoderWork CN/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork CN/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
+
+> `qoder-trace` 不是纯 SQLite Input：它把 `chat_message.token_info` 作为 token enricher 合入 hook/segment 链路，所以下方步骤中“游标不前进”一类判断对它适用但入口在 `qoder-trace` 名下。
 
 > `qoder-work-sqlite` / `qoder-work-cn-sqlite` 使用 `input-state.json` 的 `extra.lastUpdatedAt` 作为时间游标，不使用 SQLite `rowid`。后续新增 SQLite Input 时，在此表追加一行即可，排查流程不变。
 
@@ -49,7 +51,7 @@ Flusher → SLS / JSONL / HTTP
 ## 系统化排查顺序
 
 SQLite 数据采集异常时，**按以下顺序逐步排查**。
-以下步骤中用 `<INPUT_ID>` 代指具体 Input ID（如 `qoder-sqlite`），`<DB>` 代指对应的 DB 路径，`<TABLE>` 代指目标表名——均可从上方注册表查得。
+以下步骤中用 `<INPUT_ID>` 代指具体 Input ID（如 `qoder-cn-sqlite`），`<DB>` 代指对应的 DB 路径，`<TABLE>` 代指目标表名——均可从上方注册表查得。
 
 ```
 第 1 步 → DB 文件是否存在且可访问
