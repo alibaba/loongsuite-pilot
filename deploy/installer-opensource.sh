@@ -1820,6 +1820,90 @@ print_summary() {
     echo "============================================================"
 }
 
+# >>> pilot-stop-for-deploy >>>
+# Overlay `install` used to SIGTERM only the collector pid file. The updater
+# stayed up, and gcOldVersions() deletes any versions/<dir> that is not
+# current/previous -- including the directory this deploy just copied, before
+# current is published. installer-opensource.sh writes current after
+# node_modules + postinstall, so that window is minutes. `loongsuite-pilot stop`
+# unloads LaunchAgent / disables systemd (autostart_remove) so neither process
+# comes back mid-deploy. That is the Unix counterpart of Disable-ScheduledTask.
+#
+# stop deletes the unit files. restore_pilot_after_deploy (EXIT trap) is the
+# counterpart of Enable-ScheduledTask in finally: it re-registers autostart
+# via start. Container installs must not start a daemon in the build layer.
+#
+# Fresh install has no CLI yet. Fall back to both pid files so a leftover
+# collector or updater still goes down.
+# All CLI after stop must go through run_pilot_cli so --data-dir matches.
+PILOT_HELD_FOR_DEPLOY=0
+
+resolve_pilot_cli() {
+    if command -v loongsuite-pilot &>/dev/null; then
+        command -v loongsuite-pilot
+    elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+        printf '%s\n' "$HOME/.local/bin/loongsuite-pilot"
+    fi
+}
+
+run_pilot_cli() {
+    local cli
+    cli="$(resolve_pilot_cli)"
+    [ -n "$cli" ] || return 1
+    LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$DATA_DIR" \
+        "$cli" "$@"
+}
+
+stop_one_pilot_pid_file() {
+    local pid_file="$1"
+    [ -f "$pid_file" ] || return 0
+    local old_pid
+    old_pid=$(cat "$pid_file")
+    if kill -0 "$old_pid" 2>/dev/null; then
+        kill "$old_pid" 2>/dev/null || true
+        local count=0
+        while kill -0 "$old_pid" 2>/dev/null && [ $count -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        if kill -0 "$old_pid" 2>/dev/null; then
+            kill -9 "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    else
+        rm -f "$pid_file"
+    fi
+}
+
+stop_pilot_for_deploy() {
+    PILOT_HELD_FOR_DEPLOY=0
+    local cli
+    cli="$(resolve_pilot_cli)"
+
+    if [ -z "$cli" ] && [ ! -f "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -f "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
+        return 0
+    fi
+
+    msg "==> 停止服务..." "==> Stopping service..."
+    if [ -n "$cli" ]; then
+        run_pilot_cli stop 2>/dev/null || true
+        PILOT_HELD_FOR_DEPLOY=1
+    fi
+    # Leftovers: no CLI on PATH, or an updater the CLI did not track.
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid"
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid"
+    echo ""
+}
+
+restore_pilot_after_deploy() {
+    [ "${PILOT_HELD_FOR_DEPLOY:-0}" -eq 1 ] || return 0
+    [ "${INSTALL_MODE:-host}" = "container" ] && return 0
+    PILOT_HELD_FOR_DEPLOY=0
+    run_pilot_cli start >/dev/null 2>&1 || true
+}
+# <<< pilot-stop-for-deploy <<<
+
 # ============================================================
 # CMD: install
 # ============================================================
@@ -1842,32 +1926,11 @@ cmd_install() {
         echo ""
     fi
 
-    # Stop running service before re-install
-    local pid_file="$DATA_DIR/loongsuite-pilot.pid"
-    if [ -f "$pid_file" ]; then
-        local old_pid
-        old_pid=$(cat "$pid_file")
-        if kill -0 "$old_pid" 2>/dev/null; then
-            msg "==> 停止运行中的服务 (PID $old_pid)..." \
-                "==> Stopping running service (PID $old_pid)..."
-            kill "$old_pid" 2>/dev/null || true
-            local count=0
-            while kill -0 "$old_pid" 2>/dev/null && [ $count -lt 10 ]; do
-                sleep 1
-                count=$((count + 1))
-            done
-            if kill -0 "$old_pid" 2>/dev/null; then
-                kill -9 "$old_pid" 2>/dev/null || true
-            fi
-            rm -f "$pid_file"
-            msg "    ✅ 已停止" "    ✅ Stopped"
-            echo ""
-        else
-            rm -f "$pid_file"
-        fi
-    fi
+    # Stop collector AND updater, and unload launchd / disable systemd so GC
+    # cannot delete the in-flight versions dir. See stop_pilot_for_deploy.
+    stop_pilot_for_deploy
 
-    trap 'rm -rf "${TMP_DIR:-}"' EXIT
+    trap 'restore_pilot_after_deploy; rm -rf "${TMP_DIR:-}"' EXIT
     download_and_extract
     probe_agents
     select_agents
@@ -1887,10 +1950,10 @@ cmd_install() {
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
-    if loongsuite-pilot start; then
+    if run_pilot_cli start; then
         sleep 2
         local _status_out
-        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
+        _status_out="$(run_pilot_cli status 2>/dev/null || true)"
         if echo "$_status_out" | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
@@ -1932,7 +1995,7 @@ cmd_upgrade() {
 
     check_deps
 
-    trap 'rm -rf "${TMP_DIR:-}"' EXIT
+    trap 'restore_pilot_after_deploy; rm -rf "${TMP_DIR:-}"' EXIT
     download_and_extract
 
     local new_ver; new_ver=$(get_version_from_dir "$INSTALL_SRC")
@@ -1949,14 +2012,7 @@ cmd_upgrade() {
         "   New version: ${new_ver:-unknown} (${new_commit:-unknown})"
     echo ""
 
-    # Stop the running service
-    msg "==> 停止服务..." "==> Stopping service..."
-    if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot stop 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
-        "$HOME/.local/bin/loongsuite-pilot" stop 2>/dev/null || true
-    fi
-    echo ""
+    stop_pilot_for_deploy
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
@@ -1965,17 +2021,9 @@ cmd_upgrade() {
         msg "⚠️  部署失败，正在回滚到旧版本..." \
             "⚠️  Deployment failed, rolling back to old version..."
         local _rollback_ok=1
-        if command -v loongsuite-pilot &>/dev/null; then
-            loongsuite-pilot rollback 2>/dev/null || _rollback_ok=0
-        elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
-            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rollback_ok=0
-        fi
+        run_pilot_cli rollback 2>/dev/null || _rollback_ok=0
         if [ "$_rollback_ok" -eq 1 ]; then
-            if command -v loongsuite-pilot &>/dev/null; then
-                loongsuite-pilot start 2>/dev/null || _rollback_ok=0
-            elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
-                "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || _rollback_ok=0
-            fi
+            run_pilot_cli start 2>/dev/null || _rollback_ok=0
         fi
         if [ "$_rollback_ok" -eq 1 ]; then
             msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
@@ -1992,10 +2040,10 @@ cmd_upgrade() {
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
-    if loongsuite-pilot start; then
+    if run_pilot_cli start; then
         sleep 2
         local _status_out
-        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
+        _status_out="$(run_pilot_cli status 2>/dev/null || true)"
         if echo "$_status_out" | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
@@ -2013,14 +2061,10 @@ cmd_upgrade() {
     msg "⚠️  新版本启动失败，正在回滚..." \
         "⚠️  New version failed to start, rolling back..."
 
-    loongsuite-pilot stop 2>/dev/null || true
+    run_pilot_cli stop 2>/dev/null || true
 
     local _rb_ok=1
-    if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot rollback 2>/dev/null || _rb_ok=0
-    else
-        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rb_ok=0
-    fi
+    run_pilot_cli rollback 2>/dev/null || _rb_ok=0
 
     if [ "$_rb_ok" -eq 1 ]; then
         msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \

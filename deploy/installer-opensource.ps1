@@ -1831,6 +1831,67 @@ function Stop-PilotService {
     }
 }
 
+# >>> pilot-hold-tasks-during-deploy >>>
+# Stop-PilotService only ends the current task instance. The updater task has a
+# repeating trigger every 5 minutes plus RestartCount, so it comes back while
+# Deploy-Package is still filling a versions/ directory that neither current nor
+# previous names. gcOldVersions then deletes that directory. Disable-ScheduledTask
+# writes Enabled=false on the task definition and actually holds that relaunch;
+# Stop-ScheduledTask does not.
+#
+# Disable is a write, so it can fail with Access is denied: a -RunLevel Limited
+# task grants its own principal only Read, Synchronize, and an elevated first
+# install leaves the tasks owned by Administrators (same ACL that makes uninstall
+# fail to delete them). A failed disable must not abort the install. Track only
+# names we actually disabled so Enable cannot turn on a task we never held.
+#
+# Enable lives in finally and is idempotent. Start stays on the success path: a
+# failed postinstall must not launch a collector whose hooks were never written.
+# Keep this block byte-identical across the three .ps1 installers.
+$script:PILOT_HELD_TASK_NAMES = @()
+
+function Get-PilotDeployTaskNames {
+    $tag = Get-PilotUserTag
+    @("LoongsuitePilot-$tag", "LoongsuitePilotUpdater-$tag")
+}
+
+function Disable-PilotScheduledTasksDuringDeploy {
+    $script:PILOT_HELD_TASK_NAMES = @()
+    $taskFolder = "\LoongsuitePilot\"
+    foreach ($taskName in (Get-PilotDeployTaskNames)) {
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+        if (-not $task) { continue }
+        $enabled = $true
+        try { $enabled = [bool]$task.Settings.Enabled } catch { $enabled = $true }
+        if (-not $enabled) { continue }
+        try {
+            Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+            $script:PILOT_HELD_TASK_NAMES += $taskName
+        } catch {
+            Msg "    ⚠️  无法禁用计划任务 ${taskName}: $($_.Exception.Message)" `
+                "    ⚠️  Could not disable scheduled task ${taskName}: $($_.Exception.Message)"
+        }
+    }
+    if (@($script:PILOT_HELD_TASK_NAMES).Count -gt 0) {
+        Msg "    已禁用计划任务（部署期间）: $($script:PILOT_HELD_TASK_NAMES -join ', ')" `
+            "    Disabled scheduled tasks for the deploy: $($script:PILOT_HELD_TASK_NAMES -join ', ')"
+    }
+}
+
+function Enable-PilotScheduledTasksAfterDeploy {
+    $taskFolder = "\LoongsuitePilot\"
+    foreach ($taskName in @($script:PILOT_HELD_TASK_NAMES)) {
+        try {
+            Enable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+        } catch {
+            Msg "    ⚠️  无法重新启用计划任务 ${taskName}: $($_.Exception.Message)" `
+                "    ⚠️  Could not re-enable scheduled task ${taskName}: $($_.Exception.Message)"
+        }
+    }
+    $script:PILOT_HELD_TASK_NAMES = @()
+}
+# <<< pilot-hold-tasks-during-deploy <<<
+
 # ============================================================
 # GC old versions
 # ============================================================
@@ -2477,6 +2538,7 @@ function Cmd-Install {
     }
 
     Stop-PilotService
+    Disable-PilotScheduledTasksDuringDeploy
 
     try {
         Download-AndExtract
@@ -2498,6 +2560,7 @@ function Cmd-Install {
         Install-Command
         Inject-QoderworkRuntimeWrapper
 
+        Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $curVer
@@ -2516,6 +2579,7 @@ function Cmd-Install {
         Write-Host ""
         Print-Summary "install"
     } finally {
+        Enable-PilotScheduledTasksAfterDeploy
         Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
@@ -2560,11 +2624,13 @@ function Cmd-Upgrade {
         Msg "==> 停止服务..." "==> Stopping service..."
         Stop-PilotService
         Write-Host ""
+        Disable-PilotScheduledTasksDuringDeploy
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
         Inject-QoderworkRuntimeWrapper
 
+        Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         # A failed postinstall is a failed upgrade: no point starting the new version, and the
@@ -2597,6 +2663,7 @@ function Cmd-Upgrade {
             exit 1
         }
     } finally {
+        Enable-PilotScheduledTasksAfterDeploy
         Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
