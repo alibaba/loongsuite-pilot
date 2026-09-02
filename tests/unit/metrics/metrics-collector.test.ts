@@ -79,9 +79,6 @@ function flusherEntry(kind: string, overrides: Record<string, any> = {}): any {
 
 function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnapshot {
   return {
-    rawInRecordsTotal: 0,
-    rawInBytesTotal: 0,
-    rawInMaxBatchBytes: 0,
     inEventsTotal: 0,
     inBytesTotal: 0,
     inputs: new Map(),
@@ -107,9 +104,6 @@ describe('MetricsCollector', () => {
   describe('collectL1', () => {
     it('returns all required fields with correct types', () => {
       const snapshot = buildSnapshot({
-        rawInRecordsTotal: 135,
-        rawInBytesTotal: 8000,
-        rawInMaxBatchBytes: 4096,
         inEventsTotal: 110,
         inBytesTotal: 5000,
         // Egress is the flusher side, summed over every destination the data was
@@ -159,10 +153,12 @@ describe('MetricsCollector', () => {
       expect(result.metric_json.active_agent_count).toBe('1');
       expect((result.metric_json as Record<string, unknown>).input_count).toBeUndefined();
       expect((result.metric_json as Record<string, unknown>).active_input_count).toBeUndefined();
-      // First row's window opens at process start, so the deltas equal the totals.
-      expect(result.metric_json.raw_in_records).toBe('135');
-      expect(result.metric_json.raw_in_bytes).toBe('8000');
-      expect(result.metric_json.raw_in_max_batch_bytes).toBe('4096');
+      // Raw source metrics stay on type=input rows until every Input has the
+      // same instrumentation coverage; mixing partial raw totals with complete
+      // event totals at L1 would make the funnel misleading.
+      expect(result.metric_json).not.toHaveProperty('raw_in_records');
+      expect(result.metric_json).not.toHaveProperty('raw_in_bytes');
+      expect(result.metric_json).not.toHaveProperty('raw_in_max_batch_bytes');
       expect(result.metric_json.in_events).toBe('110');
       expect(result.metric_json.in_bytes).toBe('5000');
       // Instance egress: what was written to the backends, not what the inputs
@@ -237,24 +233,16 @@ describe('MetricsCollector', () => {
 
     it('drains flow values on report, so an idle window reads zero', () => {
       const snapshot = buildSnapshot({
-        rawInRecordsTotal: 135, rawInBytesTotal: 8000, rawInMaxBatchBytes: 4096,
         inEventsTotal: 110, inBytesTotal: 5000,
         flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 100, outBytes: 4800 })]]),
       });
 
       const first = collector.collectL1(snapshot);
-      expect(first.metric_json.raw_in_records).toBe('135');
-      expect(first.metric_json.raw_in_bytes).toBe('8000');
-      expect(first.metric_json.raw_in_max_batch_bytes).toBe('4096');
       expect(first.metric_json.in_events).toBe('110');
       expect(first.metric_json.out_bytes).toBe('4800');
 
       // Same cumulative totals means nothing flowed since the previous row.
       const second = collector.collectL1(snapshot);
-      expect(second.metric_json.raw_in_records).toBe('0');
-      expect(second.metric_json.raw_in_bytes).toBe('0');
-      // Maximum batch comes from the current atomic window snapshot.
-      expect(second.metric_json.raw_in_max_batch_bytes).toBe('4096');
       expect(second.metric_json.in_events).toBe('0');
       expect(second.metric_json.in_bytes).toBe('0');
       expect(second.metric_json.out_events).toBe('0');
@@ -262,13 +250,9 @@ describe('MetricsCollector', () => {
 
       // Only the increment shows up in the next row, never the running total.
       const third = collector.collectL1(buildSnapshot({
-        rawInRecordsTotal: 160, rawInBytesTotal: 9200, rawInMaxBatchBytes: 6144,
         inEventsTotal: 135, inBytesTotal: 5600,
         flushers: new Map<string, any>([['sls:main', flusherEntry('sls', { outEntries: 130, outBytes: 5400 })]]),
       }));
-      expect(third.metric_json.raw_in_records).toBe('25');
-      expect(third.metric_json.raw_in_bytes).toBe('1200');
-      expect(third.metric_json.raw_in_max_batch_bytes).toBe('6144');
       expect(third.metric_json.in_events).toBe('25');
       expect(third.metric_json.in_bytes).toBe('600');
       expect(third.metric_json.out_events).toBe('30');
@@ -338,7 +322,6 @@ describe('MetricsCollector', () => {
 
       return buildSnapshot({
         inputs, inputIdleMinutes, flushers,
-        rawInRecordsTotal: 72, rawInBytesTotal: 3260, rawInMaxBatchBytes: 4096,
         inEventsTotal: 60, inBytesTotal: 1780,
       });
     }
@@ -356,11 +339,12 @@ describe('MetricsCollector', () => {
       expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers', 'inputs']);
       expect([...l2.agents, ...l2.inputs, ...l2.flushers].map(r => r.type).includes('pipeline' as never)).toBe(false);
 
-      // What the dropped row said is still recoverable by summing the detail.
+      // Raw totals are recoverable only from Input rows, whose coverage and
+      // dimensions are explicit. Agent rows keep the complete event totals.
       const sum = (rows: any[], field: string): number =>
         rows.reduce((acc, r) => acc + Number(r[field]), 0);
-      expect(sum(l2.agents, 'raw_in_records')).toBe(72);
-      expect(sum(l2.agents, 'raw_in_bytes')).toBe(3260);
+      expect(sum(l2.inputs, 'raw_in_records')).toBe(72);
+      expect(sum(l2.inputs, 'raw_in_bytes')).toBe(3260);
       expect(sum(l2.agents, 'in_events')).toBe(60);
       expect(sum(l2.agents, 'in_bytes')).toBe(1780);
       expect(sum(l2.flushers, 'out_entries')).toBe(255);
@@ -425,9 +409,9 @@ describe('MetricsCollector', () => {
       expect(agents.every(r => r.type === 'agent')).toBe(true);
 
       const qoder = agentRow(agents, 'qoder');
-      expect(qoder.raw_in_records).toBe('60');
-      expect(qoder.raw_in_bytes).toBe('2560');
-      expect(qoder.raw_in_max_batch_bytes).toBe('4096');
+      expect(qoder).not.toHaveProperty('raw_in_records');
+      expect(qoder).not.toHaveProperty('raw_in_bytes');
+      expect(qoder).not.toHaveProperty('raw_in_max_batch_bytes');
       expect(qoder.in_events).toBe('50');
       expect(qoder.in_bytes).toBe('1280');
       // Ingress only: egress cannot be attributed to an agent, it lives per flusher.
@@ -498,8 +482,6 @@ describe('MetricsCollector', () => {
       // The installed agents still report — at zero flow, with idle_minutes intact.
       // That row is the only way a consumer can see an agent has gone quiet.
       expect(second.agents.map(r => r.agent).sort()).toEqual(['cursor', 'qoder']);
-      expect(second.agents.every(r => r.raw_in_records === '0' && r.raw_in_bytes === '0')).toBe(true);
-      expect(agentRow(second.agents, 'qoder').raw_in_max_batch_bytes).toBe('4096');
       expect(second.agents.every(r => r.in_events === '0' && r.in_bytes === '0')).toBe(true);
       expect(agentRow(second.agents, 'qoder').idle_minutes).toBe('3');
       const sls = second.flushers.find(r => r.flusher === 'sls')!;
@@ -526,8 +508,6 @@ describe('MetricsCollector', () => {
       // Only qoder moved; cursor is still installed, so it reports a zero row.
       expect(result.agents.map(r => r.agent).sort()).toEqual(['cursor', 'qoder']);
       expect(agentRow(result.agents, 'cursor').in_events).toBe('0');
-      expect(agentRow(result.agents, 'qoder').raw_in_records).toBe('5');
-      expect(agentRow(result.agents, 'qoder').raw_in_bytes).toBe('200');
       expect(agentRow(result.agents, 'qoder').in_events).toBe('8');
       expect(agentRow(result.agents, 'qoder').failed_events).toBe('1');
       expect(result.flushers.find(r => r.flusher === 'sls')!.out_entries).toBe('5');

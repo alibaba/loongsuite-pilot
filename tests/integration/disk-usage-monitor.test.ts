@@ -31,7 +31,6 @@ describe('Directory usage: real files to reported metrics', () => {
       dataDir, version: '1.2.0', userId: 'disk-test',
       alarmManager: new AlarmManager({ ip: '127.0.0.1', version: '1.2.0', userId: 'disk-test' }),
       getSnapshot: () => ({
-        rawInRecordsTotal: 0, rawInBytesTotal: 0, rawInMaxBatchBytes: 0,
         inEventsTotal: 0, inBytesTotal: 0, inputs: new Map(), flushers: new Map(),
         inputIdleMinutes: new Map(),
       }),

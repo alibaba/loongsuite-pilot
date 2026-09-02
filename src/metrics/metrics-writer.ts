@@ -139,9 +139,15 @@ export class MetricsWriter {
   }
 
   private async collectAndWriteDataflow(): Promise<void> {
-    const snapshot = this.getSnapshot();
-    await this.writeL1(snapshot);
-    await this.writeL2(snapshot);
+    try {
+      const snapshot = this.getSnapshot();
+      await this.writeL1(snapshot);
+      await this.writeL2(snapshot);
+    } catch (err) {
+      // Metrics are diagnostic and must never make a timer rejection or the
+      // final metrics flush interrupt the collector's resource shutdown.
+      logger.warn('dataflow metrics snapshot failed', { error: String(err) });
+    }
   }
 
   private async writeL1(sharedSnapshot?: DataflowSnapshot): Promise<void> {

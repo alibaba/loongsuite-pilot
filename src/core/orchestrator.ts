@@ -463,7 +463,15 @@ export class Orchestrator extends EventEmitter {
     await this.inputManager?.stopAll();
     // The final dataflow window must observe the last serialized collect and
     // entry queue drain, while the flusher counters are still available.
-    await this.metricsWriter?.stop();
+    try {
+      await this.metricsWriter?.stop();
+    } catch (err) {
+      // Metrics are best-effort. A failed final snapshot must not prevent the
+      // data flusher from draining or the checkpoint store from being saved.
+      logger.warn('metrics writer stop failed during orchestrator shutdown', {
+        error: String(err),
+      });
+    }
     await this.flusher?.shutdown();
     await this.stateStore?.save();
 
@@ -1689,15 +1697,9 @@ export class Orchestrator extends EventEmitter {
 
     // Ingress only. The instance's egress is measured where the writes actually
     // happen — the flusher counters below — so it is not summed from the inputs.
-    let rawInRecordsTotal = 0;
-    let rawInBytesTotal = 0;
-    let rawInMaxBatchBytes = 0;
     let inEventsTotal = 0;
     let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
-      rawInRecordsTotal += counter.rawInRecords;
-      rawInBytesTotal += counter.rawInBytes;
-      rawInMaxBatchBytes = Math.max(rawInMaxBatchBytes, counter.rawInMaxBatchBytes);
       inEventsTotal += counter.inEvents;
       inBytesTotal += counter.inBytes;
     }
@@ -1774,9 +1776,6 @@ export class Orchestrator extends EventEmitter {
     }
 
     return {
-      rawInRecordsTotal,
-      rawInBytesTotal,
-      rawInMaxBatchBytes,
       inEventsTotal,
       inBytesTotal,
       inputs,

@@ -63,12 +63,6 @@ export interface L1Metrics {
     // with estimated OTLP span bytes, because the instance total has to cover
     // every destination. For a number that is only real bytes, sum out_bytes over
     // the flusher rows with bytes_basis = 'measured' instead.
-    /** Raw file records presented to parsing/transformation in this window. */
-    raw_in_records: string;
-    /** Checkpointed raw file bytes before parsing/transformation in this window. */
-    raw_in_bytes: string;
-    /** Process-lifetime maximum temporary raw file read buffer. */
-    raw_in_max_batch_bytes: string;
     in_events: string;
     in_bytes: string;
     out_events: string;
@@ -122,10 +116,6 @@ interface L2Identity {
 export interface AgentFlowMetrics extends L2Identity {
   type: 'agent';
   agent: string;
-  raw_in_records: string;
-  raw_in_bytes: string;
-  /** Current-window maximum across this agent's instrumented inputs. */
-  raw_in_max_batch_bytes: string;
   in_events: string;
   in_bytes: string;
   /** Events this agent produced that the dispatch to the flushers rejected. */
@@ -206,10 +196,10 @@ export interface FlusherFlowMetrics extends L2Identity {
 }
 
 /**
- * One reporting cycle's L2 output: ingress per agent, egress per destination.
- * No instance-total row — it would be the exact sum of these rows over one
- * window, which the query engine can do, and L1's metric_json already carries
- * the same four axes plus agent_count for the instance.
+ * One reporting cycle's L2 output: complete normalized ingress per agent,
+ * covered raw-source detail per Input, and egress per destination. Raw Input
+ * fields deliberately stay out of L1 and Agent rows until every custom reader
+ * has equivalent instrumentation; consumers can group Input rows by `agent`.
  */
 export interface L2Metrics {
   agents: AgentFlowMetrics[];
@@ -283,10 +273,6 @@ export interface DataflowSnapshot {
    * what the instance actually wrote is the flusher side, so both levels take
    * out_* from `flushers` and nothing has to keep two answers in sync.
    */
-  rawInRecordsTotal: number;
-  rawInBytesTotal: number;
-  /** Current-window maximum across all instrumented inputs. */
-  rawInMaxBatchBytes: number;
   inEventsTotal: number;
   inBytesTotal: number;
   /**
@@ -324,8 +310,6 @@ export interface InfraHealthSnapshot {
 
 /** Ingress axes tracked per input. */
 interface FlowTotals {
-  rawInRecords: number;
-  rawInBytes: number;
   inEvents: number;
   inBytes: number;
   outFailed: number;
@@ -334,6 +318,8 @@ interface FlowTotals {
 interface InputRuntimeTotals extends FlowTotals {
   rawReadCalls: number;
   rawReadBytes: number;
+  rawInRecords: number;
+  rawInBytes: number;
   parseSuccessRecords: number;
   parseFailedRecords: number;
   readDurationMs: number;
@@ -346,8 +332,6 @@ interface InputRuntimeTotals extends FlowTotals {
  * pair describe the instance rather than one leg of it.
  */
 interface InstanceFlow {
-  rawInRecords: number;
-  rawInBytes: number;
   inEvents: number;
   inBytes: number;
   outEvents: number;
@@ -365,7 +349,7 @@ interface FlusherTotals {
 }
 
 function zeroFlowTotals(): FlowTotals {
-  return { rawInRecords: 0, rawInBytes: 0, inEvents: 0, inBytes: 0, outFailed: 0 };
+  return { inEvents: 0, inBytes: 0, outFailed: 0 };
 }
 
 function zeroInputRuntimeTotals(): InputRuntimeTotals {
@@ -373,6 +357,8 @@ function zeroInputRuntimeTotals(): InputRuntimeTotals {
     ...zeroFlowTotals(),
     rawReadCalls: 0,
     rawReadBytes: 0,
+    rawInRecords: 0,
+    rawInBytes: 0,
     parseSuccessRecords: 0,
     parseFailedRecords: 0,
     readDurationMs: 0,
@@ -474,8 +460,6 @@ export class MetricsCollector {
    * swallow the other's window.
    */
   private l1Baseline: InstanceFlow = {
-    rawInRecords: 0,
-    rawInBytes: 0,
     inEvents: 0,
     inBytes: 0,
     outEvents: 0,
@@ -535,16 +519,12 @@ export class MetricsCollector {
     // byte-identical to ingress.
     const egress = sumFlusherEgress(snapshot);
     const cumulative: InstanceFlow = {
-      rawInRecords: snapshot.rawInRecordsTotal,
-      rawInBytes: snapshot.rawInBytesTotal,
       inEvents: snapshot.inEventsTotal,
       inBytes: snapshot.inBytesTotal,
       outEvents: egress.events,
       outBytes: egress.bytes,
     };
     const flow = {
-      rawInRecords: delta(cumulative.rawInRecords, this.l1Baseline.rawInRecords),
-      rawInBytes: delta(cumulative.rawInBytes, this.l1Baseline.rawInBytes),
       inEvents: delta(cumulative.inEvents, this.l1Baseline.inEvents),
       inBytes: delta(cumulative.inBytes, this.l1Baseline.inBytes),
       outEvents: delta(cumulative.outEvents, this.l1Baseline.outEvents),
@@ -586,9 +566,6 @@ export class MetricsCollector {
         active_agent_count: String(agents.active),
         open_fd: String(getOpenFdCount()),
         window_ms: String(windowMs),
-        raw_in_records: String(flow.rawInRecords),
-        raw_in_bytes: String(flow.rawInBytes),
-        raw_in_max_batch_bytes: String(snapshot.rawInMaxBatchBytes),
         in_events: String(flow.inEvents),
         in_bytes: String(flow.inBytes),
         out_events: String(flow.outEvents),
@@ -722,9 +699,6 @@ export class MetricsCollector {
    */
   private collectAgentRows(snapshot: DataflowSnapshot, identity: L2Identity): AgentFlowMetrics[] {
     const byAgent = new Map<string, {
-      rawRecords: number;
-      rawBytes: number;
-      rawMaxBatchBytes: number;
       events: number;
       bytes: number;
       failed: number;
@@ -740,15 +714,11 @@ export class MetricsCollector {
       // input's stale counts would resurface the next time it starts.
       const base = this.l2InputBaseline.get(inputId) ?? zeroFlowTotals();
       const flow = {
-        rawRecords: delta(stats.rawInRecords, base.rawInRecords),
-        rawBytes: delta(stats.rawInBytes, base.rawInBytes),
         events: delta(stats.inEvents, base.inEvents),
         bytes: delta(stats.inBytes, base.inBytes),
         failed: delta(stats.outFailed, base.outFailed),
       };
       this.l2InputBaseline.set(inputId, {
-        rawInRecords: stats.rawInRecords,
-        rawInBytes: stats.rawInBytes,
         inEvents: stats.inEvents,
         inBytes: stats.inBytes,
         outFailed: stats.outFailed,
@@ -760,8 +730,6 @@ export class MetricsCollector {
       // stopped mid-window reports only what it collected while running, and a
       // stopped-and-silent one drops out entirely (its agent is gone, not idle).
       if (
-        flow.rawRecords === 0 &&
-        flow.rawBytes === 0 &&
         flow.events === 0 &&
         flow.failed === 0 &&
         !stats.running
@@ -771,9 +739,6 @@ export class MetricsCollector {
       let acc = byAgent.get(agent);
       if (!acc) {
         acc = {
-          rawRecords: 0,
-          rawBytes: 0,
-          rawMaxBatchBytes: 0,
           events: 0,
           bytes: 0,
           failed: 0,
@@ -783,9 +748,6 @@ export class MetricsCollector {
         };
         byAgent.set(agent, acc);
       }
-      acc.rawRecords += flow.rawRecords;
-      acc.rawBytes += flow.rawBytes;
-      acc.rawMaxBatchBytes = Math.max(acc.rawMaxBatchBytes, stats.rawInMaxBatchBytes);
       acc.events += flow.events;
       acc.bytes += flow.bytes;
       acc.failed += flow.failed;
@@ -803,9 +765,6 @@ export class MetricsCollector {
         type: 'agent',
         ...identity,
         agent,
-        raw_in_records: String(acc.rawRecords),
-        raw_in_bytes: String(acc.rawBytes),
-        raw_in_max_batch_bytes: String(acc.rawMaxBatchBytes),
         in_events: String(acc.events),
         in_bytes: String(acc.bytes),
         failed_events: String(acc.failed),

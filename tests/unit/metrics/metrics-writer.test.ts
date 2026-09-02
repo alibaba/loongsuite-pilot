@@ -38,9 +38,6 @@ vi.mock('../../../src/internal/sender.js', () => ({
 
 function buildSnapshot(): DataflowSnapshot {
   return {
-    rawInRecordsTotal: 7,
-    rawInBytesTotal: 1536,
-    rawInMaxBatchBytes: 1024,
     inEventsTotal: 12,
     inBytesTotal: 2048,
     inputs: new Map([
@@ -125,9 +122,9 @@ describe('MetricsWriter', () => {
     expect(entry.version).toBe('2.0.0');
     expect(entry.user_id).toBe('u1');
     expect(entry.metric_json.agent_count).toBe('1');
-    expect(entry.metric_json.raw_in_records).toBe('7');
-    expect(entry.metric_json.raw_in_bytes).toBe('1536');
-    expect(entry.metric_json.raw_in_max_batch_bytes).toBe('1024');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_records');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_bytes');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_max_batch_bytes');
   });
 
   it('calls sendStatus with pilot_status topic on L1 write', async () => {
@@ -186,9 +183,9 @@ describe('MetricsWriter', () => {
 
     // Flat string fields throughout: nothing needs json_extract to be queried.
     expect(agent.agent).toBe('test-agent');
-    expect(agent.raw_in_records).toBe('7');
-    expect(agent.raw_in_bytes).toBe('1536');
-    expect(agent.raw_in_max_batch_bytes).toBe('1024');
+    expect(agent).not.toHaveProperty('raw_in_records');
+    expect(agent).not.toHaveProperty('raw_in_bytes');
+    expect(agent).not.toHaveProperty('raw_in_max_batch_bytes');
     expect(agent.in_events).toBe('5');
     expect(input.input_name).toBe('test-input');
     expect(input.source_kind).toBe('primary');
@@ -217,9 +214,6 @@ describe('MetricsWriter', () => {
       .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
       .map((c: unknown[]) => c[1] as Record<string, string>);
     expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher']);
-    expect(rows[0].raw_in_records).toBe('0');
-    expect(rows[0].raw_in_bytes).toBe('0');
-    expect(rows[0].raw_in_max_batch_bytes).toBe('1024');
     expect(rows[0].in_events).toBe('0');
     expect(rows[0].in_bytes).toBe('0');
     expect(rows[1].raw_read_bytes).toBe('0');
@@ -298,9 +292,27 @@ describe('MetricsWriter', () => {
     expect(getSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it('does not reject stop when the final dataflow snapshot fails', async () => {
+    let failSnapshot = false;
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: () => {
+        if (failSnapshot) throw new Error('snapshot exploded');
+        return buildSnapshot();
+      },
+    });
+    vi.useRealTimers();
+
+    await writer.start();
+    failSnapshot = true;
+
+    await expect(writer.stop()).resolves.toBeUndefined();
+  });
+
   it('does not write the L2 file when snapshot has no inputs/flushers', async () => {
     const emptySnapshot: DataflowSnapshot = {
-      rawInRecordsTotal: 0, rawInBytesTotal: 0, rawInMaxBatchBytes: 0,
       inEventsTotal: 0, inBytesTotal: 0,
       inputs: new Map(),
       flushers: new Map(),
