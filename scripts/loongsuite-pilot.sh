@@ -18,6 +18,7 @@ LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
 CONFIG_FILE="$DATA_DIR/config.json"
 SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
+OPEN_SOURCE_INSTALLER_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
@@ -569,6 +570,22 @@ resolve_current_version() {
         return 0
     fi
     return 1
+}
+
+build_edition() {
+    local version_dir
+    version_dir=$(resolve_current_version 2>/dev/null) || return 1
+
+    local probe="$version_dir/dist/cli-probe.cjs"
+    [ -f "$probe" ] || return 1
+
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" "$probe" --build-edition 2>/dev/null
+}
+
+is_opensource_build() {
+    [ "$(build_edition 2>/dev/null || true)" = "opensource" ]
 }
 
 resolve_previous_version() {
@@ -1360,6 +1377,97 @@ cmd_token_usage() {
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     exec "$node_bin" "$entry" token-usage "$@"
+}
+
+print_upgrade_usage() {
+    echo "Usage: loongsuite-pilot upgrade [--version <version>]"
+    echo ""
+    echo "Upgrade the open-source edition to the latest release, or to a specific version."
+}
+
+cmd_upgrade() {
+    local version=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "❌ --version requires a value" >&2
+                    return 1
+                fi
+                version="$2"
+                shift 2
+                ;;
+            --version=*)
+                version="${1#*=}"
+                if [ -z "$version" ]; then
+                    echo "❌ --version requires a value" >&2
+                    return 1
+                fi
+                shift
+                ;;
+            help|--help|-h)
+                print_upgrade_usage
+                return 0
+                ;;
+            *)
+                echo "Unknown upgrade option: $1" >&2
+                print_upgrade_usage >&2
+                return 1
+                ;;
+        esac
+    done
+
+    if [ -n "$version" ] && ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+        echo "❌ Invalid version: $version (expected e.g. 1.6.0)" >&2
+        return 1
+    fi
+
+    # The published Unix installer still stores version pointers and packages
+    # under the default ~/.loongsuite-pilot tree. Passing a custom cache env to
+    # it would either upgrade a stale default install or report success without
+    # changing the version this CLI actually uses, so fail closed until the
+    # installer supports a custom cache directory end to end.
+    local default_cache_dir="$HOME/.loongsuite-pilot"
+    if [ "$CACHE_DIR" != "$default_cache_dir" ]; then
+        echo "❌ Manual upgrade does not yet support a custom cache directory on macOS/Linux." >&2
+        echo "   Current cache directory: $CACHE_DIR" >&2
+        echo "   Supported cache directory: $default_cache_dir" >&2
+        return 1
+    fi
+
+    local installer_file
+    installer_file=$(mktemp "${TMPDIR:-/tmp}/loongsuite-pilot-installer.XXXXXX") || {
+        echo "❌ Failed to create temporary installer file" >&2
+        return 1
+    }
+
+    local download_ok=0
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$OPEN_SOURCE_INSTALLER_URL" -o "$installer_file" && download_ok=1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$OPEN_SOURCE_INSTALLER_URL" -O "$installer_file" && download_ok=1
+    else
+        echo "❌ curl or wget is required to download the installer" >&2
+    fi
+
+    if [ "$download_ok" -ne 1 ]; then
+        rm -f "$installer_file"
+        echo "❌ Failed to download the open-source installer" >&2
+        return 1
+    fi
+
+    local result=0
+    if [ -n "$version" ]; then
+        LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR" \
+            bash "$installer_file" upgrade --data-dir "$DATA_DIR" --version "$version" || result=$?
+    else
+        LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR" \
+            bash "$installer_file" upgrade --data-dir "$DATA_DIR" || result=$?
+    fi
+    rm -f "$installer_file"
+    return "$result"
 }
 
 cleanup_hermes_for_rollback() {
@@ -2303,6 +2411,9 @@ cmd_help() {
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  worker ...      Manage local remote-controlled workers"
+    if is_opensource_build; then
+        echo "  upgrade [opts]  Upgrade to latest or --version <version> (open-source only)"
+    fi
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
 }
@@ -2323,6 +2434,16 @@ case "${1:-status}" in
     span-attr)   shift; cmd_span_attr "$@" ;;
     worker)              shift; cmd_worker "$@" ;;
     agent)               shift; cmd_agent "$@" ;;
+    upgrade)
+        shift
+        if is_opensource_build; then
+            cmd_upgrade "$@"
+        else
+            echo "Unknown command: upgrade"
+            cmd_help
+            exit 1
+        fi
+        ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     restart-updater)     cmd_restart_updater ;;
