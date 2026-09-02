@@ -958,6 +958,79 @@ describe('Updater', () => {
       expect((updater as any).consecutiveFailures).toBe(0);
     });
 
+    it('allows a full health window after timed-out restart recovery', async () => {
+      setupForDownload();
+      const recoveryStartedAt = Date.now();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        if (Date.now() - recoveryStartedAt < 29_500) return Promise.resolve(null);
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('does not report success when Windows start-only returns Unknown command', async () => {
+      setupForDownload();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        if (args.includes('start-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            stdout: 'Unknown command: start-collector',
+            stderr: '',
+            code: 1,
+            killed: false,
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
+      );
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure',
+        expect.objectContaining({
+          error: expect.stringContaining('stdout="Unknown command: start-collector"'),
+        }),
+      );
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
     it('does not report restart success or run GC when collector health never appears', async () => {
       setupForDownload();
       mockReadJsonFile.mockImplementation((filePath: string) => {
