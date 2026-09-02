@@ -94,6 +94,27 @@ export function stripMarkerBlock(content: string, begin: string, end: string): s
   return out.join('\n');
 }
 
+/**
+ * Return the marker-delimited block (inclusive of the BEGIN/END marker lines),
+ * or null when the BEGIN marker is absent. Unterminated blocks yield everything
+ * from the BEGIN marker on, so a truncated rc file still reads as one block.
+ *
+ * Callers use this instead of scanning whole-file content when they need to
+ * answer a question ABOUT one block: two blocks in the same rc file can share
+ * substrings (the qodercli and qoderclicn blocks both name the same wrapper
+ * script), and a file-wide `includes` would let one satisfy the other's check.
+ */
+export function extractMarkerBlock(content: string, begin: string, end: string): string | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex(line => line.includes(begin));
+  if (start === -1) return null;
+  const rest = lines.slice(start + 1);
+  const relEnd = rest.findIndex(line => line.includes(end));
+  return relEnd === -1
+    ? lines.slice(start).join('\n')
+    : lines.slice(start, start + 1 + relEnd + 1).join('\n');
+}
+
 export function parseWindowsUserEnv(output: string, envName: string): string {
   for (const line of output.split(/\r?\n/)) {
     const match = line.match(/^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$/);
@@ -566,7 +587,7 @@ export class HookWatchdog {
 
 
   /**
-   * Shell-rc intercept block definitions (qodercli + claude-code).
+   * Shell-rc intercept block definitions (qodercli + qoderclicn + claude-code).
    *
    * blockFn must stay byte-identical to the block written by the installer
    * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
@@ -582,7 +603,9 @@ export class HookWatchdog {
    * `signature` is a substring unique to the CURRENT block shape. check()/
    * repair() use it — not just `marker` — to detect and migrate
    * an older block that shares the same marker (e.g. the released bare
-   * `<cli>() {...}` form). Keep it byte-identical to the installer's grep.
+   * `<cli>() {...}` form). It is matched WITHIN the block's own marker region,
+   * not across the whole rc file, so a neighbouring block cannot vouch for a
+   * stale one. Keep it byte-identical to the installer's grep.
    * `endMarker` bounds the block for removal/migration.
    */
   static interceptRcBlockDefs(): Array<{
@@ -609,6 +632,26 @@ export class HookWatchdog {
           `  eval 'qodercli() { "${p}" "$@"; }'`,
           'fi',
           '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        // Same wrapper script as qodercli, told apart by the flavor variable the
+        // block exports. `signature` is that assignment rather than the script
+        // name, because the script name alone cannot distinguish this block from
+        // the qodercli one.
+        id: 'qoderclicn-rc',
+        agentId: 'qoder-cn',
+        marker: 'loongsuite-pilot BEGIN qoderclicn-intercept',
+        endMarker: 'loongsuite-pilot END qoderclicn-intercept',
+        signature: 'LOONGSUITE_QODERCLI_FLAVOR=qoderclicn',
+        scriptName: 'qodercli-runtime-wrapper.sh',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qoderclicn-intercept',
+          'if ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then',
+          `  eval 'qoderclicn() { LOONGSUITE_QODERCLI_FLAVOR=qoderclicn "${p}" "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qoderclicn-intercept',
         ].join('\n'),
       },
       {
@@ -813,8 +856,9 @@ export class HookWatchdog {
             if (!await fileExists(rcPath)) continue;
             anyRcExists = true;
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) anyCurrent = true;
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              if (block.includes(rc.signature)) anyCurrent = true;
               else return false; // marker present but old shape → migrate
             }
           }
@@ -827,8 +871,9 @@ export class HookWatchdog {
           for (const rcPath of rcPaths) {
             if (!await fileExists(rcPath)) continue; // never create rc files
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) continue; // already current
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              if (block.includes(rc.signature)) continue; // already current
               // Stale block: strip the old marker region, then append fresh.
               const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n+$/, '\n');
               await fs.writeFile(rcPath, stripped + rc.blockFn(scriptPath) + '\n');

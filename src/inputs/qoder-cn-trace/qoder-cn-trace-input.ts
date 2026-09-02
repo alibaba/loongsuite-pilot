@@ -10,16 +10,24 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
-import { enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
+import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
+import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
+import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
+
+// Written by the runtime wrapper that launches qoderclicn. Kept separate from
+// the international build's file so a machine running both keeps the two
+// streams apart.
+const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
 }
 
 /**
- * Multi-source merge input for QoderCN (IDE-only).
- * Reads hook JSONL (content+structure) and SQLite (IDE tokens),
- * merges per session, outputs enriched events for both event logs (SLS)
+ * Multi-source merge input for the QoderCN product line (IDE + qoderclicn).
+ * Reads hook JSONL (content+structure) and, per session, either SQLite (IDE
+ * tokens) or session segments plus the runtime intercept (CLI tokens and
+ * response timings), then outputs enriched events for both event logs (SLS)
  * and trace conversion (ARMS).
  *
  * Pattern mirrors qoder-trace-input.ts: always emit immediately, never buffer.
@@ -135,28 +143,62 @@ export class QoderCnTraceInput extends BaseInput {
       dedupeEventsInTurn(turnEntries);
     }
 
-    // Aggregate all turns in the same session so enrichIdeTurn can use
-    // SQLite request ordering to match tokens correctly across turns.
+    // Aggregate all turns in the same session: enrichIdeTurn needs SQLite
+    // request ordering to match tokens across turns, and the CLI/IDE variant is
+    // decided per session rather than per turn.
     // Mirrors qoder-trace-input.ts ideSessionGroups pattern.
-    const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const sessionGroups = new Map<string, AgentActivityEntry[]>();
     const noSessionEntries: AgentActivityEntry[] = [];
     for (const [, turnEntries] of mergedGroups) {
       const sessionId = this.extractSessionId(turnEntries);
       if (sessionId) {
-        const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
+        const sessionEntries = sessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
-        ideSessionGroups.set(sessionId, sessionEntries);
+        sessionGroups.set(sessionId, sessionEntries);
       } else {
         noSessionEntries.push(...turnEntries);
       }
     }
 
-    for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      // Intentionally ignores matchedDbPath: agent.type must never be derived from
-      // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
-      const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
-      enrichIdeTurn(sessionEntries, sqliteRows);
-      // Post-processing after enrichIdeTurn:
+    // The IDE and qoderclicn share one agentId and therefore one hook history,
+    // so the variant has to be recovered here. A CLI session is recognised by
+    // two signals the IDE does not produce: the transcript's usage.request_id
+    // (surfaced by the hook as agent.client_request_id) and a segments directory
+    // of its own. Both are required, so an IDE session stays on the SQLite path
+    // even if a later IDE build starts carrying a request id, and a history
+    // collected before the hook shipped that field degrades to the previous
+    // behaviour instead of losing its tokens.
+    let interceptData: InterceptData | null = null;
+    for (const [sessionId, sessionEntries] of sessionGroups) {
+      const segments = hasClientRequestId(sessionEntries)
+        ? await readSegmentTokensForSession(sessionId, [], QODER_CN_SEGMENTS_ROOT)
+        : [];
+
+      if (segments.length > 0) {
+        // Tokens come from the runtime intercept rather than from the segments:
+        // on this build the segment records and the transcript both report zero
+        // token counts and carry only `credits`, same as the international one.
+        // Segments are read for the response timings, which are the only source
+        // of a non-zero LLM duration.
+        interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
+        enrichCliTurn(
+          sessionEntries,
+          segments,
+          interceptData.systemPrompt?.content,
+          interceptData.tokens,
+        );
+      } else {
+        // Intentionally ignores matchedDbPath: agent.type must never be derived from
+        // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
+        const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
+        enrichIdeTurn(sessionEntries, sqliteRows);
+      }
+
+      // Shared by both variants: these repair hook-level artefacts inherited
+      // from the one processor both go through (step-less user boundary,
+      // 'unknown' model on tool events, container spans ending before their
+      // children). They deliberately leave the llm.* / tool.* timestamps the
+      // enrichment above just wrote.
       expandContainerTimes(sessionEntries);
       propagateModelToToolEvents(sessionEntries);
       computeToolCallDurations(sessionEntries);
@@ -165,7 +207,7 @@ export class QoderCnTraceInput extends BaseInput {
 
     // Aggregate all session entries.
     const allSessionEntries: AgentActivityEntry[] = [];
-    for (const sessionEntries of ideSessionGroups.values()) {
+    for (const sessionEntries of sessionGroups.values()) {
       allSessionEntries.push(...sessionEntries);
     }
 
@@ -280,6 +322,16 @@ export class QoderCnTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+// A CLI turn's llm.response carries the transcript's usage.request_id, which
+// the hook writes as agent.client_request_id. The IDE transcript has no such
+// field, so its absence is what keeps IDE sessions on the SQLite path.
+function hasClientRequestId(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const raw = (e as Record<string, unknown>)['agent.client_request_id'];
+    return typeof raw === 'string' && raw !== '';
+  });
 }
 
 // Deduplicate events within a single turn by (step_id, event_name, tool_call_id).

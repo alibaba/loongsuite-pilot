@@ -1,26 +1,36 @@
 #!/bin/sh
 #
-# Launch qodercli with the token intercept scoped to this process only.
+# Launch a Qoder CLI with the token intercept scoped to this process only.
 #
-# npm and bundled SDK qodercli distributions are Node.js entrypoints and require
-# NODE_OPTIONS --import. Native qodercli distributions are Bun executables and
-# require BUN_OPTIONS --preload. Set LOONGSUITE_QODERCLI_RUNTIME=node|bun to
-# override auto-detection, or LOONGSUITE_QODERCLI_BIN to provide the real entry.
+# Serves both product lines: LOONGSUITE_QODERCLI_FLAVOR selects which one, and
+# defaults to qodercli so an rc block written by an older install keeps working.
+# The rc block installed for the CN build sets it to qoderclicn.
+#
+# npm and bundled SDK distributions are Node.js entrypoints and require
+# NODE_OPTIONS --import. Native distributions are Bun executables and require
+# BUN_OPTIONS --preload. Set <FLAVOR>_RUNTIME=node|bun to override
+# auto-detection, or <FLAVOR>_BIN to provide the real entry, where <FLAVOR> is
+# LOONGSUITE_QODERCLI or LOONGSUITE_QODERCLICN. The names are per flavor on
+# purpose: a value exported for one product line must not redirect the other.
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)
 INTERCEPT_SCRIPT="$SCRIPT_DIR/qodercli-token-intercept.mjs"
-QODERCLI_BIN="${LOONGSUITE_QODERCLI_BIN:-}"
+QODERCLI_FLAVOR="${LOONGSUITE_QODERCLI_FLAVOR:-qodercli}"
+FLAVOR_VAR=$(printf '%s' "$QODERCLI_FLAVOR" | tr 'a-z-' 'A-Z_')
+INTERCEPT_FILE_NAME="${LOONGSUITE_INTERCEPT_FILE:-${QODERCLI_FLAVOR}-intercept.jsonl}"
+
+eval "QODERCLI_BIN=\${LOONGSUITE_${FLAVOR_VAR}_BIN:-}"
 
 if [ -z "$QODERCLI_BIN" ]; then
-  QODERCLI_BIN=$(command -v qodercli 2>/dev/null || true)
+  QODERCLI_BIN=$(command -v "$QODERCLI_FLAVOR" 2>/dev/null || true)
 fi
 
 if [ -z "$QODERCLI_BIN" ]; then
-  echo "loongsuite-pilot: qodercli executable not found" >&2
+  echo "loongsuite-pilot: $QODERCLI_FLAVOR executable not found" >&2
   exit 127
 fi
 
-QODERCLI_RUNTIME="${LOONGSUITE_QODERCLI_RUNTIME:-}"
+eval "QODERCLI_RUNTIME=\${LOONGSUITE_${FLAVOR_VAR}_RUNTIME:-}"
 if [ -z "$QODERCLI_RUNTIME" ]; then
   case "$QODERCLI_BIN" in
     *.js|*.cjs|*.mjs) QODERCLI_RUNTIME=node ;;
@@ -36,12 +46,12 @@ fi
 
 launch_qodercli() {
   if [ "$QODERCLI_RUNTIME" = "node" ]; then
-    QODERCLI_NODE_BIN="${LOONGSUITE_QODERCLI_NODE_BIN:-}"
+    eval "QODERCLI_NODE_BIN=\${LOONGSUITE_${FLAVOR_VAR}_NODE_BIN:-}"
     if [ -z "$QODERCLI_NODE_BIN" ]; then
       QODERCLI_NODE_BIN=$(command -v node 2>/dev/null || true)
     fi
     if [ -z "$QODERCLI_NODE_BIN" ]; then
-      echo "loongsuite-pilot: node executable not found for qodercli entry" >&2
+      echo "loongsuite-pilot: node executable not found for $QODERCLI_FLAVOR entry" >&2
       exit 127
     fi
     exec "$QODERCLI_NODE_BIN" "$QODERCLI_BIN" "$@"
@@ -49,10 +59,13 @@ launch_qodercli() {
   exec "$QODERCLI_BIN" "$@"
 }
 
-# Missing hook assets must never prevent qodercli from starting.
+# Missing hook assets must never prevent the CLI from starting.
 if [ ! -f "$INTERCEPT_SCRIPT" ]; then
   launch_qodercli "$@"
 fi
+
+# Read by the preload script to pick its output file.
+export LOONGSUITE_INTERCEPT_FILE="$INTERCEPT_FILE_NAME"
 
 if [ "$QODERCLI_RUNTIME" = "node" ]; then
   PILOT_PRELOAD_OPTION="--import=$INTERCEPT_SCRIPT"

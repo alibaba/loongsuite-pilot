@@ -5,6 +5,7 @@ import {
   HookWatchdog,
   parseWindowsUserEnv,
   stripMarkerBlock,
+  extractMarkerBlock,
   type InterceptCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
@@ -411,6 +412,7 @@ describe('intercept rc target check/repair/cleanup against a temp rc (real closu
   const path = require('node:path') as typeof import('node:path');
 
   const SCRIPT = 'claude-code-fetch-intercept.mjs';
+  const WRAPPER = 'qodercli-runtime-wrapper.sh';
   const SIG = 'if ! alias claude >/dev/null 2>&1';
   const OLD_BARE_BLOCK = [
     '# loongsuite-pilot BEGIN claude-code-intercept',
@@ -433,6 +435,7 @@ describe('intercept rc target check/repair/cleanup against a temp rc (real closu
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-rc-real-'));
     fs.mkdirSync(path.join(tmp, 'hooks'), { recursive: true });
     fs.writeFileSync(path.join(tmp, 'hooks', SCRIPT), '// stub\n');
+    fs.writeFileSync(path.join(tmp, 'hooks', WRAPPER), '# stub\n');
     zshrc = path.join(tmp, '.zshrc');
     bashrc = path.join(tmp, '.bashrc');
   });
@@ -502,6 +505,61 @@ describe('intercept rc target check/repair/cleanup against a temp rc (real closu
     expect(rc).toContain('# keep');
   });
 
+  it('does not let a current qoderclicn block mask a stale qodercli one', async () => {
+    // Both blocks name the same wrapper script, which is qodercli's signature,
+    // so a file-wide signature scan would read the stale qodercli block as
+    // current and never migrate it.
+    const targets = HookWatchdog.defaultInterceptTargets(tmp, () => true, [zshrc]);
+    const cliTarget = targets.find(t => t.id === 'qodercli-rc')!;
+    const cnTarget = targets.find(t => t.id === 'qoderclicn-rc')!;
+
+    fs.writeFileSync(zshrc, '');
+    await cnTarget.repair();                       // current CN block present
+    expect(await cnTarget.check()).toBe(true);
+    fs.appendFileSync(zshrc, [
+      '# loongsuite-pilot BEGIN qodercli-intercept',
+      'qodercli() { BUN_OPTIONS="--preload=/old ${BUN_OPTIONS}" command qodercli "$@"; }',
+      '# loongsuite-pilot END qodercli-intercept',
+      '',
+    ].join('\n'));
+
+    expect(await cliTarget.check()).toBe(false);   // stale, despite the CN block
+    await cliTarget.repair();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc).not.toContain('--preload=/old');    // old bare form migrated
+    expect(rc.match(/BEGIN qodercli-intercept/g)!.length).toBe(1);
+    expect(rc.match(/BEGIN qoderclicn-intercept/g)!.length).toBe(1); // CN untouched
+    expect(await cliTarget.check()).toBe(true);
+    expect(await cnTarget.check()).toBe(true);
+  });
+
+  it('keeps the two wrapper flavors independent in one rc file', async () => {
+    const targets = HookWatchdog.defaultInterceptTargets(tmp, () => true, [zshrc]);
+    const cliTarget = targets.find(t => t.id === 'qodercli-rc')!;
+    const cnTarget = targets.find(t => t.id === 'qoderclicn-rc')!;
+
+    fs.writeFileSync(zshrc, '');
+    await cliTarget.repair();
+    // The CN block is absent even though qodercli's marker prefix is similar.
+    expect(await cnTarget.check()).toBe(false);
+    await cnTarget.repair();
+
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc).toContain("eval 'qodercli() { \"");                       // no flavor var
+    expect(rc).toContain('LOONGSUITE_QODERCLI_FLAVOR=qoderclicn');
+    expect(rc.match(/BEGIN qodercli-intercept/g)!.length).toBe(1);
+    expect(rc.match(/BEGIN qoderclicn-intercept/g)!.length).toBe(1);
+
+    // Disabling one flavor must not strip the other's block.
+    const cnDisabled = HookWatchdog
+      .defaultInterceptTargets(tmp, id => id !== 'qoder-cn', [zshrc])
+      .find(t => t.id === 'qoderclicn-rc')!;
+    await cnDisabled.cleanup!();
+    const after = fs.readFileSync(zshrc, 'utf-8');
+    expect(after).not.toContain('qoderclicn-intercept');
+    expect(after).toContain('BEGIN qodercli-intercept');
+  });
+
   it('disabled target: runCheck() runs cleanup() and does not re-inject', async () => {
     fs.writeFileSync(zshrc, '');
     await claudeTarget(true).repair(); // block present
@@ -554,6 +612,25 @@ describe('stripMarkerBlock', () => {
   });
 });
 
+describe('extractMarkerBlock', () => {
+  const BEGIN = 'loongsuite-pilot BEGIN claude-code-intercept';
+  const END = 'loongsuite-pilot END claude-code-intercept';
+
+  it('returns null when the BEGIN marker is absent', () => {
+    expect(extractMarkerBlock('a\nb\n', BEGIN, END)).toBeNull();
+  });
+
+  it('returns only the block, excluding surrounding content', () => {
+    const content = ['before', BEGIN, 'body', END, 'after'].join('\n');
+    expect(extractMarkerBlock(content, BEGIN, END)).toBe([BEGIN, 'body', END].join('\n'));
+  });
+
+  it('returns the tail when the END marker is missing', () => {
+    const content = ['before', BEGIN, 'body'].join('\n');
+    expect(extractMarkerBlock(content, BEGIN, END)).toBe([BEGIN, 'body'].join('\n'));
+  });
+});
+
 describe('interceptRcBlockDefs migration metadata', () => {
   it('exposes signature + endMarker matching the block body', () => {
     for (const def of HookWatchdog.interceptRcBlockDefs()) {
@@ -561,14 +638,32 @@ describe('interceptRcBlockDefs migration metadata', () => {
       expect(block).toContain(def.marker);       // BEGIN marker present
       expect(block).toContain(def.endMarker);    // END marker present
       expect(block).toContain(def.signature);    // current-shape signature present
-      // qodercli uses the runtime wrapper name so the previous Bun-only guarded
-      // block is migrated; other intercepts still key on their guard line.
-      if (def.id === 'qodercli-rc') {
-        expect(def.signature).toBe('qodercli-runtime-wrapper.sh');
-      } else {
-        expect(def.signature).toMatch(/^if ! alias \S+ >\/dev\/null 2>&1$/);
+    }
+  });
+
+  it('keeps markers mutually non-overlapping so per-block scoping is unambiguous', () => {
+    const defs = HookWatchdog.interceptRcBlockDefs();
+    for (const a of defs) {
+      for (const b of defs) {
+        if (a.id === b.id) continue;
+        // extractMarkerBlock matches a marker as a substring of a line, so one
+        // marker containing another would make the two blocks indistinguishable.
+        expect(a.marker.includes(b.marker)).toBe(false);
+        expect(a.endMarker.includes(b.endMarker)).toBe(false);
       }
     }
+  });
+
+  it('tells the two wrapper flavors apart by signature, not by script name', () => {
+    const defs = HookWatchdog.interceptRcBlockDefs();
+    const cli = defs.find(d => d.id === 'qodercli-rc')!;
+    const cn = defs.find(d => d.id === 'qoderclicn-rc')!;
+    expect(cn.scriptName).toBe(cli.scriptName); // one wrapper serves both
+    // qodercli's signature is that shared script name, so it also occurs inside
+    // the CN block. Only per-block scoping keeps a stale qodercli block
+    // detectable next to a current CN one; the reverse never collides.
+    expect(cn.blockFn(`/tmp/hooks/${cn.scriptName}`)).toContain(cli.signature);
+    expect(cli.blockFn(`/tmp/hooks/${cli.scriptName}`)).not.toContain(cn.signature);
   });
 
   it('exposes cleanup() on every default intercept target', () => {
