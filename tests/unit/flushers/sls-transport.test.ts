@@ -80,6 +80,18 @@ describe('isRetryable', () => {
       category: 'connection_reset',
     });
   });
+
+  it('does not traverse cause while making the legacy retry decision', () => {
+    let causeReads = 0;
+    const outer = Object.defineProperty(new Error('network failure'), 'cause', {
+      get: () => {
+        causeReads += 1;
+        return Object.assign(new Error('private detail'), { code: 'ECONNRESET' });
+      },
+    });
+    expect(isRetryable(outer)).toBe(true);
+    expect(causeReads).toBe(0);
+  });
 });
 
 describe('classifySlsSendError', () => {

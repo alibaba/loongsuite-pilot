@@ -61,6 +61,11 @@ export class HttpError extends Error {
   }
 }
 
+/** Preserve the pre-existing non-HTTP retry decision without inspecting nested diagnostics. */
+export function isLegacyRetryableError(error: unknown): boolean {
+  return isPreviouslyRetryableMessage(safeErrorString(error));
+}
+
 interface ExtractedEvidence {
   code: string;
   httpStatus: number;
@@ -87,7 +92,7 @@ export function classifySlsSendError(error: unknown): SlsSendErrorClassification
   const category = categoryForCode(code, evidence.httpStatus, evidence.name);
   const retryable = evidence.httpStatus > 0
     ? RETRYABLE_STATUS_CODES.has(evidence.httpStatus)
-    : isPreviouslyRetryableMessage(safeErrorString(error));
+    : isLegacyRetryableError(error);
 
   return {
     retryable,
