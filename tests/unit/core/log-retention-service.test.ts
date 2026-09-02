@@ -6,6 +6,8 @@ import {
   LogRetentionService,
   OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
   OUTPUT_RETENTION_MAX_TOTAL_BYTES,
+  METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES,
+  OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES,
   SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
   extractDate,
 } from '../../../src/core/log-retention-service.js';
@@ -26,6 +28,8 @@ function makeConfig(overrides: Partial<LogRetentionConfig> = {}): LogRetentionCo
     hookDebugDays: 7,
     outputDays: 7,
     slsFailedDays: 7,
+    otlpFailedDays: 7,
+    metricAlarmDays: 7,
     ...overrides,
   };
 }
@@ -33,11 +37,19 @@ function makeConfig(overrides: Partial<LogRetentionConfig> = {}): LogRetentionCo
 function daysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  return localDate(d);
 }
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return localDate(new Date());
+}
+
+function localDate(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
 }
 
 async function writeSizedFile(filePath: string, size: number): Promise<void> {
@@ -220,6 +232,140 @@ describe('LogRetentionService', () => {
       expect(await fs.access(sealed0).then(() => true, () => false)).toBe(false);
       expect(await fs.access(sealed1).then(() => true, () => false)).toBe(true);
       expect(await fs.access(active).then(() => true, () => false)).toBe(true);
+    });
+
+    it('cleans expired OTLP daily files and leaves recent legacy files protected', async () => {
+      const otlpDir = path.join(tmpDir, 'logs', 'otlp-failed');
+      await fs.mkdir(otlpDir, { recursive: true });
+      const expired = path.join(otlpDir, `service-primary-${daysAgo(10)}.jsonl`);
+      const recent = path.join(otlpDir, `service-primary-${today()}.jsonl`);
+      const legacy = path.join(otlpDir, 'service.jsonl');
+      await fs.writeFile(expired, 'old\n');
+      await fs.writeFile(recent, 'recent\n');
+      await fs.writeFile(legacy, 'legacy\n');
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ otlpFailedDays: 7 }));
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 1, errors: 0 });
+      await expect(fs.access(expired)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.readFile(recent, 'utf8')).resolves.toBe('recent\n');
+      await expect(fs.readFile(legacy, 'utf8')).resolves.toBe('legacy\n');
+    });
+
+    it('cleans expired metric daily and legacy files without touching unknown or state files', async () => {
+      const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+      await fs.mkdir(metricDir, { recursive: true });
+      const expired = path.join(metricDir, `pilot-metrics-${daysAgo(10)}.jsonl`);
+      const legacy = path.join(metricDir, 'pilot-input-metrics.jsonl');
+      const tokenState = path.join(metricDir, 'token-usage-state.json');
+      const unknown = path.join(metricDir, 'user-data.jsonl');
+      const unknownDated = path.join(metricDir, `user-data-${daysAgo(10)}.jsonl`);
+      await fs.writeFile(expired, 'old\n');
+      await fs.writeFile(legacy, 'legacy\n');
+      await fs.writeFile(tokenState, '{"state":true}');
+      await fs.writeFile(unknown, 'unknown\n');
+      await fs.writeFile(unknownDated, 'unknown dated\n');
+      const old = new Date();
+      old.setDate(old.getDate() - 10);
+      await fs.utimes(legacy, old, old);
+      await fs.utimes(tokenState, old, old);
+      await fs.utimes(unknown, old, old);
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ metricAlarmDays: 7 }));
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 2, errors: 0 });
+      await expect(fs.access(expired)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.access(legacy)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.readFile(tokenState, 'utf8')).resolves.toContain('state');
+      await expect(fs.readFile(unknown, 'utf8')).resolves.toBe('unknown\n');
+      await expect(fs.readFile(unknownDated, 'utf8')).resolves.toBe('unknown dated\n');
+    });
+
+    it('reduces metric_alarm pressure while preserving both today and yesterday', async () => {
+      const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+      await fs.mkdir(metricDir, { recursive: true });
+      const fileSize = Math.floor(METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES / 3) + 1;
+      const old = path.join(metricDir, `pilot-metrics-${daysAgo(2)}.jsonl`);
+      const yesterday = path.join(metricDir, `pilot-metrics-${daysAgo(1)}.jsonl`);
+      const current = path.join(metricDir, `pilot-metrics-${today()}.jsonl`);
+      await writeSizedFile(old, fileSize);
+      await writeSizedFile(yesterday, fileSize);
+      await writeSizedFile(current, fileSize);
+
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 1, errors: 0 });
+      await expect(fs.access(old)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.access(yesterday)).resolves.toBeUndefined();
+      await expect(fs.access(current)).resolves.toBeUndefined();
+    });
+
+    it('keeps OTLP today and yesterday even when they alone exceed the soft limit', async () => {
+      const otlpDir = path.join(tmpDir, 'logs', 'otlp-failed');
+      await fs.mkdir(otlpDir, { recursive: true });
+      const fileSize = Math.floor(OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES / 2) + 1;
+      const yesterday = path.join(otlpDir, `service-${daysAgo(1)}.jsonl`);
+      const current = path.join(otlpDir, `service-${today()}.jsonl`);
+      await writeSizedFile(yesterday, fileSize);
+      await writeSizedFile(current, fileSize);
+
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 0, errors: 0 });
+      await expect(fs.access(yesterday)).resolves.toBeUndefined();
+      await expect(fs.access(current)).resolves.toBeUndefined();
+    });
+
+    it('protects today and yesterday from age cleanup even with a shorter retention value', async () => {
+      const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+      await fs.mkdir(metricDir, { recursive: true });
+      const old = path.join(metricDir, `pilot-alarms-${daysAgo(2)}.jsonl`);
+      const yesterday = path.join(metricDir, `pilot-alarms-${daysAgo(1)}.jsonl`);
+      const current = path.join(metricDir, `pilot-alarms-${today()}.jsonl`);
+      await fs.writeFile(old, 'old\n');
+      await fs.writeFile(yesterday, 'yesterday\n');
+      await fs.writeFile(current, 'today\n');
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ metricAlarmDays: 0 }));
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 1, errors: 0 });
+      await expect(fs.access(old)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.access(yesterday)).resolves.toBeUndefined();
+      await expect(fs.access(current)).resolves.toBeUndefined();
+    });
+
+    it('skips metric state, unknown, hidden, symlink, and directory entries', async () => {
+      const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+      await fs.mkdir(metricDir, { recursive: true });
+      const oldDate = daysAgo(10);
+      const state = path.join(metricDir, 'token-usage-state.json');
+      const unknown = path.join(metricDir, `user-data-${oldDate}.jsonl`);
+      const hidden = path.join(metricDir, `.pilot-metrics-${oldDate}.jsonl`);
+      const external = path.join(tmpDir, 'external.jsonl');
+      const symlink = path.join(metricDir, `pilot-metrics-${oldDate}.jsonl`);
+      const directory = path.join(metricDir, `pilot-alarms-${oldDate}.jsonl`);
+      await fs.writeFile(state, '{}');
+      await fs.writeFile(unknown, 'unknown\n');
+      await fs.writeFile(hidden, 'hidden\n');
+      await fs.writeFile(external, 'external\n');
+      await fs.symlink(external, symlink);
+      await fs.mkdir(directory);
+
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 0, errors: 0 });
+      await expect(fs.access(state)).resolves.toBeUndefined();
+      await expect(fs.access(unknown)).resolves.toBeUndefined();
+      await expect(fs.access(hidden)).resolves.toBeUndefined();
+      await expect(fs.lstat(symlink)).resolves.toMatchObject({});
+      await expect(fs.stat(directory)).resolves.toMatchObject({});
+      await expect(fs.readFile(external, 'utf8')).resolves.toBe('external\n');
     });
 
     it('skips unrecognized subdirectories', async () => {

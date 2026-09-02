@@ -210,7 +210,9 @@ Pilot can clean up local runtime logs on a schedule.
     "hookErrorDays": 7,
     "hookDebugDays": 7,
     "outputDays": 7,
-    "slsFailedDays": 7
+    "slsFailedDays": 7,
+    "otlpFailedDays": 7,
+    "metricAlarmDays": 7
   }
 }
 ```
@@ -220,6 +222,17 @@ Pilot can clean up local runtime logs on a schedule.
 | `LOONGSUITE_PILOT_LOG_RETENTION_ENABLED` | Enables or disables retention cleanup. |
 | `LOONGSUITE_PILOT_LOG_RETENTION_DAYS` | Applies one retention period to all log categories. |
 | `LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS` | Cleanup interval. |
+
+`otlpFailedDays` controls managed files under `logs/otlp-failed`; `metricAlarmDays`
+controls managed metrics, alarms, and updater-event files under `logs/metric_alarm`.
+Both default to 7 days. These streams write one file per local calendar day; there
+is no per-file size rotation. During scheduled cleanup, Pilot also tries to reduce
+managed OTLP failure logs to 512 MiB and managed metric/alarm logs to 256 MiB by
+deleting the oldest files while always retaining today and yesterday. These are
+soft cleanup targets: current files can grow beyond them between cleanup runs.
+Legacy undated files use their modification date for cleanup. When scheduled
+retention is disabled, neither age nor size cleanup runs. `token-usage-state.json`
+remains an overwrite state file and is excluded from this policy.
 
 ## Verify Changes
 

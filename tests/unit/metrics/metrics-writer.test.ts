@@ -82,6 +82,20 @@ function cpuAboveProcessThreshold(): string {
   return '81';
 }
 
+function managedLogFile(metricDir: string, prefix: string): string {
+  const file = fs.readdirSync(metricDir).find(name => (
+    name.startsWith(`${prefix}-`) && /-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)
+  ));
+  if (!file) throw new Error(`managed log file not found for ${prefix}`);
+  return path.join(metricDir, file);
+}
+
+function hasManagedLogFile(metricDir: string, prefix: string): boolean {
+  return fs.existsSync(metricDir) && fs.readdirSync(metricDir).some(name => (
+    name.startsWith(`${prefix}-`) && name.endsWith('.jsonl')
+  ));
+}
+
 describe('MetricsWriter', () => {
   let tmpDir: string;
   let writer: MetricsWriter;
@@ -112,7 +126,7 @@ describe('MetricsWriter', () => {
     vi.useRealTimers();
     await writer.start();
 
-    const filePath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl');
+    const filePath = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
     expect(fs.existsSync(filePath)).toBe(true);
 
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
@@ -235,22 +249,22 @@ describe('MetricsWriter', () => {
     await writer.stop();
 
     const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
-    const firstLine = (name: string): any => JSON.parse(
-      fs.readFileSync(path.join(metricDir, name), 'utf-8').trim().split('\n')[0],
+    const firstLine = (prefix: string): any => JSON.parse(
+      fs.readFileSync(managedLogFile(metricDir, prefix), 'utf-8').trim().split('\n')[0],
     );
 
-    const agent = firstLine('pilot-agent-metrics.jsonl');
+    const agent = firstLine('pilot-agent-metrics');
     expect(agent.type).toBe('agent');
     expect(agent.user_id).toBe('u1');
     expect(agent.agent).toBe('test-agent');
     expect(agent.in_events).toBe('5');
 
-    const input = firstLine('pilot-input-metrics.jsonl');
+    const input = firstLine('pilot-input-metrics');
     expect(input.type).toBe('input');
     expect(input.input_name).toBe('test-input');
     expect(input.raw_read_calls).toBe('2');
 
-    const flusher = firstLine('pilot-flusher-metrics.jsonl');
+    const flusher = firstLine('pilot-flusher-metrics');
     expect(flusher.type).toBe('flusher');
     expect(flusher.flusher).toBe('sls');
     expect(flusher.logstore).toBe('store-a');
@@ -331,9 +345,9 @@ describe('MetricsWriter', () => {
     await writer.stop();
 
     const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
-    expect(fs.existsSync(path.join(metricDir, 'pilot-agent-metrics.jsonl'))).toBe(false);
-    expect(fs.existsSync(path.join(metricDir, 'pilot-input-metrics.jsonl'))).toBe(false);
-    expect(fs.existsSync(path.join(metricDir, 'pilot-flusher-metrics.jsonl'))).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-agent-metrics')).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-input-metrics')).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-flusher-metrics')).toBe(false);
   });
 
   it('includes capture_message_disabled_agents in L1 metrics', async () => {
@@ -351,7 +365,7 @@ describe('MetricsWriter', () => {
     vi.useRealTimers();
     await writer.start();
 
-    const filePath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl');
+    const filePath = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 

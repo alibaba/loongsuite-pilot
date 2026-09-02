@@ -259,6 +259,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       hookDebugDays: 7,
       outputDays: 7,
       slsFailedDays: 7,
+      otlpFailedDays: 7,
+      metricAlarmDays: 7,
     },
     hookWatchdog: {
       enabled: false, // disabled by default in tests to avoid spawning child processes

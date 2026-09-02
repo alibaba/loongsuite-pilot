@@ -117,6 +117,8 @@ export interface ConfigFile {
     hookDebugDays?: number;
     outputDays?: number;
     slsFailedDays?: number;
+    otlpFailedDays?: number;
+    metricAlarmDays?: number;
   };
 
   hookWatchdog?: {
@@ -651,6 +653,8 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
     hookDebugDays: resolve(file?.retention?.hookDebugDays, 7),
     outputDays: resolve(file?.retention?.outputDays, 7),
     slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
+    otlpFailedDays: resolve(file?.retention?.otlpFailedDays, 7),
+    metricAlarmDays: resolve(file?.retention?.metricAlarmDays, 7),
   };
 }
 

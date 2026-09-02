@@ -338,6 +338,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(7);
       expect(config.retention.outputDays).toBe(7);
       expect(config.retention.slsFailedDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(7);
+      expect(config.retention.metricAlarmDays).toBe(7);
     });
 
     it('uses config file values over defaults', async () => {
@@ -345,6 +347,8 @@ describe('ConfigLoader', () => {
         retention: {
           hookHistoryDays: 60,
           hookDebugDays: 14,
+          otlpFailedDays: 3,
+          metricAlarmDays: 14,
         },
       });
 
@@ -352,6 +356,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookHistoryDays).toBe(60);
       expect(config.retention.hookDebugDays).toBe(14);
       expect(config.retention.hookErrorDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(3);
+      expect(config.retention.metricAlarmDays).toBe(14);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_DAYS overrides all defaults', async () => {
@@ -364,6 +370,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(10);
       expect(config.retention.outputDays).toBe(10);
       expect(config.retention.slsFailedDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('config file values take precedence over unified env var', async () => {
@@ -375,6 +383,8 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.retention.hookHistoryDays).toBe(90);
       expect(config.retention.hookErrorDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED disables retention', async () => {
