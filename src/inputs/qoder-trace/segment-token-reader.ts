@@ -7,9 +7,16 @@ function getSessionsDir(): string {
   return resolveHome('~/.qoder/logs/sessions');
 }
 
-const sessionCache = new Map<string, { data: SegmentTokenData[]; ts: number }>();
-const CACHE_TTL_MS = 60_000;
+const sessionCache = new Map<string, { data: SegmentTokenData[]; fingerprint: string; ts: number }>();
+// `ts` only drives eviction of sessions nobody touches any more - it never
+// decides whether the cached data is still valid.
+const CACHE_IDLE_MS = 60_000;
 const CACHE_MAX_SIZE = 50;
+
+interface SegmentFileScan {
+  files: string[];
+  fingerprint: string;
+}
 
 export interface SegmentTokenData {
   requestId: string;
@@ -25,11 +32,23 @@ export interface SegmentTokenData {
 }
 
 export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
-  const cached = sessionCache.get(sessionId);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.data;
+  const scan = await findSegmentFilesForSession(sessionId);
+  if (scan.files.length === 0) return [];
 
-  const files = await findSegmentFilesForSession(sessionId);
-  if (files.length === 0) return [];
+  // Freshness is decided by what is on disk, never by elapsed time. The CLI
+  // keeps appending to these files while pilot is already processing earlier
+  // turns of the same session, so an age-based cache would serve a snapshot
+  // taken before the current turn's own segments were written. The exact-id
+  // join would then find nothing for that turn and its llm.request /
+  // llm.response would keep the hook's identical timestamps - a zero-width
+  // LLM span. Re-scanning is cheap next to re-parsing every file.
+  const cached = sessionCache.get(sessionId);
+  if (cached && cached.fingerprint === scan.fingerprint) {
+    cached.ts = Date.now();
+    return cached.data;
+  }
+
+  const files = scan.files;
 
   const requestStarts = new Map<string, number>();
   const results: SegmentTokenData[] = [];
@@ -108,27 +127,27 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     results[i].toolFinishedTs = lastToolFinish;
   }
 
-  // Evict expired entries and enforce max size
+  // Evict idle entries and enforce max size
   const now = Date.now();
   for (const [key, entry] of sessionCache) {
-    if (now - entry.ts > CACHE_TTL_MS) sessionCache.delete(key);
+    if (key !== sessionId && now - entry.ts > CACHE_IDLE_MS) sessionCache.delete(key);
   }
-  if (sessionCache.size >= CACHE_MAX_SIZE) {
+  if (sessionCache.size >= CACHE_MAX_SIZE && !sessionCache.has(sessionId)) {
     const oldest = [...sessionCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
     if (oldest) sessionCache.delete(oldest[0]);
   }
 
-  sessionCache.set(sessionId, { data: results, ts: now });
+  sessionCache.set(sessionId, { data: results, fingerprint: scan.fingerprint, ts: now });
   return results;
 }
 
-async function findSegmentFilesForSession(sessionId: string): Promise<string[]> {
+async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {
   const files: string[] = [];
   let cwdDirs: Dirent[];
   try {
     cwdDirs = await fs.readdir(getSessionsDir(), { withFileTypes: true });
   } catch {
-    return [];
+    return { files: [], fingerprint: '' };
   }
 
   for (const cwdDir of cwdDirs) {
@@ -147,7 +166,30 @@ async function findSegmentFilesForSession(sessionId: string): Promise<string[]> 
     }
   }
 
-  return files.sort();
+  files.sort();
+
+  // size + mtime per file: an append always grows the file, and a rewrite that
+  // happens to land on the same size still moves mtime. A file that disappeared
+  // between readdir and stat is dropped from both lists so they stay in step.
+  const stamps = await Promise.all(files.map(async filePath => {
+    try {
+      const stat = await fs.stat(filePath);
+      return `${filePath}:${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return undefined;
+    }
+  }));
+
+  const readable: string[] = [];
+  const parts: string[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const stamp = stamps[i];
+    if (stamp === undefined) continue;
+    readable.push(files[i]);
+    parts.push(stamp);
+  }
+
+  return { files: readable, fingerprint: parts.join('|') };
 }
 
 function parseTs(value: unknown): number {

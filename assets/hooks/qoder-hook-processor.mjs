@@ -1146,6 +1146,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     const outputParts = [];
     const toolCalls = [];
     let responseId = undefined;
+    let clientRequestId = undefined;
     let lastAssistantTs = null;
     let firstAssistantTs = null;
 
@@ -1154,6 +1155,13 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         const msg = row.message || {};
         const blocks = Array.isArray(msg.content) ? msg.content : [];
         if (msg.id && !responseId) responseId = msg.id;
+        // The CLI's own request id, carried on the usage object of the row that
+        // closes a streamed response (msg.id lands on the first row instead, so
+        // the two cannot be read from the same row).
+        if (!clientRequestId && msg.usage && typeof msg.usage === 'object' &&
+            typeof msg.usage.request_id === 'string' && msg.usage.request_id) {
+          clientRequestId = msg.usage.request_id;
+        }
         if (row.timestamp) lastAssistantTs = row.timestamp;
         if (row.timestamp && !firstAssistantTs) firstAssistantTs = row.timestamp;
         for (const block of blocks) {
@@ -1234,6 +1242,13 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         // with dropAgentScopedFields: true, so an `agent.qoder.stop_reason`
         // spelling would reach neither sink.
         'agent.stop_reason': lastStopReason,
+        // The CLI's own request id for this response, taken from the transcript's
+        // usage object. It shares a namespace with a segment record's request_id
+        // (gen_ai.response.id does not: that one is the provider's id), so the
+        // token-enricher joins segments on this field and only falls back to
+        // timestamp proximity when it is absent. Single segment after `agent.`
+        // on purpose, same reason as agent.stop_reason above.
+        'agent.client_request_id': clientRequestId,
         // Accurate per-response timestamp from the transcript's first assistant record
         // (≈ SQLite gmt_create). Used only for token-enricher matching; dropped from
         // SLS/JSONL output as an agent-scoped field. Absent for CLI (no firstAssistantTs).

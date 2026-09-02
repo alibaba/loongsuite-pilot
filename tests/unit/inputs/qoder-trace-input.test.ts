@@ -27,6 +27,9 @@ import {
   type SqliteTokenData,
 } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
+// The dev validator's enum, imported so a drift in the runtime copy fails here
+// rather than at collection time.
+import { VALID_FINISH_REASONS as VALIDATOR_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 vi.mock('../../../src/inputs/qoder-trace/sqlite-token-reader.js', async (importOriginal) => {
@@ -65,15 +68,34 @@ function makeIntercept(overrides: Partial<InterceptTokenData> = {}): InterceptTo
   };
 }
 
+function makeSegment(overrides: Partial<SegmentTokenData> = {}): SegmentTokenData {
+  return {
+    requestId: 'req-A',
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    requestStartTs: 1780000000000,
+    responseEndTs: 1780000001000,
+    toolFinishedTs: 0,
+    stopReason: '',
+    model: '',
+    ...overrides,
+  };
+}
+
 describe('QoderTraceInput token-enricher', () => {
-  describe('enrichCliTurn (precise response_id match)', () => {
+  // Segments are paired with llm.response by completion instant, so a fixture's
+  // response time must sit within the join tolerance of its responseEndTs - the
+  // hook fires just after the response lands, 0-32ms later on real data.
+  describe('enrichCliTurn (segment paired by response completion time)', () => {
     it('injects tokens from segment into matching hook events', () => {
       // Simulate old processor output (time == observed → enricher overwrites timestamp)
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'gen_ai.response.id': 'req-A',
           'event.name': 'llm.response',
-          time_unix_nano: '1780000001000000000',
+          time_unix_nano: '1780000002030000000',
           observed_time_unix_nano: '1780000001000000000',
         } as any),
       ];
@@ -103,7 +125,7 @@ describe('QoderTraceInput token-enricher', () => {
         makeEntry({
           'gen_ai.response.id': 'req-A',
           'event.name': 'llm.response',
-          time_unix_nano: '1780000005000000000',
+          time_unix_nano: '1780000002030000000',
           observed_time_unix_nano: '1780000009000000000',
         } as any),
       ];
@@ -129,8 +151,8 @@ describe('QoderTraceInput token-enricher', () => {
 
     it('only writes tokens to first response of same response.id (thinking+text)', () => {
       const entries: AgentActivityEntry[] = [
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000001000000000' }),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000001500000000' }),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000002000000000' }),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000002010000000' }),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -156,7 +178,7 @@ describe('QoderTraceInput token-enricher', () => {
     it('injects real model name from segment into llm.request and llm.response', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.request', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto' } as any),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto', 'gen_ai.response.model': 'auto' } as any),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto', 'gen_ai.response.model': 'auto', time_unix_nano: '1780000002000000000' } as any),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -164,8 +186,9 @@ describe('QoderTraceInput token-enricher', () => {
         outputTokens: 200,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        // Left at 0 so no request timestamp is backfilled, isolating the model assertion.
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: 'ultimate',
@@ -180,7 +203,7 @@ describe('QoderTraceInput token-enricher', () => {
 
     it('does not override model when segment model is empty or unknown', () => {
       const entries: AgentActivityEntry[] = [
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.request.model': 'auto' } as any),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.request.model': 'auto', time_unix_nano: '1780000002000000000' } as any),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -189,7 +212,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -242,6 +265,7 @@ describe('QoderTraceInput token-enricher', () => {
           'gen_ai.usage.input_tokens': 10,
           'gen_ai.usage.output_tokens': 1,
           'gen_ai.usage.total_tokens': 11,
+          time_unix_nano: '1780000002000000000',
         }),
       ];
       const segments: SegmentTokenData[] = [{
@@ -251,7 +275,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 3000,
         cacheCreationTokens: 100,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -272,6 +296,7 @@ describe('QoderTraceInput token-enricher', () => {
           'gen_ai.usage.input_tokens': 700,
           'gen_ai.usage.output_tokens': 30,
           'gen_ai.usage.total_tokens': 730,
+          time_unix_nano: '1780000002000000000',
         }),
       ];
       const segments: SegmentTokenData[] = [{
@@ -281,7 +306,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 3000,
         cacheCreationTokens: 0,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -352,6 +377,272 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[1].time_unix_nano).toBe(ms(base + 201));
       expect(entries[2].time_unix_nano).toBe(ms(base + 4201));
       expect(entries[2]['gen_ai.tool.call.duration']).toBe(4000);
+    });
+
+    // Segments carry Anthropic's native stop_reason, but finish_reasons is the
+    // OTel GenAI enum. This path used to write the raw value through, so a
+    // segment could put tool_use / stop_sequence on a span while the transcript
+    // hook normalized the very same reason.
+    it('maps vendor stop_reason spellings onto the OTel finish_reason enum', () => {
+      const cases: Array<[string, string]> = [
+        ['tool_use', 'tool_call'],
+        ['stop_sequence', 'stop'],
+        ['refusal', 'stop'],
+        ['model_context_window_exceeded', 'length'],
+      ];
+
+      for (const [raw, expected] of cases) {
+        const entries: AgentActivityEntry[] = [
+          makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+        ];
+        enrichCliTurn(entries, [makeSegment({ stopReason: raw })]);
+        expect(entries[0]['gen_ai.response.finish_reasons']).toEqual([expected]);
+      }
+    });
+
+    // Dropped rather than coerced to `stop`: pause_turn is mid-turn, and reading
+    // it as terminal would make Signal A flush the turn buffer early, trading a
+    // validator error for a fragmented trace.
+    it('leaves finish_reasons absent for stop_reasons outside the enum', () => {
+      for (const raw of ['pause_turn', 'some_future_reason']) {
+        const entries: AgentActivityEntry[] = [
+          makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+        ];
+        enrichCliTurn(entries, [makeSegment({ stopReason: raw })]);
+        expect(entries[0]['gen_ai.response.finish_reasons']).toBeUndefined();
+      }
+    });
+
+    it('never emits a finish_reason the trace validator rejects', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+      ];
+      enrichCliTurn(entries, [makeSegment({ stopReason: 'tool_use' })]);
+      const reasons = entries[0]['gen_ai.response.finish_reasons'] as string[];
+      for (const reason of reasons) {
+        expect(VALIDATOR_FINISH_REASONS).toContain(reason);
+      }
+    });
+  });
+
+  // agent.client_request_id carries the CLI's own request id, the same id a
+  // segment records, so pairing no longer depends on the two clocks agreeing.
+  // The timestamp pass above stays for JSONL written before the hook had it.
+  describe('enrichCliTurn (segment paired by agent.client_request_id)', () => {
+    it('pairs on the client request id even when the clocks are far apart', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_provider_A',
+          'event.name': 'llm.response',
+          'agent.client_request_id': 'cli-req-A',
+          // 30s away: the timestamp pass would reject this outright.
+          time_unix_nano: '1780000032000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+    });
+
+    // The whole point of the exact key: a burst of calls closer together than
+    // the tolerance can no longer be attributed to the wrong segment.
+    it('keeps near-simultaneous responses on their own segments', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 10),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_B',
+          'gen_ai.step.id': 'turn-1:s2',
+          'agent.client_request_id': 'cli-req-B',
+          time_unix_nano: ms(base + 12),
+        } as any),
+      ];
+      // Deliberately inverted: B's segment is nearer to A's response time, so a
+      // purely temporal match would swap the two.
+      const segments = [
+        makeSegment({ requestId: 'cli-req-A', inputTokens: 100, outputTokens: 1, responseEndTs: base + 40 }),
+        makeSegment({ requestId: 'cli-req-B', inputTokens: 200, outputTokens: 2, responseEndTs: base + 11 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+      expect(entries[0].time_unix_nano).toBe(ms(base + 40));
+      expect(entries[1].time_unix_nano).toBe(ms(base + 11));
+    });
+
+    it('falls back to the timestamp pass for entries without the id', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_legacy',
+          'gen_ai.step.id': 'turn-1:s2',
+          time_unix_nano: ms(base + 20),
+        } as any),
+      ];
+      const segments = [
+        makeSegment({ requestId: 'cli-req-A', inputTokens: 100, outputTokens: 1, responseEndTs: base + 9000 }),
+        makeSegment({ requestId: 'cli-req-legacy', inputTokens: 200, outputTokens: 2, responseEndTs: base + 30 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+    });
+
+    // A segment already claimed by an exact match must not be reused by the
+    // fallback, otherwise one provider call's usage lands on two spans.
+    it('does not let the timestamp pass re-consume an exactly matched segment', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_legacy',
+          'gen_ai.step.id': 'turn-1:s2',
+          time_unix_nano: ms(base + 20),
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 100,
+        outputTokens: 1,
+        responseEndTs: base + 20,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(entries[1].time_unix_nano).toBe(ms(base + 20));
+    });
+
+    // Both ids come from the CLI's own namespace, so a segment carrying a
+    // different one provably belongs to another request. The CLI makes internal
+    // calls (title generation) whose segments have no response in the batch, and
+    // proximity alone would happily attribute one of those to this response.
+    it('does not fall back to proximity when the exact key found no segment', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'agent.client_request_id': 'cli-req-missing',
+          time_unix_nano: '1780000002000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-other',
+        inputTokens: 100,
+        outputTokens: 1,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(entries[0].time_unix_nano).toBe('1780000002000000000');
+    });
+
+    // Exact pairing accepts a segment whose timestamps failed to parse, so the
+    // timestamp injection has to stand on its own guard: moving llm.response onto
+    // a zero clock would put it before its llm.request (negative-duration span)
+    // and stamp tool.call at 1970.
+    it('takes usage from a segment with unparseable timestamps without moving any clock', () => {
+      const hookTs = '1780000099000000000';
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: hookTs,
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(5000);
+      for (const entry of entries) {
+        expect(entry.time_unix_nano).toBe(hookTs);
+      }
+    });
+
+    // Segment usage is zero on current qodercli releases; timestamps are the
+    // reason to pair at all, so an all-zero segment must still be joined.
+    it('joins a zero-usage segment for its timestamps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          'gen_ai.usage.input_tokens': 700,
+          'gen_ai.usage.output_tokens': 30,
+          time_unix_nano: '1780000099000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000099000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      // Native usage is preserved, timing comes from the segment.
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(700);
+      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[1].time_unix_nano).toBe(String(BigInt(1780000000000) * 1_000_000n));
     });
   });
 
