@@ -1880,15 +1880,19 @@ function Disable-PilotScheduledTasksDuringDeploy {
 
 function Enable-PilotScheduledTasksAfterDeploy {
     $taskFolder = "\LoongsuitePilot\"
+    $stillHeld = @()
     foreach ($taskName in @($script:PILOT_HELD_TASK_NAMES)) {
         try {
             Enable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
         } catch {
             Msg "    ⚠️  无法重新启用计划任务 ${taskName}: $($_.Exception.Message)" `
                 "    ⚠️  Could not re-enable scheduled task ${taskName}: $($_.Exception.Message)"
+            # Keep the name so finally can retry. Wiping the list here would
+            # make a failed success-path Enable a no-op on the way out.
+            $stillHeld += $taskName
         }
     }
-    $script:PILOT_HELD_TASK_NAMES = @()
+    $script:PILOT_HELD_TASK_NAMES = @($stillHeld)
 }
 # <<< pilot-hold-tasks-during-deploy <<<
 
@@ -2537,10 +2541,10 @@ function Cmd-Install {
         Write-Host ""
     }
 
-    Stop-PilotService
-    Disable-PilotScheduledTasksDuringDeploy
-
     try {
+        Stop-PilotService
+        Disable-PilotScheduledTasksDuringDeploy
+
         Download-AndExtract
         Probe-Agents
         Select-Agents

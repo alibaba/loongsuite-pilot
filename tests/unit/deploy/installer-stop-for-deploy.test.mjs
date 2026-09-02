@@ -73,6 +73,22 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
     const code = codeOf(blockOf(read(patched[0]), 'pilot-stop-for-deploy'));
     expect(code).toMatch(/run_pilot_cli\(\)/);
     expect(code).toMatch(/LOONGSUITE_PILOT_DATA_DIR="\$DATA_DIR"/);
+    // deploy_package writes versions/current under $HOME/.loongsuite-pilot.
+    // Pointing the CLI cache at DATA_DIR would start/rollback a different tree.
+    expect(code).not.toMatch(/LOONGSUITE_PILOT_CACHE_DIR=/);
+  });
+
+  it('sets PILOT_HELD_FOR_DEPLOY before stop, so a killed stop still restores', () => {
+    const code = codeOf(blockOf(read(patched[0]), 'pilot-stop-for-deploy'));
+    const stopFn = code.slice(
+      code.indexOf('stop_pilot_for_deploy() {'),
+      code.indexOf('restore_pilot_after_deploy() {'),
+    );
+    const heldAt = stopFn.lastIndexOf('PILOT_HELD_FOR_DEPLOY=1');
+    const cliStopAt = stopFn.indexOf('run_pilot_cli stop');
+    expect(heldAt).toBeGreaterThan(-1);
+    expect(cliStopAt).toBeGreaterThan(-1);
+    expect(heldAt).toBeLessThan(cliStopAt);
   });
 
   it('restores autostart after a failed overlay, except in container mode', () => {
@@ -83,6 +99,9 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
     expect(code).toMatch(/restore_pilot_after_deploy\(\)/);
     expect(code).toMatch(/INSTALL_MODE:-host/);
     expect(code).toMatch(/run_pilot_cli start/);
+    // Swallowing start hides the only signal that autostart did not come back.
+    expect(code).not.toMatch(/run_pilot_cli start\s+>\/dev\/null/);
+    expect(code).toMatch(/Could not restore autostart/);
   });
 
   it('cmd_install and cmd_upgrade both call it before deploy_package', () => {
@@ -124,6 +143,22 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
         .toMatch(/run_pilot_cli start/);
       expect(upgrade, `${file}: cmd_upgrade rollback is not DATA_DIR-aware`)
         .toMatch(/run_pilot_cli rollback/);
+
+      const trapAt = (fn) => fn.indexOf("trap 'restore_pilot_after_deploy");
+      const stopCall = (fn) => fn.search(/^\s*stop_pilot_for_deploy$/m);
+      expect(trapAt(install), `${file}: cmd_install restore trap missing`).toBeGreaterThan(-1);
+      expect(stopCall(install), `${file}: cmd_install stop call missing`).toBeGreaterThan(-1);
+      expect(trapAt(install), `${file}: cmd_install trap must be armed before stop`)
+        .toBeLessThan(stopCall(install));
+      expect(trapAt(upgrade), `${file}: cmd_upgrade restore trap missing`).toBeGreaterThan(-1);
+      expect(stopCall(upgrade), `${file}: cmd_upgrade stop call missing`).toBeGreaterThan(-1);
+      expect(trapAt(upgrade), `${file}: cmd_upgrade trap must be armed before stop`)
+        .toBeLessThan(stopCall(upgrade));
+
+      const failAt = upgrade.indexOf('New version failed to start');
+      expect(failAt, `${file}: cmd_upgrade start-failure path missing`).toBeGreaterThan(-1);
+      expect(upgrade.slice(failAt), `${file}: start-failure path never starts after rollback`)
+        .toMatch(/run_pilot_cli start/);
     }
   });
 

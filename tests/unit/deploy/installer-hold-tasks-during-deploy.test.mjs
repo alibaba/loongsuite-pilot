@@ -84,20 +84,37 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     // or a task whose Disable failed (and is therefore still enabled).
     const code = codeOf(blockOf(read(patched[0]), TAG));
     expect(code).toMatch(/PILOT_HELD_TASK_NAMES/);
-    expect(code).toMatch(/Enable-PilotScheduledTasksAfterDeploy[\s\S]*PILOT_HELD_TASK_NAMES = @\(\)/);
+    expect(code).toMatch(/PILOT_HELD_TASK_NAMES \+= \$taskName/);
+  });
+
+  it('keeps failed Enable names on the list for finally to retry', () => {
+    // Unconditional wipe after the loop makes a failed success-path Enable a
+    // no-op in finally: the names are already gone.
+    const code = codeOf(blockOf(read(patched[0]), TAG));
+    const enableFn = code.slice(code.indexOf('function Enable-PilotScheduledTasksAfterDeploy'));
+    expect(enableFn).not.toMatch(/PILOT_HELD_TASK_NAMES = @\(\)/);
+    expect(enableFn).toMatch(/stillHeld/);
+    expect(enableFn).toMatch(/PILOT_HELD_TASK_NAMES = @\(\$stillHeld\)/);
   });
 
   it('Cmd-Install stops, then disables, then deploys', () => {
     for (const file of patched) {
       const body = functionBody(read(file), 'Cmd-Install');
+      const tryAt = body.indexOf('try {');
       const stopAt = body.indexOf('Stop-PilotService');
       const disableAt = body.indexOf('Disable-PilotScheduledTasksDuringDeploy');
       const deployAt = body.indexOf('Deploy-Package');
+      const finallyAt = body.indexOf('} finally {');
       expect(stopAt, `${file}: Stop-PilotService missing from Cmd-Install`).toBeGreaterThan(-1);
       expect(disableAt, `${file}: Disable missing from Cmd-Install`).toBeGreaterThan(-1);
       expect(deployAt, `${file}: Deploy-Package missing from Cmd-Install`).toBeGreaterThan(-1);
       expect(stopAt).toBeLessThan(disableAt);
       expect(disableAt).toBeLessThan(deployAt);
+      // Ctrl+C during Disable must still hit Enable in finally.
+      expect(tryAt, `${file}: Cmd-Install try missing`).toBeGreaterThan(-1);
+      expect(finallyAt, `${file}: Cmd-Install finally missing`).toBeGreaterThan(-1);
+      expect(tryAt, `${file}: Disable must be inside try`).toBeLessThan(disableAt);
+      expect(disableAt, `${file}: Disable must be before finally`).toBeLessThan(finallyAt);
     }
   });
 
