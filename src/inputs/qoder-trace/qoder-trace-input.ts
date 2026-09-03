@@ -15,7 +15,13 @@ import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-cont
 import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import {
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichIdeTurn,
+  injectTraceId,
+  needsCliSegmentFallback,
+} from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 
@@ -141,6 +147,14 @@ export class QoderTraceInput extends BaseInput {
     clearAttachedImagePathsCache();
   }
 
+  protected readCliIntercept(): Promise<InterceptData> {
+    return readInterceptData();
+  }
+
+  protected readCliSegments(sessionId: string): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
@@ -155,19 +169,26 @@ export class QoderTraceInput extends BaseInput {
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
     const cliTurns: AgentActivityEntry[][] = [];
+    const segmentReads = new Map<string, ReturnType<typeof readSegmentTokensForSession>>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
       if (variant === 'qoder-cli' && sessionId) {
-        interceptData ??= await readInterceptData();
-        const segments = await readSegmentTokensForSession(sessionId);
-        enrichCliTurn(
+        interceptData ??= await this.readCliIntercept();
+        enrichCliPrimary(
           turnEntries,
-          segments,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        if (needsCliSegmentFallback(turnEntries)) {
+          let read = segmentReads.get(sessionId);
+          if (!read) {
+            read = this.readCliSegments(sessionId);
+            segmentReads.set(sessionId, read);
+          }
+          enrichCliFromSegments(turnEntries, await read);
+        }
         cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];

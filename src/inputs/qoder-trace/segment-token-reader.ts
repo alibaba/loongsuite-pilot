@@ -1,102 +1,53 @@
 import * as fs from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SegmentTokenReader');
 
+const READ_CHUNK_SIZE = 1024 * 1024;
+const SESSION_IDLE_MS = 60_000;
+const SESSION_MAX_SIZE = 50;
+
 function getSessionsDir(): string {
   return resolveHome('~/.qoder/logs/sessions');
 }
 
-const sessionCache = new Map<string, { data: SegmentTokenData[]; fingerprint: string; ts: number }>();
-// `ts` only drives eviction of sessions nobody touches any more - it never
-// decides whether the cached data is still valid.
-const CACHE_IDLE_MS = 60_000;
-const CACHE_MAX_SIZE = 50;
-// An unreadable segment file is reported once per on-disk state, so a sustained
-// failure does not emit one line per poll cycle.
-const warnedScans = new Map<string, string>();
-// The sessions root is shared by every session, so its failure is reported on
-// the transition into the failure instead of once per session per cycle.
-let rootUnreadableReported = false;
-// A tail that never completed is reported once per file per session, so a file
-// left permanently truncated by a crashed writer does not log every cycle.
-const warnedTruncatedTails = new Map<string, string>();
-// A directory or file we could not inspect is reported once per path until it
-// works again. Keyed by path because the failure is a property of that path, not
-// of the session that happened to look at it.
-const warnedPaths = new Set<string>();
-
-// The CLI appends to these files while pilot is reading them, so a read can lose
-// a race that the next attempt wins: a partially flushed file, a momentary
-// EMFILE, or a directory replaced between listing and opening. Retrying inside
-// the same cycle is the only place the hook evidence for this batch still
-// exists - the hook offset has already advanced by the time enrichment runs, so
-// a failure that outlives this window leaves those turns on the hook clock
-// permanently. That offset constraint is pre-existing and deliberately left
-// alone here; this window only closes the genuinely momentary failures.
-const TRANSIENT_READ_RETRY_DELAYS_MS = [25, 75] as const;
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+interface SegmentEvent {
+  type: string;
+  ts: number;
+  requestId?: string;
+  loopId?: string;
+  data?: Record<string, unknown>;
 }
 
-// A path that does not exist is a stable answer rather than a lost race: qoder
-// may never have run on this machine, or the file was rotated away after it was
-// listed. Retrying that would burn the backoff on every cycle and report an
-// absence as a failure.
-function isMissingPath(err: unknown): boolean {
-  return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+interface SegmentFileState {
+  dev: number;
+  ino: number;
+  committedOffset: number;
+  events: SegmentEvent[];
 }
 
-// Carries the content that was read so an exhausted retry can still use the lines
-// that did parse instead of discarding the whole file.
-class IncompleteTailLineError extends Error {
-  constructor(readonly content: string) {
-    super('segment file ends mid-record');
-  }
+interface SegmentSessionState {
+  files: Map<string, SegmentFileState>;
+  data: SegmentTokenData[];
+  lastAccessMs: number;
 }
 
-// A read can land between the first and the last byte of a record the CLI is
-// still appending, leaving a prefix of real JSON at the end of the file. Only the
-// final non-empty line can be in that state: a parse failure anywhere earlier is
-// a genuinely corrupt line that re-reading will not repair, so it keeps being
-// skipped by the parse loop. An absent trailing newline is not evidence of
-// anything - a completed write often has none.
-function hasIncompleteTailLine(content: string): boolean {
-  const trimmed = content.trimEnd();
-  if (!trimmed) return false;
-  const lastBreak = trimmed.lastIndexOf('\n');
-  const tail = lastBreak === -1 ? trimmed : trimmed.slice(lastBreak + 1);
-  try {
-    JSON.parse(tail);
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-// Returns a discriminated result rather than throwing or returning undefined so
-// a successful read of a falsy value stays distinguishable from a failure.
-async function readWithRetry<T>(read: () => Promise<T>): Promise<{ value: T } | { error: unknown }> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= TRANSIENT_READ_RETRY_DELAYS_MS.length; attempt += 1) {
-    if (attempt > 0) await delay(TRANSIENT_READ_RETRY_DELAYS_MS[attempt - 1]);
-    try {
-      return { value: await read() };
-    } catch (err) {
-      lastError = err;
-      if (isMissingPath(err)) break;
-    }
-  }
-  return { error: lastError };
+interface SegmentFileSnapshot {
+  filePath: string;
+  dev: number;
+  ino: number;
+  size: number;
 }
 
 interface SegmentFileScan {
-  files: string[];
-  fingerprint: string;
+  files: SegmentFileSnapshot[];
+  complete: boolean;
 }
+
+const sessionStates = new Map<string, SegmentSessionState>();
 
 export interface SegmentTokenData {
   requestId: string;
@@ -111,168 +62,256 @@ export interface SegmentTokenData {
   model: string;
 }
 
+/**
+ * Read the segment index for one session.
+ *
+ * The parsed index is kept in memory, but freshness never depends on its age:
+ * every lookup inspects the current files and reads bytes appended after each
+ * file's last complete JSONL record. A process restart simply rebuilds the
+ * requested session once; persisting offsets without the parsed events would
+ * make all records before those offsets impossible to match.
+ */
 export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
+  const now = Date.now();
+  evictIdleSessions(sessionId, now);
+
   const scan = await findSegmentFilesForSession(sessionId);
-  if (scan.files.length === 0) return [];
+  let state = sessionStates.get(sessionId);
+  if (!state && scan.files.length === 0) return [];
 
-  // Freshness is decided by what is on disk, never by elapsed time. The CLI
-  // keeps appending to these files while pilot is already processing earlier
-  // turns of the same session, so an age-based cache would serve a snapshot
-  // taken before the current turn's own segments were written. The exact-id
-  // join would then find nothing for that turn and its llm.request /
-  // llm.response would keep the hook's identical timestamps - a zero-width
-  // LLM span. Re-scanning is cheap next to re-parsing every file.
-  const cached = sessionCache.get(sessionId);
-  if (cached && cached.fingerprint === scan.fingerprint) {
-    cached.ts = Date.now();
-    return cached.data;
+  if (!state) {
+    evictOldestSessionIfFull();
+    state = { files: new Map(), data: [], lastAccessMs: now };
+    sessionStates.set(sessionId, state);
+  }
+  state.lastAccessMs = now;
+
+  let changed = false;
+  const livePaths = new Set(scan.files.map(file => file.filePath));
+
+  for (const file of scan.files) {
+    let fileState = state.files.get(file.filePath);
+    if (
+      !fileState
+      || fileState.dev !== file.dev
+      || fileState.ino !== file.ino
+      || file.size < fileState.committedOffset
+    ) {
+      fileState = {
+        dev: file.dev,
+        ino: file.ino,
+        committedOffset: 0,
+        events: [],
+      };
+      state.files.set(file.filePath, fileState);
+      changed = true;
+    }
+
+    if (file.size > fileState.committedOffset) {
+      changed = await readAppendedEvents(file, fileState, sessionId) || changed;
+    }
   }
 
-  const files = scan.files;
-
-  const requestStarts = new Map<string, number>();
-  // loop_id is 1:1 with a CLI loop iteration, so it joins a completion back to
-  // the iteration that issued it without any time-proximity guessing.
-  const loopStarts = new Map<string, number>();
-  const attemptFailures = new Map<string, number>();
-  const results: SegmentTokenData[] = [];
-
-  // A file we could not open leaves this scan missing whole requests, which must
-  // not be cached behind a fingerprint that claims the data is current.
-  let complete = true;
-
-  // Collect all events in order to properly associate tool.execution.finished with LLM calls
-  const allEvents: Array<{ type: string; ts: number; requestId?: string; loopId?: string; data?: Record<string, unknown> }> = [];
-
-  // Only the file still being appended to can be caught mid-record. An older
-  // file that ends mid-record was left that way by a writer that is gone, and no
-  // amount of retrying will complete it, so it is not worth a retry window.
-  const newestFile = files[files.length - 1];
-
-  for (const filePath of files) {
-    const read = await readWithRetry(async () => {
-      const text = await fs.readFile(filePath, 'utf-8');
-      // Treated as a lost race rather than a bad line: the next attempt usually
-      // sees the flushed remainder, and this cycle is the only chance to recover
-      // that request because the hook offset has already advanced.
-      if (filePath === newestFile && hasIncompleteTailLine(text)) {
-        throw new IncompleteTailLineError(text);
+  // Only an authoritative scan may remove vanished files. If a directory or
+  // stat failed, retaining the previous index is safer than treating an
+  // unreadable path as an empty session.
+  if (scan.complete) {
+    for (const filePath of state.files.keys()) {
+      if (!livePaths.has(filePath)) {
+        state.files.delete(filePath);
+        changed = true;
       }
-      return text;
+    }
+  }
+
+  if (changed) state.data = buildSegmentData(state.files);
+  return state.data;
+}
+
+async function readAppendedEvents(
+  snapshot: SegmentFileSnapshot,
+  state: SegmentFileState,
+  sessionId: string,
+): Promise<boolean> {
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(snapshot.filePath, 'r');
+  } catch (err) {
+    logger.info('segment file unavailable; keeping the previously parsed prefix', {
+      sessionId,
+      filePath: snapshot.filePath,
+      error: String(err),
     });
-
-    let content: string;
-    if ('error' in read) {
-      complete = false;
-      if (read.error instanceof IncompleteTailLineError) {
-        // The remainder never arrived, so the writer stopped mid-record. Use the
-        // lines that did parse: dropping the file would lose far more than the
-        // one truncated line, leaving this worse than not retrying at all.
-        content = read.error.content;
-        warnTruncatedTailOnce(sessionId, filePath);
-      } else {
-        warnUnreadableOnce(sessionId, scan.fingerprint, filePath, read.error);
-        continue;
-      }
-    } else {
-      content = read.value;
-    }
-
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      let record: Record<string, unknown>;
-      try {
-        record = JSON.parse(line);
-      } catch {
-        continue;
-      }
-
-      const type = record.type as string | undefined;
-      if (!type) continue;
-
-      const ts = parseTs(record.ts);
-      if (
-        type === 'model.request.started'
-        || type === 'model.response.completed'
-        || type === 'tool.execution.finished'
-        || type === 'loop.iteration.started'
-        || type === 'model.request.attempt_failed'
-      ) {
-        const requestId = record.request_id as string | undefined;
-        const loopId = record.loop_id as string | undefined;
-        const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
-          ? record.data as Record<string, unknown>
-          : undefined;
-        allEvents.push({ type, ts, requestId: requestId || undefined, loopId: loopId || undefined, data });
-      }
-    }
+    return false;
   }
 
-  // Anchors are looked up while walking forward, so an event that lands in a
-  // later file than the one it anchors would otherwise be invisible when its
-  // completion is processed. Files are read in name order, which is not
-  // guaranteed to be timestamp order across a session's segment files. Sorting
-  // is stable, so events sharing a millisecond keep their on-disk order, and
-  // unparseable timestamps (ts === 0) sort first where every anchor writer
-  // already rejects them.
-  allEvents.sort((a, b) => a.ts - b.ts);
+  const startOffset = state.committedOffset;
+  let position = startOffset;
+  let committedOffset = startOffset;
+  let pending = Buffer.alloc(0);
+  let pendingStartOffset = startOffset;
+  const appendedEvents: SegmentEvent[] = [];
 
-  // Build results from ordered events
-  for (const evt of allEvents) {
-    if (evt.type === 'model.request.started' && evt.requestId && evt.ts > 0) {
-      requestStarts.set(evt.requestId, evt.ts);
-    }
+  try {
+    while (position < snapshot.size) {
+      const length = Math.min(READ_CHUNK_SIZE, snapshot.size - position);
+      const chunk = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, position);
+      if (bytesRead <= 0) {
+        logger.debug('segment file stopped before the stat snapshot; keeping the unread suffix', {
+          sessionId,
+          filePath: snapshot.filePath,
+          expectedEnd: snapshot.size,
+          actualEnd: position,
+        });
+        break;
+      }
+      position += bytesRead;
 
-    if (evt.type === 'loop.iteration.started' && evt.loopId && evt.ts > 0) {
-      loopStarts.set(evt.loopId, evt.ts);
-    }
+      const data = pending.length > 0
+        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+        : chunk.subarray(0, bytesRead);
+      const dataStartOffset = pendingStartOffset;
+      let cursor = 0;
 
-    // A retry reaches the model under a fresh request id, so the failure of the
-    // attempt it replaces is the closest thing to that retry's own start.
-    if (evt.type === 'model.request.attempt_failed' && evt.loopId && evt.ts > 0) {
-      attemptFailures.set(evt.loopId, evt.ts);
-    }
+      while (cursor < data.length) {
+        const newline = data.indexOf(0x0a, cursor);
+        if (newline < 0) break;
 
-    if (evt.type === 'model.response.completed' && evt.requestId) {
-      const data = evt.data || {};
-      const start = resolveRequestStart(evt, requestStarts, attemptFailures, loopStarts);
+        const lineStartOffset = dataStartOffset + cursor;
+        const text = data.subarray(cursor, newline).toString('utf8').trim();
+        if (text) {
+          try {
+            const record: unknown = JSON.parse(text);
+            if (record && typeof record === 'object' && !Array.isArray(record)) {
+              const event = toSegmentEvent(record as Record<string, unknown>);
+              if (event) appendedEvents.push(event);
+            }
+          } catch (err) {
+            // A newline-terminated malformed record cannot be repaired by a
+            // later append. Consume it so one bad line cannot stall the file.
+            logger.warn('invalid complete segment JSONL record; skipping it', {
+              sessionId,
+              filePath: snapshot.filePath,
+              offset: lineStartOffset,
+              error: String(err),
+            });
+          }
+        }
 
-      // The failure anchor is one-shot: it bounds the retry that replaced that
-      // attempt, not any later request of the same iteration. Leaving it in the
-      // map would hand an already-consumed instant to a second completion of
-      // this loop, producing a span that spans the earlier call it is not part
-      // of. Only an actual consumer clears it, so a completion that resolved
-      // exactly leaves the anchor for the retry it really belongs to.
-      if (start.anchor === 'attempt_failed' && evt.loopId) {
-        attemptFailures.delete(evt.loopId);
+        committedOffset = dataStartOffset + newline + 1;
+        cursor = newline + 1;
       }
 
-      results.push({
-        requestId: evt.requestId,
-        inputTokens: finiteNum(data.input_tokens) ?? 0,
-        outputTokens: finiteNum(data.output_tokens) ?? 0,
-        cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
-        cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
-        requestStartTs: start.ts,
-        responseEndTs: evt.ts,
-        toolFinishedTs: 0,
-        stopReason: (data.stop_reason as string) ?? '',
-        model: (data.model as string) ?? '',
+      pending = cursor < data.length
+        ? Buffer.from(data.subarray(cursor))
+        : Buffer.alloc(0);
+      pendingStartOffset = dataStartOffset + cursor;
+    }
+  } catch (err) {
+    logger.info('segment read interrupted; keeping the unread suffix for the next lookup', {
+      sessionId,
+      filePath: snapshot.filePath,
+      offset: committedOffset,
+      error: String(err),
+    });
+  } finally {
+    try {
+      await handle.close();
+    } catch (err) {
+      // Closing does not change which prefix was successfully read. Treat a
+      // close failure like the other best-effort diagnostics instead of
+      // failing the whole Hook batch after useful data has been collected.
+      logger.info('segment file close failed after reading', {
+        sessionId,
+        filePath: snapshot.filePath,
+        error: String(err),
       });
     }
   }
 
-  // Associate tool.execution.finished with the preceding LLM call.
-  // The last tool.execution.finished before the next model.request.started belongs to that step.
+  if (committedOffset === startOffset) return false;
+  state.events.push(...appendedEvents);
+  state.committedOffset = committedOffset;
+  return true;
+}
+
+function toSegmentEvent(record: Record<string, unknown>): SegmentEvent | null {
+  const type = typeof record.type === 'string' ? record.type : '';
+  if (
+    type !== 'model.request.started'
+    && type !== 'model.response.completed'
+    && type !== 'tool.execution.finished'
+    && type !== 'loop.iteration.started'
+    && type !== 'model.request.attempt_failed'
+  ) {
+    return null;
+  }
+
+  const requestId = typeof record.request_id === 'string' && record.request_id
+    ? record.request_id
+    : undefined;
+  const loopId = typeof record.loop_id === 'string' && record.loop_id
+    ? record.loop_id
+    : undefined;
+  const data = record.data && typeof record.data === 'object' && !Array.isArray(record.data)
+    ? record.data as Record<string, unknown>
+    : undefined;
+
+  return { type, ts: parseTs(record.ts), requestId, loopId, data };
+}
+
+function buildSegmentData(files: Map<string, SegmentFileState>): SegmentTokenData[] {
+  const allEvents: SegmentEvent[] = [];
+  for (const [, file] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    allEvents.push(...file.events);
+  }
+  // Stable sorting preserves the order within a file for events sharing one
+  // millisecond while removing any dependency on multi-process file names.
+  allEvents.sort((a, b) => a.ts - b.ts);
+
+  const requestStarts = new Map<string, number>();
+  const loopStarts = new Map<string, number>();
+  const attemptFailures = new Map<string, number>();
+  const results: SegmentTokenData[] = [];
+
+  for (const evt of allEvents) {
+    if (evt.type === 'model.request.started' && evt.requestId && evt.ts > 0) {
+      requestStarts.set(evt.requestId, evt.ts);
+    }
+    if (evt.type === 'loop.iteration.started' && evt.loopId && evt.ts > 0) {
+      loopStarts.set(evt.loopId, evt.ts);
+    }
+    if (evt.type === 'model.request.attempt_failed' && evt.loopId && evt.ts > 0) {
+      attemptFailures.set(evt.loopId, evt.ts);
+    }
+    if (evt.type !== 'model.response.completed' || !evt.requestId) continue;
+
+    const data = evt.data ?? {};
+    const start = resolveRequestStart(evt, requestStarts, attemptFailures, loopStarts);
+    if (start.anchor === 'attempt_failed' && evt.loopId) {
+      attemptFailures.delete(evt.loopId);
+    }
+    results.push({
+      requestId: evt.requestId,
+      inputTokens: finiteNum(data.input_tokens) ?? 0,
+      outputTokens: finiteNum(data.output_tokens) ?? 0,
+      cacheReadTokens: finiteNum(data.cache_read_input_tokens) ?? 0,
+      cacheCreationTokens: finiteNum(data.cache_creation_input_tokens) ?? 0,
+      requestStartTs: start.ts,
+      responseEndTs: evt.ts,
+      toolFinishedTs: 0,
+      stopReason: typeof data.stop_reason === 'string' ? data.stop_reason : '',
+      model: typeof data.model === 'string' ? data.model : '',
+    });
+  }
+
   for (let i = 0; i < results.length; i++) {
     const currentEnd = results[i].responseEndTs;
     const next = i + 1 < results.length ? results[i + 1] : undefined;
-    // An unresolved start would collapse the window to nothing and drop the tool
-    // timings that belong to this step.
     const nextStart = next
       ? (next.requestStartTs > 0 ? next.requestStartTs : next.responseEndTs)
       : Infinity;
-
     let lastToolFinish = 0;
     for (const evt of allEvents) {
       if (evt.type === 'tool.execution.finished' && evt.ts > currentEnd && evt.ts <= nextStart) {
@@ -282,42 +321,9 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     results[i].toolFinishedTs = lastToolFinish;
   }
 
-  // Evict idle entries and enforce max size
-  const now = Date.now();
-  for (const [key, entry] of sessionCache) {
-    if (key !== sessionId && now - entry.ts > CACHE_IDLE_MS) {
-      sessionCache.delete(key);
-      warnedScans.delete(key);
-      warnedTruncatedTails.delete(key);
-    }
-  }
-  if (sessionCache.size >= CACHE_MAX_SIZE && !sessionCache.has(sessionId)) {
-    const oldest = [...sessionCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
-    if (oldest) sessionCache.delete(oldest[0]);
-  }
-
-  // An incomplete parse is still returned, but never cached: the fingerprint
-  // describes the current on-disk state, so caching it would serve the same gap
-  // to every remaining turn of this batch instead of retrying the read.
-  if (complete) {
-    sessionCache.set(sessionId, { data: results, fingerprint: scan.fingerprint, ts: now });
-  }
   return results;
 }
 
-/**
- * Resolve the instant a completed request began.
- *
- * A retried request emits model.response.completed under a fresh request id but
- * no matching model.request.started, so the exact lookup misses. Falling back to
- * the completion instant made requestStartTs === responseEndTs - a zero-width
- * LLM span manufactured by enrichment rather than one merely left un-enriched.
- *
- * Anchors are tried tightest first. 0 means "unknown" and is returned instead of
- * a degenerate value so the enricher leaves the hook clock in place. The anchor
- * that was used is reported back so the caller can tell an exact measurement
- * from an inferred upper bound.
- */
 function resolveRequestStart(
   evt: { requestId?: string; loopId?: string; ts: number },
   requestStarts: Map<string, number>,
@@ -328,146 +334,113 @@ function resolveRequestStart(
     const exact = requestStarts.get(evt.requestId);
     if (exact !== undefined) return { ts: exact, anchor: 'exact' };
   }
-
-  if (!evt.loopId) {
-    logger.warn('segment completion carries no loop_id to anchor its start', {
-      requestId: evt.requestId,
-    });
-    return { ts: 0, anchor: 'none' };
-  }
+  if (!evt.loopId) return { ts: 0, anchor: 'none' };
 
   const failedAttempt = attemptFailures.get(evt.loopId);
-  if (failedAttempt !== undefined) {
-    logger.debug('anchored a retried request on the attempt it replaced', {
-      requestId: evt.requestId, loopId: evt.loopId,
-    });
-    return { ts: failedAttempt, anchor: 'attempt_failed' };
-  }
+  if (failedAttempt !== undefined) return { ts: failedAttempt, anchor: 'attempt_failed' };
 
   const loopStart = loopStarts.get(evt.loopId);
-  if (loopStart !== undefined) {
-    logger.debug('anchored a request on its loop iteration', {
-      requestId: evt.requestId, loopId: evt.loopId,
-    });
-    return { ts: loopStart, anchor: 'loop_iteration' };
-  }
-
-  logger.warn('segment completion has no start anchor; leaving its span on the hook clock', {
-    requestId: evt.requestId, loopId: evt.loopId,
-  });
+  if (loopStart !== undefined) return { ts: loopStart, anchor: 'loop_iteration' };
   return { ts: 0, anchor: 'none' };
 }
 
-function warnUnreadableOnce(sessionId: string, fingerprint: string, filePath: string, err: unknown): void {
-  if (warnedScans.get(sessionId) === fingerprint) return;
-  warnedScans.set(sessionId, fingerprint);
-  logger.warn('segment file unreadable; affected turns keep the hook clock', {
-    sessionId, filePath, error: String(err),
-  });
-}
-
-function warnTruncatedTailOnce(sessionId: string, filePath: string): void {
-  if (warnedTruncatedTails.get(sessionId) === filePath) return;
-  warnedTruncatedTails.set(sessionId, filePath);
-  logger.warn('segment file still ends mid-record after retrying; using the records that parsed', {
-    sessionId, filePath,
-  });
-}
-
-function warnPathOnce(targetPath: string, err: unknown, message: string): void {
-  if (warnedPaths.has(targetPath)) return;
-  warnedPaths.add(targetPath);
-  logger.warn(message, { path: targetPath, error: String(err) });
-}
-
 async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {
-  const files: string[] = [];
-  const root = await readWithRetry(() => fs.readdir(getSessionsDir(), { withFileTypes: true }));
-  if ('error' in root) {
-    // A root we cannot list makes every session look segment-less, which is
-    // indistinguishable from the legitimate empty result below - and used to be
-    // completely silent, leaving no trace of why a batch kept the hook clock.
-    // An absent root is not that case: it is the normal state on a machine where
-    // only the IDE ever ran, so it stays silent.
-    if (!isMissingPath(root.error) && !rootUnreadableReported) {
-      rootUnreadableReported = true;
-      logger.warn('qoder sessions root unreadable; affected turns keep the hook clock', {
-        dir: getSessionsDir(), error: String(root.error),
+  let cwdDirs: Dirent[];
+  try {
+    cwdDirs = await fs.readdir(getSessionsDir(), { withFileTypes: true });
+  } catch (err) {
+    if (!isMissingPath(err)) {
+      logger.info('qoder sessions root unavailable; keeping any previously parsed segment data', {
+        dir: getSessionsDir(),
+        error: String(err),
       });
     }
-    return { files: [], fingerprint: '' };
+    return { files: [], complete: isMissingPath(err) };
   }
-  rootUnreadableReported = false;
-  const cwdDirs = root.value;
 
+  const files: SegmentFileSnapshot[] = [];
+  let complete = true;
   for (const cwdDir of cwdDirs) {
     if (!cwdDir.isDirectory()) continue;
     const segDir = path.join(getSessionsDir(), cwdDir.name, sessionId, 'segments');
-    // Most cwd directories hold other sessions, so an absent segments directory
-    // is the norm and stays silent - readWithRetry short-circuits ENOENT, so
-    // those misses cost no backoff. Any other errno is a lost race, and if it
-    // hits the one cwd that does hold this session, every turn of the session
-    // silently falls back to the hook clock.
-    const listed = await readWithRetry(() => fs.readdir(segDir, { withFileTypes: true }));
-    if ('error' in listed) {
-      if (!isMissingPath(listed.error)) {
-        warnPathOnce(segDir, listed.error, 'segment directory unlistable; this session may look segment-less');
-      }
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(segDir, { withFileTypes: true });
+    } catch (err) {
+      if (isMissingPath(err)) continue;
+      complete = false;
+      logger.info('segment directory unavailable; keeping any previously parsed data', {
+        sessionId,
+        dir: segDir,
+        error: String(err),
+      });
       continue;
     }
-    warnedPaths.delete(segDir);
-    for (const entry of listed.value) {
-      if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-        files.push(path.join(segDir, entry.name));
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+      const filePath = path.join(segDir, entry.name);
+      try {
+        const stat = await fs.stat(filePath);
+        files.push({
+          filePath,
+          dev: stat.dev,
+          ino: stat.ino,
+          size: stat.size,
+        });
+      } catch (err) {
+        if (!isMissingPath(err)) {
+          complete = false;
+          logger.info('segment file could not be inspected; keeping any previously parsed prefix', {
+            sessionId,
+            filePath,
+            error: String(err),
+          });
+        }
       }
     }
   }
 
-  files.sort();
+  files.sort((a, b) => a.filePath.localeCompare(b.filePath));
+  return { files, complete };
+}
 
-  // size + mtime per file: an append always grows the file, and a rewrite that
-  // happens to land on the same size still moves mtime. A file that disappeared
-  // between readdir and stat is dropped from both lists so they stay in step.
-  const stamps = await Promise.all(files.map(async filePath => {
-    const stat = await readWithRetry(() => fs.stat(filePath));
-    if ('error' in stat) {
-      // A file rotated away between readdir and stat is genuinely gone. Any other
-      // errno already had its retries and is a lost race, so it is recorded
-      // rather than silently shrinking this scan towards an empty result that
-      // cannot be told apart from a session with no segments at all.
-      if (!isMissingPath(stat.error)) {
-        warnPathOnce(filePath, stat.error, 'segment file could not be stat-ed; excluded from this scan');
-      }
-      return undefined;
+function evictIdleSessions(currentSessionId: string, now: number): void {
+  for (const [sessionId, state] of sessionStates) {
+    if (sessionId !== currentSessionId && now - state.lastAccessMs > SESSION_IDLE_MS) {
+      sessionStates.delete(sessionId);
     }
-    warnedPaths.delete(filePath);
-    return `${filePath}:${stat.value.size}:${stat.value.mtimeMs}`;
-  }));
-
-  const readable: string[] = [];
-  const parts: string[] = [];
-  for (let i = 0; i < files.length; i++) {
-    const stamp = stamps[i];
-    if (stamp === undefined) continue;
-    readable.push(files[i]);
-    parts.push(stamp);
   }
+}
 
-  return { files: readable, fingerprint: parts.join('|') };
+function evictOldestSessionIfFull(): void {
+  if (sessionStates.size < SESSION_MAX_SIZE) return;
+  let oldestId: string | undefined;
+  let oldestAccess = Infinity;
+  for (const [sessionId, state] of sessionStates) {
+    if (state.lastAccessMs < oldestAccess) {
+      oldestId = sessionId;
+      oldestAccess = state.lastAccessMs;
+    }
+  }
+  if (oldestId) sessionStates.delete(oldestId);
+}
+
+function isMissingPath(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
 }
 
 function parseTs(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
-    const d = Date.parse(value);
-    if (!Number.isNaN(d)) return d;
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
+    const date = Date.parse(value);
+    if (!Number.isNaN(date)) return date;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
   }
   return 0;
 }
 
 function finiteNum(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  return undefined;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
