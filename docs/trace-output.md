@@ -89,7 +89,7 @@ Shared vs. per-backend settings (spans are converted once per distinct `service.
 - **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
 - **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
-A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
+A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>-YYYY-MM-DD.jsonl`.
 
 ### Managed backends (`configs/inner/data_config.json`)
 
@@ -365,3 +365,11 @@ Failed trace export data may be persisted under:
 ```text
 ~/.loongsuite-pilot/logs/otlp-failed/
 ```
+
+Each JSONL record keeps the existing full span payload plus `_error`. Files use
+the local calendar date and are not split by size. Scheduled retention defaults to
+7 days. If managed files exceed the 512 MiB soft cleanup target, Pilot removes the
+oldest files while always retaining today and yesterday. The directory may exceed
+that target between cleanup runs. Legacy undated JSONL files are no longer appended
+and use their modification date for the same age and pressure cleanup. This lifecycle
+does not change OTLP retry, exporter, or healthy-backend behavior.

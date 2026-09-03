@@ -8,7 +8,7 @@ Pilot 会对 Input 的主数据源做低开销窗口统计，用于比较“实�
 - 正常运行时每 10 分钟上报一次；
 - 正常退出时在 Input 停止并排空事件队列后上报最后一个短窗口；
 - 远端仍使用 `pilot_pipeline`，Input 行的 `type` 为 `input`；
-- 本地镜像位于 `logs/metric_alarm/pilot-input-metrics.jsonl`。
+- 本地镜像按本地日期写入 `logs/metric_alarm/pilot-input-metrics-YYYY-MM-DD.jsonl`。
 
 当前窗口维度是固定的 `agent + input_name + source_kind + collection_method`。不包含 `session_id`、`turn_id`、`trace_id`、动态文件名或文件路径，因此上报行数和常驻内存不会随源记录数增长。
 

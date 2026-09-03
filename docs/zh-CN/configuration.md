@@ -210,7 +210,9 @@ Pilot 可以定期清理本地运行日志。
     "hookErrorDays": 7,
     "hookDebugDays": 7,
     "outputDays": 7,
-    "slsFailedDays": 7
+    "slsFailedDays": 7,
+    "otlpFailedDays": 7,
+    "metricAlarmDays": 7
   }
 }
 ```
@@ -220,6 +222,15 @@ Pilot 可以定期清理本地运行日志。
 | `LOONGSUITE_PILOT_LOG_RETENTION_ENABLED` | 开启或关闭保留清理。 |
 | `LOONGSUITE_PILOT_LOG_RETENTION_DAYS` | 对所有日志类别使用统一保留天数。 |
 | `LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS` | 清理间隔。 |
+
+`otlpFailedDays` 控制 `logs/otlp-failed` 中受管文件的保留天数；
+`metricAlarmDays` 控制 `logs/metric_alarm` 中指标、告警和 Updater 事件文件的
+保留天数，二者默认都是 7 天。这些日志按本地日期每天写一个文件，不按单文件
+大小轮转。后台定时清理时，如果受管 OTLP 失败日志超过 512 MiB，或受管指标
+告警日志超过 256 MiB，Pilot 会从最旧文件开始删除，但始终保留当天和昨天。
+这些容量值是软清理目标，两次清理之间或当天文件持续增长时可以暂时超过。
+旧的无日期文件按修改日期参与清理；关闭定时保留后，按天数和容量的清理都不
+执行。`token-usage-state.json` 仍是覆盖写状态文件，不参与这项清理。
 
 ## 验证配置
 

@@ -15,14 +15,35 @@ export const OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES = 512 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_DAYS = 2;
 export const OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS = 1;
 export const SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES = SLS_FAILURE_LOG_MAX_TOTAL_BYTES;
+export const OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES = 512 * MEBIBYTE;
+export const METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES = 256 * MEBIBYTE;
+export const LOCAL_OBSERVABILITY_PRESSURE_MIN_KEEP_DAYS = 1;
 
-type Category = 'history' | 'errors' | 'debug' | 'output' | 'sls-failed-logs';
+const METRIC_ALARM_STREAM_NAMES = new Set([
+  'pilot-metrics',
+  'pilot-agent-metrics',
+  'pilot-flusher-metrics',
+  'pilot-input-metrics',
+  'pilot-alarm-metrics',
+  'pilot-alarms',
+  'pilot-updater-events',
+]);
+
+type Category =
+  | 'history'
+  | 'errors'
+  | 'debug'
+  | 'output'
+  | 'sls-failed-logs'
+  | 'otlp-failed'
+  | 'metric_alarm';
 
 interface DatedLogFile {
   file: string;
   fullPath: string;
   dateStr: string;
   size: number;
+  mtimeMs: number;
 }
 
 const CATEGORY_DIR_MAP: Record<string, Category> = {
@@ -31,6 +52,8 @@ const CATEGORY_DIR_MAP: Record<string, Category> = {
   debug: 'debug',
   output: 'output',
   'sls-failed-logs': 'sls-failed-logs',
+  'otlp-failed': 'otlp-failed',
+  metric_alarm: 'metric_alarm',
 };
 
 export class LogRetentionService {
@@ -56,11 +79,16 @@ export class LogRetentionService {
       hookDebugDays: this.config.hookDebugDays,
       outputDays: this.config.outputDays,
       slsFailedDays: this.config.slsFailedDays,
+      otlpFailedDays: this.config.otlpFailedDays,
+      metricAlarmDays: this.config.metricAlarmDays,
       outputMaxTotalBytes: OUTPUT_RETENTION_MAX_TOTAL_BYTES,
       outputLargeFileThresholdBytes: OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
       outputLargeFileDays: OUTPUT_RETENTION_LARGE_FILE_DAYS,
       outputPressureMinKeepDays: OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS,
       slsFailedMaxTotalBytes: SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
+      otlpFailedMaxTotalBytes: OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES,
+      metricAlarmMaxTotalBytes: METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES,
+      localObservabilityPressureMinKeepDays: LOCAL_OBSERVABILITY_PRESSURE_MIN_KEEP_DAYS,
     });
 
     this.startupTimer = setTimeout(() => {
@@ -156,6 +184,9 @@ export class LogRetentionService {
     if (category === 'sls-failed-logs') {
       return this.cleanSlsFailedDirectory(dir, files, today);
     }
+    if (category === 'otlp-failed' || category === 'metric_alarm') {
+      return this.cleanLocalObservabilityDirectory(dir, files, category);
+    }
 
     const retentionDays = this.getRetentionDays(category);
     const cutoff = dateCutoff(retentionDays);
@@ -217,6 +248,100 @@ export class LogRetentionService {
     return { deleted, errors };
   }
 
+  private async cleanLocalObservabilityDirectory(
+    dir: string,
+    files: string[],
+    category: 'otlp-failed' | 'metric_alarm',
+  ): Promise<{ deleted: number; errors: number }> {
+    let deleted = 0;
+    let errors = 0;
+    let remaining = await this.collectLocalObservabilityFiles(dir, files, category);
+
+    const retentionCutoff = dateCutoff(this.getRetentionDays(category));
+    // Both age and pressure cleanup protect the two most recent local dates.
+    const protectedFrom = dateCutoff(LOCAL_OBSERVABILITY_PRESSURE_MIN_KEEP_DAYS);
+    const expired = await this.deleteDatedFiles(
+      remaining,
+      file => file.dateStr < protectedFrom && file.dateStr < retentionCutoff,
+    );
+    deleted += expired.deleted;
+    errors += expired.errors;
+
+    // Re-read after deletion so a failed unlink still contributes to pressure.
+    remaining = await this.collectLocalObservabilityFiles(dir, await readdir(dir), category);
+    let totalBytes = remaining.reduce((sum, file) => sum + file.size, 0);
+    const maxTotalBytes = category === 'otlp-failed'
+      ? OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES
+      : METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES;
+    if (totalBytes <= maxTotalBytes) return { deleted, errors };
+
+    // protectedFrom is yesterday. Only strictly older files are eligible.
+    const candidates = remaining
+      .filter(file => file.dateStr < protectedFrom)
+      .sort((a, b) => a.dateStr.localeCompare(b.dateStr)
+        || a.mtimeMs - b.mtimeMs
+        || a.file.localeCompare(b.file));
+
+    for (const file of candidates) {
+      if (totalBytes <= maxTotalBytes) break;
+      if (await this.deleteFile(file.fullPath)) {
+        deleted++;
+        totalBytes -= file.size;
+      } else {
+        errors++;
+      }
+    }
+
+    return { deleted, errors };
+  }
+
+  private async collectLocalObservabilityFiles(
+    dir: string,
+    files: string[],
+    category: 'otlp-failed' | 'metric_alarm',
+  ): Promise<DatedLogFile[]> {
+    const result: DatedLogFile[] = [];
+    for (const file of files) {
+      if (file.startsWith('.') || !file.endsWith('.jsonl')) continue;
+
+      const extractedDate = extractDate(file);
+      const dated = extractedDate !== null && this.isManagedDatedFile(file, extractedDate, category);
+      const legacy = extractedDate === null && this.isManagedLegacyFile(file, category);
+      if (!dated && !legacy) continue;
+
+      const fullPath = path.join(dir, file);
+      const stat = await safeLstat(fullPath);
+      if (!stat?.isFile()) continue;
+      result.push({
+        file,
+        fullPath,
+        dateStr: extractedDate ?? localDateString(new Date(stat.mtimeMs)),
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      });
+    }
+    return result;
+  }
+
+  private isManagedDatedFile(
+    file: string,
+    dateStr: string,
+    category: 'otlp-failed' | 'metric_alarm',
+  ): boolean {
+    if (category === 'otlp-failed') return true;
+    const suffix = `-${dateStr}.jsonl`;
+    if (!file.endsWith(suffix)) return false;
+    return METRIC_ALARM_STREAM_NAMES.has(file.slice(0, -suffix.length));
+  }
+
+  private isManagedLegacyFile(
+    file: string,
+    category: 'otlp-failed' | 'metric_alarm',
+  ): boolean {
+    if (category === 'otlp-failed') return true;
+    return METRIC_ALARM_STREAM_NAMES.has(file.slice(0, -'.jsonl'.length));
+  }
+
   private async cleanOutputDirectory(
     dir: string,
     files: string[],
@@ -268,6 +393,7 @@ export class LogRetentionService {
         fullPath,
         dateStr,
         size: stat.size,
+        mtimeMs: stat.mtimeMs,
       });
     }
     return result;
@@ -344,6 +470,8 @@ export class LogRetentionService {
       case 'debug': return this.config.hookDebugDays;
       case 'output': return this.config.outputDays;
       case 'sls-failed-logs': return this.config.slsFailedDays;
+      case 'otlp-failed': return this.config.otlpFailedDays;
+      case 'metric_alarm': return this.config.metricAlarmDays;
     }
   }
 }
@@ -383,6 +511,14 @@ async function readdir(dir: string): Promise<string[]> {
 async function safeStat(p: string) {
   try {
     return await fs.stat(p);
+  } catch {
+    return null;
+  }
+}
+
+async function safeLstat(p: string) {
+  try {
+    return await fs.lstat(p);
   } catch {
     return null;
   }

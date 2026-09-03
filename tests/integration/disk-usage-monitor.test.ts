@@ -58,8 +58,13 @@ describe('Directory usage: real files to reported metrics', () => {
       disk_dir_status: 'ok', disk_data_bytes: '8', disk_logs_bytes: '5',
       disk_dir_sampled_at: new Date(snapshot.sampledAt!).toISOString(),
     });
+    const metricDir = path.join(dataDir, 'logs', 'metric_alarm');
+    const metricFile = fs.readdirSync(metricDir).find(name => (
+      name.startsWith('pilot-metrics-') && name.endsWith('.jsonl')
+    ));
+    expect(metricFile).toBeDefined();
     const localRow = JSON.parse(fs.readFileSync(
-      path.join(dataDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl'), 'utf8',
+      path.join(metricDir, metricFile!), 'utf8',
     ).trim().split('\n')[0]);
     expect(localRow.metric_json.disk_data_bytes).toBe('8');
     expect(sent.runningStatus).toHaveBeenCalledOnce();

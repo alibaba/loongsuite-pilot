@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
@@ -172,7 +172,7 @@ export class MetricsWriter {
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
 
-      const filePath = path.join(this.logsDir, 'pilot-metrics.jsonl');
+      const filePath = path.join(this.logsDir, `pilot-metrics-${getTodayDateString()}.jsonl`);
       await appendLine(filePath, JSON.stringify(metrics));
     } catch (err) {
       logger.warn('L1 metrics write failed', { error: String(err) });
@@ -441,13 +441,22 @@ export class MetricsWriter {
         for (const row of l2.flushers) sendStatus('pilot_pipeline', flattenToStrings(row));
 
         for (const row of l2.agents) {
-          await appendLine(path.join(this.logsDir, 'pilot-agent-metrics.jsonl'), JSON.stringify(row));
+          await appendLine(
+            path.join(this.logsDir, `pilot-agent-metrics-${getTodayDateString()}.jsonl`),
+            JSON.stringify(row),
+          );
         }
         for (const row of l2.inputs) {
-          await appendLine(path.join(this.logsDir, 'pilot-input-metrics.jsonl'), JSON.stringify(row));
+          await appendLine(
+            path.join(this.logsDir, `pilot-input-metrics-${getTodayDateString()}.jsonl`),
+            JSON.stringify(row),
+          );
         }
         for (const row of l2.flushers) {
-          await appendLine(path.join(this.logsDir, 'pilot-flusher-metrics.jsonl'), JSON.stringify(row));
+          await appendLine(
+            path.join(this.logsDir, `pilot-flusher-metrics-${getTodayDateString()}.jsonl`),
+            JSON.stringify(row),
+          );
         }
       }
     } catch (err) {
@@ -460,11 +469,11 @@ export class MetricsWriter {
     try {
       const entries = this.alarmManager.serialize();
       if (entries.length === 0) return;
-      const filePath = path.join(this.logsDir, 'pilot-alarms.jsonl');
       // Invoke the existing sender before local IO, so ENOSPC cannot block it.
       for (const entry of entries) {
         sendAlarm('pilot_alarm', flattenToStrings(entry));
       }
+      const filePath = path.join(this.logsDir, `pilot-alarms-${getTodayDateString()}.jsonl`);
       for (const entry of entries) {
         await appendLine(filePath, JSON.stringify(entry));
       }

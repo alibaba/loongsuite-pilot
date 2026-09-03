@@ -1634,7 +1634,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const svcName = `${this.cfg.serviceName}-${agentType}__${safeEndpoint}`;
       const dir = this.failedDir;
       await ensureDir(dir);
-      const filepath = path.join(dir, `${svcName}.jsonl`);
+      const filepath = path.join(dir, `${svcName}-${getTodayDateString()}.jsonl`);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
         const obj = JSON.parse(line);

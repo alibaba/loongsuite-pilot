@@ -89,7 +89,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 - **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
 - **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
 
-某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<后端名>.jsonl`。
+某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<服务>-<Agent>__<后端名>-YYYY-MM-DD.jsonl`。
 
 ### 托管后端(`configs/inner/data_config.json`)
 
@@ -365,3 +365,9 @@ Trace 导出失败的数据可能会持久化到：
 ```text
 ~/.loongsuite-pilot/logs/otlp-failed/
 ```
+
+每条 JSONL 仍保留现有完整 span 和 `_error`。文件按本地日期每天写一个，不按
+大小分片，默认保留 7 天。后台清理时，如果受管文件超过 512 MiB 的软目标，
+Pilot 会从最旧文件开始删除，但始终保留当天和昨天，因此目录可能在两次清理
+之间暂时超过目标。新版本不再追加旧的无日期 JSONL；旧文件按修改日期参与
+相同的保留和容量清理。该变化不影响 OTLP 重试、导出和健康后端行为。

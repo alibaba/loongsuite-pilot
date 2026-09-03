@@ -379,6 +379,8 @@ export interface LogRetentionConfig {
   hookDebugDays: number;
   outputDays: number;
   slsFailedDays: number;
+  otlpFailedDays: number;
+  metricAlarmDays: number;
 }
 
 export interface HookWatchdogConfig {
