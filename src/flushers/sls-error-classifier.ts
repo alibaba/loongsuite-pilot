@@ -1,5 +1,8 @@
 const MAX_CAUSE_DEPTH = 5;
-const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
+const MAX_CODE_LENGTH = 128;
+const MAX_STRUCTURED_BODY_LENGTH = 16 * 1024;
+const MAX_DETAIL_BYTES = 512;
+const SAFE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 
 const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN']);
 const CONNECTION_RESET_CODES = new Set(['ECONNRESET']);
@@ -55,7 +58,7 @@ interface ExtractedEvidence {
   detail: string;
 }
 
-/** Extract diagnostic evidence without making retry decisions. */
+/** Extract bounded diagnostic evidence without making retry decisions. */
 export function classifySlsSendError(error: unknown): SlsSendErrorClassification {
   const evidence = extractEvidence(error);
   const code = evidence.code || (evidence.httpStatus === 0
@@ -127,11 +130,17 @@ function extractEvidence(error: unknown): ExtractedEvidence {
   }
 
   if (!message) message = safeErrorString(error);
-  const detail = detailParts.join(' <- ') || safeErrorString(error);
+  const fallbackDetail = detailParts.length === 0 && (error instanceof Error || typeof error === 'string')
+    ? safeErrorString(error)
+    : '';
+  const detail = httpStatus === 0
+    ? normalizeErrorDetail(detailParts.join(' <- ') || fallbackDetail)
+    : '';
   return { code, httpStatus, name, message, detail };
 }
 
 function structuredCodeFromBody(body: string): string {
+  if (body.length === 0 || body.length > MAX_STRUCTURED_BODY_LENGTH) return '';
   try {
     const parsed: unknown = JSON.parse(body);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return '';
@@ -143,7 +152,8 @@ function structuredCodeFromBody(body: string): string {
 }
 
 function normalizeCode(value: unknown): string {
-  return typeof value === 'string' && SAFE_CODE_PATTERN.test(value) ? value : '';
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CODE_LENGTH) return '';
+  return SAFE_CODE_PATTERN.test(value) ? value : '';
 }
 
 function normalizeHttpStatus(value: unknown): number {
@@ -161,6 +171,39 @@ function safeErrorString(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+export function redactSensitiveErrorText(value: string): string {
+  return value
+    .replace(
+      /(\bauthorization\s*["']?\s*[:=]\s*["']?)(?:Bearer|Basic)\s+[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /(\bauthorization\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/\bLTAI[A-Za-z0-9]{12,}\b/g, '[REDACTED_ACCESS_KEY]')
+    .replace(
+      /((?:access[_-]?key(?:[_-]?(?:id|secret))?|api[_-]?key)\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@');
+}
+
+function normalizeErrorDetail(value: string): string {
+  const oneLine = redactSensitiveErrorText(value)
+    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return truncateUtf8(oneLine, MAX_DETAIL_BYTES);
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  return bytes.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/u, '');
 }
 
 function categoryForCode(code: string, httpStatus: number, name: string): SlsSendErrorCategory {

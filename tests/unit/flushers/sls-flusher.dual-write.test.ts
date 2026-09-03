@@ -281,8 +281,8 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     expect(String(failure.error)).toContain('Forbidden');
   });
 
-  it('keeps WebTracking retries for a real fetch error and reports its cause code and original text', async () => {
-    const causeText = `getaddrinfo ENOTFOUND original-host.example ${'x'.repeat(700)}`;
+  it('keeps WebTracking retries for a real fetch error and reports bounded safe detail', async () => {
+    const causeText = `getaddrinfo ENOTFOUND original-host.example Authorization: Bearer test-token ${'x'.repeat(700)}`;
     fetchSpy.mockRejectedValue(Object.assign(new TypeError('fetch failed'), {
       cause: Object.assign(new Error(causeText), { code: 'ENOTFOUND' }),
     }));
@@ -303,10 +303,13 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     const message = mockAlarmRecord.mock.calls[0][2] as string;
     expect(message).toContain('category=dns code=ENOTFOUND attempts=3');
     expect(message).toContain('TypeError: fetch failed');
-    expect(message).toContain(causeText);
+    expect(message).toContain('original-host.example');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).not.toContain('test-token');
+    expect(message).not.toContain('x'.repeat(700));
   });
 
-  it('does not change permanent HTTP retry behavior and reports the response error text', async () => {
+  it('does not change permanent HTTP retry behavior or report the response body', async () => {
     const body = '{"errorCode":"Forbidden","message":"original response text"}';
     fetchSpy.mockResolvedValue({ ok: false, status: 403, text: async () => body });
     const flusher = new SlsFlusher(
@@ -325,7 +328,7 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     expect(mockAlarmRecord).toHaveBeenCalledOnce();
     const message = mockAlarmRecord.mock.calls[0][2] as string;
     expect(message).toContain('category=http code=Forbidden status=403 attempts=1');
-    expect(message).toContain('original response text');
+    expect(message).not.toContain('original response text');
   });
 });
 
