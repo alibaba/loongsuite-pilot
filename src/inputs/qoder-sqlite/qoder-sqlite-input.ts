@@ -80,7 +80,7 @@ export class QoderSqliteInput extends BaseSqliteInput {
     }
   }
 
-  protected async readNewRows(lastRowId: number): Promise<SqliteRow[]> {
+  protected async readNewRows(lastRowId: number, limit: number): Promise<SqliteRow[]> {
     const sql = `
       SELECT
         rowid,
@@ -96,9 +96,10 @@ export class QoderSqliteInput extends BaseSqliteInput {
         AND token_info != ''
         AND json_valid(token_info)
       ORDER BY rowid ASC
+      LIMIT ?
     `;
 
-    return queryReadonly<QoderTokenRow>(this.dbPath, sql, [lastRowId]);
+    return queryReadonly<QoderTokenRow>(this.dbPath, sql, [lastRowId, limit]);
   }
 
   protected async transformRow(row: SqliteRow): Promise<AgentActivityEntry | null> {

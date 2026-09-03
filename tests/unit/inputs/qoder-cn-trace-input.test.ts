@@ -309,7 +309,161 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
   });
 });
 
+describe('QoderCnTraceInput session anchor bounds', () => {
+  it('merges orphan turns into a live anchor with contiguous step numbering across cycles', async () => {
+    const session = 'sess-anchor-live';
+    const input = makeInput();
+
+    await appendHookJsonl(logDir, [
+      buildUserInputEntry({ turn: 'turn-anchor', session, ts: 1_780_000_000_000 }),
+      buildEntry({ event: 'llm.request', turn: 'turn-anchor', step: 'turn-anchor:s1', session, ts: 1_780_000_000_100 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-anchor', step: 'turn-anchor:s1', session, ts: 1_780_000_000_200 }),
+      buildEntry({ event: 'llm.request', turn: 'turn-anchor', step: 'turn-anchor:s2', session, ts: 1_780_000_000_300 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-anchor', step: 'turn-anchor:s2', session, ts: 1_780_000_000_400 }),
+    ]);
+    await collectWith(input);
+
+    await appendHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-orphan-1', step: 'turn-orphan-1:s1', session, ts: 1_780_000_001_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-orphan-1', step: 'turn-orphan-1:s1', session, ts: 1_780_000_001_100 }),
+    ]);
+    const secondCycle = await collectWith(input);
+
+    expect(secondCycle.length).toBeGreaterThan(0);
+    expect(new Set(secondCycle.map(e => e['gen_ai.turn.id']))).toEqual(new Set(['turn-anchor']));
+    expect(new Set(secondCycle.map(e => e['gen_ai.step.id']))).toEqual(new Set(['turn-anchor:s3']));
+
+    await appendHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-orphan-2', step: 'turn-orphan-2:s1', session, ts: 1_780_000_002_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-orphan-2', step: 'turn-orphan-2:s1', session, ts: 1_780_000_002_100 }),
+    ]);
+    const thirdCycle = await collectWith(input);
+
+    // Step numbering continues from the anchor's counter — no gap, no reuse of s3.
+    expect(new Set(thirdCycle.map(e => e['gen_ai.turn.id']))).toEqual(new Set(['turn-anchor']));
+    expect(new Set(thirdCycle.map(e => e['gen_ai.step.id']))).toEqual(new Set(['turn-anchor:s4']));
+  });
+
+  it('keeps an anchor indefinitely while there is capacity, however long the session idles', async () => {
+    const session = 'sess-anchor-idle';
+    const input = makeInput();
+
+    await appendHookJsonl(logDir, [
+      buildUserInputEntry({ turn: 'turn-idle-anchor', session, ts: 1_780_000_000_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-idle-anchor', step: 'turn-idle-anchor:s1', session, ts: 1_780_000_000_100 }),
+    ]);
+    await collectWith(input);
+    expect(anchorMap(input).size).toBe(1);
+
+    // A user can leave a session open for hours and come back to it. Nothing about
+    // elapsed time may drop the anchor, or the resumed turns would form a second trace.
+    await appendHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-resumed', step: 'turn-resumed:s1', session, ts: 1_780_050_000_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-resumed', step: 'turn-resumed:s1', session, ts: 1_780_050_000_100 }),
+    ]);
+    const resumed = await collectWith(input);
+
+    expect(new Set(resumed.map(e => e['gen_ai.turn.id']))).toEqual(new Set(['turn-idle-anchor']));
+    expect(new Set(resumed.map(e => e['gen_ai.step.id']))).toEqual(new Set(['turn-idle-anchor:s2']));
+  });
+
+  it('lets a forgotten anchor be evicted, after which a later orphan turn keeps its own ids', async () => {
+    const session = 'sess-anchor-evicted';
+    const input = makeInput();
+
+    await appendHookJsonl(logDir, [
+      buildUserInputEntry({ turn: 'turn-doomed-anchor', session, ts: 1_780_000_000_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-doomed-anchor', step: 'turn-doomed-anchor:s1', session, ts: 1_780_000_000_100 }),
+    ]);
+    await collectWith(input);
+    expect(anchorMap(input).get(session)).toBeDefined();
+
+    // Enough other sessions arrive to push the untouched anchor out of the map.
+    for (let i = 0; i < 500; i++) {
+      recordAnchor(input, `other-session-${i}`, { turnId: `turn-other-${i}`, maxStep: 1 });
+    }
+    expect(anchorMap(input).get(session)).toBeUndefined();
+
+    await appendHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-late-orphan', step: 'turn-late-orphan:s1', session, ts: 1_780_000_003_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-late-orphan', step: 'turn-late-orphan:s1', session, ts: 1_780_000_003_100 }),
+    ]);
+    const lateCycle = await collectWith(input);
+
+    expect(new Set(lateCycle.map(e => e['gen_ai.turn.id']))).toEqual(new Set(['turn-late-orphan']));
+    expect(new Set(lateCycle.map(e => e['gen_ai.step.id']))).toEqual(new Set(['turn-late-orphan:s1']));
+  });
+
+  it('never grows the anchor map past its capacity as sessions churn', async () => {
+    const input = makeInput();
+
+    for (let i = 0; i < 2000; i++) {
+      recordAnchor(input, `churn-session-${i}`, { turnId: `turn-${i}`, maxStep: 1 });
+      expect(anchorMap(input).size).toBeLessThanOrEqual(500);
+    }
+
+    expect(anchorMap(input).size).toBe(500);
+  });
+
+  it('keeps an anchor that is touched each cycle alive through heavy churn from other sessions', async () => {
+    const input = makeInput();
+    const live = 'sess-live';
+    recordAnchor(input, live, { turnId: 'turn-live', maxStep: 1 });
+
+    for (let round = 0; round < 10; round++) {
+      for (let i = 0; i < 200; i++) {
+        recordAnchor(input, `churn-${round}-${i}`, { turnId: 'turn-churn', maxStep: 1 });
+      }
+      // A live session is read every cycle, which promotes it to most-recently-used.
+      expect(anchorMap(input).get(live)).toEqual({ turnId: 'turn-live', maxStep: 1 });
+    }
+
+    expect(anchorMap(input).size).toBeLessThanOrEqual(500);
+    expect(anchorMap(input).get(live)).toEqual({ turnId: 'turn-live', maxStep: 1 });
+  });
+});
+
 // --- Test helpers ---
+
+function makeInput() {
+  return new QoderCnTraceInput({
+    stateStore: stateStore as any,
+    logDir,
+    pollIntervalMs: 60_000,
+  });
+}
+
+async function collectWith(input: any): Promise<AgentActivityEntry[]> {
+  return await input.collect() as AgentActivityEntry[];
+}
+
+function anchorMap(input: any): { size: number; get(key: string): unknown } {
+  return input.sessionAnchor;
+}
+
+function recordAnchor(input: any, sessionId: string, anchor: { turnId: string; maxStep: number }): void {
+  input.recordSessionAnchor(sessionId, anchor);
+}
+
+function buildUserInputEntry(opts: { turn: string; session: string; ts: number }): Record<string, unknown> {
+  return {
+    'event.id': `${opts.turn}-user-input`,
+    'event.name': 'other',
+    'gen_ai.session.id': opts.session,
+    'gen_ai.turn.id': opts.turn,
+    'gen_ai.agent.type': 'qoder-cn',
+    'gen_ai.input.messages_delta': JSON.stringify([{ role: 'user', content: 'hello' }]),
+    time_unix_nano: `${opts.ts}000000`,
+    observed_time_unix_nano: `${opts.ts}000000`,
+  };
+}
+
+async function appendHookJsonl(dir: string, records: Record<string, unknown>[]): Promise<void> {
+  const today = getTodayDateString();
+  const logFile = path.join(dir, `qoder-cn-${today}.jsonl`);
+  const lines = records.map(r => JSON.stringify(r)).join('\n') + '\n';
+  await fs.appendFile(logFile, lines, 'utf-8');
+}
 
 async function collectOnce(): Promise<AgentActivityEntry[]> {
   const input = new QoderCnTraceInput({

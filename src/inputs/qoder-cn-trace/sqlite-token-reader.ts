@@ -27,6 +27,12 @@ export interface SqliteTokenResult {
   matchedDbPath: string | null;
 }
 
+/**
+ * Unlike the cursor-based `readNewRows` in `BaseSqliteInput`, this query is scoped to a
+ * single `session_id`, so it is already bounded by one conversation rather than by total
+ * backlog. Do NOT add a `LIMIT` here: it would silently drop tokens from the tail of a
+ * long session, and enrichment needs every request in the session to order them.
+ */
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
   const dbPaths = resolveQoderCnDbPaths();
   if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
