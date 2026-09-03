@@ -1852,6 +1852,11 @@ function Stop-PilotService {
 # writes Enabled=false on the task definition and actually holds that relaunch;
 # Stop-ScheduledTask does not.
 #
+# Callers Disable BEFORE Stop-PilotService. Disable does not kill a running
+# instance, so Stop is still required, but Stop-Process -Force while the task
+# is still Enabled can arm RestartCount (collector interval is 1 minute).
+# Closing the definition first means a stop cannot be scheduled as a restart.
+#
 # Disable is a write, so it can fail with Access is denied: a -RunLevel Limited
 # task grants its own principal only Read, Synchronize, and an elevated first
 # install leaves the tasks owned by Administrators (same ACL that makes uninstall
@@ -1860,7 +1865,7 @@ function Stop-PilotService {
 #
 # Enable lives in finally and is idempotent. Start stays on the success path: a
 # failed postinstall must not launch a collector whose hooks were never written.
-# Keep this block byte-identical across the three .ps1 installers.
+# Keep this block byte-identical across every .ps1 installer that carries it.
 $script:PILOT_HELD_TASK_NAMES = @()
 
 function Get-PilotDeployTaskNames {
@@ -2555,8 +2560,8 @@ function Cmd-Install {
     }
 
     try {
-        Stop-PilotService
         Disable-PilotScheduledTasksDuringDeploy
+        Stop-PilotService
 
         Download-AndExtract
         Probe-Agents
@@ -2639,9 +2644,9 @@ function Cmd-Upgrade {
         Write-Host ""
 
         Msg "==> 停止服务..." "==> Stopping service..."
+        Disable-PilotScheduledTasksDuringDeploy
         Stop-PilotService
         Write-Host ""
-        Disable-PilotScheduledTasksDuringDeploy
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command

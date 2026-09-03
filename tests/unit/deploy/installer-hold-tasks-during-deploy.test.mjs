@@ -4,8 +4,14 @@
 // gcOldVersions deletes that directory. Disable-ScheduledTask is a write to the task
 // definition, so it actually holds the watchdog for the rest of the deploy.
 //
+// Disable must run BEFORE Stop: Disable does not kill a running instance, but
+// Stop-Process -Force while the task is still Enabled can arm RestartCount
+// (collector interval is 1 minute). Unix `loongsuite-pilot stop` already unloads
+// launchd / disables systemd first.
+//
 // Only the .ps1 installers are pinned here: the relaunch is a Task Scheduler artefact,
 // and the .sh installers unload launchd / disable systemd in `loongsuite-pilot stop`.
+// installer-opensource.ps1 is ratcheted on the GitHub PR, not on the internal one.
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -41,6 +47,15 @@ const functionBody = (text, name) => {
 
 const present = PS1_INSTALLERS.filter(existsSync);
 const patched = present.filter(f => blockOf(read(f), TAG));
+// Identity and Disable-before-Stop are pinned on the installers this tree
+// owns. The internal repo updates installer{,-inner}.ps1 here and sends
+// installer-opensource.ps1 to GitHub as its own PR; the GitHub tree has
+// only the opensource file. Mixing them in one identity set fails until
+// opensource sync lands the GitHub copy.
+const withBlock = (files) => files.filter(existsSync).filter(f => blockOf(read(f), TAG));
+const PINNED = withBlock(INTERNAL_PS1).length > 0
+  ? withBlock(INTERNAL_PS1)
+  : withBlock([OPENSOURCE_PS1]);
 
 describe('installers disable scheduled tasks for the duration of a deploy', () => {
   it('defines the hold/restore helpers', () => {
@@ -57,8 +72,9 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     }
   });
 
-  it('the block is byte-identical across the patched .ps1 installers', () => {
-    const blocks = patched.map(f => blockOf(read(f), TAG));
+  it('the block is byte-identical across the pinned .ps1 installers', () => {
+    expect(PINNED.length).toBeGreaterThanOrEqual(1);
+    const blocks = PINNED.map(f => blockOf(read(f), TAG));
     expect(blocks.filter(b => !b)).toEqual([]);
     expect(new Set(blocks).size).toBe(1);
   });
@@ -67,6 +83,11 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     const code = codeOf(blockOf(read(patched[0]), TAG));
     expect(code).toMatch(/LoongsuitePilot-\$tag/);
     expect(code).toMatch(/LoongsuitePilotUpdater-\$tag/);
+  });
+
+  it('the shared block tells callers to Disable before Stop', () => {
+    const block = blockOf(read(PINNED[0]), TAG);
+    expect(block).toMatch(/Disable BEFORE Stop-PilotService/);
   });
 
   it('does not abort the install when Disable is denied', () => {
@@ -97,8 +118,8 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     expect(enableFn).toMatch(/PILOT_HELD_TASK_NAMES = @\(\$stillHeld\)/);
   });
 
-  it('Cmd-Install stops, then disables, then deploys', () => {
-    for (const file of patched) {
+  it('Cmd-Install disables, then stops, then deploys', () => {
+    for (const file of PINNED) {
       const body = functionBody(read(file), 'Cmd-Install');
       const tryAt = body.indexOf('try {');
       const stopAt = body.indexOf('Stop-PilotService');
@@ -108,8 +129,8 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
       expect(stopAt, `${file}: Stop-PilotService missing from Cmd-Install`).toBeGreaterThan(-1);
       expect(disableAt, `${file}: Disable missing from Cmd-Install`).toBeGreaterThan(-1);
       expect(deployAt, `${file}: Deploy-Package missing from Cmd-Install`).toBeGreaterThan(-1);
-      expect(stopAt).toBeLessThan(disableAt);
-      expect(disableAt).toBeLessThan(deployAt);
+      expect(disableAt, `${file}: Disable must precede Stop`).toBeLessThan(stopAt);
+      expect(stopAt).toBeLessThan(deployAt);
       // Ctrl+C during Disable must still hit Enable in finally.
       expect(tryAt, `${file}: Cmd-Install try missing`).toBeGreaterThan(-1);
       expect(finallyAt, `${file}: Cmd-Install finally missing`).toBeGreaterThan(-1);
@@ -118,8 +139,8 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     }
   });
 
-  it('Cmd-Upgrade stops, then disables, then deploys', () => {
-    for (const file of patched) {
+  it('Cmd-Upgrade disables, then stops, then deploys', () => {
+    for (const file of PINNED) {
       const body = functionBody(read(file), 'Cmd-Upgrade');
       const stopAt = body.indexOf('Stop-PilotService');
       const disableAt = body.indexOf('Disable-PilotScheduledTasksDuringDeploy');
@@ -127,8 +148,8 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
       expect(stopAt, `${file}: Stop-PilotService missing from Cmd-Upgrade`).toBeGreaterThan(-1);
       expect(disableAt, `${file}: Disable missing from Cmd-Upgrade`).toBeGreaterThan(-1);
       expect(deployAt, `${file}: Deploy-Package missing from Cmd-Upgrade`).toBeGreaterThan(-1);
-      expect(stopAt).toBeLessThan(disableAt);
-      expect(disableAt).toBeLessThan(deployAt);
+      expect(disableAt, `${file}: Disable must precede Stop`).toBeLessThan(stopAt);
+      expect(stopAt).toBeLessThan(deployAt);
     }
   });
 
@@ -137,7 +158,7 @@ describe('installers disable scheduled tasks for the duration of a deploy', () =
     // finally must also Enable so Ctrl+C / exit 1 cannot leave the tasks disabled.
     // Start itself stays on the success path -- a failed postinstall must not launch
     // a collector whose hooks were never written.
-    for (const file of patched) {
+    for (const file of PINNED) {
       for (const fn of ['Cmd-Install', 'Cmd-Upgrade']) {
         const body = functionBody(read(file), fn);
         const enables = [];
