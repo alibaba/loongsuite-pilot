@@ -1,6 +1,5 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Dirent } from 'node:fs';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { createLogger } from '../../utils/logger.js';
 
@@ -21,6 +20,13 @@ const warnedScans = new Map<string, string>();
 // The sessions root is shared by every session, so its failure is reported on
 // the transition into the failure instead of once per session per cycle.
 let rootUnreadableReported = false;
+// A tail that never completed is reported once per file per session, so a file
+// left permanently truncated by a crashed writer does not log every cycle.
+const warnedTruncatedTails = new Map<string, string>();
+// A directory or file we could not inspect is reported once per path until it
+// works again. Keyed by path because the failure is a property of that path, not
+// of the session that happened to look at it.
+const warnedPaths = new Set<string>();
 
 // The CLI appends to these files while pilot is reading them, so a read can lose
 // a race that the next attempt wins: a partially flushed file, a momentary
@@ -42,6 +48,33 @@ function delay(ms: number): Promise<void> {
 // absence as a failure.
 function isMissingPath(err: unknown): boolean {
   return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+// Carries the content that was read so an exhausted retry can still use the lines
+// that did parse instead of discarding the whole file.
+class IncompleteTailLineError extends Error {
+  constructor(readonly content: string) {
+    super('segment file ends mid-record');
+  }
+}
+
+// A read can land between the first and the last byte of a record the CLI is
+// still appending, leaving a prefix of real JSON at the end of the file. Only the
+// final non-empty line can be in that state: a parse failure anywhere earlier is
+// a genuinely corrupt line that re-reading will not repair, so it keeps being
+// skipped by the parse loop. An absent trailing newline is not evidence of
+// anything - a completed write often has none.
+function hasIncompleteTailLine(content: string): boolean {
+  const trimmed = content.trimEnd();
+  if (!trimmed) return false;
+  const lastBreak = trimmed.lastIndexOf('\n');
+  const tail = lastBreak === -1 ? trimmed : trimmed.slice(lastBreak + 1);
+  try {
+    JSON.parse(tail);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 // Returns a discriminated result rather than throwing or returning undefined so
@@ -111,14 +144,39 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   // Collect all events in order to properly associate tool.execution.finished with LLM calls
   const allEvents: Array<{ type: string; ts: number; requestId?: string; loopId?: string; data?: Record<string, unknown> }> = [];
 
+  // Only the file still being appended to can be caught mid-record. An older
+  // file that ends mid-record was left that way by a writer that is gone, and no
+  // amount of retrying will complete it, so it is not worth a retry window.
+  const newestFile = files[files.length - 1];
+
   for (const filePath of files) {
-    const read = await readWithRetry(() => fs.readFile(filePath, 'utf-8'));
+    const read = await readWithRetry(async () => {
+      const text = await fs.readFile(filePath, 'utf-8');
+      // Treated as a lost race rather than a bad line: the next attempt usually
+      // sees the flushed remainder, and this cycle is the only chance to recover
+      // that request because the hook offset has already advanced.
+      if (filePath === newestFile && hasIncompleteTailLine(text)) {
+        throw new IncompleteTailLineError(text);
+      }
+      return text;
+    });
+
+    let content: string;
     if ('error' in read) {
       complete = false;
-      warnUnreadableOnce(sessionId, scan.fingerprint, filePath, read.error);
-      continue;
+      if (read.error instanceof IncompleteTailLineError) {
+        // The remainder never arrived, so the writer stopped mid-record. Use the
+        // lines that did parse: dropping the file would lose far more than the
+        // one truncated line, leaving this worse than not retrying at all.
+        content = read.error.content;
+        warnTruncatedTailOnce(sessionId, filePath);
+      } else {
+        warnUnreadableOnce(sessionId, scan.fingerprint, filePath, read.error);
+        continue;
+      }
+    } else {
+      content = read.value;
     }
-    const content = read.value;
 
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
@@ -230,6 +288,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     if (key !== sessionId && now - entry.ts > CACHE_IDLE_MS) {
       sessionCache.delete(key);
       warnedScans.delete(key);
+      warnedTruncatedTails.delete(key);
     }
   }
   if (sessionCache.size >= CACHE_MAX_SIZE && !sessionCache.has(sessionId)) {
@@ -307,6 +366,20 @@ function warnUnreadableOnce(sessionId: string, fingerprint: string, filePath: st
   });
 }
 
+function warnTruncatedTailOnce(sessionId: string, filePath: string): void {
+  if (warnedTruncatedTails.get(sessionId) === filePath) return;
+  warnedTruncatedTails.set(sessionId, filePath);
+  logger.warn('segment file still ends mid-record after retrying; using the records that parsed', {
+    sessionId, filePath,
+  });
+}
+
+function warnPathOnce(targetPath: string, err: unknown, message: string): void {
+  if (warnedPaths.has(targetPath)) return;
+  warnedPaths.add(targetPath);
+  logger.warn(message, { path: targetPath, error: String(err) });
+}
+
 async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {
   const files: string[] = [];
   const root = await readWithRetry(() => fs.readdir(getSessionsDir(), { withFileTypes: true }));
@@ -330,15 +403,20 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
   for (const cwdDir of cwdDirs) {
     if (!cwdDir.isDirectory()) continue;
     const segDir = path.join(getSessionsDir(), cwdDir.name, sessionId, 'segments');
-    let entries: Dirent[];
-    try {
-      // Most cwd directories hold other sessions, so a miss here is the norm and
-      // must stay silent rather than being retried as a transient failure.
-      entries = await fs.readdir(segDir, { withFileTypes: true });
-    } catch {
+    // Most cwd directories hold other sessions, so an absent segments directory
+    // is the norm and stays silent - readWithRetry short-circuits ENOENT, so
+    // those misses cost no backoff. Any other errno is a lost race, and if it
+    // hits the one cwd that does hold this session, every turn of the session
+    // silently falls back to the hook clock.
+    const listed = await readWithRetry(() => fs.readdir(segDir, { withFileTypes: true }));
+    if ('error' in listed) {
+      if (!isMissingPath(listed.error)) {
+        warnPathOnce(segDir, listed.error, 'segment directory unlistable; this session may look segment-less');
+      }
       continue;
     }
-    for (const entry of entries) {
+    warnedPaths.delete(segDir);
+    for (const entry of listed.value) {
       if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         files.push(path.join(segDir, entry.name));
       }
@@ -351,12 +429,19 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
   // happens to land on the same size still moves mtime. A file that disappeared
   // between readdir and stat is dropped from both lists so they stay in step.
   const stamps = await Promise.all(files.map(async filePath => {
-    try {
-      const stat = await fs.stat(filePath);
-      return `${filePath}:${stat.size}:${stat.mtimeMs}`;
-    } catch {
+    const stat = await readWithRetry(() => fs.stat(filePath));
+    if ('error' in stat) {
+      // A file rotated away between readdir and stat is genuinely gone. Any other
+      // errno already had its retries and is a lost race, so it is recorded
+      // rather than silently shrinking this scan towards an empty result that
+      // cannot be told apart from a session with no segments at all.
+      if (!isMissingPath(stat.error)) {
+        warnPathOnce(filePath, stat.error, 'segment file could not be stat-ed; excluded from this scan');
+      }
       return undefined;
     }
+    warnedPaths.delete(filePath);
+    return `${filePath}:${stat.value.size}:${stat.value.mtimeMs}`;
   }));
 
   const readable: string[] = [];
