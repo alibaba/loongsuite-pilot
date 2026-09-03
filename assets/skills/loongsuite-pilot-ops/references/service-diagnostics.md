@@ -71,7 +71,7 @@ pilot 注册多条 Input，每个 Input 对应一条数据采集链路。部分 
 
 | Input ID | agentType | 数据源 | 触发条件 |
 |----------|-----------|-------|---------|
-| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合（Qoder IDE、Qoder CLI、JetBrains 均由它采集） | `~/.loongsuite-pilot/logs/qoder/history/`、Qoder 本地数据或 `~/.qoder/shared_client/cache/db/local.db` 可用 |
+| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合（Qoder IDE、Qoder CLI、JetBrains 均由它采集） | `~/.qoder` 目录存在（`checkAvailability()` 只检查这一项；hook 目录与 SQLite 是否可读不影响注册） |
 | `qoder-cn` | `qoder-cn` | Qoder CN IDE history + ai_tracker | QoderCN 应用数据根目录存在，且 `qoder-cn-trace` 未启用 |
 | `qoder-cn-sqlite` | `qoder-cn` | Qoder CN SQLite token usage | QoderCN `SharedClientCache/cache/db/local.db` 存在，且 `qoder-cn-trace` 未启用 |
 | `qoder-cn-trace` | `qoder-cn` | Qoder CN hook / SQLite trace 聚合 | QoderCN history 或本地数据可用 |

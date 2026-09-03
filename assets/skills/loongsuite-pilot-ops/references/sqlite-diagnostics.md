@@ -4,7 +4,8 @@
 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/sqlite-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 通过 SQLite 轮询采集数据的通用链路排查**。
-大多数 SQLite Input 共享 `BaseSqliteInput` 的 `rowid` 增量机制；Qoder Work / Qoder Work CN 使用 `updated_at` 时间游标，但 DB 可访问性、表结构、游标状态与服务消费排查流程一致。
+`qoder-cn-sqlite` 使用 `BaseSqliteInput` 的 `rowid` 增量机制；Qoder Work / Qoder Work CN 使用 `updated_at` 时间游标，但 DB 可访问性、表结构、游标状态与服务消费排查流程一致。
+`qoder-trace` 不属于上述任何一类：它按 session id 查询 SQLite，**没有任何 SQLite 游标**，第 3 步整节对它不适用——详见注册表下方说明。
 Qoder for JetBrains 的 token 数据位于 `~/.qoder/shared_client/cache/db/local.db`，由 `qoder-trace` 读取并标记为 `qoder-idea`，不单独注册 `*-sqlite` Input。
 
 ---
@@ -22,7 +23,7 @@ Flusher → SLS / JSONL / HTTP
 ```
 
 关键事实：
-- Qoder / Qoder CN 以 SQLite 内置 `rowid` 为增量游标，只读新增行
+- Qoder CN 以 SQLite 内置 `rowid` 为增量游标，只读新增行
 - Qoder Work / Qoder Work CN 以 `messages.updated_at` 为增量游标，只读新增消息
 - DB 以 `OPEN_READONLY` 打开，**不会影响**目标应用的正常读写
 - 首次启动时自动取当前最大游标作为基线，**只采启动后新产生的数据**
@@ -42,7 +43,7 @@ Flusher → SLS / JSONL / HTTP
 | `qoder-work-sqlite` | `qoder-work` | Qoder Work | `~/Library/Application Support/QoderWork/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
 | `qoder-work-cn-sqlite` | `qoder-work-cn` | Qoder Work CN | `~/Library/Application Support/QoderWork CN/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork CN/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
 
-> `qoder-trace` 不是纯 SQLite Input：它把 `chat_message.token_info` 作为 token enricher 合入 hook/segment 链路，所以下方步骤中“游标不前进”一类判断对它适用但入口在 `qoder-trace` 名下。
+> `qoder-trace` 不是 SQLite Input，它只把 SQLite 当作 token enricher：按 `WHERE cm.session_id = ?` 取该 session 的 `chat_message.token_info`，合入 hook / segment 链路。因此它**没有 `lastRowId`，也没有任何 SQLite 游标或基线**——第 3 步「游标状态检查」整节对它不适用。它在 `input-state.json` 中的条目记录的是 hook JSONL 的读取位置（`lastFile` / `lastOffset`），与 SQLite 无关。若怀疑 Qoder 的 token 数据缺失，排查方向是 hook JSONL 与 segment 链路，而不是 SQLite 游标。
 
 > `qoder-work-sqlite` / `qoder-work-cn-sqlite` 使用 `input-state.json` 的 `extra.lastUpdatedAt` 作为时间游标，不使用 SQLite `rowid`。后续新增 SQLite Input 时，在此表追加一行即可，排查流程不变。
 
@@ -118,7 +119,9 @@ sqlite3 "$DB" "
 
 ## 第 3 步：游标状态检查
 
-SQLite Input 在 `input-state.json` 中记录增量游标：Qoder / Qoder CN 使用 `lastRowId`，Qoder Work / Qoder Work CN 使用 `extra.lastUpdatedAt`。
+SQLite Input 在 `input-state.json` 中记录增量游标：Qoder CN 使用 `lastRowId`，Qoder Work / Qoder Work CN 使用 `extra.lastUpdatedAt`。
+
+> **本节不适用于 `qoder-trace`。** 它没有 SQLite 游标；其 `input-state.json` 条目是 hook JSONL 的 `lastFile` / `lastOffset`。
 
 ```bash
 # 将 <INPUT_ID> 替换为具体 Input ID
@@ -135,6 +138,8 @@ pilot 首次启动时，SQLite Input 会读取当前 `MAX(rowid)` 作为基线�
 - 只有启动后新产生的行才会被读取
 
 若需要重置基线（例如升级目标应用后想从新位置开始），先让用户确认可以短暂停服，然后备份并原子替换 state 文件：
+
+> ⚠️ **不要对 `qoder-trace` 执行此操作。** 它的 state 条目不是 SQLite 基线，而是 hook JSONL 的 `lastFile` / `lastOffset`。删除该条目不会重置任何 SQLite 位置，只会让 hook 历史 checkpoint 重新建立基线，其效果与预期完全不同。
 
 ```bash
 ~/.local/bin/loongsuite-pilot stop
@@ -159,6 +164,8 @@ PY
 ```
 
 ### 3.2 游标卡住不前进
+
+> 仅适用于 `qoder-cn-sqlite`（`rowid`）与 Qoder Work / Qoder Work CN（`extra.lastUpdatedAt`）。`qoder-trace` 没有游标，不存在「卡住」这一现象。
 
 ```bash
 # 对比游标位置与 DB 中最新 rowid（使用注册表中的过滤条件）
@@ -250,7 +257,7 @@ grep -i 'sqlite\|SQLITE_BUSY\|SQLITE_LOCKED\|failed to read SQLite' \
 
 | 文件 / 目录 | 作用 |
 |---|---|
-| `~/.loongsuite-pilot/logs/input-state.json` | 所有 SQLite Input 的 `lastRowId` 游标 |
+| `~/.loongsuite-pilot/logs/input-state.json` | 各 Input 的读取位置：`qoder-cn-sqlite` 为 `lastRowId`，Qoder Work 系列为 `extra.lastUpdatedAt`，`qoder-trace` 为 hook JSONL 的 `lastFile` / `lastOffset` |
 | `~/.loongsuite-pilot/logs/output/` | 各 agentType 的规范化输出 JSONL |
 | `~/.loongsuite-pilot/config.json` | `listeners["<INPUT_ID>"]` 配置（enabled / pollInterval） |
 | `~/.loongsuite-pilot/logs/loongsuite-pilot-service.log` | 服务日志，搜索 Input ID 或 `failed to read SQLite` |
@@ -266,8 +273,8 @@ grep -i 'sqlite\|SQLITE_BUSY\|SQLITE_LOCKED\|failed to read SQLite' \
 | DB 文件不存在 | 目标应用未安装/未启动过/版本过低。升级到最新稳定版 |
 | 目标表或关键列不存在 | 目标应用版本过低，DB schema 尚未引入。升级目标应用 |
 | 有关键列但满足过滤条件的行数为 0 | 应用写入了空值或非法格式。升级目标应用 |
-| `lastRowId` 游标不前进 | 1) pilot 服务未运行；2) Input 未注册（被禁用或 DB 文件不可达）；3) DB 后续无新增行 |
-| 首次安装后看不到历史数据 | 设计如此——首次启动从当前 `MAX(rowid)` 开始，不补采历史。若需重采，删除 `input-state.json` 中对应 Input 条目后重启 |
+| `lastRowId` 游标不前进 | 1) pilot 服务未运行；2) Input 未注册（被禁用或 DB 文件不可达）；3) DB 后续无新增行。**注意 `qoder-trace` 没有此游标**，Qoder token 缺失应查 hook JSONL 与 segment 链路 |
+| 首次安装后看不到历史数据 | 设计如此——首次启动从当前 `MAX(rowid)` 开始，不补采历史。若需重采，删除 `input-state.json` 中对应 Input 条目后重启。**`qoder-trace` 除外**：删除它的条目重置的是 hook JSONL 读取位置，不是 SQLite 基线 |
 | `SQLITE_BUSY` / `SQLITE_LOCKED` 错误 | 第三方工具以独占写模式占用了 DB。关闭后 pilot 自动恢复 |
 | Linux 上路径不匹配 | 确保 pilot 服务进程和目标应用使用相同的 `XDG_CONFIG_HOME` 值 |
 | `row transform failed` 日志 | 某行数据格式异常。不影响后续行的采集（跳过并继续） |
