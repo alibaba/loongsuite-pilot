@@ -79,6 +79,15 @@ export function needsCliSegmentFallback(entries: AgentActivityEntry[]): boolean 
   return false;
 }
 
+/** Request ids the current Hook batch expects to find in the segment index. */
+export function collectCliExpectedRequestIds(entries: AgentActivityEntry[]): string[] {
+  const ids: string[] = [];
+  for (const group of buildResponseGroups(entries).values()) {
+    if (group.clientRequestId) ids.push(group.clientRequestId);
+  }
+  return ids;
+}
+
 /** Fill only gaps that remain after Hook and intercept enrichment. */
 export function enrichCliFromSegments(
   entries: AgentActivityEntry[],

@@ -16,6 +16,7 @@ import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import {
+  collectCliExpectedRequestIds,
   enrichCliFromSegments,
   enrichCliPrimary,
   enrichIdeTurn,
@@ -151,8 +152,11 @@ export class QoderTraceInput extends BaseInput {
     return readInterceptData();
   }
 
-  protected readCliSegments(sessionId: string): ReturnType<typeof readSegmentTokensForSession> {
-    return readSegmentTokensForSession(sessionId);
+  protected readCliSegments(
+    sessionId: string,
+    expectedRequestIds: readonly string[],
+  ): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId, expectedRequestIds);
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -169,7 +173,7 @@ export class QoderTraceInput extends BaseInput {
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
     const cliTurns: AgentActivityEntry[][] = [];
-    const segmentReads = new Map<string, ReturnType<typeof readSegmentTokensForSession>>();
+    const cliFallbackGroups = new Map<string, AgentActivityEntry[][]>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
@@ -182,18 +186,26 @@ export class QoderTraceInput extends BaseInput {
           interceptData.tokens,
         );
         if (needsCliSegmentFallback(turnEntries)) {
-          let read = segmentReads.get(sessionId);
-          if (!read) {
-            read = this.readCliSegments(sessionId);
-            segmentReads.set(sessionId, read);
-          }
-          enrichCliFromSegments(turnEntries, await read);
+          const fallbackTurns = cliFallbackGroups.get(sessionId) ?? [];
+          fallbackTurns.push(turnEntries);
+          cliFallbackGroups.set(sessionId, fallbackTurns);
         }
         cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
         ideSessionGroups.set(sessionId, sessionEntries);
+      }
+    }
+
+    // Read once per session after seeing the whole Hook batch. The expected-id
+    // list lets the reader spend one short retry only when this batch's exact
+    // segment records are not visible yet.
+    for (const [sessionId, fallbackTurns] of cliFallbackGroups) {
+      const expectedRequestIds = fallbackTurns.flatMap(collectCliExpectedRequestIds);
+      const segments = await this.readCliSegments(sessionId, expectedRequestIds);
+      for (const turnEntries of fallbackTurns) {
+        enrichCliFromSegments(turnEntries, segments);
       }
     }
 

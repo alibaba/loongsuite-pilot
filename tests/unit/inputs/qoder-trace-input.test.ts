@@ -1311,13 +1311,18 @@ describe('QoderTraceInput conditional segment reads', () => {
       });
       class TestInput extends QoderTraceInput {
         segmentReadCount = 0;
+        expectedRequestIds: string[] = [];
 
         protected override async readCliIntercept(): Promise<{ tokens: []; systemPrompt: null }> {
           return { tokens: [], systemPrompt: null };
         }
 
-        protected override async readCliSegments(): Promise<SegmentTokenData[]> {
+        protected override async readCliSegments(
+          _sessionId: string,
+          expectedRequestIds: readonly string[],
+        ): Promise<SegmentTokenData[]> {
           this.segmentReadCount += 1;
+          this.expectedRequestIds = [...expectedRequestIds];
           return [
             makeSegment({
               requestId: 'missing-request-id',
@@ -1386,6 +1391,10 @@ describe('QoderTraceInput conditional segment reads', () => {
 
       const second = await (input as any).collect() as AgentActivityEntry[];
       expect(input.segmentReadCount).toBe(1);
+      expect(input.expectedRequestIds).toEqual([
+        'missing-request-id',
+        'second-missing-request-id',
+      ]);
       expect(second.find(entry => entry['event.id'] === 'missing-response'))
         .toMatchObject({
           'gen_ai.usage.input_tokens': 200,

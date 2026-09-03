@@ -7,6 +7,7 @@ import { createLogger } from '../../utils/logger.js';
 const logger = createLogger('SegmentTokenReader');
 
 const READ_CHUNK_SIZE = 1024 * 1024;
+const EXPECTED_ID_RETRY_DELAY_MS = 25;
 const SESSION_IDLE_MS = 60_000;
 const SESSION_MAX_SIZE = 50;
 
@@ -45,6 +46,13 @@ interface SegmentFileSnapshot {
 interface SegmentFileScan {
   files: SegmentFileSnapshot[];
   complete: boolean;
+  retryable: boolean;
+  stableFailure: boolean;
+}
+
+interface SegmentReadAttempt {
+  data: SegmentTokenData[];
+  retryable: boolean;
 }
 
 const sessionStates = new Map<string, SegmentSessionState>();
@@ -71,13 +79,39 @@ export interface SegmentTokenData {
  * requested session once; persisting offsets without the parsed events would
  * make all records before those offsets impossible to match.
  */
-export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
+export async function readSegmentTokensForSession(
+  sessionId: string,
+  expectedRequestIds: readonly string[] = [],
+): Promise<SegmentTokenData[]> {
+  const first = await readSegmentTokensOnce(sessionId);
+  let missing = missingExpectedRequestIds(expectedRequestIds, first.data);
+  if (missing.length === 0 || !first.retryable) return first.data;
+
+  // The Hook offset is committed before enrichment, so the current batch is
+  // the last opportunity to attach this segment to its Hook entries. Retry
+  // once only when an exact request id proves the first snapshot is incomplete.
+  await delay(EXPECTED_ID_RETRY_DELAY_MS);
+  const second = await readSegmentTokensOnce(sessionId);
+  missing = missingExpectedRequestIds(expectedRequestIds, second.data);
+  if (missing.length > 0) {
+    logger.warn('expected segment requests remain unavailable after one bounded retry', {
+      sessionId,
+      missingRequestIds: [...new Set(missing)],
+      missingCount: missing.length,
+    });
+  }
+  return second.data;
+}
+
+async function readSegmentTokensOnce(sessionId: string): Promise<SegmentReadAttempt> {
   const now = Date.now();
   evictIdleSessions(sessionId, now);
 
   const scan = await findSegmentFilesForSession(sessionId);
   let state = sessionStates.get(sessionId);
-  if (!state && scan.files.length === 0) return [];
+  if (!state && scan.files.length === 0) {
+    return { data: [], retryable: scan.retryable && !scan.stableFailure };
+  }
 
   if (!state) {
     evictOldestSessionIfFull();
@@ -87,6 +121,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   state.lastAccessMs = now;
 
   let changed = false;
+  let stableFailure = scan.stableFailure;
   const livePaths = new Set(scan.files.map(file => file.filePath));
 
   for (const file of scan.files) {
@@ -108,7 +143,9 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     }
 
     if (file.size > fileState.committedOffset) {
-      changed = await readAppendedEvents(file, fileState, sessionId) || changed;
+      const read = await readAppendedEvents(file, fileState, sessionId);
+      changed = read.changed || changed;
+      stableFailure = read.stableFailure || stableFailure;
     }
   }
 
@@ -125,14 +162,14 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
   }
 
   if (changed) state.data = buildSegmentData(state.files);
-  return state.data;
+  return { data: state.data, retryable: scan.retryable && !stableFailure };
 }
 
 async function readAppendedEvents(
   snapshot: SegmentFileSnapshot,
   state: SegmentFileState,
   sessionId: string,
-): Promise<boolean> {
+): Promise<{ changed: boolean; stableFailure: boolean }> {
   let handle: fs.FileHandle;
   try {
     handle = await fs.open(snapshot.filePath, 'r');
@@ -142,7 +179,7 @@ async function readAppendedEvents(
       filePath: snapshot.filePath,
       error: String(err),
     });
-    return false;
+    return { changed: false, stableFailure: !isTransientSegmentError(err) };
   }
 
   const startOffset = state.committedOffset;
@@ -151,6 +188,7 @@ async function readAppendedEvents(
   let pending = Buffer.alloc(0);
   let pendingStartOffset = startOffset;
   const appendedEvents: SegmentEvent[] = [];
+  let stableFailure = false;
 
   try {
     while (position < snapshot.size) {
@@ -209,6 +247,7 @@ async function readAppendedEvents(
       pendingStartOffset = dataStartOffset + cursor;
     }
   } catch (err) {
+    stableFailure = !isTransientSegmentError(err);
     logger.info('segment read interrupted; keeping the unread suffix for the next lookup', {
       sessionId,
       filePath: snapshot.filePath,
@@ -230,10 +269,10 @@ async function readAppendedEvents(
     }
   }
 
-  if (committedOffset === startOffset) return false;
+  if (committedOffset === startOffset) return { changed: false, stableFailure };
   state.events.push(...appendedEvents);
   state.committedOffset = committedOffset;
-  return true;
+  return { changed: true, stableFailure };
 }
 
 function toSegmentEvent(record: Record<string, unknown>): SegmentEvent | null {
@@ -355,20 +394,30 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
         error: String(err),
       });
     }
-    return { files: [], complete: isMissingPath(err) };
+    return {
+      files: [],
+      complete: isMissingPath(err),
+      retryable: isTransientSegmentError(err),
+      stableFailure: !isMissingPath(err) && !isTransientSegmentError(err),
+    };
   }
 
   const files: SegmentFileSnapshot[] = [];
   let complete = true;
+  let retryable = false;
+  let stableFailure = false;
   for (const cwdDir of cwdDirs) {
     if (!cwdDir.isDirectory()) continue;
     const segDir = path.join(getSessionsDir(), cwdDir.name, sessionId, 'segments');
     let entries: Dirent[];
     try {
       entries = await fs.readdir(segDir, { withFileTypes: true });
+      retryable = true;
     } catch (err) {
       if (isMissingPath(err)) continue;
       complete = false;
+      if (isTransientSegmentError(err)) retryable = true;
+      else stableFailure = true;
       logger.info('segment directory unavailable; keeping any previously parsed data', {
         sessionId,
         dir: segDir,
@@ -391,6 +440,8 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
       } catch (err) {
         if (!isMissingPath(err)) {
           complete = false;
+          if (isTransientSegmentError(err)) retryable = true;
+          else stableFailure = true;
           logger.info('segment file could not be inspected; keeping any previously parsed prefix', {
             sessionId,
             filePath,
@@ -402,7 +453,30 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
   }
 
   files.sort((a, b) => a.filePath.localeCompare(b.filePath));
-  return { files, complete };
+  return { files, complete, retryable, stableFailure };
+}
+
+function missingExpectedRequestIds(
+  expectedRequestIds: readonly string[],
+  data: readonly SegmentTokenData[],
+): string[] {
+  if (expectedRequestIds.length === 0) return [];
+  const available = new Map<string, number>();
+  for (const segment of data) {
+    available.set(segment.requestId, (available.get(segment.requestId) ?? 0) + 1);
+  }
+
+  const missing: string[] = [];
+  for (const requestId of expectedRequestIds) {
+    const count = available.get(requestId) ?? 0;
+    if (count > 0) available.set(requestId, count - 1);
+    else missing.push(requestId);
+  }
+  return missing;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function evictIdleSessions(currentSessionId: string, now: number): void {
@@ -428,6 +502,16 @@ function evictOldestSessionIfFull(): void {
 
 function isMissingPath(err: unknown): boolean {
   return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+}
+
+function isTransientSegmentError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  return code === 'EAGAIN'
+    || code === 'EBUSY'
+    || code === 'EINTR'
+    || code === 'EMFILE'
+    || code === 'ENFILE'
+    || code === 'ESTALE';
 }
 
 function parseTs(value: unknown): number {
