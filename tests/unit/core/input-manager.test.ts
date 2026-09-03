@@ -65,6 +65,65 @@ describe('InputManager', () => {
   });
 
   describe('registerInput and event dispatch (T030)', () => {
+    it('counts raw input independently from normalized entry emission', () => {
+      const input = new StubInput('raw-input');
+      manager.registerInput(input as any);
+
+      input.emit('input-runtime-delta', {
+        sourceKind: 'primary',
+        rawReadCalls: 2,
+        rawReadBytes: 180,
+        rawInRecords: 3,
+        rawInBytes: 120,
+        rawInMaxBatchBytes: 80,
+        rawInMaxRecordBytes: 50,
+        rawBacklogBytesMax: 120,
+        parseSuccessRecords: 2,
+        parseFailedRecords: 1,
+        readDurationMs: 1.5,
+        processDurationMs: 2.5,
+      });
+      input.emit('input-runtime-delta', {
+        sourceKind: 'primary',
+        rawReadCalls: 1,
+        rawReadBytes: 40,
+        rawInRecords: 2,
+        rawInBytes: 40,
+        rawInMaxBatchBytes: 40,
+        rawInMaxRecordBytes: 20,
+        rawBacklogBytesMax: 40,
+        parseSuccessRecords: 2,
+        parseFailedRecords: 0,
+        readDurationMs: 0.5,
+        processDurationMs: 1.5,
+      });
+
+      expect(manager.getInputCounters().get(input.id)).toMatchObject({
+        rawReadCalls: 3,
+        rawReadBytes: 220,
+        rawInRecords: 5,
+        rawInBytes: 160,
+        rawInMaxBatchBytes: 80,
+        rawInMaxRecordBytes: 50,
+        rawBacklogBytesMax: 120,
+        parseSuccessRecords: 4,
+        parseFailedRecords: 1,
+        readDurationMs: 2,
+        processDurationMs: 4,
+        inEvents: 0,
+        inBytes: 0,
+      });
+
+      const firstWindow = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(firstWindow.rawInMaxBatchBytes).toBe(80);
+      expect(firstWindow.rawBacklogBytesMax).toBe(120);
+      const nextWindow = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(nextWindow.rawInMaxBatchBytes).toBe(0);
+      expect(nextWindow.rawInMaxRecordBytes).toBe(0);
+      expect(nextWindow.rawBacklogBytesMax).toBe(0);
+      expect(nextWindow.rawInBytes).toBe(160);
+    });
+
     it('subscribes to entries events and calls flusher.sendBatch', async () => {
       const input = new StubInput('test-input');
       manager.registerInput(input as any);

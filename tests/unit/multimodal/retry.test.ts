@@ -1,5 +1,6 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { retryDelayMs, withRetries } from '../../../src/multimodal/uploader/retry.js';
+import { retryDelayMs, sleep, withRetries } from '../../../src/multimodal/uploader/retry.js';
 
 describe('multimodal upload retry', () => {
   it('retryDelayMs stays within jitter bounds', () => {
@@ -54,5 +55,24 @@ describe('multimodal upload retry', () => {
     const result = await withRetries({ maxAttempts: 3, baseDelayMs: 0 }, run);
     expect(result).toEqual({ ok: true, value: 'ok' });
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('removes the abort listener when sleep finishes normally', async () => {
+    const abort = new AbortController();
+    await sleep(5, abort.signal);
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('stops without another attempt after abort', async () => {
+    const abort = new AbortController();
+    const run = vi.fn(async () => {
+      abort.abort();
+      return { ok: false as const, retryable: true, error: 'busy', statusCode: 503 };
+    });
+    const result = await withRetries({ maxAttempts: 3, baseDelayMs: 20 }, run, {
+      signal: abort.signal,
+    });
+    expect(result).toEqual({ ok: false, error: 'aborted' });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

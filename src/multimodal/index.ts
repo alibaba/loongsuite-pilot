@@ -3,12 +3,14 @@ export {
   isAgentMultimodalEnabled,
 } from './agent-gate.js';
 export { MultimodalProcessor } from './processor.js';
-export { isImageFilePath, matchAll, resolveImagePath, takeUniqueExtractedPaths } from './resolve.js';
+export { matchAll, resolveImagePath, takeUniqueExtractedPaths } from './resolve.js';
 export { attachMultimodalMetadataForEntry } from './rewrite.js';
 export { createUploader } from './uploader/factory.js';
+export {
+  resolveMultimodalEventStorageBasePath,
+} from './uploader/sls-client.js';
 export type {
   PathToUriFn,
   UriPart,
-  UriResult,
 } from './types.js';
 export { MAX_MULTIMODAL_PARTS, MAX_MULTIMODAL_PATH_CHARS } from './types.js';

@@ -71,9 +71,10 @@ const SPAN_ATTR_RESERVED_PREFIXES = [
 const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
 const SPAN_ATTR_SENSITIVE_RE =
   /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+const INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id";
 const INVOCATION_IDENTITY_FIELD_MAP = {
   "gen_ai.session.id": "agent.pilot.invocation.session.id",
-  "gen_ai.user.id": "agent.pilot.invocation.user.id",
+  "gen_ai.user.id": INVOCATION_USER_ID_FIELD,
 };
 
 function parseSpanAttributesFromEnv(env = process.env) {
@@ -239,15 +240,45 @@ function loadPilotConfig() {
   return value;
 }
 
-function resolveUserId(cfg) {
-  return (
-    process.env.LOONGSUITE_USER_ID ||
-    process.env.LOONGSUITE_PILOT_USER_ID ||
-    cfg.userId ||
-    cfg["user.id"] ||
-    os.hostname() ||
-    "unknown"
+function normalizeIdentityValue(value) {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+    return undefined;
+  }
+  const normalized = String(value).trim();
+  return normalized.length > 0 && normalized.length <= SPAN_ATTR_MAX_VALUE_LENGTH
+    ? normalized
+    : undefined;
+}
+
+function resolveSenderId(event, ctx) {
+  return normalizeIdentityValue(event?.senderId)
+    || normalizeIdentityValue(ctx?.senderId)
+    || normalizeIdentityValue(ctx?.channelContext?.sender?.id);
+}
+
+function resolveUserIdentity(cfg, senderId) {
+  const invocationUserId = normalizeIdentityValue(SPAN_ATTRIBUTES[INVOCATION_USER_ID_FIELD]);
+  if (invocationUserId) return { userId: invocationUserId, source: "invocation" };
+
+  const environmentUserId = normalizeIdentityValue(
+    process.env.LOONGSUITE_PILOT_USER_ID || process.env.LOONGSUITE_USER_ID,
   );
+  if (environmentUserId) return { userId: environmentUserId, source: "environment" };
+
+  const nativeSenderId = normalizeIdentityValue(senderId);
+  if (nativeSenderId) return { userId: nativeSenderId, source: "sender" };
+
+  const configuredUserId = normalizeIdentityValue(cfg.userId || cfg["user.id"]);
+  if (configuredUserId) return { userId: configuredUserId, source: "config" };
+
+  return {
+    userId: normalizeIdentityValue(os.hostname()) || "unknown",
+    source: "hostname",
+  };
+}
+
+function resolveUserId(cfg) {
+  return resolveUserIdentity(cfg).userId;
 }
 
 function isExplicitlyFalse(value) {
@@ -425,6 +456,21 @@ function getRun(runId, event, ctx) {
   return r;
 }
 
+function updateRunUserIdentity(run, event, ctx, cfg) {
+  if (!run) return;
+  const senderId = resolveSenderId(event, ctx) || run.senderId;
+
+  const identity = resolveUserIdentity(cfg, senderId);
+  run.userId = identity.userId;
+  run.userIdSource = identity.source;
+  if (senderId) {
+    run.senderId = senderId;
+    run.channel = normalizeIdentityValue(ctx?.channel || event?.channel) || run.channel;
+    run.accountId = normalizeIdentityValue(event?.accountId || ctx?.accountId) || run.accountId;
+    run.channelId = normalizeIdentityValue(event?.channelId || ctx?.channelId) || run.channelId;
+  }
+}
+
 function resolveContextRun(event, ctx) {
   const directRunId = event?.runId || ctx?.runId;
   if (directRunId) return getRun(directRunId, event, ctx);
@@ -503,14 +549,23 @@ function getSession(sessionId) {
 // ---------------------------------------------------------------------------
 
 function buildCommonFields(run, sessionId, userId) {
+  const resolvedUserId = run?.userId || userId;
   const base = {
     time_unix_nano: nowNanos(),
     observed_time_unix_nano: nowNanos(),
     "event.id": crypto.randomUUID(),
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
-    "user.id": userId,
+    "user.id": resolvedUserId,
     ...(agentCwd ? { "agent.openclaw.cwd": agentCwd } : {}),
+    ...(run?.senderId ? { "agent.openclaw.sender.id": run.senderId } : {}),
+    ...(run?.channel ? { "agent.openclaw.channel": run.channel } : {}),
+    ...(run?.accountId ? { "agent.openclaw.account.id": run.accountId } : {}),
+    ...(run?.channelId ? { "agent.openclaw.channel.id": run.channelId } : {}),
+    ...(run?.userIdSource ? { "agent.openclaw.user.id.source": run.userIdSource } : {}),
+    ...(["invocation", "environment", "sender"].includes(run?.userIdSource)
+      ? { [INVOCATION_USER_ID_FIELD]: resolvedUserId }
+      : {}),
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_BASE_FIELD_PATCH,
     ...RESOURCE_ATTRIBUTE_FIELDS,
@@ -762,10 +817,11 @@ function handleSessionEnd(event, ctx, userId, emit) {
   if (s.sessionKey) sessionRunIds.delete(s.sessionKey);
 }
 
-function handleBeforeModelResolve(event, ctx, userId, emit) {
+function handleBeforeModelResolve(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
@@ -777,18 +833,20 @@ function handleBeforeModelResolve(event, ctx, userId, emit) {
   emit(record);
 }
 
-function handleBeforePromptBuild(event, ctx, userId) {
+function handleBeforePromptBuild(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   if (event?.prompt) run.userPromptText = event.prompt;
   // No emission — redundant with before_agent_run which has richer fields.
 }
 
-function handleBeforeAgentRun(event, ctx, userId, emit) {
+function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId || event?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   if (event?.prompt) run.userPromptText = event.prompt;
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
@@ -820,10 +878,11 @@ function handleBeforeAgentReply(event, ctx, userId, emit) {
   emit(record);
 }
 
-function handleLlmInput(event, ctx, userId) {
+function handleLlmInput(event, ctx, userId, emit, cfg) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   // OpenClaw v2026.6.10 can reuse a runId for a provider fallback after the
   // first agent cycle has already emitted llm_output. A fresh llm_input is the
   // unambiguous start of that next cycle; late terminal hooks must not revive
@@ -1244,7 +1303,7 @@ function makeHandler(fn) {
       const cfg = loadPilotConfig();
       const userId = resolveUserId(cfg);
       const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
-      fn(event, ctx, userId, emit);
+      fn(event, ctx, userId, emit, cfg);
     } catch (err) {
       writeError(fn.name || "handler", err);
     }

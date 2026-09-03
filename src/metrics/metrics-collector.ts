@@ -126,6 +126,29 @@ export interface AgentFlowMetrics extends L2Identity {
   start_time: string;
 }
 
+/** One bounded, payload-free row per running or active Input. */
+export interface InputFlowMetrics extends L2Identity {
+  type: 'input';
+  agent: string;
+  input_name: string;
+  source_kind: 'primary';
+  collection_method: string;
+  raw_read_calls: string;
+  raw_read_bytes: string;
+  raw_in_records: string;
+  raw_in_bytes: string;
+  raw_in_max_batch_bytes: string;
+  raw_in_max_record_bytes: string;
+  raw_backlog_bytes_max: string;
+  parse_success_records: string;
+  parse_failed_records: string;
+  read_duration_ms: string;
+  process_duration_ms: string;
+  in_events: string;
+  in_bytes: string;
+  failed_events: string;
+}
+
 /**
  * One row per destination, not per backend family: two SLS logstores are two
  * rows, and a billing view can attribute every byte to the project and logstore
@@ -173,13 +196,14 @@ export interface FlusherFlowMetrics extends L2Identity {
 }
 
 /**
- * One reporting cycle's L2 output: ingress per agent, egress per destination.
- * No instance-total row — it would be the exact sum of these rows over one
- * window, which the query engine can do, and L1's metric_json already carries
- * the same four axes plus agent_count for the instance.
+ * One reporting cycle's L2 output: complete normalized ingress per agent,
+ * covered raw-source detail per Input, and egress per destination. Raw Input
+ * fields deliberately stay out of L1 and Agent rows until every custom reader
+ * has equivalent instrumentation; consumers can group Input rows by `agent`.
  */
 export interface L2Metrics {
   agents: AgentFlowMetrics[];
+  inputs: InputFlowMetrics[];
   flushers: FlusherFlowMetrics[];
 }
 
@@ -201,6 +225,18 @@ export interface FlusherStats {
  * measured at the flushers.
  */
 export interface InputStats {
+  sourceKind: 'primary';
+  rawReadCalls: number;
+  rawReadBytes: number;
+  rawInRecords: number;
+  rawInBytes: number;
+  rawInMaxBatchBytes: number;
+  rawInMaxRecordBytes: number;
+  rawBacklogBytesMax: number;
+  parseSuccessRecords: number;
+  parseFailedRecords: number;
+  readDurationMs: number;
+  processDurationMs: number;
   inEvents: number;
   inBytes: number;
   outFailed: number;
@@ -240,10 +276,10 @@ export interface DataflowSnapshot {
   inEventsTotal: number;
   inBytesTotal: number;
   /**
-   * Keyed by input id. Inputs are the collection mechanism, not a reported
-   * dimension: `agent` is the owning agent (several inputs map to one agent) and
-   * everything reported is rolled up by it. `running` means discovery detected
-   * the agent on this host and started collecting, i.e. the agent is installed.
+   * Keyed by the fixed input id. Each entry produces an Input detail row while
+   * running or when it carried data in the just-finished window. `agent` is the
+   * owning agent (several inputs can map to one agent), and `running` means
+   * discovery detected the agent on this host and started collecting.
    */
   inputs: Map<string, InputStats & { type: string; agent: string; running: boolean }>;
   /**
@@ -279,6 +315,17 @@ interface FlowTotals {
   outFailed: number;
 }
 
+interface InputRuntimeTotals extends FlowTotals {
+  rawReadCalls: number;
+  rawReadBytes: number;
+  rawInRecords: number;
+  rawInBytes: number;
+  parseSuccessRecords: number;
+  parseFailedRecords: number;
+  readDurationMs: number;
+  processDurationMs: number;
+}
+
 /**
  * L1's four axes. The two halves come from opposite ends of the pipeline —
  * ingress from the inputs, egress from the flushers — which is what makes the
@@ -303,6 +350,20 @@ interface FlusherTotals {
 
 function zeroFlowTotals(): FlowTotals {
   return { inEvents: 0, inBytes: 0, outFailed: 0 };
+}
+
+function zeroInputRuntimeTotals(): InputRuntimeTotals {
+  return {
+    ...zeroFlowTotals(),
+    rawReadCalls: 0,
+    rawReadBytes: 0,
+    rawInRecords: 0,
+    rawInBytes: 0,
+    parseSuccessRecords: 0,
+    parseFailedRecords: 0,
+    readDurationMs: 0,
+    processDurationMs: 0,
+  };
 }
 
 function zeroFlusherTotals(): FlusherTotals {
@@ -398,8 +459,14 @@ export class MetricsCollector {
    * keep separate baselines — a shared one would let whichever fires first
    * swallow the other's window.
    */
-  private l1Baseline: InstanceFlow = { inEvents: 0, inBytes: 0, outEvents: 0, outBytes: 0 };
+  private l1Baseline: InstanceFlow = {
+    inEvents: 0,
+    inBytes: 0,
+    outEvents: 0,
+    outBytes: 0,
+  };
   private l2InputBaseline: Map<string, FlowTotals> = new Map();
+  private l2InputDetailBaseline: Map<string, InputRuntimeTotals> = new Map();
   private l2FlusherBaseline: Map<string, FlusherTotals> = new Map();
   private l2LastCollectTime = 0;
   private l1CycleCount = 0;
@@ -520,13 +587,12 @@ export class MetricsCollector {
   }
 
   /**
-   * One cycle of L2: a row per agent that carried data, a row per write
-   * destination. Both sides are produced by a single call so they share one drain
-   * and one window — collecting them separately would let whichever ran first
-   * swallow the other's traffic, and ingress and egress would then describe
-   * different windows.
+   * One cycle of L2: Agent aggregate rows, Input detail rows and destination
+   * rows. All are produced by one call so they share one drain and one window;
+   * collecting them separately would let whichever ran first consume the
+   * window while the others reported different maxima or flow intervals.
    *
-   * Returns null when there is nothing on either side, so a freshly started
+   * Returns null when there are no rows, so a freshly started
    * instance with no agents and no destinations ships nothing at all.
    */
   collectL2(snapshot: DataflowSnapshot): L2Metrics | null {
@@ -543,14 +609,81 @@ export class MetricsCollector {
     };
 
     const agentRows = this.collectAgentRows(snapshot, identity);
+    const inputRows = this.collectInputRows(snapshot, identity);
     const flusherRows = this.collectFlusherRows(snapshot, identity);
     // The row builders already drained the counters, so the window is spent
     // whether or not there is anything to ship.
     this.l2LastCollectTime = now;
 
-    if (agentRows.length === 0 && flusherRows.length === 0) return null;
+    if (agentRows.length === 0 && inputRows.length === 0 && flusherRows.length === 0) return null;
 
-    return { agents: agentRows, flushers: flusherRows };
+    return { agents: agentRows, inputs: inputRows, flushers: flusherRows };
+  }
+
+  private collectInputRows(
+    snapshot: DataflowSnapshot,
+    identity: L2Identity,
+  ): InputFlowMetrics[] {
+    const rows: InputFlowMetrics[] = [];
+    for (const [inputId, stats] of snapshot.inputs) {
+      const base = this.l2InputDetailBaseline.get(inputId) ?? zeroInputRuntimeTotals();
+      const flow = {
+        rawReadCalls: delta(stats.rawReadCalls, base.rawReadCalls),
+        rawReadBytes: delta(stats.rawReadBytes, base.rawReadBytes),
+        rawInRecords: delta(stats.rawInRecords, base.rawInRecords),
+        rawInBytes: delta(stats.rawInBytes, base.rawInBytes),
+        parseSuccessRecords: delta(stats.parseSuccessRecords, base.parseSuccessRecords),
+        parseFailedRecords: delta(stats.parseFailedRecords, base.parseFailedRecords),
+        readDurationMs: delta(stats.readDurationMs, base.readDurationMs),
+        processDurationMs: delta(stats.processDurationMs, base.processDurationMs),
+        inEvents: delta(stats.inEvents, base.inEvents),
+        inBytes: delta(stats.inBytes, base.inBytes),
+        failedEvents: delta(stats.outFailed, base.outFailed),
+      };
+      this.l2InputDetailBaseline.set(inputId, {
+        rawReadCalls: stats.rawReadCalls,
+        rawReadBytes: stats.rawReadBytes,
+        rawInRecords: stats.rawInRecords,
+        rawInBytes: stats.rawInBytes,
+        parseSuccessRecords: stats.parseSuccessRecords,
+        parseFailedRecords: stats.parseFailedRecords,
+        readDurationMs: stats.readDurationMs,
+        processDurationMs: stats.processDurationMs,
+        inEvents: stats.inEvents,
+        inBytes: stats.inBytes,
+        outFailed: stats.outFailed,
+      });
+
+      const carriedWindowData = Object.values(flow).some(value => value > 0)
+        || stats.rawInMaxBatchBytes > 0
+        || stats.rawInMaxRecordBytes > 0
+        || stats.rawBacklogBytesMax > 0;
+      if (!stats.running && !carriedWindowData) continue;
+
+      rows.push({
+        type: 'input',
+        ...identity,
+        agent: agentKeyOf(inputId, stats),
+        input_name: inputId,
+        source_kind: stats.sourceKind,
+        collection_method: stats.type,
+        raw_read_calls: String(flow.rawReadCalls),
+        raw_read_bytes: String(flow.rawReadBytes),
+        raw_in_records: String(flow.rawInRecords),
+        raw_in_bytes: String(flow.rawInBytes),
+        raw_in_max_batch_bytes: String(stats.rawInMaxBatchBytes),
+        raw_in_max_record_bytes: String(stats.rawInMaxRecordBytes),
+        raw_backlog_bytes_max: String(stats.rawBacklogBytesMax),
+        parse_success_records: String(flow.parseSuccessRecords),
+        parse_failed_records: String(flow.parseFailedRecords),
+        read_duration_ms: String(Math.round(flow.readDurationMs)),
+        process_duration_ms: String(Math.round(flow.processDurationMs)),
+        in_events: String(flow.inEvents),
+        in_bytes: String(flow.inBytes),
+        failed_events: String(flow.failedEvents),
+      });
+    }
+    return rows;
   }
 
   /**
@@ -565,7 +698,14 @@ export class MetricsCollector {
    * (every build registers one per agent it knows about) stay unreported.
    */
   private collectAgentRows(snapshot: DataflowSnapshot, identity: L2Identity): AgentFlowMetrics[] {
-    const byAgent = new Map<string, { events: number; bytes: number; failed: number; idle: number; lastPoll: string; start: string }>();
+    const byAgent = new Map<string, {
+      events: number;
+      bytes: number;
+      failed: number;
+      idle: number;
+      lastPoll: string;
+      start: string;
+    }>();
 
     for (const [inputId, stats] of snapshot.inputs) {
       // Drain per input, not per agent: an input registered mid-run (agent
@@ -589,12 +729,23 @@ export class MetricsCollector {
       // idle alarm is about — must still produce a row. An input discovery
       // stopped mid-window reports only what it collected while running, and a
       // stopped-and-silent one drops out entirely (its agent is gone, not idle).
-      if (flow.events === 0 && flow.failed === 0 && !stats.running) continue;
+      if (
+        flow.events === 0 &&
+        flow.failed === 0 &&
+        !stats.running
+      ) continue;
 
       const agent = agentKeyOf(inputId, stats);
       let acc = byAgent.get(agent);
       if (!acc) {
-        acc = { events: 0, bytes: 0, failed: 0, idle: -1, lastPoll: '', start: '' };
+        acc = {
+          events: 0,
+          bytes: 0,
+          failed: 0,
+          idle: -1,
+          lastPoll: '',
+          start: '',
+        };
         byAgent.set(agent, acc);
       }
       acc.events += flow.events;

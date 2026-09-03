@@ -57,6 +57,7 @@ $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
+$OPEN_SOURCE_INSTALLER_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1"
 
 # >>> pilot-account-identity >>>
 # Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
@@ -248,6 +249,27 @@ function Resolve-CurrentVersion {
     return $null
 }
 
+function Get-BuildEdition {
+    try {
+        $versionDir = Resolve-CurrentVersion
+        if (-not $versionDir) { return "" }
+
+        $probe = Join-Path $versionDir "dist\cli-probe.cjs"
+        if (-not (Test-Path -LiteralPath $probe)) { return "" }
+
+        $nodeBin = Resolve-Node
+        if (-not $nodeBin) { return "" }
+
+        return ([string](& $nodeBin $probe --build-edition 2>$null)).Trim()
+    } catch {
+        return ""
+    }
+}
+
+function Test-OpenSourceBuild {
+    return (Get-BuildEdition) -eq "opensource"
+}
+
 function Resolve-PreviousVersion {
     if (Test-Path $PREVIOUS_FILE) {
         $dir = (Get-Content $PREVIOUS_FILE -ErrorAction SilentlyContinue).Trim()
@@ -388,14 +410,17 @@ function Stop-OrphanProcesses {
     # core type, so it stays CLM-safe.
     param([string]$Match = "collector-daemon|updater-daemon")
     $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
+    # Query Win32_Process once. The old Get-Process pipeline issued one CIM query per
+    # node process, so a machine with many IDE/agent runtimes paid N WMI round trips on
+    # every upgrade. CommandLine and ProcessId already come from this single result set.
+    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
-                $cmdLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                $cmdLine = [string]$_.CommandLine
                 ($cmdLine -match $Match) -and $cmdLine.ToLower().Contains($ownRoot)
             } catch { $false }
         } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
 }
 
@@ -579,7 +604,7 @@ sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 }
 
 function Install-CollectorTask {
-    param([string]$nodeBin)
+    param([string]$nodeBin, [switch]$SkipCleanup)
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
     if (-not (Test-Path $entry)) {
         Write-Host "Bootstrap script missing: $entry"
@@ -612,12 +637,14 @@ function Install-CollectorTask {
     # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
     # new registration -- so without this reap the orphan keeps running alongside the new
     # instance and both write the same output (duplicate-collection incident root cause).
-    Stop-OrphanProcesses -Match "collector-daemon"
+    if (-not $SkipCleanup) {
+        Stop-OrphanProcesses -Match "collector-daemon"
 
-    # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
-    # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
-    try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
-    try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
+        # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+    }
 
     return (Register-PilotTask `
         -taskName $TASK_NAME_COLLECTOR `
@@ -857,10 +884,131 @@ function Cmd-Restart {
     Cmd-Start
 }
 
+function Start-BackgroundDaemon {
+    param(
+        [string]$DaemonName,
+        [string]$NodeBin,
+        [string]$Entry,
+        [string]$OutputLog,
+        [string]$ErrorLog
+    )
+    $launcherPath = Join-Path $BOOTSTRAP_DIR "$DaemonName-background.ps1"
+    $escapedDataDir = ([string]$DATA_DIR).Replace("'", "''")
+    $escapedCacheDir = ([string]$CACHE_DIR).Replace("'", "''")
+    $escapedConfig = ([string]$CONFIG_FILE).Replace("'", "''")
+    $escapedNode = ([string]$NodeBin).Replace("'", "''")
+    $escapedEntry = ([string]$Entry).Replace("'", "''")
+    $escapedOutput = ([string]$OutputLog).Replace("'", "''")
+    $escapedError = ([string]$ErrorLog).Replace("'", "''")
+    @(
+        "`$env:LOONGSUITE_PILOT_DATA_DIR = '$escapedDataDir'",
+        "`$env:LOONGSUITE_PILOT_CACHE_DIR = '$escapedCacheDir'",
+        "`$env:AGENT_DATA_COLLECTION_CONFIG = '$escapedConfig'",
+        "& '$escapedNode' '$escapedEntry' >> '$escapedOutput' 2>> '$escapedError'"
+    ) | Set-Content -LiteralPath $launcherPath -Encoding Unicode
+
+    # Use -File so paths are parsed only inside the generated script, where every
+    # single quote has been escaped. Directly interpolating them into -Command breaks
+    # profiles and custom data dirs such as C:\Users\O'Brien.
+    $launcherArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPath`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $launcherArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+}
+
+# Start the collector without stopping it or scanning for processes. This command is
+# the updater's recovery path after restart-collector times out: the timed-out command
+# may already have completed the stop half, so running another restart would extend the
+# collection gap. If a partial upgrade deleted the scheduled task, recreate only that
+# missing task without the destructive cleanup used by normal registration.
+function Cmd-StartCollector {
+    if ((Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)) {
+        Write-Host "collector is already running"
+        return
+    }
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    if (Get-TaskExists $TASK_NAME_COLLECTOR) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            Write-Host "collector start requested (Task Scheduler)"
+            return
+        } catch {
+            Write-Host "Task Scheduler start failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Error "Service manager failed to start collector"
+            exit 1
+        }
+    }
+
+    try {
+        $ok = Install-CollectorTask $nodeBin -SkipCleanup
+        if ($ok) {
+            Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Write-Host "collector task restored and start requested (Task Scheduler)"
+            return
+        }
+    } catch {
+        Write-Host "Collector task recovery failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # A missing task can be the result of an interrupted activation. Keep collection
+    # available even when task repair is denied; the updater's runtime/PID validation
+    # decides whether this detached fallback really became healthy.
+    $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
+    if (-not (Test-Path $entry)) {
+        Write-Error "Bootstrap script missing"
+        exit 1
+    }
+    $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
+    Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
+    Write-Host "collector start requested (background fallback)" -ForegroundColor Yellow
+}
+
+function Schedule-UpdaterRestart {
+    Ensure-Dirs
+    $handoffScript = Join-Path $BOOTSTRAP_DIR "restart-updater-delayed.ps1"
+    $escapedBin = ([string]$LOONGSUITE_PILOT_BIN).Replace("'", "''")
+    $escapedLog = ([string]$UPDATER_LOG_FILE).Replace("'", "''")
+    @(
+        "Start-Sleep -Seconds 10",
+        "& '$escapedBin' restart-updater *>> '$escapedLog'"
+    ) | Set-Content -LiteralPath $handoffScript -Encoding Unicode
+
+    # Start-Process creates an independent process instead of a PowerShell job owned by
+    # this invocation. It therefore survives long enough to stop/relaunch the updater
+    # after the current health check and bookkeeping have completed.
+    $handoffArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$handoffScript`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $handoffArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+    Write-Host "updater restart scheduled"
+}
+
 # ============================================================
 # CMD: restart-collector (used by updater after deploying a new version)
 # ============================================================
 function Cmd-RestartCollector {
+    param([string[]]$Options = @())
+    $deferUpdaterRestart = $false
+    foreach ($option in $Options) {
+        if ($option -eq "--defer-updater-restart") {
+            $deferUpdaterRestart = $true
+        } else {
+            Write-Error "Unknown restart-collector option: $option"
+            exit 1
+        }
+    }
+
     # Stop collector only (leave updater running)
     $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
@@ -954,10 +1102,7 @@ function Cmd-RestartCollector {
                 # node publishes its own pid file on Windows (see src/index.ts); export the
                 # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here --
                 # $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
+                Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
                 Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart collector (init_type=$initType)"
@@ -966,11 +1111,9 @@ function Cmd-RestartCollector {
         }
     }
 
-    # Schedule updater restart in background (equivalent to setsid on Linux)
-    Start-Job -ScriptBlock {
-        Start-Sleep -Seconds 10
-        & $using:LOONGSUITE_PILOT_BIN restart-updater
-    } | Out-Null
+    if (-not $deferUpdaterRestart) {
+        Schedule-UpdaterRestart
+    }
 }
 
 # ============================================================
@@ -1053,10 +1196,7 @@ function Cmd-RestartUpdater {
                 # node publishes its own pid file on Windows (see src/updater/index.ts); export
                 # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
                 # Set-Content -- $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
+                Start-BackgroundDaemon "updater" $nodeBin $entry $UPDATER_LOG_FILE $updaterErrLog
                 Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart updater (init_type=$initType)"
@@ -1248,6 +1388,92 @@ function Cmd-Info {
         # BOM sniffing then falls back to ANSI, printing a Chinese prefix as mojibake.
         Get-Content $CONFIG_FILE -Encoding UTF8
     }
+}
+
+function Show-UpgradeUsage {
+    Write-Host "Usage: loongsuite-pilot upgrade [--version <version>]"
+    Write-Host ""
+    Write-Host "Upgrade the open-source edition to the latest release, or to a specific version."
+}
+
+function Cmd-Upgrade {
+    $version = ""
+    for ($i = 0; $i -lt $SubArgs.Count; $i++) {
+        $arg = [string]$SubArgs[$i]
+        if ($arg -in @("--version", "-Version")) {
+            if ($i + 1 -ge $SubArgs.Count -or -not $SubArgs[$i + 1]) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+            $i++
+            $version = [string]$SubArgs[$i]
+        } elseif ($arg -match '^--version=(.*)$') {
+            $version = [string]$Matches[1]
+            if (-not $version) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+        } elseif ($arg -in @("help", "--help", "-h")) {
+            Show-UpgradeUsage
+            return
+        } else {
+            Write-Host "Unknown upgrade option: $arg" -ForegroundColor Red
+            Show-UpgradeUsage
+            exit 1
+        }
+    }
+
+    if ($version -and $version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
+        Write-Host "Invalid version: $version (expected e.g. 1.6.0)" -ForegroundColor Red
+        exit 1
+    }
+
+    $tempRoot = if ($env:TEMP) { $env:TEMP } else { $DEFAULT_PILOT_DIR }
+    if (-not (Test-Path -LiteralPath $tempRoot)) {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    }
+    $installerFile = Join-Path $tempRoot ("loongsuite-pilot-installer-" + (Get-Random) + ".ps1")
+
+    $installerExit = 1
+    try {
+        # Windows PowerShell 5.1 may still default to TLS 1.0. Match the
+        # open-source installer's best-effort TLS 1.2 compatibility handling;
+        # the assignment can be blocked under Constrained Language Mode.
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        try {
+            Invoke-WebRequest -Uri $OPEN_SOURCE_INSTALLER_URL -OutFile $installerFile -UseBasicParsing
+        } catch {
+            Write-Host "Failed to download the open-source installer: $_" -ForegroundColor Red
+            exit 1
+        }
+        $installerArgs = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $installerFile,
+            "upgrade",
+            "-DataDir", $DATA_DIR
+        )
+        if ($version) { $installerArgs += @("-Version", $version) }
+
+        $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+        $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+        & powershell.exe @installerArgs
+        $installerExit = $LASTEXITCODE
+    } finally {
+        # Cleanup must not replace the installer's real success/failure result.
+        # In particular, some 8.3-short %TEMP% paths make the FileSystem
+        # provider throw a terminating normalization error that SilentlyContinue
+        # cannot suppress.
+        try {
+            if (Test-Path -LiteralPath $installerFile -ErrorAction SilentlyContinue) {
+                Remove-Item -LiteralPath $installerFile -Force -ErrorAction Stop
+            }
+        } catch {
+            Write-Warning "Failed to remove temporary installer: $_"
+        }
+    }
+
+    if ($installerExit -ne 0) { exit $installerExit }
 }
 
 # ============================================================
@@ -1567,6 +1793,9 @@ function Cmd-Help {
     Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
+    if (Test-OpenSourceBuild) {
+        Write-Host "  upgrade [opts]  Upgrade to latest or --version <version> (open-source only)"
+    }
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  worker          Manage local Workers:"
     Write-Host "                    worker connect/list/status/disconnect/delete"
@@ -1586,10 +1815,21 @@ switch ($Command.ToLower()) {
     "deploy"             { Cmd-Deploy }
     "token-usage"        { Cmd-TokenUsage }
     "tokens"             { Cmd-TokenUsage }
+    "upgrade" {
+        if (Test-OpenSourceBuild) {
+            Cmd-Upgrade
+        } else {
+            Write-Host "Unknown command: upgrade"
+            Cmd-Help
+            exit 1
+        }
+    }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }
-    "restart-collector"  { Cmd-RestartCollector }
+    "start-collector"    { Cmd-StartCollector }
+    "restart-collector"  { Cmd-RestartCollector -Options $SubArgs }
+    "schedule-updater-restart" { Schedule-UpdaterRestart }
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }

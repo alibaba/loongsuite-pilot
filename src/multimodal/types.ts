@@ -1,9 +1,11 @@
 export type {
-  MultimodalOssConfig,
+  MultimodalAkAuth,
   MultimodalRuntimeConfig,
-  MultimodalSlsConfig,
+  MultimodalSlsAuthMode,
+  MultimodalStorage,
+  MultimodalStorageAuth,
+  MultimodalStorageType,
   MultimodalUploadMode as UploadMode,
-  MultimodalUploaderKind as UploaderKind,
 } from '../types/index.js';
 
 export interface UploadItem {

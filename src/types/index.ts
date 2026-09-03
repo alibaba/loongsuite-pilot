@@ -170,37 +170,61 @@ export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolea
   return mode === 'tool' || mode === 'both';
 }
 
-export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
-export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
+export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export interface MultimodalOssConfig {
-  endpoint: string;
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
+
+export interface MultimodalAkAuth {
+  mode: 'ak';
   accessKeyId: string;
   accessKeySecret: string;
   securityToken?: string;
 }
 
-export interface MultimodalSlsConfig {
+export interface MultimodalApiKeyAuth {
+  mode: 'apiKey';
+  apiKey: string;
+}
+
+/** Discriminated auth after load. User config must be exactly one complete credential set. */
+export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+
+export interface MultimodalSlsTarget {
   endpoint: string;
   project: string;
   logstore: string;
-  accessKeyId: string;
-  accessKeySecret: string;
-  securityToken?: string;
 }
 
-/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
-export interface MultimodalRuntimeConfig {
-  uploader: MultimodalUploaderKind;
+export interface MultimodalDelegatedOssTarget extends MultimodalSlsTarget {
+  /** Expected landing bucket. Not provisioned by Pilot. */
+  ossBucket?: string;
+}
+
+export interface MultimodalOssTarget {
+  endpoint: string;
   storageBasePath: string;
-  oss?: MultimodalOssConfig;
-  sls?: MultimodalSlsConfig;
+}
+
+export type MultimodalStorage =
+  | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalDelegatedOssTarget; auth: MultimodalStorageAuth }
+  | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
+
+/**
+ * Experimental global multimodal storage; per-agent policy is under agents.<id>.multimodal.
+ * This subtree and multimodal event fields may change without migration.
+ */
+export interface MultimodalRuntimeConfig {
+  storage: MultimodalStorage;
+  storageBasePath: string;
 }
 
 /** Agent ids with multimodal extraction implemented. */
 export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
 
-/** Per-agent multimodal policy (`uploadMode: none` disables). */
+/** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
   /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */

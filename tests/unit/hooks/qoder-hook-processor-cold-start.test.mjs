@@ -162,6 +162,27 @@ describe('qoder-hook-processor cold-start recovery', () => {
     }
   });
 
+  it('stamps safe invocation attributes from env onto every hook record', () => {
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'custom attribute prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runProcessor('session-custom-attributes', {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'multica.issue.id=AGE-992,multica.user.id=staff-1,multica.api_token=blocked',
+    });
+
+    expect(result.status).toBe(0);
+    const records = readHistory();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['multica.issue.id']).toBe('AGE-992');
+      expect(record['multica.user.id']).toBe('staff-1');
+      expect(record['multica.api_token']).toBeUndefined();
+    }
+  });
+
   it('does not replay old turns when each old session first appears after redeployment', () => {
     fs.writeFileSync(transcriptPath, [
       ...turnRows(1, 'historical prompt 1'),

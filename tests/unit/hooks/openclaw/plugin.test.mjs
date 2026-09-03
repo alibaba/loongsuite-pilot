@@ -88,7 +88,7 @@ function readOutputRecords() {
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
 
-async function replay(plugin, envelopes, { pluginConfig = {} } = {}) {
+async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {}) {
   const handlers = registerPlugin(plugin, pluginConfig);
 
   // Agent/model/tool hooks receive PluginHookAgentContext with the run/session
@@ -113,6 +113,7 @@ async function replay(plugin, envelopes, { pluginConfig = {} } = {}) {
       runId: env.event?.runId || knownRun,
       sessionKey: env.event?.sessionKey || knownSessionKey,
     };
+    if (contextPatch) Object.assign(ctx, contextPatch(env) || {});
     await h(env.event, ctx);
   }
   return readOutputRecords();
@@ -290,6 +291,82 @@ describe('OpenClaw plugin stateful pipeline', () => {
       expect(record['gen_ai.session.id']).not.toBe('env-session');
       expect(record['gen_ai.agent.name']).not.toBe('blocked');
     }
+  });
+
+  it('uses before_agent_run senderId as the invocation user identity', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? {
+            ...envelope,
+            event: {
+              ...envelope.event,
+              senderId: 'telegram-user-42',
+              accountId: 'telegram-account',
+              channelId: 'telegram-chat',
+            },
+          }
+        : envelope);
+
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes, {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? { channel: 'telegram' }
+        : {},
+    });
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every(record => record['user.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(records[0]).toMatchObject({
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'telegram-account',
+      'agent.openclaw.channel.id': 'telegram-chat',
+    });
+  });
+
+  it.each([
+    ['ctx.senderId', { senderId: 'context-sender' }, 'context-sender'],
+    ['ctx.channelContext.sender.id', { channelContext: { sender: { id: 'channel-context-sender' } } }, 'channel-context-sender'],
+  ])('falls back to %s on newer OpenClaw contexts', async (_label, contextIdentity, expected) => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? contextIdentity
+        : {},
+    });
+
+    expect(records.every(record => record['user.id'] === expected)).toBe(true);
+    expect(records.every(record => record[INVOCATION_USER_ID_FIELD] === expected)).toBe(true);
+  });
+
+  it('keeps an explicit Pilot user ID above the native sender', async () => {
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? { ...envelope, event: { ...envelope.event, senderId: 'native-sender' } }
+        : envelope);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes);
+
+    expect(records.every(record => record['user.id'] === 'test-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'native-sender')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'environment')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'test-user')).toBe(true);
   });
 
   it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', async () => {

@@ -84,6 +84,80 @@ interface GrokConversionMetadata {
   dataSourceId?: string;
 }
 
+interface OpenClawIdentityMetadata {
+  senderId?: string;
+  channel?: string;
+  accountId?: string;
+  channelId?: string;
+  userIdSource?: string;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * OpenClaw's before_model_resolve hook can emit before before_agent_run exposes
+ * senderId. Reconcile record copies at the full-turn boundary so the converter
+ * cannot select the earlier collector fallback as the trace-wide user ID.
+ */
+function prepareOpenClawIdentityRecords(records: AgentActivityEntry[]): {
+  records: AgentActivityEntry[];
+  metadata: OpenClawIdentityMetadata;
+} {
+  const metadata: OpenClawIdentityMetadata = {};
+  let senderIdentity: OpenClawIdentityMetadata | undefined;
+
+  for (const record of records) {
+    const recordSenderId = nonEmptyString(record['agent.openclaw.sender.id']);
+    metadata.senderId ??= recordSenderId;
+    metadata.channel ??= nonEmptyString(record['agent.openclaw.channel']);
+    metadata.accountId ??= nonEmptyString(record['agent.openclaw.account.id']);
+    metadata.channelId ??= nonEmptyString(record['agent.openclaw.channel.id']);
+    metadata.userIdSource ??= nonEmptyString(record['agent.openclaw.user.id.source']);
+    if (record['agent.openclaw.user.id.source'] === 'sender' && recordSenderId) {
+      // Keep the selected sender and its provenance metadata atomic. Otherwise
+      // an earlier config/hostname fallback can survive as the turn-wide source
+      // even after user.id has been reconciled to a later sender.
+      senderIdentity = {
+        senderId: recordSenderId,
+        channel: nonEmptyString(record['agent.openclaw.channel']),
+        accountId: nonEmptyString(record['agent.openclaw.account.id']),
+        channelId: nonEmptyString(record['agent.openclaw.channel.id']),
+        userIdSource: 'sender',
+      };
+    }
+  }
+
+  if (!senderIdentity?.senderId) return { records, metadata };
+  const senderUserId = senderIdentity.senderId;
+  const reconciledMetadata: OpenClawIdentityMetadata = {
+    senderId: senderUserId,
+    channel: senderIdentity.channel ?? metadata.channel,
+    accountId: senderIdentity.accountId ?? metadata.accountId,
+    channelId: senderIdentity.channelId ?? metadata.channelId,
+    userIdSource: 'sender',
+  };
+  const reconciledFields = {
+    'user.id': senderUserId,
+    'agent.openclaw.sender.id': senderUserId,
+    ...(reconciledMetadata.channel
+      ? { 'agent.openclaw.channel': reconciledMetadata.channel }
+      : {}),
+    ...(reconciledMetadata.accountId
+      ? { 'agent.openclaw.account.id': reconciledMetadata.accountId }
+      : {}),
+    ...(reconciledMetadata.channelId
+      ? { 'agent.openclaw.channel.id': reconciledMetadata.channelId }
+      : {}),
+    'agent.openclaw.user.id.source': 'sender',
+  };
+  return {
+    records: records.map(record => ({ ...record, ...reconciledFields })),
+    metadata: reconciledMetadata,
+  };
+}
+
 function parseGrokSystemInstructions(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string' || value.length === 0) return [];
@@ -786,6 +860,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
+    let openClawIdentity: OpenClawIdentityMetadata = {};
 
     try {
       try {
@@ -828,6 +903,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
               return copy;
             });
+        if (agentType === 'openclaw') {
+          const prepared = prepareOpenClawIdentityRecords(recordsForConversion);
+          recordsForConversion = prepared.records;
+          openClawIdentity = prepared.metadata;
+        }
         if (agentType === 'grok-build') {
           const prepared = prepareGrokConversionRecords(recordsForConversion);
           recordsForConversion = prepared.records;
@@ -883,6 +963,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       applyQoderWorkStepTiming(records, spans);
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
+        this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
       }
@@ -1110,6 +1191,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+  }
+
+  private enrichOpenClawIdentityAttributes(
+    identity: OpenClawIdentityMetadata,
+    spans: ReadableSpan[],
+  ): void {
+    const attributes = {
+      ...(identity.senderId ? { 'agent.openclaw.sender.id': identity.senderId } : {}),
+      ...(identity.channel ? { 'agent.openclaw.channel': identity.channel } : {}),
+      ...(identity.accountId ? { 'agent.openclaw.account.id': identity.accountId } : {}),
+      ...(identity.channelId ? { 'agent.openclaw.channel.id': identity.channelId } : {}),
+      ...(identity.userIdSource
+        ? { 'agent.openclaw.user.id.source': identity.userIdSource }
+        : {}),
+    };
+    if (Object.keys(attributes).length === 0) return;
+    for (const span of spans) Object.assign(span.attributes, attributes);
   }
 
   private enrichGrokBuildSpans(

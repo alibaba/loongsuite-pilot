@@ -73,6 +73,7 @@ import {
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
+  resolveMultimodalEventStorageBasePath,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -244,11 +245,21 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const uploader = createUploader(multimodalConfig);
-        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
-        this.inputManager.setMultimodalProcessor(processor);
-        this.multimodalProcessor = processor;
-        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
+        if (!eventBase.ok) {
+          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
+        } else {
+          const uploader = createUploader(multimodalConfig, {
+            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
+          });
+          const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
+          this.inputManager.setMultimodalProcessor(processor);
+          this.multimodalProcessor = processor;
+          logger.info('multimodal processor enabled', {
+            type: multimodalConfig.storage.type,
+            storageBasePath: eventBase.storageBasePath,
+          });
+        }
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }
@@ -361,7 +372,13 @@ export class Orchestrator extends EventEmitter {
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
     const packageVersion = this.readPackageVersion();
-    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    const packageGitCommit = this.readPackageGitCommit();
+    this.runtimeWriter = new RuntimeWriter(
+      this.dataDir,
+      this.config.statusBar,
+      packageVersion,
+      packageGitCommit,
+    );
     this.runtimeWriter.start();
 
     // MetricsSummaryWriter is a collector-owned source shared by every local
@@ -437,7 +454,6 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.pipelineManager?.stop();
-    await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
       logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
     });
@@ -456,6 +472,17 @@ export class Orchestrator extends EventEmitter {
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // The final dataflow window must observe the last serialized collect and
+    // entry queue drain, while the flusher counters are still available.
+    try {
+      await this.metricsWriter?.stop();
+    } catch (err) {
+      // Metrics are best-effort. A failed final snapshot must not prevent the
+      // data flusher from draining or the checkpoint store from being saved.
+      logger.warn('metrics writer stop failed during orchestrator shutdown', {
+        error: String(err),
+      });
+    }
     await this.flusher?.shutdown();
     await this.stateStore?.save();
 
@@ -1622,12 +1649,27 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
+  private readPackageGitCommit(): string {
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const versionFile = path.join(pilotDir, 'VERSION');
+      if (fsSync.existsSync(versionFile)) {
+        const content = fsSync.readFileSync(versionFile, 'utf8');
+        const match = content.match(/^git_commit=(.+)$/m);
+        if (match) return match[1].trim();
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
+
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {
-    const inputCounters = this.inputManager.getInputCounters();
+    const inputCounters = this.inputManager.takeInputCounterSnapshot();
     const activeIds = this.inputManager.getActiveInputIds();
 
     // Ingress only. The instance's egress is measured where the writes actually

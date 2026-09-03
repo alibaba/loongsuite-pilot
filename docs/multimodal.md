@@ -2,6 +2,8 @@
 
 English | [简体中文](zh-CN/multimodal.md)
 
+> **Experimental.** Multimodal config and event fields may change.
+
 LoongSuite Pilot can convert media in agent messages or tool results (images today: inline base64, or local paths read and encoded at write time) into object-storage `uri` parts, upload them asynchronously to OSS or SLS PutObject, and attach a short summary on normalized events. Use this when downstream analysis needs image content without embedding large base64 blobs in JSONL.
 
 Multimodal conversion is separate from message content capture:
@@ -23,7 +25,7 @@ Multimodal also requires global `config.multimodal` object-storage infrastructur
 
 Both must be ready:
 
-1. Global `config.multimodal` (uploader, credentials, `storageBasePath`, etc.).
+1. Global `config.multimodal.storage` (`type` / `target` / `auth`).
 2. A non-`none` `uploadMode` on the target agent, and that agent must implement extraction.
 
 Example (Codex + Qoder IDE):
@@ -31,12 +33,17 @@ Example (Codex + Qoder IDE):
 ```json
 {
   "multimodal": {
-    "uploader": "oss",
-    "storageBasePath": "oss://your-bucket/pilot-mm",
-    "oss": {
-      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
+    "storage": {
+      "type": "oss",
+      "target": {
+        "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+        "storageBasePath": "oss://your-bucket/pilot-mm"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
     }
   },
   "agents": {

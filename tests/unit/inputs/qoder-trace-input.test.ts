@@ -1808,7 +1808,7 @@ describe('QoderTraceInput multimodal', () => {
   });
 
   describe('IDE gate via collect', () => {
-    it('converts IDE and CLI tool Image file paths independently', async () => {
+    it('converts IDE and CLI tool Image file paths and preserves invocation attributes', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-'));
       const imgPath = path.join(tmpDir, 'shot.png');
       await fs.writeFile(imgPath, Buffer.from('shot'));
@@ -1822,6 +1822,7 @@ describe('QoderTraceInput multimodal', () => {
           'gen_ai.session.id': 'ide-sess',
           'gen_ai.turn.id': 'ide-turn',
           'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          'multica.issue.id': 'IDE-992',
           time_unix_nano: '1780000000000000000',
         };
         const cliTool = {
@@ -1831,6 +1832,7 @@ describe('QoderTraceInput multimodal', () => {
           'gen_ai.session.id': 'cli-sess',
           'gen_ai.turn.id': 'cli-turn',
           'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          'multica.issue.id': 'CLI-992',
           time_unix_nano: '1780000000000000000',
         };
         await fs.writeFile(
@@ -1862,6 +1864,8 @@ describe('QoderTraceInput multimodal', () => {
         const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
         expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
         expect(Array.isArray(cli['gen_ai.tool.call.result'])).toBe(true);
+        expect(ide['multica.issue.id']).toBe('IDE-992');
+        expect(cli['multica.issue.id']).toBe('CLI-992');
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }
@@ -2228,6 +2232,70 @@ describe('QoderTraceInput bootstrap history filtering', () => {
         'session-a-latest',
         'session-b-latest',
       ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('QoderTraceInput runtime metrics', () => {
+  it('separates physical reads from complete unique records and preserves a half line', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-runtime-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const current = JSON.stringify(makeEntry({ 'event.id': 'current' }));
+      const later = JSON.stringify(makeEntry({
+        'event.id': 'later',
+        'gen_ai.turn.id': 'turn-2',
+      }));
+      const splitAt = Math.floor(later.length / 2);
+      const completePrefix = `not-json\n${current}\n`;
+      await fs.writeFile(logFile, completePrefix + later.slice(0, splitAt));
+
+      const stateStore = new MockStateStore();
+      stateStore.set('qoder-trace', {
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+      const deltas: any[] = [];
+      input.on('input-runtime-delta', delta => deltas.push(delta));
+
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0]).toMatchObject({
+        sourceKind: 'primary',
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completePrefix + later.slice(0, splitAt)),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(completePrefix),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+      expect(deltas[0].rawInMaxRecordBytes).toBe(Buffer.byteLength(`${current}\n`));
+      expect(stateStore.get('qoder-trace').lastOffset).toBe(Buffer.byteLength(completePrefix));
+
+      await fs.appendFile(logFile, `${later.slice(splitAt)}\n`);
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(2);
+      expect(deltas[1]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(`${later}\n`),
+        rawInRecords: 1,
+        rawInBytes: Buffer.byteLength(`${later}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 0,
+      });
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

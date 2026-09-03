@@ -1,5 +1,10 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
+import { isReservedKey } from '../../normalization/global-attributes.js';
+
+const MAX_CUSTOM_FIELD_VALUE_LENGTH = 512;
+const SENSITIVE_FIELD_NAME_RE =
+  /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
 
 const CANONICAL_PREFIXES = [
   'agent.',
@@ -24,10 +29,21 @@ const CANONICAL_KEYS = new Set([
   'user.id',
 ]);
 
+export interface CanonicalHookRecordOptions {
+  /**
+   * Preserve caller-supplied string fields after canonical normalization.
+   * This is opt-in because most canonical adapters intentionally expose only
+   * the managed schema. Reserved, sensitive, malformed, and unsafe values are
+   * still discarded.
+   */
+  preserveSafeCustomTopLevelFields?: boolean;
+}
+
 export function buildCanonicalHookEntry(
   record: Record<string, unknown>,
   fallbackAgentType: string,
   attributes?: Record<string, unknown>,
+  options?: CanonicalHookRecordOptions,
 ): AgentActivityEntry | null {
   if (!isCanonicalHookRecord(record)) return null;
 
@@ -50,7 +66,31 @@ export function buildCanonicalHookEntry(
     attributes: toJsonObject(attributes ?? {}),
   });
 
+  if (options?.preserveSafeCustomTopLevelFields) {
+    attachSafeCustomTopLevelFields(entry, record);
+  }
+
   return entry;
+}
+
+function attachSafeCustomTopLevelFields(
+  entry: AgentActivityEntry,
+  record: Record<string, unknown>,
+): void {
+  for (const [rawKey, rawValue] of Object.entries(record)) {
+    if (isCanonicalKey(rawKey)) continue;
+
+    const key = rawKey.trim();
+    if (!key || key.includes(',') || key.includes('=') || isReservedKey(key)) continue;
+    if (SENSITIVE_FIELD_NAME_RE.test(key)) continue;
+    if (typeof rawValue !== 'string') continue;
+
+    const value = rawValue.trim();
+    if (!value || value.length > MAX_CUSTOM_FIELD_VALUE_LENGTH || value.includes(',')) continue;
+
+    // Fill only: custom fields must never overwrite the normalized schema.
+    if (entry[key] === undefined) entry[key] = value;
+  }
 }
 
 function isCanonicalHookRecord(record: Record<string, unknown>): boolean {
