@@ -72,6 +72,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
+| `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
 | `--package-url <url>` | 从自定义 URL 或本地 `file://` 路径安装。 |
 | `--sls-endpoint <url>` | SLS endpoint。 |
 | `--sls-project <name>` | SLS project。 |
@@ -90,6 +91,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
 | `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统没有可用 node 时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
+
+例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
 
 ## 托管 Node.js 运行时
 
@@ -164,7 +167,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，直接打开：
+本地 Dashboard 会随采集服务一起启动和停止，默认地址如下；指定了其他端口时，请替换地址中的端口：
 
 ```text
 http://127.0.0.1:8765/

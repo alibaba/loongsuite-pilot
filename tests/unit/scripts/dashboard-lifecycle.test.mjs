@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -281,16 +281,155 @@ describe('dashboard service lifecycle', () => {
     expect(runtimeSh).not.toContain('18765');
     expect(runtimePs1).not.toContain('18765');
   });
+});
 
-  it('public installers add the default port without overwriting an explicit port', () => {
-    for (const installer of [
-      opensourceInstallerSh,
-      opensourceInstallerPs1,
-    ]) {
-      expect(installer).toContain("if (config.dashboard.port === undefined) config.dashboard.port = 8765;");
-      expect(installer).not.toContain('config.dashboard.port = 8765;\nif (config.dashboard.port');
+describe('dashboard installer configuration', () => {
+  const bashPrelude = opensourceInstallerSh.slice(0, opensourceInstallerSh.indexOf('# Validate current user'));
+  const bashConfig = opensourceInstallerSh.slice(
+    opensourceInstallerSh.indexOf('write_config() {'),
+    opensourceInstallerSh.indexOf('install_loongsuite_pilot_command() {'),
+  );
+  const bashConfirm = opensourceInstallerSh.slice(
+    opensourceInstallerSh.indexOf('confirm_config_overwrite() {'),
+    opensourceInstallerSh.indexOf('deploy_bootstrap_scripts() {'),
+  );
+  const psPrelude = opensourceInstallerPs1.slice(0, opensourceInstallerPs1.indexOf('# Resolve package URL'));
+  const psConfig = opensourceInstallerPs1.slice(
+    opensourceInstallerPs1.indexOf('function Write-Config {'),
+    opensourceInstallerPs1.indexOf('# QoderWork-family runtime wrapper:'),
+  );
+  const psConfigJs = psConfig.match(/-e @'\r?\n([\s\S]*?)\r?\n'@ \$cfgTmp/)?.[1];
+  const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+  const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
+
+  // Execute the real parser/config writer only; never download, deploy, or touch services.
+  function runConfig(platform, args = [], existing) {
+    const root = mkdtempSync(resolve(tmpdir(), 'pilot-dashboard-config-'));
+    const configPath = resolve(root, 'config.json');
+    try {
+      if (existing !== undefined) writeFileSync(configPath, JSON.stringify(existing));
+      let result;
+      if (platform === 'bash') {
+        result = spawnSync('bash', ['-c', `${bashPrelude}
+msg() { :; }
+NODE_BIN="$PILOT_TEST_NODE"
+PROBE_RESULT='[]'
+${bashConfirm}
+${bashConfig}
+confirm_config_overwrite
+write_config`, 'installer-test', 'install', '--data-dir', root, ...args], {
+          encoding: 'utf8',
+          env: { ...process.env, PILOT_TEST_NODE: process.execPath },
+        });
+      } else if (platform === 'powershell') {
+        const scriptPath = resolve(root, 'installer-test.ps1');
+        writeFileSync(scriptPath, `${psPrelude}
+function Msg { }
+$script:NODE_BIN = $env:PILOT_TEST_NODE
+$script:PROBE_RESULT = '[]'
+${psConfig}
+Write-Config`);
+        result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
+          'install', '-DataDir', root, ...args], {
+          encoding: 'utf8',
+          env: { ...process.env, USERPROFILE: root, TEMP: root, LOONGSUITE_PILOT_CACHE_DIR: root, PILOT_TEST_NODE: process.execPath },
+        });
+      } else {
+        expect(psConfigJs).toBeTruthy();
+        const optsPath = resolve(root, 'options.json');
+        writeFileSync(optsPath, JSON.stringify({ configPath, dataDir: root, dashboardPort: args[0] ?? '' }));
+        result = spawnSync(process.execPath, ['-e', psConfigJs, optsPath], { encoding: 'utf8' });
+      }
+      expect(result.error).toBeUndefined();
+      const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : undefined;
+      return { ...result, config };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
+  }
+
+  for (const platform of ['bash', 'powershell-js']) {
+    describe(platform, () => {
+      it.each([undefined, { dashboard: { extra: true } }])('defaults to 8765 without a configured port: %j', existing => {
+        const result = runConfig(platform, [], existing);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.dashboard).toEqual({ ...existing?.dashboard, port: 8765 });
+      });
+
+      it('preserves an existing port and other config when the option is omitted', () => {
+        const existing = { dashboard: { port: 9010, extra: true }, logLevel: 'debug' };
+        const result = runConfig(platform, [], existing);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config).toMatchObject(existing);
+      });
+
+      it.each(['9000', '1', '65535', '08765'])('writes %s as a numeric port without losing other config', port => {
+        const args = platform === 'bash' ? ['--dashboard-port', port] : [port];
+        const result = runConfig(platform, args, { dashboard: { port: 9010, extra: true }, logLevel: 'debug' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config).toMatchObject({ dashboard: { port: Number(port), extra: true }, logLevel: 'debug' });
+      });
+    });
+  }
+
+  it('accepts the Bash --dashboard-port=9000 form', () => {
+    const result = runConfig('bash', ['--dashboard-port=9000']);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.config.dashboard.port).toBe(9000);
   });
+
+  it('shows a changed port in the overwrite prompt but ignores an unchanged numeric port', () => {
+    const existing = { dashboard: { port: 8765 } };
+    const changed = runConfig('bash', ['--dashboard-port', '9000'], existing);
+    expect(changed.status, changed.stderr).toBe(0);
+    expect(changed.stdout).toContain('dashboard.port: 8765 -> 9000');
+    const unchanged = runConfig('bash', ['--dashboard-port', '08765'], existing);
+    expect(unchanged.status, unchanged.stderr).toBe(0);
+    expect(unchanged.stdout).not.toContain('dashboard.port:');
+  });
+
+  it.each(['', '0', '-1', '65536', '1.5', 'abc', '0x2328', '9e3', '9000\n', '99999999999999999999', "9000';process.exit(0);//"])(
+    'rejects invalid Bash port %j before changing existing config', port => {
+      const existing = { dashboard: { port: 9010 }, logLevel: 'debug' };
+      for (const args of [['--dashboard-port', port], [`--dashboard-port=${port}`]]) {
+        const result = runConfig('bash', args, existing);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('--dashboard-port must be an integer between 1 and 65535');
+        expect(result.config).toEqual(existing);
+      }
+    },
+  );
+
+  it.each([['--dashboard-port'], ['--dashboard-port', '--log-level', 'debug']])(
+    'rejects a missing Bash port: %j', (...args) => {
+      const result = runConfig('bash', args);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('--dashboard-port');
+      expect(result.config).toBeUndefined();
+    },
+  );
+
+  it.runIf(hasPowerShell)('parses and validates the native PowerShell option before writing config', () => {
+    const defaults = runConfig('powershell');
+    expect(defaults.status, defaults.stderr).toBe(0);
+    expect(defaults.config.dashboard.port).toBe(8765);
+    const existing = { dashboard: { port: 9010, extra: true }, logLevel: 'debug' };
+    const preserved = runConfig('powershell', [], existing);
+    expect(preserved.status, preserved.stderr).toBe(0);
+    expect(preserved.config).toMatchObject(existing);
+    for (const port of ['9000', '1', '65535', '08765']) {
+      const result = runConfig('powershell', ['-DashboardPort', port], existing);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.config).toMatchObject({ ...existing, dashboard: { ...existing.dashboard, port: Number(port) } });
+    }
+    for (const port of [undefined, '', '0', '-1', '65536', '1.5', 'abc', '9000\n', '99999999999999999999']) {
+      const args = port === undefined ? ['-DashboardPort'] : ['-DashboardPort', port];
+      const result = runConfig('powershell', args, existing);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('DashboardPort');
+      expect(result.config).toEqual(existing);
+    }
+  }, 30_000);
 });
 
 describe('dashboard static page', () => {
