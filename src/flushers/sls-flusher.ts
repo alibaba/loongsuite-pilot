@@ -27,6 +27,10 @@ import {
   WEBTRACKING_MAX_LOGS,
   RETRYABLE_STATUS_CODES,
 } from './sls-transport.js';
+import {
+  classifySlsSendError,
+  formatSlsSendFailureMessage,
+} from './sls-error-classifier.js';
 
 const HOSTNAME = os.hostname();
 
@@ -340,7 +344,9 @@ export class SlsFlusher extends BaseFlusher {
 
     const client = this.getAkClient(endpoint);
     let lastErr: unknown;
+    let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
+      attempts = attempt + 1;
       try {
         await client.postLogStoreLogs(
           endpoint.project,
@@ -374,7 +380,7 @@ export class SlsFlusher extends BaseFlusher {
     });
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS ak send failed: ${String(lastErr)}`,
+      formatSlsSendFailureMessage('ak', classifySlsSendError(lastErr), attempts),
       { endpoint_name: endpoint.name },
     );
     if (lastErr instanceof HttpError && lastErr.status === 429) {
@@ -420,7 +426,9 @@ export class SlsFlusher extends BaseFlusher {
     };
 
     let lastErr: unknown;
+    let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
+      attempts = attempt + 1;
       try {
         await postApiKeyLogStoreLogs(
           {
@@ -461,7 +469,7 @@ export class SlsFlusher extends BaseFlusher {
     });
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS apiKey send failed: ${String(lastErr)}`,
+      formatSlsSendFailureMessage('apiKey', classifySlsSendError(lastErr), attempts),
       { endpoint_name: endpoint.name },
     );
     if (lastErr instanceof HttpError && lastErr.status === 429) {
@@ -523,7 +531,9 @@ export class SlsFlusher extends BaseFlusher {
     const url = `${base}/logstores/${endpoint.logstore}/track`;
 
     let lastErr: unknown;
+    let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
+      attempts = attempt + 1;
       try {
         const fetchOptions: Record<string, unknown> = {
           method: 'POST',
@@ -578,7 +588,7 @@ export class SlsFlusher extends BaseFlusher {
     });
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS webtracking send failed: ${String(lastErr)}`,
+      formatSlsSendFailureMessage('webtracking', classifySlsSendError(lastErr), attempts),
       { endpoint_name: endpoint.name },
     );
     if (lastErr instanceof HttpError && lastErr.status === 429) {

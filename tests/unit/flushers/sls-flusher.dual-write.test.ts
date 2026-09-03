@@ -11,6 +11,7 @@ import * as crypto from 'node:crypto';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
 const mockFailureWrite = vi.fn().mockResolvedValue(true);
+const mockAlarmRecord = vi.fn();
 
 // Track each ALY client constructor call so we can assert on per-endpoint instances.
 const akClientCtorCalls: Array<{ endpoint: string; accessKeyId: string }> = [];
@@ -73,7 +74,10 @@ function apiKeyEndpoint(name: string, url: string, project: string): SlsEndpoint
   };
 }
 
-function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
+function makeConfig(
+  endpoints: SlsEndpoint[],
+  overrides: Partial<SlsFlusherConfig> = {},
+): SlsFlusherConfig {
   const primary = endpoints[0];
   return {
     enabled: true,
@@ -86,14 +90,17 @@ function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
     batchMaxSize: 20,
     flushIntervalMs: 99999,
     serviceNamePrefix: '',
+    ...overrides,
   };
 }
 
 describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPostLogStoreLogs.mockReset().mockResolvedValue(undefined);
+    mockFailureWrite.mockReset().mockResolvedValue(true);
+    fetchSpy.mockReset().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
     akClientCtorCalls.length = 0;
-    fetchSpy.mockClear();
   });
 
   afterEach(() => {
@@ -272,6 +279,56 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     });
     expect(failure.batchBytes).toBeGreaterThan(0);
     expect(String(failure.error)).toContain('Forbidden');
+  });
+
+  it('keeps WebTracking retries for a real fetch error and reports bounded safe detail', async () => {
+    const causeText = `getaddrinfo ENOTFOUND original-host.example Authorization: Bearer test-token ${'x'.repeat(700)}`;
+    fetchSpy.mockRejectedValue(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(causeText), { code: 'ENOTFOUND' }),
+    }));
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-network', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
+      '/tmp/data',
+    );
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
+
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=dns code=ENOTFOUND attempts=3');
+    expect(message).toContain('TypeError: fetch failed');
+    expect(message).toContain('original-host.example');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).not.toContain('test-token');
+    expect(message).not.toContain('x'.repeat(700));
+  });
+
+  it('does not change permanent HTTP retry behavior or report the response body', async () => {
+    const body = '{"errorCode":"Forbidden","message":"original response text"}';
+    fetchSpy.mockResolvedValue({ ok: false, status: 403, text: async () => body });
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-http', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
+      '/tmp/data',
+    );
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
+
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=http code=Forbidden status=403 attempts=1');
+    expect(message).not.toContain('original response text');
   });
 });
 
