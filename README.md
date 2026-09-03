@@ -1,8 +1,22 @@
 # LoongSuite Pilot
 
-English | [简体中文](README.zh-CN.md)
+![LoongSuite](docs/_assets/img/loongsuite-logo.png)
 
-[Quick Start](#quick-start) | [Documentation](#documentation) | [Agent Onboarding](docs/agent-onboarding.md) | [License](#license)
+**Local telemetry collector for AI coding agents**
+
+[![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
+[![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
+
+**English** | [简体中文](README.zh-CN.md)
+
+[Overview](#overview) | [Quick Start](#quick-start) | [Documentation](#documentation) | [Community](#community) | [Contributing](#contributing)
+
+---
+
+## Overview
 
 LoongSuite Pilot is a local telemetry collector for AI coding agents. It discovers supported agents on a developer machine, installs the required hooks or plugins, normalizes activity into a shared GenAI event schema, and exports logs or traces to your chosen backends.
 
@@ -11,8 +25,6 @@ LoongSuite Pilot is a local telemetry collector for AI coding agents. It discove
   <br>
   <em>Built-in local dashboard — multi-agent token usage, sessions, requests, tools, models, providers, and repository activity at a glance.</em>
 </p>
-
-## Why LoongSuite Pilot?
 
 Development teams often use more than one AI coding agent, and each agent records activity in a different local format. Pilot gives teams one local collector that can discover those agents, collect their activity, normalize the data, and send it to destinations that are useful for analysis, audit, and observability.
 
@@ -24,7 +36,7 @@ Pilot is designed to answer practical questions:
 - Where should the data be exported: local files, SLS, HTTP, or traces?
 - How should sensitive prompts, tool arguments, and secrets be controlled before export?
 
-## Core Capabilities
+## Highlights
 
 
 | Capability               | What Pilot Does                                                                    |
@@ -233,7 +245,7 @@ The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has high
 
 [Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
 
-## Build From Source
+## Development
 
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
@@ -255,6 +267,19 @@ npm test
 
 For packaging and service installation from a local build, see [Installation](docs/installation.md).
 
+## Contributing
+
+Issues and pull requests are welcome. Before submitting a change, run the same core checks used by CI:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+To add support for another AI coding agent, start with the [Agent Onboarding Guide](docs/agent-onboarding.md). Report bugs and propose features through [GitHub Issues](https://github.com/alibaba/loongsuite-pilot/issues).
+
 ## Community
 
 We are looking forward to your feedback and suggestions. Scan the QR code below to join the LoongSuite Pilot DingTalk group.
@@ -263,13 +288,16 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 |----|
 | <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
 
-### Related Projects
+## LoongSuite Ecosystem
 
-- [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
-- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
-- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Process agent for Python applications
-- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Process agent for Golang with compile-time instrumentation
-- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - GenAI telemetry utility library for Java applications
+| Project | Role |
+| ------- | ---- |
+| [LoongCollector](https://github.com/alibaba/loongcollector) | High-performance collector for logs, metrics, traces, events, and profiles. |
+| [LoongSuite Java](https://github.com/alibaba/loongsuite-java) | Shared GenAI telemetry utilities for Java instrumentation. |
+| [LoongSuite Go](https://github.com/alibaba/loongsuite-go) | Compile-time auto-instrumentation for Go applications. |
+| [LoongSuite Python](https://github.com/alibaba/loongsuite-python) | OpenTelemetry auto-instrumentation for Python and GenAI applications. |
+| [LoongSuite JS](https://github.com/alibaba/loongsuite-js) | OpenTelemetry integrations for JavaScript AI agents. |
+| [LoongSuite Pilot](https://github.com/alibaba/loongsuite-pilot) | Local telemetry collector for AI coding agents. |
 
 ## License
 
