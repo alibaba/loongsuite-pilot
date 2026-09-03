@@ -378,7 +378,13 @@ export class Orchestrator extends EventEmitter {
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
     const packageVersion = this.readPackageVersion();
-    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    const packageGitCommit = this.readPackageGitCommit();
+    this.runtimeWriter = new RuntimeWriter(
+      this.dataDir,
+      this.config.statusBar,
+      packageVersion,
+      packageGitCommit,
+    );
     this.runtimeWriter.start();
 
     // MetricsSummaryWriter is a collector-owned source shared by every local
@@ -1696,6 +1702,21 @@ export class Orchestrator extends EventEmitter {
       // ignore
     }
     return 'unknown';
+  }
+
+  private readPackageGitCommit(): string {
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const versionFile = path.join(pilotDir, 'VERSION');
+      if (fsSync.existsSync(versionFile)) {
+        const content = fsSync.readFileSync(versionFile, 'utf8');
+        const match = content.match(/^git_commit=(.+)$/m);
+        if (match) return match[1].trim();
+      }
+    } catch {
+      // ignore
+    }
+    return '';
   }
 
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {

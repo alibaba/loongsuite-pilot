@@ -884,6 +884,39 @@ function Cmd-Restart {
     Cmd-Start
 }
 
+function Start-BackgroundDaemon {
+    param(
+        [string]$DaemonName,
+        [string]$NodeBin,
+        [string]$Entry,
+        [string]$OutputLog,
+        [string]$ErrorLog
+    )
+    $launcherPath = Join-Path $BOOTSTRAP_DIR "$DaemonName-background.ps1"
+    $escapedDataDir = ([string]$DATA_DIR).Replace("'", "''")
+    $escapedCacheDir = ([string]$CACHE_DIR).Replace("'", "''")
+    $escapedConfig = ([string]$CONFIG_FILE).Replace("'", "''")
+    $escapedNode = ([string]$NodeBin).Replace("'", "''")
+    $escapedEntry = ([string]$Entry).Replace("'", "''")
+    $escapedOutput = ([string]$OutputLog).Replace("'", "''")
+    $escapedError = ([string]$ErrorLog).Replace("'", "''")
+    @(
+        "`$env:LOONGSUITE_PILOT_DATA_DIR = '$escapedDataDir'",
+        "`$env:LOONGSUITE_PILOT_CACHE_DIR = '$escapedCacheDir'",
+        "`$env:AGENT_DATA_COLLECTION_CONFIG = '$escapedConfig'",
+        "& '$escapedNode' '$escapedEntry' >> '$escapedOutput' 2>> '$escapedError'"
+    ) | Set-Content -LiteralPath $launcherPath -Encoding Unicode
+
+    # Use -File so paths are parsed only inside the generated script, where every
+    # single quote has been escaped. Directly interpolating them into -Command breaks
+    # profiles and custom data dirs such as C:\Users\O'Brien.
+    $launcherArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPath`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $launcherArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+}
+
 # Start the collector without stopping it or scanning for processes. This command is
 # the updater's recovery path after restart-collector times out: the timed-out command
 # may already have completed the stop half, so running another restart would extend the
@@ -936,10 +969,7 @@ function Cmd-StartCollector {
         exit 1
     }
     $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-    Start-Process -FilePath "powershell.exe" `
-        -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-        -WorkingDirectory $CACHE_DIR `
-        -WindowStyle Hidden
+    Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
     Write-Host "collector start requested (background fallback)" -ForegroundColor Yellow
 }
 
@@ -1072,10 +1102,7 @@ function Cmd-RestartCollector {
                 # node publishes its own pid file on Windows (see src/index.ts); export the
                 # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here --
                 # $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
+                Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
                 Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart collector (init_type=$initType)"
@@ -1169,10 +1196,7 @@ function Cmd-RestartUpdater {
                 # node publishes its own pid file on Windows (see src/updater/index.ts); export
                 # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
                 # Set-Content -- $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
+                Start-BackgroundDaemon "updater" $nodeBin $entry $UPDATER_LOG_FILE $updaterErrLog
                 Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart updater (init_type=$initType)"

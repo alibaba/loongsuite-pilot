@@ -34,6 +34,20 @@ describe('Windows updater handoff and collector recovery commands', () => {
     expect(body).toMatch(/if \(-not \$SkipCleanup\) \{[\s\S]*schtasks\.exe \/Delete/);
   });
 
+  it('launches background fallbacks through an escaped script file', () => {
+    const helper = bodyOf('Start-BackgroundDaemon');
+    expect(helper).toContain(".Replace(\"'\", \"''\")");
+    expect(helper).toContain('Set-Content -LiteralPath $launcherPath -Encoding Unicode');
+    expect(helper).toContain('-File `"$launcherPath`"');
+    expect(helper).not.toContain('-Command');
+
+    for (const command of ['Cmd-StartCollector', 'Cmd-RestartCollector', 'Cmd-RestartUpdater']) {
+      const body = bodyOf(command);
+      expect(body).toContain('Start-BackgroundDaemon');
+      expect(body).not.toContain('-Command');
+    }
+  });
+
   it('restart-collector can defer updater restart until health validation completes', () => {
     const body = bodyOf('Cmd-RestartCollector');
     expect(body).toContain('--defer-updater-restart');

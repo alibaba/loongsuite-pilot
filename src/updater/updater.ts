@@ -169,6 +169,7 @@ export interface ResolvedTarget {
 interface CollectorRuntimeRecord {
   status?: unknown;
   packageVersion?: unknown;
+  gitCommit?: unknown;
   pid?: unknown;
   updatedAt?: unknown;
 }
@@ -261,11 +262,14 @@ export class Updater {
           remote: target.version,
           channel,
         });
-        const activeVersion = local?.version || target.version;
+        const activeVersion: LocalVersion = local ?? {
+          version: target.version,
+          gitCommit: target.git_commit,
+        };
         const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
         if (collectorRecovered) {
           void this.metrics?.writeEvent('collector_restarted', {
-            latest_version: activeVersion,
+            latest_version: activeVersion.version,
           });
         }
         this.consecutiveFailures = 0;
@@ -301,7 +305,11 @@ export class Updater {
         latest_version: target.version,
       });
 
-      await this.restartCollector(target.version, local?.version === target.version);
+      await this.restartCollector(
+        target.version,
+        local?.version === target.version,
+        target.git_commit,
+      );
       void this.metrics?.writeEvent('collector_restarted', {
         latest_version: target.version,
       });
@@ -1089,7 +1097,11 @@ export class Updater {
     }
   }
 
-  private async restartCollector(targetVersion: string, requireNewPid: boolean): Promise<void> {
+  private async restartCollector(
+    targetVersion: string,
+    requireNewPid: boolean,
+    targetGitCommit = '',
+  ): Promise<void> {
     logger.info('restarting collector service');
     const previousRuntime = requireNewPid ? await this.readCollectorRuntime() : null;
     const previousPid = typeof previousRuntime?.pid === 'number' ? previousRuntime.pid : null;
@@ -1109,14 +1121,24 @@ export class Updater {
     }
 
     try {
-      await this.waitForCollectorHealth(targetVersion, restartStartedAt, previousPid);
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
     } catch (healthErr) {
       if (recoveryAttempted) throw healthErr;
       logger.warn('collector failed post-restart health check; attempting start-only recovery', {
         error: String(healthErr),
       });
       await this.startCollectorForRecovery(healthErr);
-      await this.waitForCollectorHealth(targetVersion, restartStartedAt, previousPid);
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
     }
 
     logger.info('collector restarted and healthy', { targetVersion });
@@ -1188,33 +1210,75 @@ export class Updater {
     return readJsonFile<CollectorRuntimeRecord>(this.paths.collectorRuntimeFile);
   }
 
-  private async recoverCurrentCollectorIfNeeded(targetVersion: string): Promise<boolean> {
+  private async recoverCurrentCollectorIfNeeded(target: LocalVersion): Promise<boolean> {
     const runtime = await this.readCollectorRuntime();
-    const healthFailure = this.collectorHealthFailure(runtime, targetVersion, 0, null);
+    const healthFailure = this.collectorHealthFailure(
+      runtime,
+      target.version,
+      0,
+      null,
+      target.gitCommit,
+    );
     if (!healthFailure) return false;
 
-    logger.warn('current version is installed but collector is unhealthy; attempting start-only recovery', {
-      targetVersion,
+    const livePid = this.liveCollectorPid(runtime);
+    if (livePid !== null) {
+      logger.warn('current version is installed but a stale collector is still alive; restarting it', {
+        targetVersion: target.version,
+        targetGitCommit: target.gitCommit || undefined,
+        collectorPid: livePid,
+        error: healthFailure,
+      });
+      await this.restartCollector(target.version, true, target.gitCommit);
+      return true;
+    }
+
+    logger.warn('current version is installed but collector is not running; attempting start-only recovery', {
+      targetVersion: target.version,
+      targetGitCommit: target.gitCommit || undefined,
       error: healthFailure,
     });
     const recoveryStartedAt = Date.now();
     await this.startCollectorForRecovery(new Error(healthFailure));
-    await this.waitForCollectorHealth(targetVersion, recoveryStartedAt, null);
-    logger.info('collector recovered and healthy', { targetVersion });
+    await this.waitForCollectorHealth(
+      target.version,
+      recoveryStartedAt,
+      null,
+      target.gitCommit,
+    );
+    logger.info('collector recovered and healthy', { targetVersion: target.version });
     return true;
+  }
+
+  private liveCollectorPid(runtime: CollectorRuntimeRecord | null): number | null {
+    const pid = runtime?.pid;
+    if (!Number.isInteger(pid) || (pid as number) <= 0) return null;
+    try {
+      process.kill(pid as number, 0);
+      return pid as number;
+    } catch {
+      return null;
+    }
   }
 
   private async waitForCollectorHealth(
     targetVersion: string,
     notBeforeMs: number,
     previousPid: number | null,
+    targetGitCommit = '',
   ): Promise<void> {
     const deadline = Date.now() + COLLECTOR_HEALTH_TIMEOUT_MS;
     let lastFailure = 'runtime record not found';
 
     while (true) {
       const runtime = await this.readCollectorRuntime();
-      lastFailure = this.collectorHealthFailure(runtime, targetVersion, notBeforeMs, previousPid);
+      lastFailure = this.collectorHealthFailure(
+        runtime,
+        targetVersion,
+        notBeforeMs,
+        previousPid,
+        targetGitCommit,
+      );
       if (!lastFailure) return;
       if (Date.now() >= deadline) break;
       await new Promise<void>((resolve) => setTimeout(resolve, COLLECTOR_HEALTH_POLL_MS));
@@ -1230,11 +1294,15 @@ export class Updater {
     targetVersion: string,
     notBeforeMs: number,
     previousPid: number | null,
+    targetGitCommit = '',
   ): string {
     if (!runtime) return 'runtime record not found';
     if (runtime.status !== 'active') return `runtime status is ${String(runtime.status)}`;
     if (runtime.packageVersion !== targetVersion) {
       return `runtime version is ${String(runtime.packageVersion)}, expected ${targetVersion}`;
+    }
+    if (targetGitCommit && runtime.gitCommit !== targetGitCommit) {
+      return `runtime git commit is ${String(runtime.gitCommit)}, expected ${targetGitCommit}`;
     }
 
     const updatedAtMs = typeof runtime.updatedAt === 'string' ? Date.parse(runtime.updatedAt) : NaN;
@@ -1245,11 +1313,7 @@ export class Updater {
     const pid = runtime.pid;
     if (!Number.isInteger(pid) || (pid as number) <= 0) return 'runtime PID is invalid';
     if (previousPid !== null && pid === previousPid) return 'collector PID did not change';
-    try {
-      process.kill(pid as number, 0);
-    } catch {
-      return `collector PID ${String(pid)} is not alive`;
-    }
+    if (this.liveCollectorPid(runtime) === null) return `collector PID ${String(pid)} is not alive`;
     return '';
   }
 
