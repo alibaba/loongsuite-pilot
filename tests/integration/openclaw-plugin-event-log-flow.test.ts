@@ -109,6 +109,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     expect(records.every(record => record['user.id'] === 'channel-sender')).toBe(true);
     expect(records.every(record =>
       !('agent.pilot.invocation.user.id' in record))).toBe(true);
+    const agentRun = records.find(record =>
+      record['agent.openclaw.hook'] === 'before_agent_run');
+    expect(agentRun?.['gen_ai.input.messages_delta']).toHaveLength(1);
     const terminal = records.find(record => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminal).toMatchObject({
       'event.name': 'other',
@@ -180,6 +183,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
         'gen_ai.usage.output_tokens': 326,
         'gen_ai.usage.total_tokens': 27778,
       });
+      const agentInput = JSON.parse(String(agentSpan?.attributes['gen_ai.input.messages']));
+      expect(agentInput).toHaveLength(1);
+      expect(agentInput[0]).toMatchObject({ role: 'user' });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
