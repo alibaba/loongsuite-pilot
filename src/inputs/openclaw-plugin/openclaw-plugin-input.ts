@@ -7,6 +7,7 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
+const SESSION_LIFECYCLE_HOOKS = new Set(['session_start', 'session_end']);
 
 export type OpenClawPluginInputOptions =
   Omit<Partial<HookInputOptions>, 'stateStore'>
@@ -60,6 +61,25 @@ export class OpenClawPluginInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.OpenClaw, 'openclaw');
+    const hook = record['agent.openclaw.hook'];
+
+    // Session lifecycle hooks are collector control-plane signals, not turns.
+    // Forwarding them creates trace groups with only ENTRY and AGENT spans.
+    if (typeof hook === 'string' && SESSION_LIFECYCLE_HOOKS.has(hook)) {
+      return null;
+    }
+
+    let canonicalRecord = record;
+    if (hook === 'before_model_resolve') {
+      // before_agent_run contains the same prompt plus richer turn context and
+      // is the single canonical source for ENTRY/AGENT input messages.
+      canonicalRecord = { ...record };
+      delete canonicalRecord['gen_ai.input.messages'];
+      delete canonicalRecord['gen_ai.input.messages_delta'];
+      delete canonicalRecord['input.messages'];
+      delete canonicalRecord['input.messages_delta'];
+    }
+
+    return transformHookRecord(canonicalRecord, ClientType.OpenClaw, 'openclaw');
   }
 }
