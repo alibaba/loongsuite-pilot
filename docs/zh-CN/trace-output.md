@@ -327,8 +327,10 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
   ```
 
 - 它们会转换为 event log 中的标准身份字段（`gen_ai.session.id` 和 `user.id`），并成为所有类型 trace span 上的标准属性（`gen_ai.session.id` 和 `gen_ai.user.id`）。无需配置 `spanAttributePassthroughPrefixes`。
-- 按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
+- 显式按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
 - 一期支持 OpenCode、Claude Code、Qoder/Qoder-CN 和 OpenClaw。Codex 和 Qwen Code CLI 仍会拒绝这两个保留 key。
+- Hermes 额外支持按次调用的 `gen_ai.user.id`。对于 OpenClaw 和 Hermes，最终 user id 的优先级为：`LOONGSUITE_PILOT_SPAN_ATTRIBUTES` 中显式配置的 `gen_ai.user.id` → `LOONGSUITE_PILOT_USER_ID` / `LOONGSUITE_USER_ID` → channel 原生 `senderId` / `sender_id`（通过 invocation transport field 传递，因此高于 collector 配置的 user id）→ collector 配置的 user id → producer 插件配置 / hostname fallback。标准安装中，collector 与插件 fallback 通常读取同一份 `config.json`。
+- 其他已支持 Agent 保持通用优先级，不会将 Agent 原生身份提升到 collector 配置的 user id 之前。
 - 除这两个精确 key 之外，其他 `gen_ai.*` 和 `user.*` 字段仍为保留字段并会被丢弃。
 
 **OpenCode 内置属性（`opencode.message.id`）。** OpenCode 插件会在其 `llm.request`、`llm.response`、`tool.call`、`tool.result` 记录上自动打上 `opencode.message.id`（opencode 的 assistant 消息 id）——无需启动器 env 变量。要让它出现在 span 上，只需列出 `opencode.` 前缀；随后它会出现在 ENTRY / AGENT / STEP / LLM / TOOL span 上（LLM、TOOL 取各自记录的值，ENTRY / AGENT / STEP 取 turn 级值）：

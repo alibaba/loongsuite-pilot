@@ -37,6 +37,7 @@ MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
+INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
 
 _PROCESS_FILE_TOKEN = "%s-%s-%s" % (
     os.getpid(),
@@ -128,20 +129,47 @@ def _hostname() -> str:
         return "unknown"
 
 
-def _resolve_user_id(sender_id: Any, config: Dict[str, Any]) -> str:
+def _normalized_identity(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_RESOURCE_FIELD_VALUE_LENGTH:
+        return None
+    return normalized
+
+
+def _invocation_user_id() -> Optional[str]:
+    raw = os.environ.get("LOONGSUITE_PILOT_SPAN_ATTRIBUTES")
+    if not isinstance(raw, str) or not raw:
+        return None
+    resolved = None
+    for pair in raw.split(","):
+        key, separator, value = pair.partition("=")
+        if separator and key.strip() == "gen_ai.user.id":
+            candidate = _normalized_identity(value)
+            if candidate:
+                resolved = candidate
+    return resolved
+
+
+def _resolve_user_identity(sender_id: Any, config: Dict[str, Any]) -> Dict[str, str]:
+    invocation_user = _invocation_user_id()
+    if invocation_user:
+        return {"user_id": invocation_user, "source": "invocation"}
     env_user = (
         os.environ.get("LOONGSUITE_PILOT_USER_ID")
         or os.environ.get("LOONGSUITE_USER_ID")
     )
-    if env_user:
-        return env_user
-    if isinstance(sender_id, str) and sender_id:
-        return sender_id
-    config_user = config.get("userId")
-    if isinstance(config_user, str) and config_user:
-        return config_user
-    return _hostname()
-
+    normalized_env_user = _normalized_identity(env_user)
+    if normalized_env_user:
+        return {"user_id": normalized_env_user, "source": "environment"}
+    normalized_sender_id = _normalized_identity(sender_id)
+    if normalized_sender_id:
+        return {"user_id": normalized_sender_id, "source": "sender"}
+    config_user = _normalized_identity(config.get("userId"))
+    if config_user:
+        return {"user_id": config_user, "source": "config"}
+    return {"user_id": _hostname(), "source": "hostname"}
 
 def _worker_name() -> Optional[str]:
     raw = os.environ.get("AGENTTEAMS_WORKER_NAME")
@@ -289,6 +317,8 @@ def _new_turn(
     observer_turn_id: Any = "",
 ) -> Dict[str, Any]:
     config = _config()
+    normalized_sender_id = _normalized_identity(sender_id)
+    user_identity = _resolve_user_identity(normalized_sender_id, config)
     return {
         "session_id": session_id,
         "task_id": None,
@@ -297,7 +327,9 @@ def _new_turn(
         ),
         "fallback_turn_id": "%s:%s" % (session_id, uuid.uuid4()),
         "trace_id": _new_trace_id(),
-        "user_id": _resolve_user_id(sender_id, config),
+        "user_id": user_identity["user_id"],
+        "user_id_source": user_identity["source"],
+        "sender_id": normalized_sender_id,
         "capture_content": _capture_message_content(config),
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
         "history_length": max(1, history_length),
@@ -455,6 +487,10 @@ def _common_fields(
         "gen_ai.step.id": step_id,
         "gen_ai.agent.type": AGENT_TYPE,
     }
+    if turn.get("user_id_source") in ("invocation", "environment", "sender"):
+        fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
+    if turn.get("sender_id"):
+        fields["agent.hermes.sender.id"] = turn["sender_id"]
     worker_name = _worker_name()
     if worker_name:
         fields["gen_ai.agent.name"] = worker_name

@@ -54,6 +54,70 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(callArgs[1]).toMatchObject({ strict: false });
   });
 
+  it('reconciles an early OpenClaw fallback to the sender identity at turn conversion', async () => {
+    const early = {
+      'event.name': 'other',
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'openclaw-turn',
+      'user.id': 'collector-user',
+      'agent.openclaw.hook': 'before_model_resolve',
+      'agent.openclaw.user.id.source': 'hostname',
+      'gen_ai.input.messages_delta': [],
+    } as unknown as AgentActivityEntry;
+    const senderKnown = {
+      ...early,
+      'event.id': 'sender-known',
+      'user.id': 'channel-sender',
+      'agent.openclaw.hook': 'before_agent_run',
+      'agent.openclaw.sender.id': 'channel-sender',
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'channel-account',
+      'agent.openclaw.channel.id': 'channel-conversation',
+      'agent.openclaw.user.id.source': 'sender',
+    } as unknown as AgentActivityEntry;
+    const terminal = {
+      ...senderKnown,
+      'event.id': 'terminal',
+      'agent.openclaw.hook': 'llm_output',
+    } as unknown as AgentActivityEntry;
+
+    await flusher.sendBatch([early, senderKnown, terminal]);
+
+    const convertedRecords = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(convertedRecords.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.sender.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.channel'] === 'telegram')).toBe(true);
+    expect(early['user.id']).toBe('collector-user');
+    expect(early['agent.openclaw.user.id.source']).toBe('hostname');
+  });
+
+  it('does not replace an explicit OpenClaw environment identity with sender metadata', async () => {
+    const early = {
+      'event.name': 'other',
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'openclaw-env-turn',
+      'user.id': 'environment-user',
+      'agent.openclaw.hook': 'before_model_resolve',
+      'gen_ai.input.messages_delta': [],
+    } as unknown as AgentActivityEntry;
+    const terminal = {
+      ...early,
+      'event.id': 'terminal',
+      'agent.openclaw.hook': 'llm_output',
+      'agent.openclaw.sender.id': 'channel-sender',
+      'agent.openclaw.user.id.source': 'environment',
+    } as unknown as AgentActivityEntry;
+
+    await flusher.sendBatch([early, terminal]);
+
+    const convertedRecords = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(convertedRecords.every(record => record['user.id'] === 'environment-user')).toBe(true);
+  });
+
   it('excludes agent.input only at the EventLog-to-Trace boundary', async () => {
     const inputOther = {
       time_unix_nano: '1700000000000000000',

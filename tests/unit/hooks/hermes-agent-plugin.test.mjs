@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { INVOCATION_USER_ID_FIELD } from '../../../assets/hooks/shared/resource-context.mjs';
 
 const PLUGIN = path.resolve(
   fileURLToPath(import.meta.url),
@@ -251,6 +252,7 @@ function replay(events, {
   agentTeamsWorkerName,
   pilotEnvUser,
   legacyEnvUser,
+  spanAttributes,
   configUser = 'pilot-config-user',
   dataDirSource = 'env',
   beforeSpawn,
@@ -319,6 +321,8 @@ print(json.dumps(sorted(ctx.hooks)))
   else env.LOONGSUITE_PILOT_USER_ID = pilotEnvUser;
   if (legacyEnvUser === undefined) delete env.LOONGSUITE_USER_ID;
   else env.LOONGSUITE_USER_ID = legacyEnvUser;
+  if (spanAttributes === undefined) delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  else env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = spanAttributes;
   if (agentTeamsWorkerName === undefined) delete env.AGENTTEAMS_WORKER_NAME;
   else env.AGENTTEAMS_WORKER_NAME = agentTeamsWorkerName;
   const run = spawnSync('python3', ['-c', driver, pluginPath, path.join(root, 'events.jsonl')], {
@@ -411,6 +415,8 @@ describe('Hermes Agent native plugin', () => {
     expect(new Set(records.map(record => record['gen_ai.turn.id']))).toEqual(new Set([TURN_ONE]));
     expect(records.every(record => record['gen_ai.session.id'] === SESSION_ID)).toBe(true);
     expect(records.every(record => record['user.id'] === 'pilot-env-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'pilot-env-user')).toBe(true);
     expect(records.every(record => record['gen_ai.agent.type'] === 'hermes')).toBe(true);
     expect(records.every(record => record['gen_ai.provider.name'] === 'qwen')).toBe(true);
 
@@ -536,6 +542,19 @@ describe('Hermes Agent native plugin', () => {
     expect(records.every(record => record['user.id'] === 'legacy-env-user')).toBe(true);
   });
 
+  it('gives invocation-scoped identity precedence over env and sender identity', () => {
+    const { records } = replay(firstTurn({ senderId: 'sender-user' }), {
+      pilotEnvUser: 'pilot-env-user',
+      spanAttributes: 'gen_ai.user.id=invocation-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(records.every(record => record['user.id'] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
+  });
+
   it('pairs two sequential tools with three unique API steps', () => {
     const { records } = replay(secondTurn(), { configUser: 'config-fallback-user' });
     expect(records.map(record => record['event.name'])).toEqual([
@@ -561,6 +580,10 @@ describe('Hermes Agent native plugin', () => {
   it('keeps message and correlation structure while removing captured content', () => {
     const { records, raw } = replay(firstTurn({ senderId: 'sender-user' }), { captureMessageContent: false });
     expect(records.every(record => record['user.id'] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
     expect(raw).not.toContain('approved files');
     expect(raw).not.toContain('wc -l /etc/hosts');
     expect(raw).not.toContain('17 /etc/hosts');
