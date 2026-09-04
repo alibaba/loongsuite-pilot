@@ -10,6 +10,7 @@ import {
   buildEventsFromBoundaries,
   findIncrementalTurnEndLine,
   findTriggeredTurnWindow,
+  hasQoderCnTerminalMarker,
   isRetryLockStale,
   readRetryLock,
   releaseRetryLock,
@@ -664,6 +665,26 @@ describe('findTriggeredTurnWindow stop source variants (B3 P0)', () => {
       stopLine: null,
       endLine: null,
     });
+  });
+});
+
+describe('hasQoderCnTerminalMarker', () => {
+  it('accepts the traditional progress Stop marker', () => {
+    expect(hasQoderCnTerminalMarker([{ hookEvent: 'Stop' }], [])).toBe(true);
+  });
+
+  it('accepts SDK print-mode terminal rows before progress Stop is appended', () => {
+    expect(hasQoderCnTerminalMarker([], [
+      { type: 'assistant', message: { stop_reason: 'end_turn' } },
+      { type: 'last-prompt', lastPrompt: 'summarize the file' },
+    ])).toBe(true);
+  });
+
+  it('rejects a mid-tool snapshot', () => {
+    expect(hasQoderCnTerminalMarker([], [
+      { type: 'assistant', message: { stop_reason: 'tool_use' } },
+      { type: 'user', message: { content: [{ type: 'tool_result' }] } },
+    ])).toBe(false);
   });
 });
 

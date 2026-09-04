@@ -382,6 +382,20 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('passes the configured QoderCN trace poll interval to the input', async () => {
+      const config = makeConfig();
+      config.listeners['qoder-cn-trace'] = { enabled: true, pollInterval: 1000 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = (orch as any).inputManager.getInput('qoder-cn-trace');
+      expect(input).toBeDefined();
+      expect(input.pollIntervalMs).toBe(1000);
+
+      await orch.stop();
+    });
+
     it('uses the configured dataDir for all QwenWorkCN Hook and intercept paths', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));
