@@ -1193,6 +1193,144 @@ describe('Updater', () => {
     });
   });
 
+  describe('restartCollector failure reporting', () => {
+    function attachMetrics(updater: Updater): unknown[][] {
+      const calls: unknown[][] = [];
+      updater.setMetrics({
+        writeAlarm: (...args: unknown[]) => { calls.push(args); return Promise.resolve(); },
+        writeEvent: () => Promise.resolve(),
+      } as never);
+      return calls;
+    }
+
+    function failRestartWith(err: unknown): void {
+      mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+        if (String(cmd).includes('loongsuite-pilot') || (args ?? []).includes('restart-collector') || (args ?? []).includes('start-collector')) {
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+    }
+
+    it('alarms with the stage the service script recorded when recovery also fails', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'register-denied',
+            init_type: 'taskscheduler',
+            detail: 'self-heal failed: Access is denied.',
+            diag: { definition_owner: 'BUILTIN\\Administrators' },
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) {
+          return Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(Object.assign(new Error('Command failed'), {
+        code: 1,
+        stdout: '[restart-failure] target=collector stage=register-denied\n',
+        stderr: 'Service manager failed to restart collector\n',
+      }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=register-denied');
+      expect(message).toContain('reason="self-heal failed: Access is denied."');
+      expect(message).toContain('definition_owner="BUILTIN\\Administrators"');
+      expect(message).toContain('stdout="[restart-failure] target=collector stage=register-denied"');
+    });
+
+    it('does not attribute an older breadcrumb to this attempt', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000) - 900,
+            target: 'collector',
+            stage: 'register-denied',
+            detail: 'stale evidence from fifteen minutes ago',
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(new Error('spawn ENOENT'));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=unknown');
+      expect(message).not.toContain('register-denied');
+      expect(message).not.toContain('stale evidence');
+    });
+
+    it('stays silent when the restart succeeds', async () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await (updater as any).restartCollector('1.0.2', false);
+      expect(alarms).toEqual([]);
+    });
+
+    it('alarms with the first restart stage when start-collector succeeds but health never appears', async () => {
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if ((args ?? []).includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            code: 1,
+            stdout: '[restart-failure] target=collector stage=task-missing\n',
+            stderr: 'Service manager failed to restart collector\n',
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'task-missing',
+            init_type: 'taskscheduler',
+            detail: 'scheduled task is not registered',
+            diag: {},
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      const pending = (updater as any).restartCollector('1.0.2', false);
+      const assertion = expect(pending).rejects.toThrow(/did not become healthy/);
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=task-missing');
+      expect(message).toContain('health check failed after start-collector recovery');
+      expect(message).toContain('runtime record not found');
+    });
+  });
+
   // ─── check(): reentry protection ─────────────────────
 
   describe('check - reentry protection', () => {
