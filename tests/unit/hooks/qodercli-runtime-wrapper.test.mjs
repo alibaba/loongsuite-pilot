@@ -37,6 +37,25 @@ async function makeFixture(qodercliSource, withIntercept = true, qodercliName = 
   };
 }
 
+/** Add another executable to an existing fixture's bin dir. */
+async function addBin(fixture, name, source) {
+  const p = path.join(fixture.bin, name);
+  await fs.writeFile(p, source, { mode: 0o755 });
+  return p;
+}
+
+/**
+ * A launcher that reports which entry actually ran plus the intercept file the
+ * wrapper picked. `id` is what tells the two product lines' entries apart.
+ */
+const probe = (id) => `#!/bin/sh
+printf '{"id":"${id}","interceptFile":"%s","nodeOptions":"%s","bunOptions":"%s"}\\n' "$LOONGSUITE_INTERCEPT_FILE" "$NODE_OPTIONS" "$BUN_OPTIONS"
+`;
+
+// A PATH with the usual utilities (the wrapper shells out to tr/head/grep) but
+// no CLI of either flavor, so only an explicit override can resolve an entry.
+const BARE_PATH = '/usr/bin:/bin';
+
 describe('qodercli runtime wrapper', () => {
   it('uses NODE_OPTIONS --import for a Node shebang and preserves user options', async () => {
     const fixture = await makeFixture(`#!/usr/bin/env node
@@ -108,6 +127,123 @@ console.log(JSON.stringify({
     expect(output.nodeOptions).toContain('qodercli-token-intercept.mjs');
     expect(output.bunOptions).toBe('');
     expect(output.args).toEqual(['hello']);
+  });
+
+  it('scopes the intercept file to the qoderclicn flavor', async () => {
+    // The CN rc block launches this same wrapper with LOONGSUITE_QODERCLI_FLAVOR
+    // set; the derived intercept file name is the only thing keeping the two
+    // product lines' token output apart. Nothing asserted that name before, so
+    // both lines could have been writing to one file unnoticed.
+    const fixture = await makeFixture(probe('CN'), true, 'qoderclicn');
+    const result = spawnSync('sh', [fixture.wrapper, 'hello'], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn',
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout.trim());
+    expect(output.id).toBe('CN'); // resolved `qoderclicn` off PATH, not `qodercli`
+    expect(output.interceptFile).toBe('qoderclicn-intercept.jsonl');
+    expect(output.bunOptions).toContain('qodercli-token-intercept.mjs'); // one shared asset
+  });
+
+  it('keeps the default flavor writing to the qodercli intercept file', async () => {
+    // Counterpart to the CN case: proves the name is derived from the flavor
+    // rather than hard-coded on either side.
+    const fixture = await makeFixture(probe('INTL'));
+    const result = spawnSync('sh', [fixture.wrapper], {
+      env: {
+        ...process.env,
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim()).interceptFile).toBe('qodercli-intercept.jsonl');
+  });
+
+  it('does not let the qodercli entry override redirect the qoderclicn flavor', async () => {
+    // The wrapper's contract: "The names are per flavor on purpose: a value
+    // exported for one product line must not redirect the other." A user with
+    // LOONGSUITE_QODERCLI_BIN exported for the international CLI must still get
+    // the CN entry when running qoderclicn.
+    const fixture = await makeFixture(probe('INTL'), true, 'qodercli');
+    await addBin(fixture, 'qoderclicn', probe('CN'));
+    const result = spawnSync('sh', [fixture.wrapper], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn',
+        LOONGSUITE_QODERCLI_BIN: fixture.qodercli, // the OTHER line's override
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout.trim());
+    expect(output.id).toBe('CN'); // international override stayed inert
+    expect(output.interceptFile).toBe('qoderclicn-intercept.jsonl');
+  });
+
+  it('honours the per-flavor LOONGSUITE_QODERCLICN_BIN override', async () => {
+    // The flavor-derived override name has to actually work, or the CN line
+    // would have no way to point at a non-PATH entry.
+    const fixture = await makeFixture(probe('INTL'), true, 'qodercli');
+    const cnBin = await addBin(fixture, 'cn-entry', probe('CN'));
+    const result = spawnSync('sh', [fixture.wrapper], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn',
+        LOONGSUITE_QODERCLICN_BIN: cnBin,
+        PATH: BARE_PATH, // nothing named qoderclicn is reachable
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim()).id).toBe('CN');
+  });
+
+  it('lets LOONGSUITE_INTERCEPT_FILE override the derived name', async () => {
+    const fixture = await makeFixture(probe('CN'), true, 'qoderclicn');
+    const result = spawnSync('sh', [fixture.wrapper], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn',
+        LOONGSUITE_INTERCEPT_FILE: 'custom-intercept.jsonl',
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim()).interceptFile).toBe('custom-intercept.jsonl');
+  });
+
+  it('names the missing executable by flavor when nothing resolves', async () => {
+    const fixture = await makeFixture(probe('INTL'), true, 'qodercli');
+    const result = spawnSync('sh', [fixture.wrapper], {
+      env: {
+        ...process.env,
+        LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn',
+        PATH: BARE_PATH,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status).toBe(127);
+    expect(result.stderr).toContain('qoderclicn executable not found');
   });
 
   it('fails open when the intercept asset is missing', async () => {

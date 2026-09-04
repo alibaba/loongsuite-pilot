@@ -533,6 +533,45 @@ describe('intercept rc target check/repair/cleanup against a temp rc (real closu
     expect(await cnTarget.check()).toBe(true);
   });
 
+  it('treats a qodercli block that lost its END marker as unhealthy', async () => {
+    // A partial write or a hand edit can drop the END marker. Extraction used to
+    // run to EOF, so the damaged block absorbed everything below it; its own
+    // current-shape body then satisfied the signature check and check() reported
+    // healthy forever. Worse, had it reported unhealthy, repair()'s strip would
+    // have cut to EOF and taken the CN block and the user's own lines with it.
+    const targets = HookWatchdog.defaultInterceptTargets(tmp, () => true, [zshrc]);
+    const cliTarget = targets.find(t => t.id === 'qodercli-rc')!;
+    const cnTarget = targets.find(t => t.id === 'qoderclicn-rc')!;
+
+    fs.writeFileSync(zshrc, '');
+    await cnTarget.repair();
+    const cnBlock = fs.readFileSync(zshrc, 'utf-8').trim();
+    // Installer order puts qodercli first, so the CN block sits below it.
+    fs.writeFileSync(zshrc, [
+      '# user-top',
+      '# loongsuite-pilot BEGIN qodercli-intercept',
+      `  eval 'qodercli() { "/tmp/pilot/hooks/qodercli-runtime-wrapper.sh" "$@"; }'`,
+      // END marker deliberately absent.
+      cnBlock,
+      'export PATH=/user/bin:$PATH',
+      '',
+    ].join('\n'));
+
+    expect(await cliTarget.check()).toBe(false);
+    expect(await cnTarget.check()).toBe(true); // the CN block reads as current
+
+    await cliTarget.repair();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc.match(/BEGIN qodercli-intercept/g)!.length).toBe(1); // rewritten once
+    expect(rc.match(/END qodercli-intercept/g)!.length).toBe(1);   // now terminated
+    expect(rc.match(/BEGIN qoderclicn-intercept/g)!.length).toBe(1);
+    expect(rc).toContain('LOONGSUITE_QODERCLI_FLAVOR=qoderclicn'); // CN body intact
+    expect(rc).toContain('# user-top');
+    expect(rc).toContain('export PATH=/user/bin:$PATH');           // user tail intact
+    expect(await cliTarget.check()).toBe(true);
+    expect(await cnTarget.check()).toBe(true);
+  });
+
   it('keeps the two wrapper flavors independent in one rc file', async () => {
     const targets = HookWatchdog.defaultInterceptTargets(tmp, () => true, [zshrc]);
     const cliTarget = targets.find(t => t.id === 'qodercli-rc')!;
@@ -610,6 +649,40 @@ describe('stripMarkerBlock', () => {
     const out = stripMarkerBlock(content, BEGIN, END);
     expect(out.split('\n')).toEqual(['before', 'after']);
   });
+
+  it('an unterminated block does not swallow the next block or user content', () => {
+    // repair() writes this result back over the rc file, so cutting to EOF here
+    // deletes the sibling blocks and whatever the user keeps below them.
+    const content = [
+      'export PATH=/x:$PATH',
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'claude() { echo old; }',
+      // END marker deliberately absent.
+      '# loongsuite-pilot BEGIN qodercli-intercept',
+      "  eval 'qodercli() { :; }'",
+      '# loongsuite-pilot END qodercli-intercept',
+      'alias ll=ls',
+    ].join('\n');
+    const out = stripMarkerBlock(content, BEGIN, END);
+    expect(out).not.toContain('claude() { echo old; }');  // damaged block removed
+    expect(out).toContain('BEGIN qodercli-intercept');    // sibling block survives
+    expect(out).toContain("eval 'qodercli() { :; }");
+    expect(out).toContain('export PATH=/x:$PATH');        // user content survives
+    expect(out).toContain('alias ll=ls');
+  });
+
+  it('collapses repeated BEGINs of the same block into one removal', () => {
+    const content = [
+      'before',
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'first',
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'second',
+      '# loongsuite-pilot END claude-code-intercept',
+      'after',
+    ].join('\n');
+    expect(stripMarkerBlock(content, BEGIN, END).split('\n')).toEqual(['before', 'after']);
+  });
 });
 
 describe('extractMarkerBlock', () => {
@@ -622,12 +695,35 @@ describe('extractMarkerBlock', () => {
 
   it('returns only the block, excluding surrounding content', () => {
     const content = ['before', BEGIN, 'body', END, 'after'].join('\n');
-    expect(extractMarkerBlock(content, BEGIN, END)).toBe([BEGIN, 'body', END].join('\n'));
+    expect(extractMarkerBlock(content, BEGIN, END)).toEqual({
+      text: [BEGIN, 'body', END].join('\n'),
+      terminated: true,
+    });
   });
 
-  it('returns the tail when the END marker is missing', () => {
+  it('reports an unterminated block and returns its tail', () => {
     const content = ['before', BEGIN, 'body'].join('\n');
-    expect(extractMarkerBlock(content, BEGIN, END)).toBe([BEGIN, 'body'].join('\n'));
+    expect(extractMarkerBlock(content, BEGIN, END)).toEqual({
+      text: [BEGIN, 'body'].join('\n'),
+      terminated: false,
+    });
+  });
+
+  it('stops an unterminated block at the next block BEGIN, not at EOF', () => {
+    // Running to EOF pulled the following block into this one's text, which is
+    // how a neighbour could end up satisfying this block's signature check.
+    const content = [
+      'before',
+      BEGIN,
+      'body',
+      '# loongsuite-pilot BEGIN qoderclicn-intercept',
+      'cn body',
+      '# loongsuite-pilot END qoderclicn-intercept',
+    ].join('\n');
+    expect(extractMarkerBlock(content, BEGIN, END)).toEqual({
+      text: [BEGIN, 'body'].join('\n'),
+      terminated: false,
+    });
   });
 });
 
@@ -654,16 +750,26 @@ describe('interceptRcBlockDefs migration metadata', () => {
     }
   });
 
-  it('tells the two wrapper flavors apart by signature, not by script name', () => {
+  it('gives every block a signature no other block can satisfy', () => {
+    // A signature that also occurs in a sibling block would let that sibling
+    // vouch for a stale block of this shape. Per-block scoping is the other half
+    // of the defence; neither half should be load-bearing on its own.
+    const defs = HookWatchdog.interceptRcBlockDefs();
+    for (const a of defs) {
+      for (const b of defs) {
+        if (a.id === b.id) continue;
+        expect(b.blockFn(`/tmp/hooks/${b.scriptName}`)).not.toContain(a.signature);
+      }
+    }
+  });
+
+  it('keeps the shared wrapper script name out of both flavors\' signatures', () => {
     const defs = HookWatchdog.interceptRcBlockDefs();
     const cli = defs.find(d => d.id === 'qodercli-rc')!;
     const cn = defs.find(d => d.id === 'qoderclicn-rc')!;
     expect(cn.scriptName).toBe(cli.scriptName); // one wrapper serves both
-    // qodercli's signature is that shared script name, so it also occurs inside
-    // the CN block. Only per-block scoping keeps a stale qodercli block
-    // detectable next to a current CN one; the reverse never collides.
-    expect(cn.blockFn(`/tmp/hooks/${cn.scriptName}`)).toContain(cli.signature);
-    expect(cli.blockFn(`/tmp/hooks/${cli.scriptName}`)).not.toContain(cn.signature);
+    expect(cli.signature).not.toContain(cli.scriptName);
+    expect(cn.signature).not.toContain(cn.scriptName);
   });
 
   it('exposes cleanup() on every default intercept target', () => {
