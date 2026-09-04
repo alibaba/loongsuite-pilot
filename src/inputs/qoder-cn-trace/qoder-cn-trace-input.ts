@@ -176,39 +176,48 @@ export class QoderCnTraceInput extends BaseInput {
 
     // The IDE and qoderclicn share one agentId and therefore one hook history,
     // so the variant has to be recovered here. A CLI session is recognised by
-    // two signals the IDE does not produce: the transcript's usage.request_id
-    // (surfaced by the hook as agent.client_request_id) and a segments directory
-    // of its own. Both are required, so an IDE session stays on the SQLite path
-    // even if a later IDE build starts carrying a request id, and a history
-    // collected before the hook shipped that field degrades to the previous
-    // behaviour instead of losing its tokens.
+    // the transcript's usage.request_id, surfaced by the hook as
+    // agent.client_request_id, which the IDE does not produce. A history
+    // collected before the hook shipped that field carries no request id either,
+    // so it degrades to the SQLite path instead of losing its tokens.
+    //
+    // The presence of segments is deliberately NOT part of this decision.
+    // Segments are written by the CLI itself and can lag behind the hook record,
+    // so gating on them sent a CLI turn whose segments had not landed yet down
+    // the IDE path, where its intercept was never read at all. The Hook offset is
+    // committed before enrichment, so those tokens were lost for good rather than
+    // repaired on a later poll. The cost of dropping segments as a signal is that
+    // an IDE build which one day starts carrying a request id would take the CLI
+    // path; it would find no exact intercept match and end up with no tokens,
+    // which is what gating on segments already produced for real CLI turns.
     let interceptData: InterceptData | null = null;
     for (const [sessionId, sessionEntries] of sessionGroups) {
-      // Here the segment read is itself the second discriminator signal, so it
-      // cannot be deferred behind a missing-data check the way the international
-      // input defers it. Handing the reader this batch's exact request ids keeps
-      // the guarantee that check exists for: the Hook offset is committed before
-      // enrichment, so a record that is not visible yet has to be waited for now
-      // or never. Absent ids cost one short retry; present ids cost nothing.
-      const segments = hasClientRequestId(sessionEntries)
+      const isCliSession = hasClientRequestId(sessionEntries);
+      // Handing the reader this batch's exact request ids buys one bounded retry
+      // for an id missing from the first snapshot, for the same now-or-never
+      // reason: the Hook offset is committed before enrichment.
+      const segments = isCliSession
         ? await this.readCliSegments(sessionId, collectCliExpectedRequestIds(sessionEntries))
         : [];
 
-      if (segments.length > 0) {
+      if (isCliSession) {
         // Tokens come from the runtime intercept rather than from the segments:
         // on this build the segment records and the transcript both report zero
         // token counts and carry only `credits`, same as the international one.
-        // Segments are read for the response timings, which are the only source
-        // of a non-zero LLM duration.
+        // The intercept joins on an exact gen_ai.response.id, so its usefulness
+        // does not depend on whether segments have landed.
         interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
         enrichCliPrimary(
           sessionEntries,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
-        // Only fills what Hook plus intercept left missing, so it is safe to run
-        // unconditionally once the segments are in hand.
-        enrichCliFromSegments(sessionEntries, segments);
+        // Segments only supply the response timings, which are the only source of
+        // a non-zero LLM duration. Without them the turn keeps a zero duration,
+        // but its tokens are already in place above.
+        if (segments.length > 0) {
+          enrichCliFromSegments(sessionEntries, segments);
+        }
       } else {
         // Intentionally ignores matchedDbPath: agent.type must never be derived from
         // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.

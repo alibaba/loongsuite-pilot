@@ -355,6 +355,50 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     expect(outResponse['gen_ai.response.model']).toBe('qwen3-max');
   });
 
+  it('still applies intercept usage when the segments have not landed yet', async () => {
+    // Segments are written by the CLI and can lag behind the hook record. Routing
+    // such a turn to the IDE path meant its intercept was never read, and because
+    // the Hook offset is committed before enrichment those tokens were gone for
+    // good. Usage joins on an exact gen_ai.response.id, so it does not depend on
+    // the segments at all; only the duration does.
+    const sessionId = 'cli-sess-no-segments';
+    const clientRequestId = 'creq-no-segments';
+    const responseId = 'resp-no-segments';
+    const now = Date.now();
+
+    const request = buildEntry({
+      event: 'llm.request', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    request['agent.client_request_id'] = clientRequestId;
+    const response = buildEntry({
+      event: 'llm.response', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    response['agent.client_request_id'] = clientRequestId;
+    response['gen_ai.response.id'] = responseId;
+    await writeHookJsonl(logDir, [request, response]);
+
+    // Deliberately no writeSegments call.
+    await writeCnIntercept([{
+      type: 'token',
+      id: responseId,
+      ts: now,
+      prompt_tokens: 700,
+      completion_tokens: 42,
+      cached_tokens: 0,
+      total_tokens: 742,
+    }]);
+
+    const entries = await collectOnce();
+    const outRequest = entries.find(e => e['event.name'] === 'llm.request')!;
+    const outResponse = entries.find(e => e['event.name'] === 'llm.response')!;
+
+    expect(outResponse['gen_ai.usage.input_tokens']).toBe(700);
+    expect(outResponse['gen_ai.usage.output_tokens']).toBe(42);
+    // The duration stays zero: only the segments carry the response timings, and
+    // that is the accepted residual loss rather than an oversight.
+    expect(spanDurationMs(outRequest, outResponse)).toBe(0);
+  });
+
   it('never reads the international segments root for a QoderCN session', async () => {
     // The two product lines mint session ids independently, so one id can exist
     // under both roots. Reading ~/.qoder here would stamp these entries with
