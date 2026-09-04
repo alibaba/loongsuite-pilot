@@ -84,6 +84,12 @@ DeepSeek Harness (`dsh`) loads Pilot's observability plugin from its user-level
 and time-to-first-token events. See [Agent Configuration](docs/agents.md#deepseek-harness-collection-and-lifecycle)
 for activation, source-log, disable, and uninstall behavior.
 
+Only need DeepSeek Harness, and want it to emit standard OTLP straight to your
+own backend without running a local collector? Use the standalone
+[@loongsuite/dsh-plugin](https://github.com/loongsuite/dsh-plugin) instead.
+Pilot is the multi-agent path: discovery, normalization into a shared schema,
+and fan-out to files, SLS, HTTP, or trace backends.
+
 ### Documented Windows Agent Support
 
 The table above describes Pilot's general integration capabilities; it does not imply that every agent is supported on every operating system. The following agents are currently explicitly documented as supported on Windows:
