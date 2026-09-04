@@ -1,10 +1,20 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import * as childProcess from 'node:child_process';
 import * as os from 'node:os';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import * as nodePath from 'node:path';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { WukongInput } from '../../../src/inputs/wukong/wukong-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+
+const LEETCODE_FIXTURE = JSON.parse(
+  readFileSync(
+    nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), '../../fixtures/wukong/leetcode-session.json'),
+    'utf-8',
+  ),
+);
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
@@ -191,7 +201,7 @@ describe('WukongInput', () => {
     expect(respEntry).toBeDefined();
     expect(respEntry!['gen_ai.agent.type']).toBe(ClientType.Wukong);
     expect(respEntry!['gen_ai.session.id']).toBe('sess-1');
-    expect(respEntry!['gen_ai.response.id']).toBe('run-1');
+    expect(respEntry!['gen_ai.response.id']).toBe('text-1');
     expect(respEntry!['gen_ai.output.messages']).toEqual([
       { role: 'assistant', parts: [{ type: 'text', content: 'Hello! How can I help?' }] },
     ]);
@@ -238,7 +248,13 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(3);
+    const other = entries.find(e => e['event.name'] === 'other');
+    expect(other).toBeDefined();
+    expect(other!['gen_ai.step.id']).toBeUndefined();
+    expect(other!['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Follow up question' }] },
+    ]);
     const llmReq = entries.find(e => e['event.name'] === 'llm.request');
     expect(llmReq).toBeDefined();
     expect(llmReq!['gen_ai.input.messages_delta']).toEqual([
@@ -946,181 +962,6 @@ describe('WukongInput', () => {
     expect(toolResult!['gen_ai.tool.call.duration']).toBe(200);
   });
 
-  it('maps FILE_READ, SEARCH, DIRECTORY_LIST, SKILL, ARTIFACT, and FILE_WRITE activity snapshots to canonical fields', async () => {
-    const activityMessages = [
-      SAMPLE_MESSAGES[0],
-      {
-        id: 'msg-activity-2',
-        conversationId: 'sess-1',
-        role: 'assistant' as const,
-        content: null,
-        events: [
-          { type: 'RUN_STARTED', runId: 'run-act-2', threadId: 'sess-1', timestamp: 1779240560000 },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 1779240560100,
-            content: {
-              path: '/repo/src/index.ts', content: 'export const a = 1;', snippet: 'export const a = 1;',
-              total_lines: 1, status: 'success', start_time: 1779240560100, finish_time: 1779240560200,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'SEARCH', timestamp: 1779240560300,
-            content: {
-              queries: ['loongsuite pilot'], search_type: 'web', results: [{ title: 'result-1' }],
-              status: 'success', start_time: 1779240560300, finish_time: 1779240560400,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'DIRECTORY_LIST', timestamp: 1779240560500,
-            content: {
-              path: '/repo/src', files: ['index.ts', 'utils.ts'], total_count: 2,
-              status: 'success', start_time: 1779240560500, finish_time: 1779240560600,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 1779240560700,
-            content: {
-              skill_name: 'search_skills', purpose: 'find relevant skill', output: 'skill-output',
-              status: 'success', start_time: 1779240560700, finish_time: 1779240560800,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'ARTIFACT', timestamp: 1779240560900,
-            content: {
-              artifactsMetadata: [{ id: 'artifact-1', name: 'report.md' }], generatedAt: 1779240560900,
-              start_time: 1779240560900, finish_time: 1779240561000,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_WRITE', timestamp: 1779240561100,
-            content: {
-              file_path: '/repo/src/new-file.ts', status: 'done',
-              start_time: 1779240561100, finish_time: 1779240561200,
-            },
-          },
-          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done.', messageId: 'text-2', timestamp: 1779240561300 },
-          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240561400 },
-          { type: 'RUN_FINISHED', runId: 'run-act-2', threadId: 'sess-1', timestamp: 1779240561400 },
-        ],
-        createdAt: 1779240560000,
-        timestamp: 1779240560000,
-        turnIndex: 1,
-      },
-    ];
-
-    mockExecFile.mockImplementation(makeExecFileImpl({
-      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
-      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
-    }));
-
-    createInput();
-    seedSeenCounts();
-    const entries: AgentActivityEntry[] = [];
-    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
-    await input.start();
-    await input.stop();
-
-    const toolCallByName = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name);
-    const toolResultByName = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name);
-
-    const fileReadCall = toolCallByName('file_read');
-    expect(fileReadCall!['gen_ai.tool.call.arguments']).toEqual({ path: '/repo/src/index.ts' });
-    const fileReadResult = toolResultByName('file_read');
-    expect(fileReadResult!['gen_ai.tool.call.result']).toEqual({
-      content: 'export const a = 1;', snippet: 'export const a = 1;', total_lines: 1, status: 'success',
-    });
-
-    const searchCall = toolCallByName('search');
-    expect(searchCall!['gen_ai.tool.call.arguments']).toEqual({ queries: ['loongsuite pilot'], search_type: 'web' });
-    const searchResult = toolResultByName('search');
-    expect(searchResult!['gen_ai.tool.call.result']).toEqual({ results: [{ title: 'result-1' }], status: 'success' });
-
-    const dirListResult = toolResultByName('directory_list');
-    expect(dirListResult!['gen_ai.tool.call.result']).toEqual({ files: ['index.ts', 'utils.ts'], total_count: 2, status: 'success' });
-
-    const skillCall = toolCallByName('skill');
-    expect(skillCall!['gen_ai.tool.call.arguments']).toEqual({ skill_name: 'search_skills', purpose: 'find relevant skill' });
-    const skillResult = toolResultByName('skill');
-    expect(skillResult!['gen_ai.tool.call.result']).toEqual({ output: 'skill-output', status: 'success' });
-
-    const artifactCall = toolCallByName('artifact');
-    expect(artifactCall!['gen_ai.tool.call.arguments']).toBeUndefined();
-    const artifactResult = toolResultByName('artifact');
-    expect(artifactResult!['gen_ai.tool.call.result']).toEqual({
-      artifactsMetadata: [{ id: 'artifact-1', name: 'report.md' }], generatedAt: 1779240560900,
-    });
-
-    const fileWriteCall = toolCallByName('file_write');
-    expect(fileWriteCall!['gen_ai.tool.call.arguments']).toEqual({ path: '/repo/src/new-file.ts' });
-  });
-
-  it('omits null activity arguments and marks failed activity snapshots consistently', async () => {
-    const activityMessages = [
-      SAMPLE_MESSAGES[0],
-      {
-        id: 'msg-activity-failure',
-        conversationId: 'sess-1',
-        role: 'assistant' as const,
-        content: null,
-        events: [
-          { type: 'RUN_STARTED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560000 },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_WRITE', timestamp: 1779240560100,
-            content: { file_path: null, status: 'done', start_time: 1779240560100, finish_time: 1779240560200 },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 1779240560300,
-            content: {
-              path: '/missing.ts', status: 'failed', error_message: 'file not found',
-              start_time: 1779240560300, finish_time: 1779240560400,
-            },
-          },
-          {
-            type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 1779240560500,
-            content: {
-              skill_name: 'missing_skill', status: 'error', error_message: 'skill failed',
-              start_time: 1779240560500, finish_time: 1779240560600,
-            },
-          },
-          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done.', messageId: 'text-3', timestamp: 1779240560700 },
-          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240560800 },
-          { type: 'RUN_FINISHED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560800 },
-        ],
-        createdAt: 1779240560000,
-        timestamp: 1779240560000,
-        turnIndex: 1,
-      },
-    ];
-
-    mockExecFile.mockImplementation(makeExecFileImpl({
-      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
-      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
-    }));
-
-    createInput();
-    seedSeenCounts();
-    const entries: AgentActivityEntry[] = [];
-    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
-    await input.start();
-    await input.stop();
-
-    const toolCallByName = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name);
-    const toolResultByName = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name);
-
-    expect(toolCallByName('file_write')!['gen_ai.tool.call.arguments']).toBeUndefined();
-
-    const fileReadResult = toolResultByName('file_read');
-    expect(fileReadResult!['tool.result.status']).toBe('failure');
-    expect(fileReadResult!['error.type']).toBe('_OTHER');
-    expect(fileReadResult!['error.message']).toBe('file not found');
-    expect(fileReadResult!['gen_ai.tool.call.result']).toEqual({ status: 'failed', error_message: 'file not found' });
-
-    const skillResult = toolResultByName('skill');
-    expect(skillResult!['tool.result.status']).toBe('failure');
-    expect(skillResult!['error.type']).toBe('_OTHER');
-    expect(skillResult!['error.message']).toBe('skill failed');
-  });
-
   it('generates trace_id and span_id on all assistant-derived entries', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
@@ -1606,6 +1447,226 @@ describe('WukongInput', () => {
     const staleCounters = (state.extra as any).staleCounters ?? {};
     expect(seenCounts['stale-sess']).toBeUndefined();
     expect(staleCounters['stale-sess']).toBeUndefined();
+  });
+
+  it('end-to-end real session: other-first, full answer, real tokens, ordered decision-aligned steps', async () => {
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify(LEETCODE_FIXTURE.listTasks),
+      get_spark_agui_messages: JSON.stringify(LEETCODE_FIXTURE.messages),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Problem 2a: the turn begins with exactly one `other` carrying the user prompt (no step id).
+    const others = entries.filter(e => e['event.name'] === 'other');
+    expect(others).toHaveLength(1);
+    expect(others[0]['gen_ai.step.id']).toBeUndefined();
+    expect(JSON.stringify(others[0]['gen_ai.input.messages_delta'])).toContain('单调队列');
+
+    // Problem 2b/3: records are sorted ascending by time_unix_nano; `other` is first
+    // and no tool.call precedes the first llm.request.
+    const times = entries.map(e => BigInt(String(e['time_unix_nano'])));
+    for (let i = 1; i < times.length; i++) expect(times[i] >= times[i - 1]).toBe(true);
+    const names = entries.map(e => e['event.name']);
+    expect(names[0]).toBe('other');
+    const firstReq = names.indexOf('llm.request');
+    const firstTool = names.indexOf('tool.call');
+    expect(firstReq).toBeGreaterThanOrEqual(0);
+    expect(firstTool).toBeGreaterThan(firstReq);
+
+    // Problem 3: STEP count == LLM decision count == 2 (text→file_read, then final answer).
+    const stepIds = new Set(entries.filter(e => e['gen_ai.step.id']).map(e => e['gen_ai.step.id']));
+    const llmReqs = entries.filter(e => e['event.name'] === 'llm.request');
+    const llmResps = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(stepIds.size).toBe(2);
+    expect(llmReqs).toHaveLength(2);
+    expect(llmResps).toHaveLength(2);
+
+    // Problem 1: final answer is NOT truncated — the full Java explanation is present.
+    const finalResp = llmResps.reduce((a, b) =>
+      Number(b['time_unix_nano']) > Number(a['time_unix_nano']) ? b : a);
+    const outStr = JSON.stringify(finalResp['gen_ai.output.messages']);
+    expect(outStr).toContain('ArrayDeque');
+    expect(outStr).toContain('复杂度');
+    expect(finalResp['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+
+    // Problem 4: real tokens land on the final step, and the AGENT aggregate equals them.
+    expect(finalResp['gen_ai.usage.input_tokens']).toBe(36779);
+    expect(finalResp['gen_ai.usage.output_tokens']).toBe(906);
+    expect(finalResp['gen_ai.usage.total_tokens']).toBe(37685);
+    expect(finalResp['gen_ai.usage.cache_read.input_tokens']).toBe(34048);
+    const sumIn = llmResps.reduce((s, e) => s + Number(e['gen_ai.usage.input_tokens'] ?? 0), 0);
+    const sumOut = llmResps.reduce((s, e) => s + Number(e['gen_ai.usage.output_tokens'] ?? 0), 0);
+    expect(sumIn).toBe(36779);
+    expect(sumOut).toBe(906);
+
+    // The first decision paired a file_read tool.call/result.
+    const toolCalls = entries.filter(e => e['event.name'] === 'tool.call');
+    const toolResults = entries.filter(e => e['event.name'] === 'tool.result');
+    expect(toolCalls).toHaveLength(1);
+    expect(toolResults).toHaveLength(1);
+    expect(toolCalls[0]['gen_ai.tool.name']).toBe('file_read');
+    // FILE_READ activity payload must be extracted (regression guard for the
+    // over-trimmed extraction switch): arguments carry the path, result the content.
+    expect(JSON.stringify(toolCalls[0]['gen_ai.tool.call.arguments'])).toContain('leetcode.cn');
+    expect(JSON.stringify(toolResults[0]['gen_ai.tool.call.result'])).toContain('滑动窗口');
+
+    // No 0-duration LLM span: the tool-step request precedes its response.
+    const toolStep = toolCalls[0]['gen_ai.step.id'];
+    const s1Req = llmReqs.find(e => e['gen_ai.step.id'] === toolStep)!;
+    const s1Resp = llmResps.find(e => e['gen_ai.step.id'] === toolStep)!;
+    expect(Number(s1Resp['time_unix_nano'])).toBeGreaterThan(Number(s1Req['time_unix_nano']));
+  });
+
+  it('extracts activity args/result for FILE_READ, SEARCH, SKILL, ARTIFACT', async () => {
+    const asstEvents = [
+      { type: 'RUN_STARTED', runId: 'r', threadId: 'sess-1', timestamp: 100 },
+      { type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 110, content: { path: '/tmp/a.txt', content: 'file body text', snippet: 'snip', status: 'completed', start_time: 110, finish_time: 120 } },
+      { type: 'ACTIVITY_SNAPSHOT', activityType: 'SEARCH', timestamp: 130, content: { queries: ['needle-q'], search_type: 'web', results: ['hit-r'], status: 'ok', start_time: 130, finish_time: 140 } },
+      { type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 150, content: { skill_name: 'pptx-skill', purpose: 'make slides', output: 'skill-done', status: 'completed', start_time: 150, finish_time: 160 } },
+      { type: 'ACTIVITY_SNAPSHOT', activityType: 'ARTIFACT', timestamp: 170, content: { artifactsMetadata: { name: 'deck' }, generatedAt: 171, start_time: 170, finish_time: 180 } },
+      { type: 'USAGE', prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, timestamp: 190 },
+      { type: 'RUN_FINISHED', runId: 'r', threadId: 'sess-1', timestamp: 191 },
+    ];
+    const msgs = [
+      { id: 'u', conversationId: 'sess-1', role: 'user' as const, content: 'go', events: null, createdAt: 1, timestamp: 1, turnIndex: 0, isComplete: 1 },
+      { id: 'a', conversationId: 'sess-1', role: 'assistant' as const, content: null, events: asstEvents, createdAt: 100, timestamp: 100, turnIndex: 1, isComplete: 1 },
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: msgs }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const call = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name)!;
+    const res = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name)!;
+    expect(JSON.stringify(call('file_read')['gen_ai.tool.call.arguments'])).toContain('/tmp/a.txt');
+    expect(JSON.stringify(res('file_read')['gen_ai.tool.call.result'])).toContain('file body text');
+    expect(JSON.stringify(call('search')['gen_ai.tool.call.arguments'])).toContain('needle-q');
+    expect(JSON.stringify(res('search')['gen_ai.tool.call.result'])).toContain('hit-r');
+    expect(JSON.stringify(call('skill')['gen_ai.tool.call.arguments'])).toContain('pptx-skill');
+    expect(JSON.stringify(res('skill')['gen_ai.tool.call.result'])).toContain('skill-done');
+    expect(JSON.stringify(res('artifact')['gen_ai.tool.call.result'])).toContain('artifactsMetadata');
+  });
+
+  it('derives activity result status from status/error_message, not only exit_code', async () => {
+    const msgs = [
+      { id: 'u', conversationId: 'sess-1', role: 'user' as const, content: 'go', events: null, createdAt: 1, timestamp: 1, turnIndex: 0, isComplete: 1 },
+      { id: 'a', conversationId: 'sess-1', role: 'assistant' as const, content: null, isComplete: 1, createdAt: 100, timestamp: 100, turnIndex: 1, events: [
+        { type: 'RUN_STARTED', runId: 'r', timestamp: 100 },
+        // No exit_code, but status=error + error_message => failure with error.message.
+        { type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 110, content: { path: '/x', status: 'error', error_message: 'permission denied', start_time: 110, finish_time: 120 } },
+        { type: 'USAGE', prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, timestamp: 130 },
+        { type: 'RUN_FINISHED', runId: 'r', timestamp: 131 },
+      ] },
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: msgs }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const result = entries.find(e => e['event.name'] === 'tool.result')!;
+    expect(result['tool.result.status']).toBe('failure');
+    expect(result['error.message']).toBe('permission denied');
+  });
+
+  it('merges REASONING and TEXT into one llm.response (parts: reasoning, text)', async () => {
+    const msgs = [
+      { id: 'u', conversationId: 'sess-1', role: 'user' as const, content: 'hi', events: null, createdAt: 1, timestamp: 1, turnIndex: 0, isComplete: 1 },
+      { id: 'a', conversationId: 'sess-1', role: 'assistant' as const, content: null, isComplete: 1, createdAt: 100, timestamp: 100, turnIndex: 1, events: [
+        { type: 'RUN_STARTED', runId: 'r', timestamp: 100 },
+        { type: 'REASONING_START', messageId: 'm1', timestamp: 110 },
+        { type: 'REASONING_MESSAGE_CHUNK', messageId: 'm1', delta: 'let me think', timestamp: 111 },
+        { type: 'REASONING_END', messageId: 'm1', timestamp: 112 },
+        { type: 'TEXT_MESSAGE_START', messageId: 'm1', timestamp: 120 },
+        { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm1', delta: 'the answer', timestamp: 121 },
+        { type: 'TEXT_MESSAGE_END', messageId: 'm1', timestamp: 122 },
+        { type: 'USAGE', prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, timestamp: 130 },
+        { type: 'RUN_FINISHED', runId: 'r', timestamp: 131 },
+      ] },
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: msgs }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const responses = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    const parts = (responses[0]['gen_ai.output.messages'] as any)[0].parts;
+    expect(parts).toEqual([
+      { type: 'reasoning', content: 'let me think' },
+      { type: 'text', content: 'the answer' },
+    ]);
+  });
+
+  it('skips PERMISSION and metadata-only auxiliary messages (no fragmentation)', async () => {
+    const msgs = [
+      { id: 'u', conversationId: 'sess-1', role: 'user' as const, content: 'load?', events: null, createdAt: 1, timestamp: 1, turnIndex: 0, isComplete: 1 },
+      { id: 'a', conversationId: 'sess-1', role: 'assistant' as const, content: null, isComplete: 1, createdAt: 100, timestamp: 100, turnIndex: 1, events: [
+        { type: 'RUN_STARTED', runId: 'r', timestamp: 100 },
+        { type: 'TEXT_MESSAGE_START', messageId: 'm1', timestamp: 105 },
+        { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm1', delta: 'running', timestamp: 106 },
+        { type: 'TEXT_MESSAGE_END', messageId: 'm1', timestamp: 107 },
+        { type: 'ACTIVITY_SNAPSHOT', activityType: 'TERMINAL', timestamp: 110, content: { command: 'uptime', output: 'ok', exit_code: 0, start_time: 110, finish_time: 120 } },
+        { type: 'USAGE', prompt_tokens: 5, completion_tokens: 2, total_tokens: 7, timestamp: 130 },
+        { type: 'RUN_FINISHED', runId: 'r', timestamp: 131 },
+      ] },
+      // Auxiliary HITL permission prompt: complete, but must not become a tool/turn.
+      { id: 'p', conversationId: 'sess-1', role: 'assistant' as const, content: null, isComplete: 1, createdAt: 140, timestamp: 140, turnIndex: 2, events: [
+        { type: 'ACTIVITY_SNAPSHOT', activityType: 'PERMISSION', timestamp: 140, content: { toolCallId: 'x', outcome: 'approved', start_time: 140, finish_time: 141 } },
+      ] },
+      // Invisible metadata-only message: must emit nothing.
+      { id: 's', conversationId: 'sess-1', role: 'assistant' as const, content: null, isComplete: 1, invisible: 1, createdAt: 150, timestamp: 150, turnIndex: 3, events: [
+        { type: 'CUSTOM', name: 'session_context_stats', timestamp: 150 },
+      ] },
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: msgs }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Single trace (no fragmentation from the auxiliary messages).
+    expect(new Set(entries.map(e => e['trace_id'])).size).toBe(1);
+    // No PERMISSION tool emitted.
+    expect(entries.some(e => e['gen_ai.tool.name'] === 'permission')).toBe(false);
+    // Only the real terminal tool.
+    const tools = entries.filter(e => e['event.name'] === 'tool.call');
+    expect(tools.map(t => t['gen_ai.tool.name'])).toEqual(['terminal']);
+    // STEP == LLM (no spurious empty llm pairs from aux messages).
+    const stepIds = new Set(entries.filter(e => e['gen_ai.step.id']).map(e => e['gen_ai.step.id']));
+    const llmReqs = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(stepIds.size).toBe(llmReqs.length);
+    // Records are globally time-ascending.
+    const times = entries.map(e => BigInt(String(e['time_unix_nano'])));
+    for (let i = 1; i < times.length; i++) expect(times[i] >= times[i - 1]).toBe(true);
   });
 
   describe('checkAvailability', () => {

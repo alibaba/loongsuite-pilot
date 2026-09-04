@@ -1,0 +1,80 @@
+{
+  "_comment": "Captured from real `wukong-cli agent data list_tasks` + `get_spark_agui_messages` (session ee7be83c, the leetcode monotonic-queue conversation). Trimmed for size but structurally faithful: multi-utterance run (text -> FILE_READ -> full answer text), real USAGE, isComplete flag.",
+  "listTasks": {
+    "hasMore": false,
+    "items": [
+      {
+        "id": "ee7be83c-0339-4850-8cb9-1b0d3690a742",
+        "session_id": "ee7be83c-0339-4850-8cb9-1b0d3690a742",
+        "name": "Java单调队列实现及滑动窗口最大值解析",
+        "status": "completed",
+        "agent_type": "spark",
+        "created_at": 1784601610210,
+        "completed_at": 1784601705871,
+        "started_at": 1784601610216,
+        "last_active_at": 1784601708212,
+        "metadata": {
+          "modelName": "dingtalk_deap/dingtalk-advanced",
+          "modelProvider": "dingtalk_deap",
+          "sandbox_level": "relaxed"
+        }
+      }
+    ]
+  },
+  "messages": {
+    "messages": [
+      {
+        "id": "83c7c76a-b9a7-4490-96c9-b8d466b70296",
+        "conversationId": "ee7be83c-0339-4850-8cb9-1b0d3690a742",
+        "role": "user",
+        "content": "java中有已经封装好的单调队列的实现吗，顺便帮我讲解一下单调队列如何解决leetcode这个题目https://leetcode.cn/problems/sliding-window-maximum/description/",
+        "events": null,
+        "createdAt": 1784601610412,
+        "timestamp": 1784601610412,
+        "turnIndex": -1,
+        "isComplete": 1,
+        "userMsgId": "48987395-7ff7-4c62-8e50-67d746f1b802"
+      },
+      {
+        "id": "95d4e652-a65c-4c73-a6af-95235574f392",
+        "conversationId": "ee7be83c-0339-4850-8cb9-1b0d3690a742",
+        "role": "assistant",
+        "content": null,
+        "createdAt": 1784601645462,
+        "timestamp": 1784601645397,
+        "turnIndex": -1,
+        "isComplete": 1,
+        "userMsgId": null,
+        "events": [
+          { "type": "RUN_STARTED", "runId": "48987395-7ff7-4c62-8e50-67d746f1b802", "threadId": "ee7be83c-0339-4850-8cb9-1b0d3690a742", "timestamp": 1784601645393 },
+          { "type": "FIRST_TOKEN", "e2e_ttft_ms": 1762, "ttft_ms": 1762, "timestamp": 1784601647373 },
+          { "type": "TEXT_MESSAGE_START", "messageId": "text-msg-d3724311", "parentMessageId": "48987395-7ff7-4c62-8e50-67d746f1b802", "role": "assistant", "timestamp": 1784601651939 },
+          { "type": "TEXT_MESSAGE_CONTENT", "delta": "Java 标准库没有直接提供\"单调队列\"的封装类，但可以用 `Deque`（双端队列）轻松实现。我先拉取题目详情，再给你讲解单调队列的解法。\n\n", "messageId": "text-msg-d3724311", "timestamp": 1784601651939 },
+          { "type": "TEXT_MESSAGE_END", "messageId": "text-msg-d3724311", "timestamp": 1784601654109 },
+          { "type": "ACTIVITY_SNAPSHOT", "activityType": "FILE_READ", "messageId": "call_6c3563b99f4f4d67bbd8bc1d", "parentMessageId": "48987395-7ff7-4c62-8e50-67d746f1b802", "timestamp": 1784601654109, "content": { "path": "https://leetcode.cn/problems/sliding-window-maximum/description/", "content": "URL: https://leetcode.cn/problems/sliding-window-maximum/\nContent length: 1456 chars\n给你一个整数数组 nums，滑动窗口大小为 k，返回滑动窗口中的最大值。", "snippet": "获取滑动窗口最大值题目详情", "start_time": 1784601654109, "finish_time": 1784601663129, "status": "completed" } },
+          { "type": "TEXT_MESSAGE_START", "messageId": "text-msg-83ee38d8", "parentMessageId": "48987395-7ff7-4c62-8e50-67d746f1b802", "role": "assistant", "timestamp": 1784601665677 },
+          { "type": "TEXT_MESSAGE_CONTENT", "delta": "好的，题目详情已经获取。现在我来为你详细解答这两个问题：\n\n## 1. Java 中是否有现成的单调队列实现？\n\n**Java 标准库（JDK）中没有直接名为\"Monotonic Queue\"的封装类。** 但你可以使用 `java.util.Deque`（双端队列接口），通常用 `ArrayDeque` 来实现单调队列。\n\n## 2. 单调队列如何解决\"滑动窗口最大值\"\n\n维护一个**单调递减**的队列，存储数组元素的下标。\n\n```java\nimport java.util.ArrayDeque;\nimport java.util.Deque;\n\nclass Solution {\n    public int[] maxSlidingWindow(int[] nums, int k) {\n        int n = nums.length;\n        int[] result = new int[n - k + 1];\n        Deque<Integer> deque = new ArrayDeque<>();\n        for (int i = 0; i < n; i++) {\n            while (!deque.isEmpty() && nums[deque.peekLast()] <= nums[i]) deque.pollLast();\n            deque.offerLast(i);\n            if (deque.peekFirst() <= i - k) deque.pollFirst();\n            if (i >= k - 1) result[i - k + 1] = nums[deque.peekFirst()];\n        }\n        return result;\n    }\n}\n```\n\n### 复杂度分析\n- **时间复杂度**：O(n)。\n- **空间复杂度**：O(k)。", "messageId": "text-msg-83ee38d8", "timestamp": 1784601665677 },
+          { "type": "TEXT_MESSAGE_END", "messageId": "text-msg-83ee38d8", "timestamp": 1784601705845 },
+          { "type": "CUSTOM", "name": "session_title_suggested", "data": { "title": "Java单调队列实现及滑动窗口最大值解析" }, "timestamp": 1784601705839 },
+          { "type": "CUSTOM", "name": "related_questions", "data": { "suggestions": ["给出完整的Java代码实现"] }, "timestamp": 1784601705841 },
+          { "type": "USAGE", "cached_tokens": 34048, "completion_tokens": 906, "prompt_tokens": 36779, "total_tokens": 37685, "timestamp": 1784601705844 },
+          { "type": "RUN_FINISHED", "runId": "48987395-7ff7-4c62-8e50-67d746f1b802", "threadId": "ee7be83c-0339-4850-8cb9-1b0d3690a742", "timestamp": 1784601705845 }
+        ]
+      },
+      {
+        "id": "95b9adc9-6b61-4427-bd5e-7b8aa882fd58",
+        "conversationId": "ee7be83c-0339-4850-8cb9-1b0d3690a742",
+        "role": "assistant",
+        "content": null,
+        "createdAt": 1784601648543,
+        "timestamp": 1784601703206,
+        "turnIndex": -1,
+        "invisible": 1,
+        "isComplete": 1,
+        "events": [
+          { "type": "CUSTOM", "name": "session_context_stats", "data": { "currentTokens": 37685, "totalTokens": 200000 }, "timestamp": 1784601703205 }
+        ]
+      }
+    ]
+  }
+}
