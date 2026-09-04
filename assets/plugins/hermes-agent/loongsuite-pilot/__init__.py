@@ -221,6 +221,143 @@ def _json_object(value: Any) -> Dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _tool_definition(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+
+    definition = value
+    nested = value.get("function")
+    if not isinstance(nested, dict):
+        nested = value.get("toolSpec")
+    if isinstance(nested, dict):
+        definition = nested
+
+    name = definition.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = name.strip()
+
+    tool_type = value.get("type")
+    if not isinstance(tool_type, str) or not tool_type:
+        tool_type = "function"
+    output: Dict[str, Any] = {
+        "type": _truncate(tool_type),
+        "name": _truncate(name),
+    }
+
+    description = definition.get("description")
+    if isinstance(description, str):
+        output["description"] = _truncate(description)
+
+    parameters: Any = None
+    for key in ("parameters", "input_schema", "inputSchema"):
+        if key in definition:
+            parameters = definition.get(key)
+            break
+    if isinstance(parameters, dict) and set(parameters) == {"json"}:
+        parameters = parameters.get("json")
+    if parameters is not None:
+        output["parameters"] = _bounded_value(parameters)
+    return output
+
+
+def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
+    if not isinstance(request, dict):
+        return []
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return []
+
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        tool_config = body.get("toolConfig") or body.get("tool_config")
+        tools = tool_config.get("tools") if isinstance(tool_config, dict) else None
+    if not isinstance(tools, list):
+        return []
+
+    output: List[Dict[str, Any]] = []
+    for value in tools[:MAX_COLLECTION_ITEMS]:
+        declarations: Any = None
+        if isinstance(value, dict):
+            declarations = value.get("functionDeclarations")
+            if not isinstance(declarations, list):
+                declarations = value.get("function_declarations")
+        candidates = declarations if isinstance(declarations, list) else [value]
+        for candidate in candidates:
+            definition = _tool_definition(candidate)
+            if definition is not None:
+                output.append(definition)
+                if len(output) >= MAX_COLLECTION_ITEMS:
+                    return output
+    return output
+
+
+def _text_parts(value: Any) -> List[Dict[str, str]]:
+    """Normalize a provider text payload (str / block list / nested parts) into text parts."""
+    if isinstance(value, str):
+        blocks: List[Any] = [value]
+    elif isinstance(value, dict):
+        # Gemini nests the prompt under systemInstruction.parts[].text.
+        nested = value.get("parts")
+        blocks = nested if isinstance(nested, list) else [value]
+    elif isinstance(value, list):
+        blocks = value
+    else:
+        return []
+
+    parts: List[Dict[str, str]] = []
+    for block in blocks[:MAX_PARTS]:
+        if isinstance(block, str):
+            text: Any = block
+        elif isinstance(block, dict):
+            # Anthropic/Bedrock blocks use "text"; OpenAI-style ones use "content".
+            text = block.get("text")
+            if not isinstance(text, str):
+                text = block.get("content")
+        else:
+            text = None
+        if isinstance(text, str) and text.strip():
+            parts.append({"type": "text", "content": _truncate(text)})
+    return parts
+
+
+def _system_instructions(request: Any) -> List[Dict[str, str]]:
+    """Extract the system prompt from a provider request body.
+
+    Hermes never replays system messages through conversation_history, so the
+    request body built for the provider is the only place the prompt is
+    observable. Shapes differ per provider: Anthropic/Bedrock keep it in a
+    top-level "system" field, Responses uses top-level "instructions", Gemini
+    nests it under systemInstruction.parts, and OpenAI-compatible providers
+    carry it as leading system/developer messages.
+    """
+    if not isinstance(request, dict):
+        return []
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return []
+
+    for key in ("system", "instructions", "systemInstruction", "system_instruction"):
+        if key in body:
+            parts = _text_parts(body.get(key))
+            if parts:
+                return parts
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return []
+    parts = []
+    for message in messages[:MAX_TURN_MESSAGES]:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("system", "developer"):
+            continue
+        parts.extend(_text_parts(message.get("content")))
+        if len(parts) >= MAX_PARTS:
+            break
+    return parts[:MAX_PARTS]
+
+
 def _skill_attributes(
     tool_name: Any,
     arguments: Any = None,
@@ -626,10 +763,15 @@ def _build_records(
             if call_id:
                 tool_step[str(call_id)] = index
 
+        pre = api.get("pre") or {}
+        tool_definitions = pre.get("tool_definitions")
+        system_instructions = pre.get("system_instructions")
+        # System instructions are provider configuration, not turn messages.
+        # Keep them in their dedicated field so they do not alter the existing
+        # input, delta, or input-hash semantics.
         input_messages = _messages(input_source, capture)
         input_delta = _messages(delta_source, capture)
         output_message = _message(assistant_message, capture)
-        pre = api.get("pre") or {}
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -651,6 +793,10 @@ def _build_records(
                 json.dumps(input_messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
         })
+        if isinstance(tool_definitions, list) and tool_definitions:
+            request["gen_ai.tool.definitions"] = tool_definitions
+        if isinstance(system_instructions, list) and system_instructions:
+            request["gen_ai.system_instructions"] = system_instructions
         records.append(request)
 
         finish_reason = str(post.get("finish_reason") or assistant_message.get("finish_reason") or "stop")
@@ -844,6 +990,16 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
+            "tool_definitions": (
+                _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "system_instructions": (
+                _system_instructions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
         },
         "post": {},
     })

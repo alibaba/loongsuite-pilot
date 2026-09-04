@@ -17,11 +17,12 @@
  * ground truth — do NOT synthesize payloads.
  *
  * Span mapping (per /event-log-spec):
- *   ENTRY  ← session_start / session_end (sessionId)
- *   AGENT  ← before_agent_run → agent_end (runId)
+ *   ENTRY / AGENT ← before_agent_run → agent_end (runId)
  *   STEP   ← model_call_started / model_call_ended (callId = <runId>:model:<N>)
  *   LLM    ← llm_input / llm_output / model_call_* (callId)
  *   TOOL   ← before_tool_call / after_tool_call / tool_result_persist (toolCallId)
+ *   session_start / session_end stay in the private raw log as lifecycle signals
+ *   and are filtered by OpenClawPluginInput before the canonical event pipeline.
  */
 
 import fs from "node:fs";
