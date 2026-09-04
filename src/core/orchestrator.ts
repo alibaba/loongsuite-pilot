@@ -36,7 +36,6 @@ import { MultiFlusher } from '../flushers/multi-flusher.js';
 import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
-import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
 import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
@@ -48,8 +47,6 @@ import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace
 import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
-import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
-import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
@@ -112,15 +109,14 @@ export class Orchestrator extends EventEmitter {
   /**
    * Listener id → the agent it belongs to, which is also the key `config.agents`
    * gates on. Both roles are why the values are what they are and not simply the
-   * input's own `agentType`: the four qoder listeners deliberately roll up to one
-   * `qoder` agent, and renaming a value here would silently re-point a gate.
+   * input's own `agentType`: several agents deliberately roll several listeners up
+   * to one agent name, and renaming a value here would silently re-point a gate.
    *
    * A listener missing from this map is not an error — snapshot reporting falls
    * back to the input's `agentType`. Entries exist for listeners whose agent name
    * differs from that, plus the ones a gate looks up.
    */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
-    'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
     'qoder-cn-trace': 'qoder-cn',
     'qoder-cn-sqlite': 'qoder-cn',
@@ -136,8 +132,6 @@ export class Orchestrator extends EventEmitter {
     'qwen-work-cn-trace': 'qwen-work-cn',
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
-    'qoder-cli-hook': 'qoder',
-    'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
@@ -836,7 +830,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     // --- Qoder CLI hooks ---
-    const qoderCliAvailable = await QoderCliInput.checkAvailability();
+    // The hook writes the JSONL that qoder-trace merges, so availability is the
+    // same `~/.qoder` probe the trace input uses; keep them reading from one
+    // definition so the hook cannot be skipped for an agent we then collect.
+    const qoderCliAvailable = await QoderTraceInput.checkAvailability();
     if (qoderCliAvailable) {
       const defs = HookManager.buildQoderCliHooks(this.dataDir);
       for (const def of defs) {
@@ -849,7 +846,7 @@ export class Orchestrator extends EventEmitter {
           } else {
             this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
               `qoder-cli hook install failed: ${def.hookJsonPath.join('.')}`,
-              { input_name: 'qoder-cli-hook' });
+              { input_name: 'qoder-trace' });
           }
         }
       }
@@ -921,31 +918,6 @@ export class Orchestrator extends EventEmitter {
   private async registerAllInputs(): Promise<AgentDetectionEntry[]> {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
-
-    // Qoder trace input mutual exclusion closure (used by sqlite/hook/session guards below)
-    const qoderTraceEnabled = () =>
-      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
-      this.agentControlManager.resolveEnabled(
-        'qoder-trace',
-        listenerCfg['qoder-trace']?.enabled ?? true,
-      );
-
-    // --- Qoder (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderSqliteInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderSqliteInput, {
-        watchPaths: QoderSqliteInput.getWatchPaths(),
-        isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-sqlite',
-            listenerCfg['qoder-sqlite']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-sqlite']?.pollInterval,
-      }),
-    );
 
     // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
     const qoderWorkTraceInput = new QoderWorkTraceInput({
@@ -1239,7 +1211,8 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
+    // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
+    // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
     const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
     const qoderMultimodalEnabled = !!this.multimodalProcessor
@@ -1259,45 +1232,17 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderTraceInput, {
         watchPaths: QoderTraceInput.getWatchPaths(),
         isAvailable: QoderTraceInput.checkAvailability,
-        enabled: qoderTraceEnabled,
+        // No fallback listener behind this one any more: disabling qoder-trace
+        // disables Qoder collection outright, which is deliberate — the former
+        // hook/session/sqlite listeners produced a second, competing turn stream
+        // for the same session.
+        enabled: () =>
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-trace',
+            listenerCfg['qoder-trace']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Hook JSONL) — disabled when qoder-trace is enabled ---
-    const qoderCliInput = new QoderCliInput({
-      stateStore: this.stateStore,
-      logDir: qoderCliLogDir,
-    });
-    this.inputManager.registerInput(qoderCliInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliInput, {
-        watchPaths: QoderCliInput.getWatchPaths(),
-        isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-hook',
-            listenerCfg['qoder-cli-hook']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Native session segments) — disabled when qoder-trace is enabled ---
-    const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderCliSessionInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
-        watchPaths: QoderCliSessionInput.getWatchPaths(),
-        isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-session',
-            listenerCfg['qoder-cli-session']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-session']?.pollInterval,
       }),
     );
 

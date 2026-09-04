@@ -577,7 +577,7 @@ function buildListenersConfig(
 ): Record<string, { enabled: boolean; pollInterval: number }> {
   const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
     qoder: { enabled: true, pollInterval: 30_000 },
-    'qoder-sqlite': { enabled: true, pollInterval: 30_000 },
+    'qoder-trace': { enabled: true, pollInterval: 30_000 },
     'qoder-work': { enabled: true, pollInterval: 30_000 },
     'qoder-work-log': { enabled: true, pollInterval: 30_000 },
     'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
@@ -588,8 +588,6 @@ function buildListenersConfig(
     'qwen-work-cn-trace': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-hook': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'grok-build-log': { enabled: true, pollInterval: 30_000 },
@@ -627,8 +625,7 @@ function buildListenersConfig(
   // Env overrides for specific poll intervals
   const envPoll = envInt('QODER_ANALYTICS_POLL_INTERVAL', 0);
   if (envPoll > 0) result.qoder.pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-sqlite'].pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-cli-session'].pollInterval = envPoll;
+  if (envPoll > 0) result['qoder-trace'].pollInterval = envPoll;
 
   return result;
 }

@@ -273,7 +273,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder).toBeDefined();
       expect(config.listeners.qoder.enabled).toBe(true);
-      expect(config.listeners['qoder-sqlite'].enabled).toBe(true);
+      expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
       expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -282,7 +282,6 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -315,14 +314,16 @@ describe('ConfigLoader', () => {
       expect(config.listeners['codex-transcript']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
-    it('applies Qoder poll interval env override to SQLite listener', async () => {
+    it('applies Qoder poll interval env override to the trace listener', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
 
       const config = await loadConfig();
       expect(config.listeners.qoder.pollInterval).toBe(45000);
-      expect(config.listeners['qoder-sqlite'].pollInterval).toBe(45000);
-      expect(config.listeners['qoder-cli-session'].pollInterval).toBe(45000);
+      // qoder-trace is the only Qoder CLI collector left, so the knob has to point
+      // at it; leaving it on the removed sqlite/session listeners would make the
+      // env var silently inert.
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(45000);
     });
   });
 

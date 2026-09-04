@@ -101,7 +101,7 @@ PY
 ```
 
 - 若未配置或为 `true`（默认）→ trace 链路生效，继续第 2/3 步
-- 若显式 `false` → `qoder-cli-hook` / `qoder-cli-session` / `qoder-sqlite` 会接管数据，但**不会**产生 `qoder-idea` 标记（relabel 逻辑只存在于 `QoderTraceInput` 内），此时 JetBrains 场景下的 token 数据会被计入 `qoder` 而非 `qoder-idea`——这是已知限制，不是 bug
+- 若显式 `false` → **Qoder 完全不采集**：旧的 `qoder-cli-hook` / `qoder-cli-session` / `qoder-sqlite` fallback Input 已删除，`qoder-trace` 背后没有兵了。这时直接把开关改回 `true` 并重启服务，不要再往下排查数据源
 
 ---
 

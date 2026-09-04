@@ -3,7 +3,14 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
+import {
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichCliTurn,
+  enrichIdeTurn,
+  injectTraceId,
+  needsCliSegmentFallback,
+} from '../../../src/inputs/qoder-trace/token-enricher.js';
 import {
   clearAttachedImagePathsCache,
   enrichIdeMultimodal,
@@ -89,8 +96,7 @@ describe('QoderTraceInput token-enricher', () => {
   // response time must sit within the join tolerance of its responseEndTs - the
   // hook fires just after the response lands, 0-32ms later on real data.
   describe('enrichCliTurn (segment paired by response completion time)', () => {
-    it('injects tokens from segment into matching hook events', () => {
-      // Simulate old processor output (time == observed → enricher overwrites timestamp)
+    it('injects tokens without moving only one side of an incomplete Hook interval', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'gen_ai.response.id': 'req-A',
@@ -117,11 +123,16 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
       expect(entries[0]['gen_ai.usage.output_tokens']).toBe(200);
       expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(3000);
-      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[0].time_unix_nano).toBe('1780000002030000000');
     });
 
-    it('always overwrites timestamp with segment time for CLI (unified clock source)', () => {
+    it('preserves an already-valid Hook LLM interval', () => {
       const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'req-A',
+          'event.name': 'llm.request',
+          time_unix_nano: '1780000001000000000',
+        } as any),
         makeEntry({
           'gen_ai.response.id': 'req-A',
           'event.name': 'llm.response',
@@ -144,9 +155,9 @@ describe('QoderTraceInput token-enricher', () => {
 
       enrichCliTurn(entries, segments);
 
-      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
-      // CLI always uses segment timestamps (unified clock)
-      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[0].time_unix_nano).toBe('1780000001000000000');
+      expect(entries[1].time_unix_nano).toBe('1780000002030000000');
     });
 
     it('only writes tokens to first response of same response.id (thinking+text)', () => {
@@ -451,7 +462,7 @@ describe('QoderTraceInput token-enricher', () => {
       enrichCliTurn(entries, segments);
 
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
-      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[0].time_unix_nano).toBe('1780000032000000000');
     });
 
     // The whole point of the exact key: a burst of calls closer together than
@@ -484,8 +495,8 @@ describe('QoderTraceInput token-enricher', () => {
 
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
       expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
-      expect(entries[0].time_unix_nano).toBe(ms(base + 40));
-      expect(entries[1].time_unix_nano).toBe(ms(base + 11));
+      expect(entries[0].time_unix_nano).toBe(ms(base + 10));
+      expect(entries[1].time_unix_nano).toBe(ms(base + 12));
     });
 
     it('falls back to the timestamp pass for entries without the id', () => {
@@ -643,6 +654,198 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(700);
       expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
       expect(entries[1].time_unix_nano).toBe(String(BigInt(1780000000000) * 1_000_000n));
+    });
+
+    it('consumes two segments when two response groups share one client request id', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'shared-request',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-b',
+          'gen_ai.step.id': 'turn-1:s2',
+          'agent.client_request_id': 'shared-request',
+        } as any),
+      ];
+      const segments = [
+        makeSegment({ requestId: 'shared-request', inputTokens: 100, outputTokens: 1 }),
+        makeSegment({ requestId: 'shared-request', inputTokens: 200, outputTokens: 2 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+    });
+  });
+
+  describe('conditional CLI segment fallback', () => {
+    it('does not request segment for optional model, finish, or tool timing gaps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.response.id': 'chatcmpl-A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780000001000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliPrimary(entries, undefined, [makeIntercept()]);
+
+      expect(needsCliSegmentFallback(entries)).toBe(false);
+    });
+
+    it('requests segment when usage remains missing', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({ time_unix_nano: '1780000001000000000' }),
+      ];
+
+      expect(needsCliSegmentFallback(entries)).toBe(true);
+    });
+
+    it('requests segment when the Hook LLM interval is zero-width despite valid usage', () => {
+      const hookTs = '1780000001000000000';
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'gen_ai.usage.input_tokens': 10,
+          'gen_ai.usage.output_tokens': 2,
+          'gen_ai.usage.total_tokens': 12,
+          time_unix_nano: hookTs,
+        }),
+      ];
+
+      expect(needsCliSegmentFallback(entries)).toBe(true);
+    });
+
+    it('keeps tool timing untouched when segment is read only for missing usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'agent.client_request_id': 'req-a',
+          time_unix_nano: '1780000001000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        inputTokens: 100,
+        outputTokens: 20,
+        requestStartTs: 1_779_999_999_000,
+        responseEndTs: 1_780_000_000_500,
+        toolFinishedTs: 1_780_000_002_000,
+      })]);
+
+      expect(entries[0].time_unix_nano).toBe('1780000000000000000');
+      expect(entries[1].time_unix_nano).toBe('1780000001000000000');
+      expect(entries[2].time_unix_nano).toBeUndefined();
+      expect(entries[3].time_unix_nano).toBeUndefined();
+      expect(entries[3]['gen_ai.tool.call.duration']).toBeUndefined();
+    });
+
+    it('switches tool timing together with an invalid Hook LLM interval', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'req-a',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        requestStartTs: 1_780_000_000_000,
+        responseEndTs: 1_780_000_002_000,
+        toolFinishedTs: 1_780_000_003_500,
+      })]);
+
+      expect(entries[0].time_unix_nano).toBe(String(1_780_000_000_000n * 1_000_000n));
+      expect(entries[1].time_unix_nano).toBe(String(1_780_000_002_000n * 1_000_000n));
+      expect(entries[2].time_unix_nano).toBe(String(1_780_000_002_000n * 1_000_000n));
+      expect(entries[3].time_unix_nano).toBe(String(1_780_000_003_500n * 1_000_000n));
+      expect(entries[3]['gen_ai.tool.call.duration']).toBe(1500);
+    });
+
+    it('does not replace a concrete Hook model while filling other gaps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'hook-model',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'req-a',
+          'gen_ai.request.model': 'hook-model',
+          'gen_ai.response.model': 'hook-model',
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        inputTokens: 100,
+        outputTokens: 20,
+        model: 'segment-model',
+      })]);
+
+      expect(entries[0]['gen_ai.request.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.request.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.response.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.usage.total_tokens']).toBe(120);
     });
   });
 
@@ -1071,6 +1274,142 @@ describe('QoderTraceInput token-enricher', () => {
     it('does nothing for empty array', () => {
       expect(() => injectTraceId([])).not.toThrow();
     });
+  });
+});
+
+describe('QoderTraceInput conditional segment reads', () => {
+  it('reads segment only after primary enrichment leaves a critical gap', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-segment-gate-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const completeTurn = [
+        makeEntry({
+          'event.id': 'complete-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-complete',
+          'gen_ai.step.id': 'turn-complete:s1',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'complete-response',
+          'gen_ai.turn.id': 'turn-complete',
+          'gen_ai.step.id': 'turn-complete:s1',
+          'gen_ai.usage.input_tokens': 100,
+          'gen_ai.usage.output_tokens': 20,
+          'gen_ai.usage.total_tokens': 120,
+          time_unix_nano: '1780000001000000000',
+        }),
+      ];
+      await fs.writeFile(logFile, completeTurn.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const stateStore = new MockStateStore();
+      stateStore.set('qoder-trace', {
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+      class TestInput extends QoderTraceInput {
+        segmentReadCount = 0;
+        expectedRequestIds: string[] = [];
+
+        protected override async readCliIntercept(): Promise<{ tokens: []; systemPrompt: null }> {
+          return { tokens: [], systemPrompt: null };
+        }
+
+        protected override async readCliSegments(
+          _sessionId: string,
+          expectedRequestIds: readonly string[],
+        ): Promise<SegmentTokenData[]> {
+          this.segmentReadCount += 1;
+          this.expectedRequestIds = [...expectedRequestIds];
+          return [
+            makeSegment({
+              requestId: 'missing-request-id',
+              inputTokens: 200,
+              outputTokens: 30,
+              requestStartTs: 1_780_000_002_000,
+              responseEndTs: 1_780_000_003_000,
+            }),
+            makeSegment({
+              requestId: 'second-missing-request-id',
+              inputTokens: 300,
+              outputTokens: 40,
+              requestStartTs: 1_780_000_004_000,
+              responseEndTs: 1_780_000_005_000,
+            }),
+          ];
+        }
+      }
+      const input = new TestInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+
+      const first = await (input as any).collect() as AgentActivityEntry[];
+      expect(first.find(entry => entry['event.id'] === 'complete-response')?.['gen_ai.usage.total_tokens'])
+        .toBe(120);
+      expect(input.segmentReadCount).toBe(0);
+
+      const missingTurn = [
+        makeEntry({
+          'event.id': 'missing-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-missing',
+          'gen_ai.step.id': 'turn-missing:s1',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'missing-response',
+          'gen_ai.turn.id': 'turn-missing',
+          'gen_ai.step.id': 'turn-missing:s1',
+          'agent.client_request_id': 'missing-request-id',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+      ];
+      const secondMissingTurn = [
+        makeEntry({
+          'event.id': 'second-missing-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-second-missing',
+          'gen_ai.step.id': 'turn-second-missing:s1',
+          time_unix_nano: '1780000006000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'second-missing-response',
+          'gen_ai.turn.id': 'turn-second-missing',
+          'gen_ai.step.id': 'turn-second-missing:s1',
+          'agent.client_request_id': 'second-missing-request-id',
+          time_unix_nano: '1780000006000000000',
+        } as any),
+      ];
+      await fs.appendFile(
+        logFile,
+        [...missingTurn, ...secondMissingTurn].map(entry => JSON.stringify(entry)).join('\n') + '\n',
+      );
+
+      const second = await (input as any).collect() as AgentActivityEntry[];
+      expect(input.segmentReadCount).toBe(1);
+      expect(input.expectedRequestIds).toEqual([
+        'missing-request-id',
+        'second-missing-request-id',
+      ]);
+      expect(second.find(entry => entry['event.id'] === 'missing-response'))
+        .toMatchObject({
+          'gen_ai.usage.input_tokens': 200,
+          'gen_ai.usage.output_tokens': 30,
+          time_unix_nano: String(1_780_000_003_000n * 1_000_000n),
+        });
+      expect(second.find(entry => entry['event.id'] === 'second-missing-response'))
+        .toMatchObject({
+          'gen_ai.usage.input_tokens': 300,
+          'gen_ai.usage.output_tokens': 40,
+          time_unix_nano: String(1_780_000_005_000n * 1_000_000n),
+        });
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

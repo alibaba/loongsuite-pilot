@@ -11,22 +11,21 @@
 
 ---
 
-## 采集链路概览（默认 qoder-trace 聚合链路）
+## 采集链路概览（qoder-trace 单一链路）
 
-Qoder 默认由 `qoder-trace` 聚合 Hook JSONL、CLI session segments 和 SQLite token 数据；
-`qoder-cli-hook` / `qoder-cli-session` / `qoder-sqlite` 是 **显式关闭 `qoder-trace` 后的 fallback**，默认不会启动。
+Qoder 全部数据由 `qoder-trace` 一条 Input 聚合 Hook JSONL、CLI session segments 和 SQLite token；
+**没有 fallback Input**——曾经的 `qoder-cli-hook` / `qoder-cli-session` / `qoder-sqlite` 已删除，
+因为它们会对同一个 session 产出第二条相互竞争的 turn 流。若 `qoder-trace` 被 agent-control 关闭，
+则 Qoder 完全不采集，这是刻意设计。
 
 | # | Input id | agentType | 数据源 | 作用 |
 |---|---------|-----------|-------|------|
-| 1 | `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Hook history + qodercli intercept + CLI segments + Qoder SQLite DB | 默认主链路：Chat / Tool call 结构、CLI intercept token、segment 元数据/旧版 token fallback、IDE/JetBrains token enrichment |
-| 2 | `qoder-cli-hook` | `qoder-cli` | `~/.loongsuite-pilot/logs/qoder/history/qoder-*.jsonl` | 仅 `qoder-trace` 显式关闭时的 Hook JSONL fallback |
-| 3 | `qoder-cli-session` | `qoder-cli` | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | 仅 `qoder-trace` 显式关闭时的 CLI token fallback |
-| 4 | `qoder-sqlite` | `qoder` | Qoder DB `SharedClientCache/cache/db/local.db` 的 `chat_message` 表 | 仅 `qoder-trace` 显式关闭时的 IDE token fallback |
+| 1 | `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Hook history + qodercli intercept + CLI segments + Qoder SQLite DB | 唯一链路：Chat / Tool call 结构、CLI intercept token、segment 元数据/旧版 token fallback、IDE/JetBrains token enrichment |
 
 > **排查前先确认用户使用的是 Qoder IDE、Qoder CLI 还是 Qoder for JetBrains**。
 >
-> - 用户问 "CLI 为什么没数据" → 默认看 `qoder-trace` + CLI session + qodercli intercept
-> - 用户问 "IDE 为什么没数据" → 默认看 `qoder-trace` + Qoder SQLite
+> - 用户问 "CLI 为什么没数据" → 看 `qoder-trace` + CLI session + qodercli intercept
+> - 用户问 "IDE 为什么没数据" → 看 `qoder-trace` + Qoder SQLite
 > - 用户问 "JetBrains 为什么没数据" → 转 `qoder-jetbrains-diagnostics.md`
 
 ---
@@ -143,7 +142,7 @@ cat ~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json
 
 ### 2.A.3 Session segments（时序元数据 / 旧版 token fallback）
 
-`qoder-cli-session` Input 不依赖 hook，直接扫描 segment 文件。新版 Qoder CLI 的 segment
+`qoder-trace` 的 segment reader 不依赖 hook，直接扫描 segment 文件。新版 Qoder CLI 的 segment
 可能仍有 request/response 时间、model、stop reason 等元数据，但 token 字段恒为 0；
 只有仍写入非零 token 的旧版本才能把 segment 作为 token fallback：
 
@@ -247,7 +246,7 @@ tail -2 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl 
 
 ### 2.B.3 SQLite token 数据
 
-`qoder-trace` 默认读取这个 DB，提取 `chat_message.token_info`；显式关闭 `qoder-trace` 后，`qoder-sqlite` 才作为 fallback 单独启动：
+`qoder-trace` 读取这个 DB，提取 `chat_message.token_info`：
 
 ```bash
 DB="$HOME/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db"
@@ -288,10 +287,7 @@ done
 
 | Input | 游标字段 | 含义 |
 |-------|---------|------|
-| `qoder-trace` | `lastFile` + `lastOffset` | 默认主链路读取 `logs/qoder/history/qoder-YYYY-MM-DD.jsonl` 的字节偏移 |
-| `qoder-cli-hook` | `lastFile` + `lastOffset` | `qoder-trace` 显式关闭时的 Hook JSONL fallback |
-| `qoder-cli-session` | 每个 segment 文件的 `lastOffset` | `qoder-trace` 显式关闭时的 CLI token fallback |
-| `qoder-sqlite` | `lastRowId` | `qoder-trace` 显式关闭时的 `chat_message.rowid` token fallback |
+| `qoder-trace` | `lastFile` + `lastOffset` | 读取 `logs/qoder/history/qoder-YYYY-MM-DD.jsonl` 的字节偏移；segment 与 SQLite 游标由同一 Input 内部维护 |
 
 游标不前进的通用排查：
 - pilot 服务未运行 → `~/.local/bin/loongsuite-pilot status`
@@ -330,7 +326,7 @@ cat ~/.loongsuite-pilot/node-bin
 
 #### 4.4 Qoder 数据根是否被环境覆盖
 
-`qoder` / `qoder-sqlite` Input 默认按平台解析：
+`qoder` / `qoder-trace` Input 默认按平台解析：
 - mac：`~/Library/Application Support/Qoder`
 - linux：`$XDG_CONFIG_HOME/Qoder` 或 `~/.config/Qoder`
 
@@ -348,12 +344,12 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | 文件 / 目录 | 作用 |
 |---|---|
 | `~/.qoder/settings.json` | Qoder 的共享 Stop hook 注册（nested 格式） |
-| `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-trace` / `qoder-cli-session` 读取） |
+| `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-trace` 读取） |
 | `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh` | Qoder Hook shell 入口 |
 | `~/.loongsuite-pilot/hooks/qoder-hook-processor.mjs` | Qoder 专用 transcript forwarder（从 stdin 拿 transcript_path，增量 append 到 history） |
 | `~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json` | processor 的 per-session 增量行记录状态（持久目录，部署升级不会覆盖） |
 | `~/.loongsuite-pilot/state/hooks/qoder-line-records.json` | 旧版本回滚兼容影子（加锁更新，非当前主状态） |
-| `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-trace` / `qoder-cli-hook` 读取） |
+| `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-trace` 读取） |
 | `~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-*.log` | processor 调试日志 |
 | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | Qoder IDE SQLite token 数据源 |
 | `~/.qoder/shared_client/cache/db/local.db` | Qoder for JetBrains SQLite token 数据源（输出标记为 `qoder-idea`） |
