@@ -62,6 +62,7 @@ import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { TraeAgentTrajectoryInput } from '../inputs/trae-agent-trajectory/trae-agent-trajectory-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
@@ -147,6 +148,7 @@ export class Orchestrator extends EventEmitter {
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
     'dsh-log': 'dsh',
+    'trae-agent-trajectory': 'trae-agent',
   };
 
   private readonly config: AnalyticsConfig;
@@ -1545,6 +1547,43 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['dsh-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
+      }),
+    );
+
+    // --- trae-agent (log-watch: trajectory JSON polling) ---
+    // trae-agent overwrites a single trajectory.json each cycle; no shell hook
+    // is installed. The input reads the file, dedups by step_number, and emits
+    // the 5-layer span tree via assets/hooks/trae-agent/trajectory-converter.mjs.
+    // The trajectory file path matches the agents.d/trae-agent.json declaration
+    // (~/.trae-agent/trajectories/trajectory.json); the converter path is the
+    // pilot install root + the per-agent asset subdir so it resolves in both
+    // dev (project root) and installed (dataDir/versions/<v>) layouts.
+    const traePilotDir = this.resolvePilotDir();
+    const traeTrajectoryFile = TraeAgentTrajectoryInput.resolveDefaultTrajectoryFile();
+    const traeConverterPath = path.join(
+      traePilotDir,
+      'assets',
+      'hooks',
+      'trae-agent',
+      'trajectory-converter.mjs',
+    );
+    const traeAgentTrajectoryInput = new TraeAgentTrajectoryInput({
+      stateStore: this.stateStore,
+      trajectoryFile: traeTrajectoryFile,
+      converterPath: traeConverterPath,
+      pollIntervalMs: listenerCfg['trae-agent-trajectory']?.pollInterval,
+    });
+    this.inputManager.registerInput(traeAgentTrajectoryInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(traeAgentTrajectoryInput, {
+        watchPaths: [path.dirname(traeTrajectoryFile)],
+        isAvailable: TraeAgentTrajectoryInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-agent-trajectory']) &&
+          this.agentControlManager.resolveEnabled(
+            'trae-agent-trajectory',
+            listenerCfg['trae-agent-trajectory']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['trae-agent-trajectory']?.pollInterval,
       }),
     );
 
