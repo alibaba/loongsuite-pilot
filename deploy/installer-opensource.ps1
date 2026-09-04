@@ -718,6 +718,20 @@ function Ensure-NodeModules {
 }
 # <<< managed-node-runtime <<<
 
+function Show-NpmFailure {
+    # Show-NpmFailure <path of the captured npm output>
+    #
+    # npm's own failure report ends in a single line naming a debug log under the npm
+    # cache. Where the npm install fallback actually runs unattended -- a container
+    # build layer, a CI runner -- that file is discarded before anyone can read it, so
+    # the pointer is all that survives and the cause is lost. Print what npm printed.
+    param([string]$LogPath)
+    if ($LogPath -and (Test-Path $LogPath)) {
+        Msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
+        Get-Content $LogPath -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+    }
+}
+
 # ============================================================
 # Check dependencies
 # ============================================================
@@ -1162,10 +1176,15 @@ function Deploy-Package {
         $nodeDir = Split-Path $script:NODE_BIN
         $savedPath = $env:PATH
         if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+        $npmLog = Join-Path ([System.IO.Path]::GetTempPath()) "loongsuite-pilot-npm-install-$PID.log"
         Push-Location $script:PERMANENT_DIR
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+            # Retries: this path pulls ~185 packages from the registry and npm only
+            # retries twice by default, so one reset connection failed the whole install.
+            # The output is captured, not discarded, so Show-NpmFailure can name the cause.
+            & $script:NPM_BIN install --omit=dev --omit=optional --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 2>&1 |
+                Out-File -FilePath $npmLog -Encoding UTF8
             $npmExit = $LASTEXITCODE
             $ErrorActionPreference = $prevEAP
         } finally {
@@ -1173,8 +1192,13 @@ function Deploy-Package {
             $env:PATH = $savedPath
         }
         if ($npmExit -ne 0) {
-            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+            Msg "❌ 依赖安装失败 (exit=$npmExit)" "❌ Dependencies installation failed (exit=$npmExit)"
+            Show-NpmFailure $npmLog
             exit 1
+        }
+        if (Test-Path $npmLog) {
+            Get-Content $npmLog -Tail 1 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            Remove-Item $npmLog -Force -ErrorAction SilentlyContinue
         }
     }
 
