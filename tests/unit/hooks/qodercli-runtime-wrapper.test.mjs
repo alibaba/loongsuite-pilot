@@ -129,6 +129,96 @@ console.log(JSON.stringify({
     expect(output.args).toEqual(['hello']);
   });
 
+  it('routes a shebang-less entry reached through PATH to Node', async () => {
+    // The real install puts a link on PATH whose name carries no extension
+    // (~/.local/bin/qodercli -> .../qodercli-1.1.42), so the extension arm never
+    // fires and classification falls through to the file header. A bundled entry
+    // has no shebang, and the header check read that absence as "then it is Bun":
+    // the entry got exec'd directly, the kernel refused a JS text file, and the
+    // shell then tried to run JS as a shell script. The CLI did not start at all.
+    // The .mjs test above passes LOONGSUITE_QODERCLI_BIN with the extension still
+    // on it, so it settles on the extension arm and never reaches this one.
+    const fixture = await makeFixture(`
+console.log(JSON.stringify({
+  nodeOptions: process.env.NODE_OPTIONS,
+  bunOptions: process.env.BUN_OPTIONS || '',
+  args: process.argv.slice(2)
+}));
+`, true, 'entry.mjs');
+    // The name command -v resolves carries no extension, unlike its target.
+    await fs.symlink(fixture.qodercli, path.join(fixture.bin, 'qodercli'));
+    const result = spawnSync('sh', [fixture.wrapper, 'hello'], {
+      env: {
+        ...process.env,
+        // No _BIN, so resolution goes through PATH. The full PATH stays on so
+        // the Node the wrapper falls back to is reachable; fixture.bin comes
+        // first, so the entry resolved is this test's.
+        PATH: `${fixture.bin}:${process.env.PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout.trim());
+    expect(output.nodeOptions).toContain('--import=');
+    expect(output.nodeOptions).toContain('qodercli-token-intercept.mjs');
+    expect(output.bunOptions).toBe('');
+    expect(output.args).toEqual(['hello']);
+  });
+
+  it('does not hand a compiled entry reached through PATH to Node', async () => {
+    // Counterpart to the test above: the Node arm must not widen into compiled
+    // entries, because `exec node <binary>` fails outright and would trade one
+    // startup failure for another. A Mach-O header followed by NUL bytes is
+    // enough to exercise the classification -- the file never has to be
+    // loadable, and copying a real system binary is not portable here anyway.
+    // A stub named `node` on PATH is what would report having been used.
+    const fixture = await makeFixture('unused\n', true, 'placeholder');
+    await fs.writeFile(
+      path.join(fixture.bin, 'qodercli'),
+      Buffer.from([0xcf, 0xfa, 0xed, 0xfe, ...new Array(28).fill(0)]),
+      { mode: 0o755 },
+    );
+    await addBin(fixture, 'node', '#!/bin/sh\necho NODE_TOOK_IT\n');
+    const result = spawnSync('sh', [fixture.wrapper, 'hello'], {
+      env: {
+        ...process.env,
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    // The entry resolved, so this is really the classification talking and not
+    // an early bail-out with an empty stdout.
+    expect(result.stderr).not.toContain('executable not found');
+    expect(result.stdout).not.toContain('NODE_TOOK_IT');
+  });
+
+  it('leaves an entry whose bytes cannot be read on the previous path', async () => {
+    // "No shebang and no NUL byte" must mean bytes were read and looked like
+    // text, not that reading produced nothing. Reading can come up empty for a
+    // binary too -- a distribution that ships mode 111, for instance -- and
+    // routing that to Node turns a CLI that starts today into one that does not.
+    // An empty file stands in for the whole class here because it needs no
+    // permission trick, which would be a no-op for a root test runner.
+    const fixture = await makeFixture('unused\n', true, 'placeholder');
+    await fs.writeFile(path.join(fixture.bin, 'qodercli'), '', { mode: 0o755 });
+    await addBin(fixture, 'node', '#!/bin/sh\necho NODE_TOOK_IT\n');
+    const result = spawnSync('sh', [fixture.wrapper, 'hello'], {
+      env: {
+        ...process.env,
+        PATH: `${fixture.bin}:${BARE_PATH}`,
+        NODE_OPTIONS: '',
+        BUN_OPTIONS: '',
+      },
+      encoding: 'utf-8',
+    });
+    expect(result.stderr).not.toContain('executable not found');
+    expect(result.stdout).not.toContain('NODE_TOOK_IT');
+  });
+
   it('scopes the intercept file to the qoderclicn flavor', async () => {
     // The CN rc block launches this same wrapper with LOONGSUITE_QODERCLI_FLAVOR
     // set; the derived intercept file name is the only thing keeping the two

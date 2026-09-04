@@ -30,12 +30,31 @@ if [ -z "$QODERCLI_BIN" ]; then
   exit 127
 fi
 
+# True for a readable file that opens with no shebang and holds no NUL byte.
+# Such a file is a Node entrypoint: a Bun executable is compiled and carries NUL
+# bytes in its header, and anything the kernel can launch on its own names an
+# interpreter on the first line. Reading the file also follows the symlink a PATH
+# entry usually is, so no path resolution is needed to reach the real bytes.
+# A file we cannot read yields no evidence and is left to the caller's fallback.
+is_shebangless_text() {
+  LC_ALL=C head -c 2 "$1" 2>/dev/null | grep -aq '^#!' && return 1
+  _read=$(LC_ALL=C head -c 128 "$1" 2>/dev/null | wc -c | tr -d ' ')
+  [ "$_read" -gt 0 ] || return 1
+  _text=$(LC_ALL=C head -c 128 "$1" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')
+  [ "$_read" = "$_text" ]
+}
+
 eval "QODERCLI_RUNTIME=\${LOONGSUITE_${FLAVOR_VAR}_RUNTIME:-}"
 if [ -z "$QODERCLI_RUNTIME" ]; then
   case "$QODERCLI_BIN" in
     *.js|*.cjs|*.mjs) QODERCLI_RUNTIME=node ;;
     *)
       if LC_ALL=C head -c 128 "$QODERCLI_BIN" 2>/dev/null | grep -aq '^#!.*node'; then
+        QODERCLI_RUNTIME=node
+      elif is_shebangless_text "$QODERCLI_BIN"; then
+        # A PATH entry's name carries no extension, so the arm above is all that
+        # stood between a bundled entry and the Bun branch, which exec's the file
+        # directly: the kernel refuses JS text and the CLI never starts.
         QODERCLI_RUNTIME=node
       else
         QODERCLI_RUNTIME=bun
