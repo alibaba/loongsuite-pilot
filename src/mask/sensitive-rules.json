@@ -71,6 +71,24 @@
       "prefilter": ["password=", "pwd="],
       "pattern": "\\bjdbc:(?:mysql|postgresql)://[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]*(?:[?&;](?!(?:password|pwd)=)[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+)*[?&;](?:password|pwd)=[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+(?:[&;][A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+)*",
       "flags": "gi"
+    },
+    {
+      "id": "apiKey.traeCnCredentials",
+      "type": "apiKey",
+      "kind": "regex",
+      "replacement": "[TRAE_CN_CREDENTIAL_MASKED]",
+      "prefilter": ["icubeauthinfo://", "trae-jwt-token", "sessionkey", "access_token"],
+      "pattern": "\\b(?:iCubeAuthInfo://[A-Za-z0-9+/=._-]{8,}|trae-jwt-token[=:]\\s*[\"']?[A-Za-z0-9._-]{8,}[\"']?|sessionKey[=:]\\s*[\"']?[A-Za-z0-9._-]{8,}[\"']?|access_token[=:]\\s*[\"']?[A-Za-z0-9._-]{8,}[\"']?)",
+      "flags": "gi"
+    },
+    {
+      "id": "apiKey.traeCnCommandOutput",
+      "type": "apiKey",
+      "kind": "regex",
+      "replacement": "[TRAE_CN_COMMAND_OUTPUT_MASKED]",
+      "prefilter": ["bearer ", "/home/", "/users/"],
+      "pattern": "(?:Bearer\\s+[A-Za-z0-9._-]{20,}|/(?:home|Users)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)",
+      "flags": "gi"
     }
   ]
 }

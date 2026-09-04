@@ -1,0 +1,8 @@
+{
+  "session_id": "trae-cn-midstream-session",
+  "cwd": "/home/dev/demo-project",
+  "timestamp": "2026-08-18T03:00:00.000Z",
+  "tool_use_id": "toolu_midstream_01",
+  "tool_name": "list_files",
+  "tool_input": { "cwd": "/home/dev/demo-project" }
+}

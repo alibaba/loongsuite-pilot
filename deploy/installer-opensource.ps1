@@ -1965,6 +1965,7 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
+        (Join-Path $env:USERPROFILE ".trae-cn\hooks.json"),
         (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
 
