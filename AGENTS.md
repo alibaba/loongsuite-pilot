@@ -118,8 +118,52 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 | `~/.loongsuite-pilot/logs/snapshot-store.json` | 快照去重状态 |
 | `~/.loongsuite-pilot/logs/otlp-debug/` | OTLP trace debug 落盘 |
 | `~/.loongsuite-pilot/logs/otlp-failed/` | OTLP trace 失败持久化 |
+| `~/.loongsuite-pilot/logs/last-restart-failure-{collector,updater}.json` | 服务管理脚本留下的重启失败面包屑，node 侧读来富化告警（文件还在 = 上次失败） |
 | `~/.loongsuite-pilot/versions/` | 多版本安装目录 |
 | `~/.loongsuite-pilot/current` | 当前版本指针 |
+
+## `restart-collector` / `restart-updater` 不许无声失败
+
+线上唯一能看到的东西曾经是这一行，没有任何原因：
+
+```
+Cmd-RestartUpdater : Service manager failed to restart updater (init_type=taskscheduler)
+```
+
+三条独立的原因把信息全吃掉了：① 原因都在 `Write-Host`，而调用方用 `execFile`，`err.message` **只带
+stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "Stop"` 让 `Write-Error` 变成**终止
+错误**，写在它之后的诊断（包括当年那句 `return`）是死代码；③ 有些分支一个字都不打印（`Get-TaskExists`
+把"任务不存在"和"`Get-ScheduledTask` 自己报错"折叠成同一个 `$false`，见 `windows-scheduledtasks-autoload-gap`）。
+外加一个行为缺陷：自愈分支被 `init_type` 门禁挡在 `background|unknown|""` 之外，`taskscheduler` 装机上
+任务一坏就**永远**只能走到那句 `Write-Error`，每个周期重演一次。
+
+现在的契约，`.ps1` 与 `.sh` 对称：
+
+- 每个非成功出口先 `Write-RestartFailure` / `write_restart_failure` 命名一个 **stage**，再退出；
+  **顺序是承重的**（EAP=Stop 下 `Write-Error` 之后的代码不可达）。
+- stage 标签是 `src/utils/restart-breadcrumb.ts` 的 `RESTART_STAGES`，两侧逐字相同、永不本地化 ——
+  它们是告警流里的聚合键，只有一侧认识的标签等于告警查不出来。
+- 面包屑落在 `logs/last-restart-failure-<target>.json`（`schema: 1`，扁平 `diag`），语义同
+  `crash-breadcrumb`：**文件还在就代表上一次失败**，所以两个命令入口都先清掉它。诊断走文件而不是流，
+  因为流不可靠（`$OutputEncoding` 是 ASCII、EAP=Stop 会改写流、安装器里的 `Restart-StaleCollector`
+  还会 `2>&1` 合流）。
+- node 侧读的时候**校验新鲜度**（`ts >= attemptStart - 5s`）：脚本压根没跑起来（`powershell.exe` 不在、
+  子进程被 kill）时，不能拿上一次留下的文件冒充这次的原因。超时被 kill 单独记成 `stage=timeout`。
+- 告警**复用现有类型**（`UPDATER_FAILURE_ALARM` / `SERVICE_NOT_RUNNING_ALARM`），只富化
+  `alarm_message`：`... | stage=<s> reason="<detail>" init_type=<t> task_state=<s> ...`。event schema
+  和下游 SLS 配置不动。
+- 启动确认是**有界轮询**（`Wait-ForUpdaterAlive` / `wait_for_updater_process`），不是 `Start-Sleep 1`
+  加一次探测 —— 一秒不够 `wscript.exe` → node 落 pid 文件，而这个误判在 `init_type=taskscheduler` 上是
+  终局判决。node 侧的命令超时因此提到 90s：30s 会在脚本诊断到一半时把它杀掉，亲手毁掉证据。
+- 自愈不再看 `init_type`；但 background/nohup 兜底**仍然**只对 `background|unknown|""` 开放（托管装机上
+  它不是修复，是一个游离于服务管理器之外、会在下次注销时死掉的第二个 daemon），跳过时要上报，不许静默。
+
+| 测试 | 约束 |
+|------|------|
+| `tests/unit/scripts/ps1-restart-diagnostics.test.mjs` | `.ps1`：每个 `Write-Error` 之前都有 `Write-RestartFailure`；两个入口都先 `Clear-RestartFailure`；每个 `Start-ScheduledTask` 后面跟着等待；自愈块不提 `$initType` 而兜底仍然门禁；写文件带 `-Encoding UTF8` + `Move-Item`；诊断只读（不碰会删 pid 文件的 `Test-PidRunning`）；`schtasks` 交叉校验保持 prevEAP/`2>&1`/`$LASTEXITCODE` 那套写法 |
+| `tests/unit/scripts/sh-restart-diagnostics.test.mjs` | `.sh` 对称版，外加 `set -euo pipefail` 的两个坑（可能空手而归的探针必须自己 `\|\| true`）、手写 JSON 的每个插值都过 `json_escape`、面包屑路径与 node 侧 `restartFailurePath()` 对齐 |
+| `tests/unit/scripts/ps1-restart-best-effort.test.mjs` | 被拒的重新注册不许跳过 `Start-ScheduledTask`（两个独立 try） |
+| `tests/unit/utils/restart-breadcrumb.test.ts` | 带 BOM 能读、未知 schema/截断文件返回 null、新鲜度窗口、摘要长度预算与引号换行清洗 |
 
 ## 快速入口
 

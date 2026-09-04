@@ -8,6 +8,14 @@ import { readJsonFile } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
+import {
+  describeRestartCommandError,
+  isRestartCommandTimeout,
+  isRestartFailureFresh,
+  readRestartFailure,
+  sanitizeAlarmText,
+  summarizeRestartFailure,
+} from '../utils/restart-breadcrumb.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from '../updater/runtime-state.js';
 
 const execFileAsync = promisify(execFile);
@@ -18,7 +26,19 @@ const DEFAULT_STALE_HEARTBEAT_MS = 3 * 60_000;
 const DEFAULT_STARTUP_GRACE_MS = 3 * 60_000;
 const DEFAULT_SLEEP_WAKE_GRACE_MS = 3 * 60_000;
 const DEFAULT_RESTART_COOLDOWN_MS = 10 * 60_000;
-const COMMAND_TIMEOUT_MS = 30_000;
+
+// The service script now waits for the restarted process to actually come up (bounded
+// polls of up to ~20s per path, and it may try several paths in a row) instead of
+// sleeping one second and guessing. A 30s cap would kill it mid-diagnosis and destroy
+// the very evidence this watchdog reports, so the cap sits well above the script's own
+// worst case and exists only to stop a wedged child from pinning the timer forever.
+const COMMAND_TIMEOUT_MS = 90_000;
+
+// How far back a breadcrumb still explains "the updater is not running now". Bounded so
+// a months-old failure never gets attached to today's alarm; generous enough to cover
+// the restart cooldown, during which no new attempt is made and the previous failure is
+// still the live explanation.
+const RECENT_RESTART_FAILURE_MS = 30 * 60_000;
 
 function homeDir(): string {
   return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
@@ -99,6 +119,7 @@ export class UpdaterWatchdog {
   private lastTickAt = 0;
   private sleepWakeGraceUntil = 0;
   private lastRestartAt = 0;
+  private checking = false;
 
   constructor(opts: UpdaterWatchdogOptions) {
     this.enabled = opts.enabled;
@@ -144,7 +165,20 @@ export class UpdaterWatchdog {
   async runCheck(): Promise<UpdaterWatchdogResult> {
     if (!this.enabled) return { status: 'disabled' };
     if (isAgentShellCurrentVersion(this.dataDir)) return { status: 'disabled' };
+    // 90s command timeout vs 60s tick: without this, an overlapping runCheck records
+    // SERVICE_NOT_RUNNING_ALARM (no breadcrumb yet) then hits cooldown.
+    if (this.checking) {
+      return { status: 'restart-rate-limited', reason: 'check already in flight', restarted: false };
+    }
+    this.checking = true;
+    try {
+      return await this.runCheckLocked();
+    } finally {
+      this.checking = false;
+    }
+  }
 
+  private async runCheckLocked(): Promise<UpdaterWatchdogResult> {
     const now = Date.now();
     if (this.lastTickAt > 0 && now - this.lastTickAt > this.intervalMs + this.sleepWakeGraceMs) {
       this.sleepWakeGraceUntil = now + this.sleepWakeGraceMs;
@@ -167,7 +201,7 @@ export class UpdaterWatchdog {
       // survive the suspend, and Task Scheduler's own repeating trigger will bring the
       // updater back within the window without help.
       if (this.inGraceWindow(now)) return { status: 'grace', reason: processState.reason };
-      this.recordServiceAlarm(processState.reason);
+      this.recordServiceAlarm(await this.withLastRestartFailure(processState.reason));
       return this.restart('missing-process', processState.reason);
     }
 
@@ -178,7 +212,7 @@ export class UpdaterWatchdog {
       // snapshot of a handover, not a broken updater. The alarm has to stay behind the
       // check too -- an alarm raised on every install is noise that hides the real ones.
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
+      this.recordFailureAlarm(await this.withLastRestartFailure(reason));
       return this.restart('command-mismatch', reason);
     }
 
@@ -186,14 +220,14 @@ export class UpdaterWatchdog {
     if (!heartbeat) {
       const reason = 'updater heartbeat is missing';
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
+      this.recordFailureAlarm(await this.withLastRestartFailure(reason));
       return this.restart('missing-heartbeat', reason);
     }
 
     if (processState.pid !== undefined && heartbeat.pid !== processState.pid && process.platform !== 'win32') {
       const reason = `updater heartbeat pid ${heartbeat.pid} does not match running pid ${processState.pid}`;
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
+      this.recordFailureAlarm(await this.withLastRestartFailure(reason));
       return this.restart('pid-mismatch', reason);
     }
 
@@ -201,7 +235,7 @@ export class UpdaterWatchdog {
     if (!Number.isFinite(heartbeatAt) || now - heartbeatAt > this.staleHeartbeatMs) {
       const reason = 'updater heartbeat is stale';
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
+      this.recordFailureAlarm(await this.withLastRestartFailure(reason));
       return this.restart('stale-heartbeat', reason);
     }
 
@@ -251,9 +285,10 @@ export class UpdaterWatchdog {
     }
 
     this.lastRestartAt = now;
+    const attemptStartedAt = now;
     try {
-      if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
+      const result = process.platform === 'win32'
+        ? await execFileAsync('powershell.exe', [
           '-NoProfile',
           '-ExecutionPolicy',
           'Bypass',
@@ -263,20 +298,70 @@ export class UpdaterWatchdog {
         ], {
           timeout: COMMAND_TIMEOUT_MS,
           windowsHide: true,
-        });
-      } else {
-        await execFileAsync(this.loongsuitePilotBin, ['restart-updater'], {
+        })
+        : await execFileAsync(this.loongsuitePilotBin, ['restart-updater'], {
           timeout: COMMAND_TIMEOUT_MS,
         });
-      }
-      logger.warn('updater-watchdog requested updater restart', { status, reason });
+      // Even a successful restart is worth its transcript: the script reports which
+      // recovery path it had to take (plain start, re-register, self-heal), and a
+      // non-empty stderr on a zero exit means a non-terminating error was written.
+      logger.warn('updater-watchdog requested updater restart', {
+        status,
+        reason,
+        stdout: sanitizeAlarmText(result.stdout ?? '', 1_000),
+        stderr: sanitizeAlarmText(result.stderr ?? '', 1_000),
+      });
       return { status: 'restart-attempted', reason, restarted: true };
     } catch (err) {
-      const message = `updater restart command failed: ${String(err)}`;
+      const detail = describeRestartCommandError(err);
+      // Freshness matters more than presence: a script that never ran (powershell.exe
+      // missing, child killed before its first statement) would otherwise be "explained"
+      // by whatever the previous attempt left on disk.
+      const breadcrumb = await this.readRestartFailure(attemptStartedAt);
+      const diagnosis = breadcrumb
+        ? summarizeRestartFailure(breadcrumb)
+        : isRestartCommandTimeout(err)
+          ? 'stage=timeout reason="restart command killed by timeout before it reported a stage"'
+          : 'stage=unknown reason="restart command left no diagnostics"';
+      const message = `updater restart command failed: ${detail} | ${diagnosis}`;
       this.recordFailureAlarm(message);
-      logger.error('updater-watchdog restart failed', { reason, error: String(err) });
+      logger.error('updater-watchdog restart failed', {
+        reason,
+        error: detail,
+        stage: breadcrumb?.stage ?? (isRestartCommandTimeout(err) ? 'timeout' : 'unknown'),
+        initType: breadcrumb?.init_type,
+        diag: breadcrumb?.diag,
+      });
       return { status: 'restart-failed', reason: message, restarted: false };
     }
+  }
+
+  /**
+   * The breadcrumb left by the service script, when it belongs to an attempt no older
+   * than `notBeforeMs`. Never throws: diagnostics must not be able to break recovery.
+   */
+  private async readRestartFailure(notBeforeMs: number) {
+    try {
+      const breadcrumb = await readRestartFailure(this.dataDir, 'updater');
+      if (!breadcrumb || !isRestartFailureFresh(breadcrumb, notBeforeMs)) return null;
+      return breadcrumb;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Appends why the last restart attempt failed, if one did recently.
+   *
+   * These alarms fire *before* this tick's restart, so the newest evidence available is
+   * the previous attempt's breadcrumb — and when the cooldown is suppressing retries,
+   * that breadcrumb is the live explanation for the updater still being down.
+   */
+  private async withLastRestartFailure(message: string): Promise<string> {
+    const breadcrumb = await this.readRestartFailure(Date.now() - RECENT_RESTART_FAILURE_MS);
+    return breadcrumb
+      ? `${message} | last_restart_failure: ${summarizeRestartFailure(breadcrumb)}`
+      : message;
   }
 
   private recordServiceAlarm(message: string): void {

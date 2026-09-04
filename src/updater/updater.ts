@@ -15,6 +15,14 @@ import {
   makeTarStagingDir,
   replaceDirWith,
 } from '../utils/win-archive.js';
+import {
+  describeRestartCommandError,
+  isRestartCommandTimeout,
+  isRestartFailureFresh,
+  readRestartFailure,
+  summarizeRestartFailure,
+  type RestartFailureBreadcrumb,
+} from '../utils/restart-breadcrumb.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -28,7 +36,10 @@ const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
 const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
-const COLLECTOR_COMMAND_TIMEOUT_MS = 30_000;
+// Matches UpdaterWatchdog's cap: restart-collector polls for the collector's heartbeat
+// instead of sleeping a second and guessing, and killing it early would throw away both
+// the restart and the diagnostics it was about to write.
+const COLLECTOR_COMMAND_TIMEOUT_MS = 90_000;
 const COLLECTOR_HEALTH_TIMEOUT_MS = 30_000;
 const COLLECTOR_HEALTH_POLL_MS = 500;
 
@@ -1107,17 +1118,35 @@ export class Updater {
     const previousPid = typeof previousRuntime?.pid === 'number' ? previousRuntime.pid : null;
     const restartStartedAt = Date.now();
     let recoveryAttempted = false;
+    let diagnosed: {
+      detail: string;
+      diagnosis: string;
+      stage: string;
+      breadcrumb: RestartFailureBreadcrumb | null;
+    } | null = null;
 
     try {
       await this.runCollectorCommand('restart-collector');
-    } catch (err: any) {
+    } catch (err: unknown) {
+      diagnosed = await this.diagnoseCollectorRestartFailure(restartStartedAt, err);
       logger.warn('collector restart failed', {
-        error: String(err?.message || err),
-        stdout: err?.stdout?.trim?.() || undefined,
-        stderr: err?.stderr?.trim?.() || undefined,
+        error: diagnosed.detail,
+        stage: diagnosed.stage,
+        initType: diagnosed.breadcrumb?.init_type,
+        diag: diagnosed.breadcrumb?.diag,
       });
-      await this.startCollectorForRecovery(err);
-      recoveryAttempted = true;
+      try {
+        await this.startCollectorForRecovery(err);
+        recoveryAttempted = true;
+      } catch (recoveryErr) {
+        // Alarm only when recovery also failed: a start-collector rescue after a
+        // timed-out restart is the #328 path working, not a stuck collector.
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${diagnosed.detail} | ${diagnosed.diagnosis}`,
+        );
+        throw recoveryErr;
+      }
     }
 
     try {
@@ -1128,7 +1157,17 @@ export class Updater {
         targetGitCommit,
       );
     } catch (healthErr) {
-      if (recoveryAttempted) throw healthErr;
+      if (recoveryAttempted) {
+        const first = diagnosed
+          ? `${diagnosed.detail} | ${diagnosed.diagnosis}`
+          : 'restart-collector failed';
+        const healthReason = healthErr instanceof Error ? healthErr.message : String(healthErr);
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${first}; health check failed after start-collector recovery: ${healthReason}`,
+        );
+        throw healthErr;
+      }
       logger.warn('collector failed post-restart health check; attempting start-only recovery', {
         error: String(healthErr),
       });
@@ -1172,6 +1211,36 @@ export class Updater {
           + `start-only recovery also failed (${this.formatCommandFailure(recoveryErr)})`,
       );
     }
+  }
+
+  private async diagnoseCollectorRestartFailure(
+    attemptStartedAt: number,
+    err: unknown,
+  ): Promise<{
+    detail: string;
+    diagnosis: string;
+    stage: string;
+    breadcrumb: RestartFailureBreadcrumb | null;
+  }> {
+    const detail = describeRestartCommandError(err);
+    let breadcrumb: RestartFailureBreadcrumb | null = null;
+    try {
+      breadcrumb = await readRestartFailure(this.paths.dataDir, 'collector');
+      if (breadcrumb && !isRestartFailureFresh(breadcrumb, attemptStartedAt)) breadcrumb = null;
+    } catch {
+      breadcrumb = null;
+    }
+    const diagnosis = breadcrumb
+      ? summarizeRestartFailure(breadcrumb)
+      : isRestartCommandTimeout(err)
+        ? 'stage=timeout reason="restart command killed by timeout before it reported a stage"'
+        : 'stage=unknown reason="restart command left no diagnostics"';
+    return {
+      detail,
+      diagnosis,
+      stage: breadcrumb?.stage ?? (isRestartCommandTimeout(err) ? 'timeout' : 'unknown'),
+      breadcrumb,
+    };
   }
 
   private formatCommandFailure(error: unknown): string {
