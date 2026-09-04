@@ -1203,6 +1203,16 @@ _sed_inplace() {
     fi
 }
 
+# Is `needle` present INSIDE the begin/end marker region of `file`?
+# Signature checks must be scoped this way rather than grepping the whole rc
+# file: the qodercli and qoderclicn blocks both name the same wrapper script, so
+# a file-wide match lets one block vouch for the other and a stale block never
+# gets migrated. Mirrors extractMarkerBlock() in src/core/hook-watchdog.ts.
+_rc_block_contains() {
+    local file="$1" begin="$2" end="$3" needle="$4"
+    sed -n "/$begin/,/$end/p" "$file" 2>/dev/null | grep -qF "$needle"
+}
+
 inject_qodercli_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
     if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
@@ -1227,7 +1237,10 @@ inject_qodercli_token_intercept() {
         # so the new guarded block below replaces it (the old bare block
         # parse-errors under a user alias, which is exactly what we're fixing).
         if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
-            if grep -qF 'qodercli-runtime-wrapper.sh' "$file"; then return 0; fi
+            if _rc_block_contains "$file" \
+                'loongsuite-pilot BEGIN qodercli-intercept' \
+                'loongsuite-pilot END qodercli-intercept' \
+                'qodercli-runtime-wrapper.sh'; then return 0; fi
             _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
         fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
@@ -1280,6 +1293,81 @@ remove_qodercli_token_intercept() {
         fi
     done
 }
+
+# The CN line gets its own function rather than sharing the one above: that
+# block's exact bytes are part of a released idempotency contract (the watchdog
+# greps for them), so it is left untouched. Only the marker and the flavor
+# variable differ here — the wrapper and preload script are the same assets.
+inject_qoderclicn_token_intercept() {
+    # Not selected: clean up any stale block from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
+    if ! command -v qoderclicn >/dev/null 2>&1; then return 0; fi
+
+    local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
+    local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
+    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
+
+    msg "==> 配置 qoderclicn token 采集..." "==> Configuring qoderclicn token intercept..."
+
+    _inject_cn_to_rc() {
+        local file="$1"
+        if [ ! -f "$file" ]; then return 0; fi
+        if [ ! -w "$file" ]; then
+            msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
+            return 0
+        fi
+        # Migrate-or-skip, same shape as the qodercli block: the signature is the
+        # flavor assignment, since the wrapper name cannot tell the two apart.
+        if grep -q 'loongsuite-pilot BEGIN qoderclicn-intercept' "$file" 2>/dev/null; then
+            if _rc_block_contains "$file" \
+                'loongsuite-pilot BEGIN qoderclicn-intercept' \
+                'loongsuite-pilot END qoderclicn-intercept' \
+                'LOONGSUITE_QODERCLI_FLAVOR=qoderclicn'; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN qoderclicn-intercept/,/# loongsuite-pilot END qoderclicn-intercept/d' "$file"
+        fi
+        [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
+        # Double-quoted heredoc so $DATA_DIR expands at install time. $@ is
+        # escaped to defer expansion to runtime. Keep byte-identical to the
+        # watchdog's blockFn (src/core/hook-watchdog.ts, id qoderclicn-rc).
+        cat >> "$file" << INTERCEPTBLOCK
+
+# loongsuite-pilot BEGIN qoderclicn-intercept
+if ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then
+  eval 'qoderclicn() { LOONGSUITE_QODERCLI_FLAVOR=qoderclicn "$DATA_DIR/hooks/qodercli-runtime-wrapper.sh" "\$@"; }'
+fi
+# loongsuite-pilot END qoderclicn-intercept
+INTERCEPTBLOCK
+        msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
+            "    ✅ Written to $file (run: source $file or open a new terminal)"
+    }
+
+    case "${SHELL:-/bin/bash}" in
+        */zsh)  _inject_cn_to_rc "$HOME/.zshrc" ;;
+        */bash) _inject_cn_to_rc "$HOME/.bashrc" ;;
+        *)      _inject_cn_to_rc "$HOME/.bashrc" ;;
+    esac
+
+    if _rc_user_override_present qoderclicn \
+        'loongsuite-pilot BEGIN qoderclicn-intercept' \
+        'loongsuite-pilot END qoderclicn-intercept'; then
+        msg "    ⚠️  检测到你已自定义 qoderclicn(alias/function)，为避免覆盖，采集未启用。" \
+            "    ⚠️  Detected your own 'qoderclicn' (alias/function); collection is disabled to avoid clobbering it."
+        msg "        如需启用采集，请让你的定义调用： LOONGSUITE_QODERCLI_FLAVOR=qoderclicn $runtime_wrapper" \
+            "        To enable collection, have your definition call: LOONGSUITE_QODERCLI_FLAVOR=qoderclicn $runtime_wrapper"
+    fi
+    echo ""
+}
+
+remove_qoderclicn_token_intercept() {
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN qoderclicn-intercept' "$file" 2>/dev/null; then
+            _sed_inplace '/# loongsuite-pilot BEGIN qoderclicn-intercept/,/# loongsuite-pilot END qoderclicn-intercept/d' "$file"
+            msg "    已清理 qoderclicn token intercept ($file)" \
+                "    Cleaned up qoderclicn token intercept ($file)"
+        fi
+    done
+}
+
 
 # ============================================================
 # QoderWork-family runtime wrapper: intercept token usage via the SDK-wide
@@ -1977,6 +2065,7 @@ cmd_install() {
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
+    inject_qoderclicn_token_intercept
     inject_qoderwork_runtime_wrapper
     inject_claude_code_fetch_intercept
 
@@ -2879,6 +2968,7 @@ cmd_uninstall() {
     remove_hook_configs
     remove_grok_build_hook_config
     remove_qodercli_token_intercept
+    remove_qoderclicn_token_intercept
     remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept
     echo ""

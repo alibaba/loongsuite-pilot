@@ -11,8 +11,23 @@ const EXPECTED_ID_RETRY_DELAY_MS = 25;
 const SESSION_IDLE_MS = 60_000;
 const SESSION_MAX_SIZE = 50;
 
-function getSessionsDir(): string {
-  return resolveHome('~/.qoder/logs/sessions');
+/** Sessions root of the international build. */
+export const QODER_SEGMENTS_ROOT = '~/.qoder/logs/sessions';
+/** Sessions root of the QoderCN build. */
+export const QODER_CN_SEGMENTS_ROOT = '~/.qoder-cn/logs/sessions';
+
+function getSessionsDir(segmentsRoot: string): string {
+  return resolveHome(segmentsRoot);
+}
+
+/**
+ * Key the in-memory index by root as well as session id. The two product lines
+ * mint session ids independently, so one id can exist under both roots; keying
+ * by session id alone would apply one line's per-file offsets to the other
+ * line's files.
+ */
+function segmentStateKey(segmentsRoot: string, sessionId: string): string {
+  return `${segmentsRoot}::${sessionId}`;
 }
 
 interface SegmentEvent {
@@ -82,8 +97,9 @@ export interface SegmentTokenData {
 export async function readSegmentTokensForSession(
   sessionId: string,
   expectedRequestIds: readonly string[] = [],
+  segmentsRoot: string = QODER_SEGMENTS_ROOT,
 ): Promise<SegmentTokenData[]> {
-  const first = await readSegmentTokensOnce(sessionId);
+  const first = await readSegmentTokensOnce(sessionId, segmentsRoot);
   let missing = missingExpectedRequestIds(expectedRequestIds, first.data);
   if (missing.length === 0 || !first.retryable) return first.data;
 
@@ -91,11 +107,12 @@ export async function readSegmentTokensForSession(
   // the last opportunity to attach this segment to its Hook entries. Retry
   // once only when an exact request id proves the first snapshot is incomplete.
   await delay(EXPECTED_ID_RETRY_DELAY_MS);
-  const second = await readSegmentTokensOnce(sessionId);
+  const second = await readSegmentTokensOnce(sessionId, segmentsRoot);
   missing = missingExpectedRequestIds(expectedRequestIds, second.data);
   if (missing.length > 0) {
     logger.warn('expected segment requests remain unavailable after one bounded retry', {
       sessionId,
+      segmentsRoot,
       missingRequestIds: [...new Set(missing)],
       missingCount: missing.length,
     });
@@ -103,12 +120,16 @@ export async function readSegmentTokensForSession(
   return second.data;
 }
 
-async function readSegmentTokensOnce(sessionId: string): Promise<SegmentReadAttempt> {
+async function readSegmentTokensOnce(
+  sessionId: string,
+  segmentsRoot: string,
+): Promise<SegmentReadAttempt> {
   const now = Date.now();
-  evictIdleSessions(sessionId, now);
+  const stateKey = segmentStateKey(segmentsRoot, sessionId);
+  evictIdleSessions(stateKey, now);
 
-  const scan = await findSegmentFilesForSession(sessionId);
-  let state = sessionStates.get(sessionId);
+  const scan = await findSegmentFilesForSession(sessionId, segmentsRoot);
+  let state = sessionStates.get(stateKey);
   if (!state && scan.files.length === 0) {
     return { data: [], retryable: scan.retryable && !scan.stableFailure };
   }
@@ -116,7 +137,7 @@ async function readSegmentTokensOnce(sessionId: string): Promise<SegmentReadAtte
   if (!state) {
     evictOldestSessionIfFull();
     state = { files: new Map(), data: [], lastAccessMs: now };
-    sessionStates.set(sessionId, state);
+    sessionStates.set(stateKey, state);
   }
   state.lastAccessMs = now;
 
@@ -383,14 +404,17 @@ function resolveRequestStart(
   return { ts: 0, anchor: 'none' };
 }
 
-async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFileScan> {
+async function findSegmentFilesForSession(
+  sessionId: string,
+  segmentsRoot: string,
+): Promise<SegmentFileScan> {
   let cwdDirs: Dirent[];
   try {
-    cwdDirs = await fs.readdir(getSessionsDir(), { withFileTypes: true });
+    cwdDirs = await fs.readdir(getSessionsDir(segmentsRoot), { withFileTypes: true });
   } catch (err) {
     if (!isMissingPath(err)) {
       logger.info('qoder sessions root unavailable; keeping any previously parsed segment data', {
-        dir: getSessionsDir(),
+        dir: getSessionsDir(segmentsRoot),
         error: String(err),
       });
     }
@@ -408,7 +432,7 @@ async function findSegmentFilesForSession(sessionId: string): Promise<SegmentFil
   let stableFailure = false;
   for (const cwdDir of cwdDirs) {
     if (!cwdDir.isDirectory()) continue;
-    const segDir = path.join(getSessionsDir(), cwdDir.name, sessionId, 'segments');
+    const segDir = path.join(getSessionsDir(segmentsRoot), cwdDir.name, sessionId, 'segments');
     let entries: Dirent[];
     try {
       entries = await fs.readdir(segDir, { withFileTypes: true });
@@ -479,25 +503,25 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function evictIdleSessions(currentSessionId: string, now: number): void {
-  for (const [sessionId, state] of sessionStates) {
-    if (sessionId !== currentSessionId && now - state.lastAccessMs > SESSION_IDLE_MS) {
-      sessionStates.delete(sessionId);
+function evictIdleSessions(currentStateKey: string, now: number): void {
+  for (const [stateKey, state] of sessionStates) {
+    if (stateKey !== currentStateKey && now - state.lastAccessMs > SESSION_IDLE_MS) {
+      sessionStates.delete(stateKey);
     }
   }
 }
 
 function evictOldestSessionIfFull(): void {
   if (sessionStates.size < SESSION_MAX_SIZE) return;
-  let oldestId: string | undefined;
+  let oldestKey: string | undefined;
   let oldestAccess = Infinity;
-  for (const [sessionId, state] of sessionStates) {
+  for (const [stateKey, state] of sessionStates) {
     if (state.lastAccessMs < oldestAccess) {
-      oldestId = sessionId;
+      oldestKey = stateKey;
       oldestAccess = state.lastAccessMs;
     }
   }
-  if (oldestId) sessionStates.delete(oldestId);
+  if (oldestKey) sessionStates.delete(oldestKey);
 }
 
 function isMissingPath(err: unknown): boolean {

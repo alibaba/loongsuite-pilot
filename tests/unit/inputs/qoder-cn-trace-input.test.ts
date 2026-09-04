@@ -297,6 +297,8 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     record['multica.issue.id'] = 'AGE-992';
     record['multica.user.id'] = 'staff-1';
     record['multica.api_token'] = 'blocked';
+    record['agentcore.task_id'] = 'task-managed-runtime';
+    record['agentcore.subtask_id'] = 'subtask-managed-runtime';
     await writeHookJsonl(logDir, [record]);
 
     const entries = await collectOnce();
@@ -304,8 +306,243 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     expect(entries[0]).toMatchObject({
       'multica.issue.id': 'AGE-992',
       'multica.user.id': 'staff-1',
+      'agentcore.task_id': 'task-managed-runtime',
+      'agentcore.subtask_id': 'subtask-managed-runtime',
     });
     expect(entries[0]).not.toHaveProperty('multica.api_token');
+  });
+
+  it('repairs a qoderclicn turn from the CN segments root and the CN intercept', async () => {
+    // The defect this covers: the CLI hook stamps llm.request and llm.response
+    // from the same progress tick, so the span carries no duration, and the
+    // transcript reports no usage. Duration has to come from the segment pair
+    // and usage from the runtime intercept; neither source alone is enough.
+    const sessionId = 'cli-sess-join';
+    const clientRequestId = 'creq-join-1';
+    const responseId = 'resp-join-1';
+    const now = Date.now();
+
+    const request = buildEntry({
+      event: 'llm.request', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    request['agent.client_request_id'] = clientRequestId;
+    const response = buildEntry({
+      event: 'llm.response', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    response['agent.client_request_id'] = clientRequestId;
+    response['gen_ai.response.id'] = responseId;
+    await writeHookJsonl(logDir, [request, response]);
+
+    await writeSegments(cnSegmentsRoot(), sessionId, clientRequestId, now - 4000, now - 1000);
+    await writeCnIntercept([{
+      type: 'token',
+      id: responseId,
+      ts: now,
+      prompt_tokens: 1234,
+      completion_tokens: 56,
+      cached_tokens: 1000,
+      total_tokens: 1290,
+    }]);
+
+    const entries = await collectOnce();
+    const outRequest = entries.find(e => e['event.name'] === 'llm.request')!;
+    const outResponse = entries.find(e => e['event.name'] === 'llm.response')!;
+
+    expect(outResponse['gen_ai.usage.input_tokens']).toBe(1234);
+    expect(outResponse['gen_ai.usage.output_tokens']).toBe(56);
+    expect(outResponse['gen_ai.usage.cache_read.input_tokens']).toBe(1000);
+    expect(spanDurationMs(outRequest, outResponse)).toBe(3000);
+    expect(outResponse['gen_ai.response.model']).toBe('qwen3-max');
+  });
+
+  it('still applies intercept usage when the segments have not landed yet', async () => {
+    // Segments are written by the CLI and can lag behind the hook record. Routing
+    // such a turn to the IDE path meant its intercept was never read, and because
+    // the Hook offset is committed before enrichment those tokens were gone for
+    // good. Usage joins on an exact gen_ai.response.id, so it does not depend on
+    // the segments at all; only the duration does.
+    const sessionId = 'cli-sess-no-segments';
+    const clientRequestId = 'creq-no-segments';
+    const responseId = 'resp-no-segments';
+    const now = Date.now();
+
+    const request = buildEntry({
+      event: 'llm.request', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    request['agent.client_request_id'] = clientRequestId;
+    const response = buildEntry({
+      event: 'llm.response', turn: 'cli-turn', step: 'cli-turn:s1', session: sessionId, ts: now,
+    });
+    response['agent.client_request_id'] = clientRequestId;
+    response['gen_ai.response.id'] = responseId;
+    await writeHookJsonl(logDir, [request, response]);
+
+    // Deliberately no writeSegments call.
+    await writeCnIntercept([{
+      type: 'token',
+      id: responseId,
+      ts: now,
+      prompt_tokens: 700,
+      completion_tokens: 42,
+      cached_tokens: 0,
+      total_tokens: 742,
+    }]);
+
+    const entries = await collectOnce();
+    const outRequest = entries.find(e => e['event.name'] === 'llm.request')!;
+    const outResponse = entries.find(e => e['event.name'] === 'llm.response')!;
+
+    expect(outResponse['gen_ai.usage.input_tokens']).toBe(700);
+    expect(outResponse['gen_ai.usage.output_tokens']).toBe(42);
+    // The duration stays zero: only the segments carry the response timings, and
+    // that is the accepted residual loss rather than an oversight.
+    expect(spanDurationMs(outRequest, outResponse)).toBe(0);
+  });
+
+  it('never reads the international segments root for a QoderCN session', async () => {
+    // The two product lines mint session ids independently, so one id can exist
+    // under both roots. Reading ~/.qoder here would stamp these entries with
+    // another product's clock instead of leaving them unrepaired.
+    const sessionId = 'cli-sess-wrong-root';
+    const clientRequestId = 'creq-wrong-root';
+    const now = Date.now();
+
+    const request = buildEntry({
+      event: 'llm.request', turn: 'cli-turn-2', step: 'cli-turn-2:s1', session: sessionId, ts: now,
+    });
+    request['agent.client_request_id'] = clientRequestId;
+    const response = buildEntry({
+      event: 'llm.response', turn: 'cli-turn-2', step: 'cli-turn-2:s1', session: sessionId, ts: now,
+    });
+    response['agent.client_request_id'] = clientRequestId;
+    await writeHookJsonl(logDir, [request, response]);
+
+    const internationalRoot = path.join(tmpHome, '.qoder', 'logs', 'sessions');
+    await writeSegments(internationalRoot, sessionId, clientRequestId, now - 4000, now - 1000);
+
+    const entries = await collectOnce();
+    const outRequest = entries.find(e => e['event.name'] === 'llm.request')!;
+    const outResponse = entries.find(e => e['event.name'] === 'llm.response')!;
+
+    expect(spanDurationMs(outRequest, outResponse)).toBe(0);
+    expect(outResponse['gen_ai.response.model']).toBe('auto');
+  });
+
+  it('hands this batch client request ids to the segment reader', async () => {
+    // Without the exact ids the reader cannot tell an empty snapshot apart from
+    // one that is merely late, and the Hook offset is already committed by the
+    // time enrichment runs, so a late record would never be attached at all.
+    const sessionId = 'cli-sess-expected-ids';
+    const now = Date.now();
+    const records: Record<string, unknown>[] = [];
+    for (const [index, requestId] of ['creq-a', 'creq-b'].entries()) {
+      const turn = `cli-turn-ids-${index}`;
+      const request = buildEntry({
+        event: 'llm.request', turn, step: `${turn}:s1`, session: sessionId, ts: now + index,
+      });
+      request['agent.client_request_id'] = requestId;
+      const response = buildEntry({
+        event: 'llm.response', turn, step: `${turn}:s1`, session: sessionId, ts: now + index,
+      });
+      response['agent.client_request_id'] = requestId;
+      response['gen_ai.response.id'] = `resp-${requestId}`;
+      records.push(request, response);
+    }
+    await writeHookJsonl(logDir, records);
+
+    class TestInput extends QoderCnTraceInput {
+      observedRequestIds: string[] = [];
+
+      protected override async readCliSegments(
+        _sessionId: string,
+        expectedRequestIds: readonly string[],
+      ): Promise<[]> {
+        this.observedRequestIds = [...expectedRequestIds];
+        return [];
+      }
+    }
+
+    const input = new TestInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+    await input.start();
+    await input.stop();
+
+    expect(input.observedRequestIds).toEqual(['creq-a', 'creq-b']);
+  });
+
+  it('never commits a half-written record and reads it on the next poll', async () => {
+    // stat() can return while the hook is still appending. Committing stat.size
+    // would step over the tail of a record whose JSON.parse just failed, so that
+    // event would be lost permanently rather than merely delayed.
+    const sessionId = 'sess-partial';
+    const completeRecords = [
+      buildEntry({
+        event: 'llm.request', turn: 'turn-complete', step: 'turn-complete:s1',
+        session: sessionId, ts: 1_780_000_030_000,
+      }),
+      buildEntry({
+        event: 'llm.response', turn: 'turn-complete', step: 'turn-complete:s1',
+        session: sessionId, ts: 1_780_000_031_000,
+      }),
+    ];
+    const lateRecord = buildEntry({
+      event: 'llm.response', turn: 'turn-late', step: 'turn-late:s1',
+      session: sessionId, ts: 1_780_000_032_000,
+    });
+
+    const logFileName = `qoder-cn-${getTodayDateString()}.jsonl`;
+    const logFile = path.join(logDir, logFileName);
+    const completeText = `${completeRecords.map(r => JSON.stringify(r)).join('\n')}\n`;
+    const lateLine = JSON.stringify(lateRecord);
+    const splitAt = Math.floor(lateLine.length / 2);
+    await fs.writeFile(logFile, completeText + lateLine.slice(0, splitAt), 'utf-8');
+
+    const input = new QoderCnTraceInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+
+    const first = await (input as any).collect() as AgentActivityEntry[];
+    expect(first.map(e => e['gen_ai.turn.id'])).toEqual(['turn-complete', 'turn-complete']);
+    // The offset stops at the last newline, not at stat.size.
+    expect(stateStore.get('qoder-cn-trace')).toMatchObject({
+      lastFile: logFileName,
+      lastOffset: Buffer.byteLength(completeText, 'utf-8'),
+    });
+
+    await fs.appendFile(logFile, `${lateLine.slice(splitAt)}\n`, 'utf-8');
+
+    const second = await (input as any).collect() as AgentActivityEntry[];
+    expect(second.map(e => e['gen_ai.turn.id'])).toEqual(['turn-late']);
+  });
+
+  it('holds the offset when the batch contains no complete record at all', async () => {
+    const logFileName = `qoder-cn-${getTodayDateString()}.jsonl`;
+    const logFile = path.join(logDir, logFileName);
+    const record = buildEntry({
+      event: 'llm.response', turn: 'turn-only-partial', step: 'turn-only-partial:s1',
+      session: 'sess-only-partial', ts: 1_780_000_033_000,
+    });
+    const line = JSON.stringify(record);
+    await fs.writeFile(logFile, line.slice(0, 20), 'utf-8');
+
+    const input = new QoderCnTraceInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+
+    expect(await (input as any).collect()).toEqual([]);
+    expect(stateStore.get('qoder-cn-trace')?.lastOffset ?? 0).toBe(0);
+
+    await fs.appendFile(logFile, `${line.slice(20)}\n`, 'utf-8');
+
+    const second = await (input as any).collect() as AgentActivityEntry[];
+    expect(second.map(e => e['gen_ai.turn.id'])).toEqual(['turn-only-partial']);
   });
 });
 
@@ -412,4 +649,50 @@ function execSql(dbPath: string, sql: string, params: unknown[] = []): Promise<v
       });
     });
   });
+}
+
+function cnSegmentsRoot(): string {
+  return path.join(tmpHome, '.qoder-cn', 'logs', 'sessions');
+}
+
+async function writeSegments(
+  root: string,
+  sessionId: string,
+  requestId: string,
+  startTs: number,
+  endTs: number,
+): Promise<void> {
+  const dir = path.join(root, 'Users-project', sessionId, 'segments');
+  await fs.mkdir(dir, { recursive: true });
+  const lines = [
+    JSON.stringify({
+      type: 'model.request.started',
+      request_id: requestId,
+      loop_id: `loop-${requestId}`,
+      ts: startTs,
+    }),
+    // Zero token counts on purpose: this build reports only `credits` in the
+    // segment, which is why usage must come from the intercept instead.
+    JSON.stringify({
+      type: 'model.response.completed',
+      request_id: requestId,
+      loop_id: `loop-${requestId}`,
+      ts: endTs,
+      data: { input_tokens: 0, output_tokens: 0, model: 'qwen3-max' },
+    }),
+  ];
+  await fs.writeFile(path.join(dir, 'segment-0.jsonl'), `${lines.join('\n')}\n`, 'utf-8');
+}
+
+async function writeCnIntercept(records: Record<string, unknown>[]): Promise<void> {
+  const dir = path.join(tmpHome, '.loongsuite-pilot', 'logs');
+  await fs.mkdir(dir, { recursive: true });
+  const lines = records.map(r => JSON.stringify(r)).join('\n');
+  await fs.writeFile(path.join(dir, 'qoderclicn-intercept.jsonl'), `${lines}\n`, 'utf-8');
+}
+
+function spanDurationMs(request: AgentActivityEntry, response: AgentActivityEntry): number {
+  const requestNs = BigInt(request.time_unix_nano as string);
+  const responseNs = BigInt(response.time_unix_nano as string);
+  return Number((responseNs - requestNs) / 1_000_000n);
 }

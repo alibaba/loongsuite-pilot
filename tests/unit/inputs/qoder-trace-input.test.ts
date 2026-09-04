@@ -2162,6 +2162,7 @@ describe('QoderTraceInput multimodal', () => {
           'gen_ai.turn.id': 'ide-turn',
           'gen_ai.tool.call.result': `Image file: ${imgPath}`,
           'multica.issue.id': 'IDE-992',
+          'agentcore.task_id': 'task-ide-runtime',
           time_unix_nano: '1780000000000000000',
         };
         const cliTool = {
@@ -2172,6 +2173,7 @@ describe('QoderTraceInput multimodal', () => {
           'gen_ai.turn.id': 'cli-turn',
           'gen_ai.tool.call.result': `Image file: ${imgPath}`,
           'multica.issue.id': 'CLI-992',
+          'agentcore.task_id': 'task-cli-runtime',
           time_unix_nano: '1780000000000000000',
         };
         await fs.writeFile(
@@ -2205,6 +2207,8 @@ describe('QoderTraceInput multimodal', () => {
         expect(Array.isArray(cli['gen_ai.tool.call.result'])).toBe(true);
         expect(ide['multica.issue.id']).toBe('IDE-992');
         expect(cli['multica.issue.id']).toBe('CLI-992');
+        expect(ide['agentcore.task_id']).toBe('task-ide-runtime');
+        expect(cli['agentcore.task_id']).toBe('task-cli-runtime');
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }

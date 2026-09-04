@@ -10,16 +10,30 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
-import { enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
+import {
+  collectCliExpectedRequestIds,
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichIdeTurn,
+  injectTraceId,
+} from '../qoder-trace/token-enricher.js';
+import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
+import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
+
+// Written by the runtime wrapper that launches qoderclicn. Kept separate from
+// the international build's file so a machine running both keeps the two
+// streams apart.
+const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
 }
 
 /**
- * Multi-source merge input for QoderCN (IDE-only).
- * Reads hook JSONL (content+structure) and SQLite (IDE tokens),
- * merges per session, outputs enriched events for both event logs (SLS)
+ * Multi-source merge input for the QoderCN product line (IDE + qoderclicn).
+ * Reads hook JSONL (content+structure) and, per session, either SQLite (IDE
+ * tokens) or session segments plus the runtime intercept (CLI tokens and
+ * response timings), then outputs enriched events for both event logs (SLS)
  * and trace conversion (ARMS).
  *
  * Pattern mirrors qoder-trace-input.ts: always emit immediately, never buffer.
@@ -70,6 +84,14 @@ export class QoderCnTraceInput extends BaseInput {
     } else {
       this.logger.info('history checkpoint initialized before first hook record');
     }
+  }
+
+  /** Seam mirroring the international input so tests can observe the join keys. */
+  protected readCliSegments(
+    sessionId: string,
+    expectedRequestIds: readonly string[],
+  ): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId, expectedRequestIds, QODER_CN_SEGMENTS_ROOT);
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -135,28 +157,79 @@ export class QoderCnTraceInput extends BaseInput {
       dedupeEventsInTurn(turnEntries);
     }
 
-    // Aggregate all turns in the same session so enrichIdeTurn can use
-    // SQLite request ordering to match tokens correctly across turns.
+    // Aggregate all turns in the same session: enrichIdeTurn needs SQLite
+    // request ordering to match tokens across turns, and the CLI/IDE variant is
+    // decided per session rather than per turn.
     // Mirrors qoder-trace-input.ts ideSessionGroups pattern.
-    const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const sessionGroups = new Map<string, AgentActivityEntry[]>();
     const noSessionEntries: AgentActivityEntry[] = [];
     for (const [, turnEntries] of mergedGroups) {
       const sessionId = this.extractSessionId(turnEntries);
       if (sessionId) {
-        const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
+        const sessionEntries = sessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
-        ideSessionGroups.set(sessionId, sessionEntries);
+        sessionGroups.set(sessionId, sessionEntries);
       } else {
         noSessionEntries.push(...turnEntries);
       }
     }
 
-    for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      // Intentionally ignores matchedDbPath: agent.type must never be derived from
-      // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
-      const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
-      enrichIdeTurn(sessionEntries, sqliteRows);
-      // Post-processing after enrichIdeTurn:
+    // The IDE and qoderclicn share one agentId and therefore one hook history,
+    // so the variant has to be recovered here. A CLI session is recognised by
+    // the transcript's usage.request_id, surfaced by the hook as
+    // agent.client_request_id, which the IDE does not produce. A history
+    // collected before the hook shipped that field carries no request id either,
+    // so it degrades to the SQLite path instead of losing its tokens.
+    //
+    // The presence of segments is deliberately NOT part of this decision.
+    // Segments are written by the CLI itself and can lag behind the hook record,
+    // so gating on them sent a CLI turn whose segments had not landed yet down
+    // the IDE path, where its intercept was never read at all. The Hook offset is
+    // committed before enrichment, so those tokens were lost for good rather than
+    // repaired on a later poll. The cost of dropping segments as a signal is that
+    // an IDE build which one day starts carrying a request id would take the CLI
+    // path; it would find no exact intercept match and end up with no tokens,
+    // which is what gating on segments already produced for real CLI turns.
+    let interceptData: InterceptData | null = null;
+    for (const [sessionId, sessionEntries] of sessionGroups) {
+      const isCliSession = hasClientRequestId(sessionEntries);
+      // Handing the reader this batch's exact request ids buys one bounded retry
+      // for an id missing from the first snapshot, for the same now-or-never
+      // reason: the Hook offset is committed before enrichment.
+      const segments = isCliSession
+        ? await this.readCliSegments(sessionId, collectCliExpectedRequestIds(sessionEntries))
+        : [];
+
+      if (isCliSession) {
+        // Tokens come from the runtime intercept rather than from the segments:
+        // on this build the segment records and the transcript both report zero
+        // token counts and carry only `credits`, same as the international one.
+        // The intercept joins on an exact gen_ai.response.id, so its usefulness
+        // does not depend on whether segments have landed.
+        interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
+        enrichCliPrimary(
+          sessionEntries,
+          interceptData.systemPrompt?.content,
+          interceptData.tokens,
+        );
+        // Segments only supply the response timings, which are the only source of
+        // a non-zero LLM duration. Without them the turn keeps a zero duration,
+        // but its tokens are already in place above.
+        if (segments.length > 0) {
+          enrichCliFromSegments(sessionEntries, segments);
+        }
+      } else {
+        // Intentionally ignores matchedDbPath: agent.type must never be derived from
+        // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
+        const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
+        enrichIdeTurn(sessionEntries, sqliteRows);
+      }
+
+      // Shared by both variants: these repair hook-level artefacts inherited
+      // from the one processor both go through (step-less user boundary,
+      // 'unknown' model on tool events, container spans ending before their
+      // children). They deliberately leave the llm.* / tool.* timestamps the
+      // enrichment above just wrote.
       expandContainerTimes(sessionEntries);
       propagateModelToToolEvents(sessionEntries);
       computeToolCallDurations(sessionEntries);
@@ -165,7 +238,7 @@ export class QoderCnTraceInput extends BaseInput {
 
     // Aggregate all session entries.
     const allSessionEntries: AgentActivityEntry[] = [];
-    for (const sessionEntries of ideSessionGroups.values()) {
+    for (const sessionEntries of sessionGroups.values()) {
       allSessionEntries.push(...sessionEntries);
     }
 
@@ -198,6 +271,7 @@ export class QoderCnTraceInput extends BaseInput {
   // ─── Hook JSONL reading ─────────────────────────────────────────────────────
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -217,26 +291,81 @@ export class QoderCnTraceInput extends BaseInput {
       offset = 0;
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
     try {
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.setState({ lastFile: logFileName, lastOffset: stat.size });
+      const readStartedAt = runtime?.now();
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
+      const snapshot = buf.subarray(0, bytesRead);
 
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      // The hook may still be appending its last record when stat() returns.
+      // Parse and commit only bytes that end in a newline: committing stat.size
+      // would move the offset past a half-written line whose JSON.parse just
+      // failed, so that record could never be read again.
+      const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (lastNewline < 0) return [];
+
+      const completeLength = lastNewline + 1;
+      const completeBytes = snapshot.subarray(0, completeLength);
+      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+
+      const completeText = completeBytes.toString('utf-8');
+      // Multi-byte characters break the line.length shortcut for per-record
+      // byte accounting, so those batches walk the buffer newline by newline.
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
 
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let record: Record<string, unknown>;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            parseFailedRecords++;
+            continue;
+          }
+          record = parsed as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid JSONL line', { error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeLength,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
     } finally {
       await handle.close();
     }
@@ -280,6 +409,16 @@ export class QoderCnTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+// A CLI turn's llm.response carries the transcript's usage.request_id, which
+// the hook writes as agent.client_request_id. The IDE transcript has no such
+// field, so its absence is what keeps IDE sessions on the SQLite path.
+function hasClientRequestId(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const raw = (e as Record<string, unknown>)['agent.client_request_id'];
+    return typeof raw === 'string' && raw !== '';
+  });
 }
 
 // Deduplicate events within a single turn by (step_id, event_name, tool_call_id).

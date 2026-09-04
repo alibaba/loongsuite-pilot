@@ -247,4 +247,31 @@ describe('qoder slash-command control rows', () => {
     expect(partsOf(records.find(r => r['event.name'] === 'other'))).toEqual(['杭州天气']);
     expect(partsOf(records.find(r => r['event.name'] === 'llm.request'))).toEqual(['杭州天气']);
   });
+
+  it('applies the shared CLI control-row filtering to QoderCN SDK transcripts', () => {
+    const prompt = promptRow('杭州天气');
+    const assistant = assistantRow('杭州今天多云。');
+    const turns = splitContentEventsIntoTurns([
+      caveatRow(), commandRow(), stdoutRow(), prompt, assistant,
+    ]);
+
+    expect(turns).toHaveLength(1);
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, turns[0]),
+      turns[0],
+      turns[0],
+      'turn-qoder-cn-sdk',
+      'session-qoder-cn-sdk',
+      'qoder-cn',
+      {},
+      '/tmp/cwd',
+    );
+
+    expect(records.every(r => r['gen_ai.agent.type'] === 'qoder-cn')).toBe(true);
+    for (const record of records) {
+      for (const part of partsOf(record)) {
+        expect(part).not.toMatch(/command-message|command-name|local-command/u);
+      }
+    }
+  });
 });
