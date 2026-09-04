@@ -10,7 +10,13 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
+import {
+  collectCliExpectedRequestIds,
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichIdeTurn,
+  injectTraceId,
+} from '../qoder-trace/token-enricher.js';
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
 
@@ -78,6 +84,14 @@ export class QoderCnTraceInput extends BaseInput {
     } else {
       this.logger.info('history checkpoint initialized before first hook record');
     }
+  }
+
+  /** Seam mirroring the international input so tests can observe the join keys. */
+  protected readCliSegments(
+    sessionId: string,
+    expectedRequestIds: readonly string[],
+  ): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId, expectedRequestIds, QODER_CN_SEGMENTS_ROOT);
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -170,8 +184,14 @@ export class QoderCnTraceInput extends BaseInput {
     // behaviour instead of losing its tokens.
     let interceptData: InterceptData | null = null;
     for (const [sessionId, sessionEntries] of sessionGroups) {
+      // Here the segment read is itself the second discriminator signal, so it
+      // cannot be deferred behind a missing-data check the way the international
+      // input defers it. Handing the reader this batch's exact request ids keeps
+      // the guarantee that check exists for: the Hook offset is committed before
+      // enrichment, so a record that is not visible yet has to be waited for now
+      // or never. Absent ids cost one short retry; present ids cost nothing.
       const segments = hasClientRequestId(sessionEntries)
-        ? await readSegmentTokensForSession(sessionId, [], QODER_CN_SEGMENTS_ROOT)
+        ? await this.readCliSegments(sessionId, collectCliExpectedRequestIds(sessionEntries))
         : [];
 
       if (segments.length > 0) {
@@ -181,12 +201,14 @@ export class QoderCnTraceInput extends BaseInput {
         // Segments are read for the response timings, which are the only source
         // of a non-zero LLM duration.
         interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
-        enrichCliTurn(
+        enrichCliPrimary(
           sessionEntries,
-          segments,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        // Only fills what Hook plus intercept left missing, so it is safe to run
+        // unconditionally once the segments are in hand.
+        enrichCliFromSegments(sessionEntries, segments);
       } else {
         // Intentionally ignores matchedDbPath: agent.type must never be derived from
         // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
@@ -240,6 +262,7 @@ export class QoderCnTraceInput extends BaseInput {
   // ─── Hook JSONL reading ─────────────────────────────────────────────────────
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -259,26 +282,81 @@ export class QoderCnTraceInput extends BaseInput {
       offset = 0;
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
     try {
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.setState({ lastFile: logFileName, lastOffset: stat.size });
+      const readStartedAt = runtime?.now();
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
+      const snapshot = buf.subarray(0, bytesRead);
 
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      // The hook may still be appending its last record when stat() returns.
+      // Parse and commit only bytes that end in a newline: committing stat.size
+      // would move the offset past a half-written line whose JSON.parse just
+      // failed, so that record could never be read again.
+      const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (lastNewline < 0) return [];
+
+      const completeLength = lastNewline + 1;
+      const completeBytes = snapshot.subarray(0, completeLength);
+      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+
+      const completeText = completeBytes.toString('utf-8');
+      // Multi-byte characters break the line.length shortcut for per-record
+      // byte accounting, so those batches walk the buffer newline by newline.
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
 
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let record: Record<string, unknown>;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            parseFailedRecords++;
+            continue;
+          }
+          record = parsed as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid JSONL line', { error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeLength,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
     } finally {
       await handle.close();
     }
