@@ -136,6 +136,16 @@ describe('InputManager', () => {
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('passes the existing serialized sizes aligned with final dispatched events', async () => {
+      const input = new StubInput('test-input');
+      manager.registerInput(input as any);
+      const send = vi.spyOn(flusher, 'sendBatch');
+      input.emit('entries', [buildTestEntry(), buildTestEntry()]);
+      await manager.stopAll();
+      const [entries, sizes] = send.mock.calls[0] as unknown as [AgentActivityEntry[], number[]];
+      expect(sizes).toEqual(entries.map(entry => Buffer.byteLength(JSON.stringify(entry))));
+    });
+
     it('last-mile enriches every Codex transcript path before dispatch', async () => {
       const input = new StubInput('codex-transcript');
       manager.registerInput(input as any);

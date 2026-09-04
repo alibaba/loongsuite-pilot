@@ -389,13 +389,16 @@ export class InputManager extends EventEmitter {
           );
 
     const expandedEntries = expandAgentInputEvents(maskedEntries);
-    const outputBatchBytes = expandedEntries.reduce(
-      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
-      0,
-    );
+    let outputBatchBytes = 0;
+    // Reuse the existing serialization; only retain its numeric results.
+    const logicalBytes = expandedEntries.map(entry => {
+      const bytes = Buffer.byteLength(JSON.stringify(entry));
+      outputBatchBytes += bytes;
+      return bytes;
+    });
 
     logger.info('dispatching entries', { inputId, count: expandedEntries.length });
-    await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes);
+    await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes, logicalBytes);
   }
 
   markInputStarted(id: string): void {
@@ -405,7 +408,7 @@ export class InputManager extends EventEmitter {
     }
   }
 
-  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number): Promise<void> {
+  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[]): Promise<void> {
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -418,7 +421,7 @@ export class InputManager extends EventEmitter {
 
     const counter = this.counters.get(inputId);
     try {
-      await this.flusher.sendBatch(entries);
+      await this.flusher.sendBatch(entries, logicalBytes);
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {

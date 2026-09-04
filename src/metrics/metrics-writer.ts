@@ -10,6 +10,7 @@ import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
+import type { TraceRuntimeSnapshot } from './trace-runtime-types.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -40,6 +41,7 @@ export interface MetricsWriterOptions {
   userId: string;
   canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
+  getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
@@ -53,6 +55,7 @@ export class MetricsWriter {
   private readonly collector: MetricsCollector;
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
+  private readonly getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
   private dataflowWritePromise: Promise<void> | null = null;
@@ -84,6 +87,7 @@ export class MetricsWriter {
       updaterLiveness: opts.updaterLiveness,
     });
     this.getSnapshot = opts.getSnapshot;
+    this.getTraceRuntimeSnapshot = opts.getTraceRuntimeSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
     this.diskUsageSampler = new DiskUsageSampler({
       dataDir: opts.dataDir,
@@ -171,11 +175,33 @@ export class MetricsWriter {
       // a failing disk write must not be what costs us the window.
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
+      this.writeTraceRuntime(metrics);
 
       const filePath = path.join(this.logsDir, `pilot-metrics-${getTodayDateString()}.jsonl`);
       await appendLine(filePath, JSON.stringify(metrics));
     } catch (err) {
       logger.warn('L1 metrics write failed', { error: String(err) });
+    }
+  }
+
+  private writeTraceRuntime(metrics: L1Metrics): void {
+    try {
+      for (const snapshot of this.getTraceRuntimeSnapshot?.() ?? []) {
+        sendStatus('pilot_trace_runtime', flattenToStrings({
+          ...snapshot,
+          schema_version: 2,
+          record_type: 'snapshot',
+          buffer_scope: 'pending_conversion',
+          version: metrics.version,
+          run_id: metrics.run_id,
+          instance_id: metrics.instance_id,
+          user_id: metrics.user_id,
+          __time__: metrics.__time__,
+        }));
+      }
+    } catch (err) {
+      // Diagnostic loss must not interrupt existing status writes or shutdown.
+      logger.warn('Trace runtime snapshot failed', { error: String(err) });
     }
   }
 

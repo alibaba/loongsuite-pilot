@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
+import type { TraceRuntimeSnapshot } from '../../../src/metrics/trace-runtime-types.js';
 
 const fsMockState = { blockAccessSync: false };
 
@@ -166,6 +167,46 @@ describe('MetricsWriter', () => {
       ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
     );
     expect(legacy).toHaveLength(0);
+  });
+
+  it('reports scalar snapshots in the existing L1 cycle using its exact process identity', async () => {
+    const row: TraceRuntimeSnapshot = {
+      agent_type: 'codex', pending_buffers: 1, pending_records: 2, pending_logical_bytes: 100,
+      pending_unmeasured_records: 0, largest_buffer_logical_bytes: 100, largest_buffer_records: 2,
+      largest_buffer_age_ms: 60_000, largest_buffer_turn_id: 'turn', largest_buffer_session_id: 'session',
+      oldest_buffer_age_ms: 60_000, removed_buffers_total: 3, removed_logical_bytes_total: 400,
+      removed_unmeasured_records_total: 0, converter_calls_total: 3, converter_duration_ms_total: 12,
+      converter_failed_total: 0,
+    };
+    const snapshot = vi.fn(() => [row]);
+    writer = new MetricsWriter({ dataDir: tmpDir, version: 'test', userId: 'u1',
+      getSnapshot: buildSnapshot, getTraceRuntimeSnapshot: snapshot });
+    vi.useRealTimers();
+    await writer.start();
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    const status = mockSendStatus.mock.calls.find(call => call[0] === 'pilot_status')![1];
+    const trace = mockSendStatus.mock.calls.find(call => call[0] === 'pilot_trace_runtime')![1];
+    expect(trace).toMatchObject({ schema_version: '2', record_type: 'snapshot', buffer_scope: 'pending_conversion',
+      agent_type: 'codex', removed_buffers_total: '3', run_id: status.run_id, instance_id: status.instance_id,
+      user_id: status.user_id, version: status.version, __time__: status.__time__ });
+    expect(trace).not.toHaveProperty('window_ms');
+    expect(trace).not.toHaveProperty('rss_before_convert_bytes');
+  });
+
+  it.each(['snapshot', 'send'])('isolates runtime %s failures from existing status output and shutdown', async failure => {
+    writer = new MetricsWriter({ dataDir: tmpDir, version: 'test', userId: 'u1', getSnapshot: buildSnapshot,
+      getTraceRuntimeSnapshot: () => {
+        if (failure === 'snapshot') throw new Error('snapshot unavailable');
+        return [{ agent_type: 'codex' } as TraceRuntimeSnapshot];
+      } });
+    mockSendStatus.mockImplementation((topic: string) => {
+      if (failure === 'send' && topic === 'pilot_trace_runtime') throw new Error('send unavailable');
+    });
+    vi.useRealTimers();
+    await expect(writer.start()).resolves.toBeUndefined();
+    await expect(writer.stop()).resolves.toBeUndefined();
+    expect(fs.existsSync(managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics'))).toBe(true);
+    mockSendStatus.mockReset();
   });
 
   it('sends one row per agent and per destination on L2 flush', async () => {

@@ -18,6 +18,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
+import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import {
@@ -52,6 +53,8 @@ const GROK_PASSTHROUGH_KEYS = [
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// Bound diagnostics even if input supplies arbitrary agent names.
+const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
   'gen_ai.skill.name',
   'gen_ai.skill.id',
@@ -68,6 +71,10 @@ interface TurnBuffer {
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
+  logicalBytes: number;
+  unmeasuredRecords: number;
+  openedAtMs: number;
+  runtimeCounters?: TraceRuntimeCounters;
 }
 
 interface AgentConvertState {
@@ -466,6 +473,7 @@ function nanoToHrTime(value: bigint): [number, number] {
 }
 
 export class OtlpTraceFlusher extends BaseFlusher {
+  private readonly runtimeCounters = new Map<string, TraceRuntimeCounters>();
   readonly name = 'otlp-trace';
 
   private readonly cfg: OtlpTraceFlusherConfig;
@@ -555,7 +563,70 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   // --- Public API (BaseFlusher) ---
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  override getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] {
+    const now = performance.now();
+    const rows = new Map<string, TraceRuntimeSnapshot>();
+    for (const [agentType, counters] of this.runtimeCounters) {
+      rows.set(agentType, {
+        ...counters,
+        agent_type: agentType,
+        pending_buffers: 0,
+        pending_records: 0,
+        pending_logical_bytes: 0,
+        pending_unmeasured_records: 0,
+        largest_buffer_logical_bytes: 0,
+        largest_buffer_records: 0,
+        largest_buffer_age_ms: 0,
+        oldest_buffer_age_ms: 0,
+      });
+    }
+    // Inspect only existing bounded buffers, never walk or copy their records.
+    // In-flight conversion/export has already left this map and is excluded.
+    for (const buf of this.turnBuffers.values()) {
+      const row = rows.get(buf.agentType);
+      if (!row) continue;
+      const age = Math.max(0, Math.round(now - buf.openedAtMs));
+      row.pending_buffers++;
+      row.pending_records += buf.records.length;
+      row.pending_logical_bytes += buf.logicalBytes;
+      row.pending_unmeasured_records += buf.unmeasuredRecords;
+      row.oldest_buffer_age_ms = Math.max(row.oldest_buffer_age_ms, age);
+      if (row.pending_buffers === 1 || buf.logicalBytes > row.largest_buffer_logical_bytes) {
+        row.largest_buffer_logical_bytes = buf.logicalBytes;
+        row.largest_buffer_records = buf.records.length;
+        row.largest_buffer_age_ms = age;
+        row.largest_buffer_turn_id = buf.keySource === 'turn_id' ? buf.keyValue : undefined;
+        row.largest_buffer_session_id = buf.sessionId;
+      }
+    }
+    return [...rows.values()];
+  }
+
+  private getRuntimeCounters(agentType: string): TraceRuntimeCounters | undefined {
+    let counters = this.runtimeCounters.get(agentType);
+    if (!counters && this.runtimeCounters.size < MAX_RUNTIME_AGENTS) {
+      counters = {
+        removed_buffers_total: 0,
+        removed_logical_bytes_total: 0,
+        removed_unmeasured_records_total: 0,
+        converter_calls_total: 0,
+        converter_duration_ms_total: 0,
+        converter_failed_total: 0,
+      };
+      this.runtimeCounters.set(agentType, counters);
+    }
+    return counters;
+  }
+
+  private recordBufferRemoval(buf: TurnBuffer): void {
+    const counters = buf.runtimeCounters;
+    if (!counters) return;
+    counters.removed_buffers_total++;
+    counters.removed_logical_bytes_total += buf.logicalBytes;
+    counters.removed_unmeasured_records_total += buf.unmeasuredRecords;
+  }
+
+  async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -624,6 +695,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
+        logicalBytes: 0,
+        unmeasuredRecords: 0,
+        openedAtMs: performance.now(),
+        runtimeCounters: this.getRuntimeCounters(agentType),
       };
       this.turnBuffers.set(key, buf);
     } else if (!buf.sessionId && incomingSessionId) {
@@ -631,6 +706,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
+    if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
+      buf.logicalBytes += logicalBytes;
+    } else {
+      buf.unmeasuredRecords++;
+    }
 
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
@@ -646,13 +726,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
     // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
     // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
     this._deferSignalA = true;
     try {
-      for (const entry of entries) {
-        await this.send(entry);
+      for (let i = 0; i < entries.length; i++) {
+        await this.send(entries[i], sizes?.[i]);
       }
     } finally {
       this._deferSignalA = false;
@@ -777,6 +858,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.flushedTurnKeys.add(buf.key);
     }
     this.turnBuffers.delete(buf.key);
+    this.recordBufferRemoval(buf);
     const p = this.flushSingleTurn(buf).catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
@@ -792,6 +874,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         completed.push(buf);
         this.flushedTurnKeys.add(key);
         this.turnBuffers.delete(key);
+        this.recordBufferRemoval(buf);
       }
     }
     await Promise.allSettled(
@@ -931,13 +1014,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
         let result;
+        const counters = this.getRuntimeCounters(agentType);
+        const convertStarted = performance.now();
+        let succeeded = false;
         try {
           result = convertEventLogToTrace(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },
           );
+          succeeded = true;
         } finally {
           toolSpanIds.clear();
+          if (counters) {
+            counters.converter_calls_total++;
+            counters.converter_duration_ms_total += performance.now() - convertStarted;
+            if (!succeeded) counters.converter_failed_total++;
+          }
         }
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
