@@ -18,9 +18,6 @@ import { readInterceptData, type InterceptData } from './intercept-token-reader.
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
-import type {
-  SourceReadMeasurement,
-} from '../../metrics/trace-runtime-types.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -146,12 +143,8 @@ export class QoderTraceInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
-    const readResult = await this.readHookJsonl();
-    const rawEntries = readResult.entries;
-    if (rawEntries.length === 0) {
-      this.setCollectionMetadata({ sourceReads: readResult.sourceReads });
-      return [];
-    }
+    const rawEntries = await this.readHookJsonl();
+    if (rawEntries.length === 0) return [];
 
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
@@ -230,16 +223,12 @@ export class QoderTraceInput extends BaseInput {
       injectTraceId(turnEntries);
     }
 
-    this.setCollectionMetadata({ sourceReads: readResult.sourceReads });
     return rawEntries;
   }
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
-  private async readHookJsonl(): Promise<{
-    entries: AgentActivityEntry[];
-    sourceReads: SourceReadMeasurement[];
-  }> {
+  private async readHookJsonl(): Promise<AgentActivityEntry[]> {
     const runtime = this.getInputRuntimeAccumulator();
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
@@ -249,7 +238,7 @@ export class QoderTraceInput extends BaseInput {
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return { entries: [], sourceReads: [] };
+      return [];
     }
 
     const state = this.getState();
@@ -259,12 +248,11 @@ export class QoderTraceInput extends BaseInput {
       this.logger.info('file truncated, resetting offset', { file: logFile, recorded: offset, actual: stat.size });
       offset = 0;
     }
-    if (stat.size <= offset) return { entries: [], sourceReads: [] };
+    if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
-    const sourceReads: SourceReadMeasurement[] = [];
     try {
       // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
       // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
@@ -276,34 +264,30 @@ export class QoderTraceInput extends BaseInput {
       }
       const snapshot = buf.subarray(0, bytesRead);
       const lastNewline = snapshot.lastIndexOf(0x0a);
-      if (lastNewline < 0) return { entries: [], sourceReads: [] };
+      if (lastNewline < 0) return [];
 
       const completeLength = lastNewline + 1;
       const completeBytes = snapshot.subarray(0, completeLength);
       this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
 
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
       let records = 0;
       let parseSuccessRecords = 0;
       let parseFailedRecords = 0;
       let maxRecordBytes = 0;
-      let lineStart = 0;
+      let recordStartOffset = 0;
 
-      while (lineStart < completeBytes.length) {
-        const newline = completeBytes.indexOf(0x0a, lineStart);
-        if (newline < 0) break;
-        const consumedEnd = newline + 1;
-        const recordBytes = consumedEnd - lineStart;
-        const line = completeBytes.subarray(lineStart, newline).toString('utf8');
-        lineStart = consumedEnd;
-        let measurement: SourceReadMeasurement = {
-          agentType: ClientType.QoderCli,
-          bytes: recordBytes,
-          basis: 'offset_delta',
-        };
-        if (!line.trim()) {
-          sourceReads.push(measurement);
-          continue;
+      for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
         }
+        if (!line.trim()) continue;
         records++;
         maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
         let record: Record<string, unknown>;
@@ -311,7 +295,6 @@ export class QoderTraceInput extends BaseInput {
           const parsed: unknown = JSON.parse(line);
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
             parseFailedRecords++;
-            sourceReads.push(measurement);
             continue;
           }
           record = parsed as Record<string, unknown>;
@@ -319,26 +302,15 @@ export class QoderTraceInput extends BaseInput {
         } catch (err) {
           parseFailedRecords++;
           this.logger.warn('invalid JSONL line', { error: String(err) });
-          sourceReads.push(measurement);
           continue;
         }
 
         try {
           const entry = await this.transformRecord(record);
-          if (entry) {
-            entries.push(entry);
-            measurement = {
-              ...measurement,
-              agentType: String(entry['gen_ai.agent.type'] ?? ClientType.QoderCli),
-              sessionId: stringField(entry['gen_ai.session.id']),
-              turnId: stringField(entry['gen_ai.turn.id']),
-              traceId: stringField(entry['trace_id']),
-            };
-          }
+          if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
-        sourceReads.push(measurement);
       }
       runtime?.observeCommittedBatch({
         records,
@@ -353,7 +325,7 @@ export class QoderTraceInput extends BaseInput {
 
     entries = filterBootstrapHistoryTurns(entries);
 
-    return { entries, sourceReads };
+    return entries;
   }
 
   // ─── Record transformation (canonical passthrough) ──────────────────────────
@@ -404,8 +376,4 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
-}
-
-function stringField(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }

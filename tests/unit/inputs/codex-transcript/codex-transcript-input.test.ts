@@ -15,7 +15,6 @@ import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
-import type { InputEntriesMetadata } from '../../../../src/metrics/trace-runtime-types.js';
 
 const tempDirs: string[] = [];
 const SUBAGENT_FIXTURE_DIR = path.resolve(process.cwd(), 'tests/fixtures/codex-subagent');
@@ -453,80 +452,6 @@ describe('CodexTranscriptInput', () => {
     expect(invalidRead.parseSuccessRecords).toBe(0);
     expect(invalidRead.parseFailedRecords).toBe(1);
 
-    await input.stop();
-  });
-
-  it('emits each physical scan and recovery read exactly once', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-source-emission-'));
-    tempDirs.push(root);
-    const { input, sessionDir } = await createDormantInput(root);
-    const sourceReads: NonNullable<InputEntriesMetadata['sourceReads']>[number][] = [];
-    input.on('entries', (_entries, metadata?: InputEntriesMetadata) => {
-      sourceReads.push(...(metadata?.sourceReads ?? []));
-    });
-    const text = completedTurn();
-    const transcript = await writeTranscript(sessionDir, text);
-
-    await processTranscriptOnce(input, transcript);
-
-    const firstLineBytes = Buffer.byteLength(text.slice(0, text.indexOf('\n') + 1));
-    const fileBytes = Buffer.byteLength(text);
-    expect(sourceReads).toEqual([
-      expect.objectContaining({ bytes: fileBytes, basis: 'bytes_read' }),
-      expect.objectContaining({
-        turnId: 'session-1:turn-1',
-        bytes: fileBytes - firstLineBytes,
-        basis: 'bytes_read',
-      }),
-    ]);
-    await input.stop();
-  });
-
-  it('reports exact Codex range bytes and counts a real repeated recovery again', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-source-bytes-'));
-    tempDirs.push(root);
-    const { input, sessionDir } = await createDormantInput(root);
-    const text = completedTurn();
-    const transcript = await writeTranscript(sessionDir, text);
-    const firstLineBytes = Buffer.byteLength(text.slice(0, text.indexOf('\n') + 1));
-    const expectedRangeBytes = Buffer.byteLength(text) - firstLineBytes;
-    const checkpoint = () => ({
-      inode: 1,
-      scanOffset: Buffer.byteLength(text),
-      activeTurn: {
-        turnId: 'turn-1',
-        startOffset: firstLineBytes,
-        startedAtMs: Date.parse('2026-06-24T06:00:01.000Z'),
-        emittedStepCount: 0,
-      },
-      pendingTerminal: null,
-      pendingFusion: null,
-      pendingSubagent: null,
-      ownerSessionMetaOffset: 0,
-    });
-
-    const first = await (input as any).recoverTurnSegment(
-      transcript,
-      checkpoint(),
-      Buffer.byteLength(text),
-      true,
-    );
-    const second = await (input as any).recoverTurnSegment(
-      transcript,
-      checkpoint(),
-      Buffer.byteLength(text),
-      true,
-    );
-
-    expect(first.sourceReads).toEqual([expect.objectContaining({
-      agentType: 'codex',
-      sessionId: 'session-1',
-      turnId: 'session-1:turn-1',
-      bytes: expectedRangeBytes,
-      basis: 'bytes_read',
-    })]);
-    expect(second.sourceReads[0].bytes).toBe(expectedRangeBytes);
-    expect(first.sourceReads[0].bytes + second.sourceReads[0].bytes).toBe(expectedRangeBytes * 2);
     await input.stop();
   });
 

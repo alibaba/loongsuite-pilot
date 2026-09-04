@@ -136,6 +136,16 @@ describe('InputManager', () => {
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('passes the existing serialized sizes aligned with final dispatched events', async () => {
+      const input = new StubInput('test-input');
+      manager.registerInput(input as any);
+      const send = vi.spyOn(flusher, 'sendBatch');
+      input.emit('entries', [buildTestEntry(), buildTestEntry()]);
+      await manager.stopAll();
+      const [entries, sizes] = send.mock.calls[0] as unknown as [AgentActivityEntry[], number[]];
+      expect(sizes).toEqual(entries.map(entry => Buffer.byteLength(JSON.stringify(entry))));
+    });
+
     it('last-mile enriches every Codex transcript path before dispatch', async () => {
       const input = new StubInput('codex-transcript');
       manager.registerInput(input as any);
@@ -217,64 +227,6 @@ describe('InputManager', () => {
       releaseFirst();
       await new Promise(resolve => setTimeout(resolve, 20));
       expect(order).toEqual(['start:first', 'finish:first', 'start:second', 'finish:second']);
-    });
-
-    it('passes input identity and source reads while reusing existing output serialization sizes', async () => {
-      const input = new StubInput('codex-transcript');
-      manager.registerInput(input as any);
-      const entries = [
-        buildTestEntry({ 'event.id': 'one' }),
-        buildTestEntry({ 'event.id': 'two' }),
-      ];
-      const sourceReads = [{
-        agentType: 'codex',
-        turnId: 'session:turn',
-        bytes: 99,
-        basis: 'bytes_read' as const,
-      }];
-      const rawInputBytes = entries.reduce(
-        (sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry), 'utf8'),
-        0,
-      );
-      const stringify = vi.spyOn(JSON, 'stringify');
-
-      input.emit('entries', entries, { sourceReads });
-      await manager.stopAll();
-      const serializationCallCount = stringify.mock.calls.length;
-      stringify.mockRestore();
-
-      const dispatched = flusher.batchCalls[0];
-      // Current InputManager intentionally serializes once for raw ingress
-      // counters and once for the post-policy/dual-write output. Runtime
-      // diagnostics reuse the latter sizes instead of adding a third pass.
-      expect(serializationCallCount).toBe(entries.length + dispatched.length);
-      expect(flusher.batchContexts[0]).toEqual({
-        inputName: 'codex-transcript',
-        entryLogicalBytes: dispatched.map(entry => Buffer.byteLength(JSON.stringify(entry), 'utf8')),
-        sourceReads,
-      });
-      expect(manager.getInputCounters().get('codex-transcript')?.inBytes)
-        .toBe(rawInputBytes);
-    });
-
-    it('forwards source-only measurements without inventing events', async () => {
-      const input = new StubInput('qoder-trace');
-      manager.registerInput(input as any);
-      const sourceReads = [{
-        agentType: 'qoder',
-        bytes: 7,
-        basis: 'offset_delta' as const,
-      }];
-
-      input.emit('entries', [], { sourceReads });
-      await manager.stopAll();
-
-      expect(flusher.batchCalls[0]).toEqual([]);
-      expect(flusher.batchContexts[0]).toEqual({
-        inputName: 'qoder-trace',
-        entryLogicalBytes: [],
-        sourceReads,
-      });
     });
   });
 

@@ -9,10 +9,6 @@ import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
-import type {
-  InputEntriesMetadata,
-  SourceReadMeasurement,
-} from '../../metrics/trace-runtime-types.js';
 import {
   buildCodexTranscriptSegment,
   nextInputMessagesForStep,
@@ -109,13 +105,11 @@ interface SegmentRecoveryDiagnostics {
 type SegmentRecoveryResult = {
   kind: 'unparseable';
   entries: [];
-  sourceReads: SourceReadMeasurement[];
   consumedEndOffset: number;
   diagnostics: SegmentRecoveryDiagnostics;
 } | {
   kind: 'processed-empty' | 'processed-emitted';
   entries: AgentActivityEntry[];
-  sourceReads: SourceReadMeasurement[];
   consumedEndOffset: number;
   terminalStatus: 'completed' | 'interrupted';
   diagnostics: SegmentRecoveryDiagnostics;
@@ -275,24 +269,17 @@ export class CodexTranscriptInput extends BaseInput {
     return this.subagentLinker.snapshot();
   }
 
-  private emitEntryBatches(
-    entries: AgentActivityEntry[],
-    sourceReads: readonly SourceReadMeasurement[] = [],
-  ): number {
+  private emitEntryBatches(entries: AgentActivityEntry[]): number {
     let emittedCount = 0;
     let batch: AgentActivityEntry[] = [];
     let batchBytes = 0;
-    let pendingMetadata: InputEntriesMetadata | undefined = sourceReads.length > 0
-      ? { sourceReads }
-      : undefined;
 
     const flush = (): void => {
       if (batch.length === 0) return;
       for (const entry of batch) {
         attachMultimodalMetadataForEntry(entry);
       }
-      this.emitEntries(batch, pendingMetadata);
-      pendingMetadata = undefined;
+      this.emit('entries', batch);
       emittedCount += batch.length;
       batch = [];
       batchBytes = 0;
@@ -310,7 +297,6 @@ export class CodexTranscriptInput extends BaseInput {
       batchBytes += entryBytes;
     }
     flush();
-    if (emittedCount === 0 && pendingMetadata) this.emitEntries([], pendingMetadata);
     return emittedCount;
   }
 
@@ -529,7 +515,6 @@ export class CodexTranscriptInput extends BaseInput {
         processScannedLine,
         runtime,
       );
-      let sourceScanBytes = scan.bytesRead;
 
       // A single JSONL record may exceed the byte budget. Read far enough to
       // consume one complete line so this file can make forward progress.
@@ -544,14 +529,6 @@ export class CodexTranscriptInput extends BaseInput {
           },
           runtime,
         );
-        sourceScanBytes += scan.bytesRead;
-      }
-      if (sourceScanBytes > 0) {
-        this.emitEntryBatches([], [{
-          agentType: ClientType.CodexCliHook,
-          bytes: sourceScanBytes,
-          basis: 'bytes_read',
-        }]);
       }
       if (scan.nextOffset === scanStartOffset) break;
       checkpointChanged = true;
@@ -609,12 +586,6 @@ export class CodexTranscriptInput extends BaseInput {
             nextScanOffset,
             terminalTurnId !== null,
           );
-          // Deferred child/parent fusion rebuilds this range later. Report this
-          // physical read now as source-only diagnostics so repeated reads are
-          // counted without prematurely emitting the buffered events.
-          if (recovered.kind !== 'unparseable' && reliableCandidate) {
-            this.emitEntryBatches([], recovered.sourceReads);
-          }
           if (
             terminalTurnId
             && activeBeforeRecovery
@@ -666,10 +637,9 @@ export class CodexTranscriptInput extends BaseInput {
               terminalEndOffset: nextScanOffset,
               children: fusionChildren,
             };
-            this.emitEntryBatches([], recovered.sourceReads);
             blocked = true;
-          } else if (!reliableCandidate && recovered.kind !== 'unparseable') {
-            emittedCount += this.emitEntryBatches(recovered.entries, recovered.sourceReads);
+          } else if (!reliableCandidate) {
+            emittedCount += this.emitEntryBatches(recovered.entries);
           }
           if (
             recovered.kind !== 'unparseable'
@@ -753,7 +723,7 @@ export class CodexTranscriptInput extends BaseInput {
       return { blocked: true, emittedCount: 0, processedTerminalCount: 0 };
     }
 
-    const emittedCount = this.emitEntryBatches(recovered.entries, recovered.sourceReads);
+    const emittedCount = this.emitEntryBatches(recovered.entries);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
     return { blocked: false, emittedCount, processedTerminalCount: 1 };
@@ -771,7 +741,6 @@ export class CodexTranscriptInput extends BaseInput {
       return {
         kind: 'unparseable',
         entries: [],
-        sourceReads: [],
         consumedEndOffset: endOffset,
         diagnostics: emptySegmentRecoveryDiagnostics(),
       };
@@ -783,13 +752,6 @@ export class CodexTranscriptInput extends BaseInput {
       endOffset,
       runtime,
     );
-    const sessionId = sessionIdFromTranscriptPath(filePath);
-    const baseSourceRead = codexSourceRead(
-      sessionId,
-      activeTurn.turnId,
-      undefined,
-      records.bytesRead,
-    );
     const metaRecord = checkpoint.ownerSessionMetaOffset === null
       ? null
       : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
@@ -797,17 +759,15 @@ export class CodexTranscriptInput extends BaseInput {
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
       meta,
-      sessionId,
+      sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
       this.partialTurnOptions(activeTurn, filePath),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
-      if (baseSourceRead.length > 0) this.emitEntryBatches([], baseSourceRead);
       return {
         kind: 'unparseable',
         entries: [],
-        sourceReads: baseSourceRead,
         consumedEndOffset: activeTurn.startOffset,
         diagnostics: emptySegmentRecoveryDiagnostics(records.items.length, previouslyEmittedStepCount),
       };
@@ -831,8 +791,7 @@ export class CodexTranscriptInput extends BaseInput {
     const committedTurn = closedStepCount === turn.steps.length
       ? turn
       : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
-    const inputContextResult = await this.resolveInputContext(filePath, activeTurn, meta);
-    const inputContext = inputContextResult.context;
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta);
     const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
@@ -934,18 +893,9 @@ export class CodexTranscriptInput extends BaseInput {
     if (spanAttributes) {
       outputEntries = attachTurnSpanAttributes(outputEntries, spanAttributes);
     }
-    const traceId = stringValue(outputEntries[0]?.trace_id)
-      ?? stringValue(built.entries[0]?.trace_id);
-    const sourceReads = codexSourceRead(
-      turn.sessionId,
-      activeTurn.turnId,
-      traceId,
-      records.bytesRead + inputContextResult.bytesRead,
-    );
     return {
       kind: outputEntries.length > 0 ? 'processed-emitted' : 'processed-empty',
       entries: outputEntries,
-      sourceReads,
       consumedEndOffset,
       terminalStatus: turn.status,
       diagnostics,
@@ -956,11 +906,11 @@ export class CodexTranscriptInput extends BaseInput {
     filePath: string,
     activeTurn: CodexActiveTranscriptTurn,
     meta: ReturnType<typeof extractCodexTranscriptMeta>,
-  ): Promise<{ context: CodexTranscriptInputContext | undefined; bytesRead: number }> {
+  ): Promise<CodexTranscriptInputContext | undefined> {
     const context = activeTurn.inputContext;
-    if (!context || context.delta) return { context, bytesRead: 0 };
+    if (!context || context.delta) return context;
     const range = context.deltaRange;
-    if (!range) return { context, bytesRead: 0 };
+    if (!range) return context;
 
     const records = await readJsonLines(
       filePath,
@@ -982,12 +932,9 @@ export class CodexTranscriptInput extends BaseInput {
         turnId: activeTurn.turnId,
         range,
       });
-      return { context, bytesRead: records.bytesRead };
+      return context;
     }
-    return {
-      context: { ...context, delta: nextInputMessagesForStep(lastStep) },
-      bytesRead: records.bytesRead,
-    };
+    return { ...context, delta: nextInputMessagesForStep(lastStep) };
   }
 
   private async registerSubagentOwnerMeta(
@@ -1175,7 +1122,7 @@ export class CodexTranscriptInput extends BaseInput {
       return { emittedCount: 0, processedTerminalCount: 0 };
     }
 
-    const emittedCount = this.emitEntryBatches(recovered.entries, recovered.sourceReads);
+    const emittedCount = this.emitEntryBatches(recovered.entries);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
     return { emittedCount, processedTerminalCount: 1 };
@@ -1206,7 +1153,7 @@ export class CodexTranscriptInput extends BaseInput {
       });
       return { emittedCount: 0, processedTerminalCount: 0 };
     }
-    const emittedCount = this.emitEntryBatches(recovered.entries, recovered.sourceReads);
+    const emittedCount = this.emitEntryBatches(recovered.entries);
     checkpoint.pendingSubagent = null;
     return { emittedCount, processedTerminalCount: 1 };
   }
@@ -1230,7 +1177,6 @@ export class CodexTranscriptInput extends BaseInput {
 
       const childOutputs: Array<{
         entries: AgentActivityEntry[];
-        sourceReads: SourceReadMeasurement[];
         path: string;
         checkpoint: CodexTranscriptCheckpoint;
         turnId: string;
@@ -1294,7 +1240,6 @@ export class CodexTranscriptInput extends BaseInput {
               ?? item.child.agentPath
               ?? item.child.taskName,
           }),
-          sourceReads: recovered.sourceReads,
           path: childPath,
           checkpoint: childCheckpoint,
           turnId: activeSnapshot.turnId,
@@ -1320,7 +1265,7 @@ export class CodexTranscriptInput extends BaseInput {
       }
 
       for (const output of childOutputs) {
-        emittedCount += this.emitEntryBatches(output.entries, output.sourceReads);
+        emittedCount += this.emitEntryBatches(output.entries);
         if (
           output.source === 'captured-terminal'
           && output.checkpoint.pendingSubagent?.parentToolCallId === output.parentToolCallId
@@ -1335,7 +1280,7 @@ export class CodexTranscriptInput extends BaseInput {
         }
         this.saveCheckpoint(this.stateKey(output.path), output.checkpoint);
       }
-      emittedCount += this.emitEntryBatches(parentRecovered.entries, parentRecovered.sourceReads);
+      emittedCount += this.emitEntryBatches(parentRecovered.entries);
       parentCheckpoint.activeTurn = null;
       parentCheckpoint.pendingFusion = null;
       this.saveCheckpoint(parentKey, parentCheckpoint);
@@ -2336,14 +2281,13 @@ async function readJsonLines(
 ): Promise<{
   items: JsonLine[];
   nextOffset: number;
-  bytesRead: number;
 }> {
-  if (endOffset <= startOffset) return { items: [], nextOffset: startOffset, bytesRead: 0 };
+  if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
   const items: JsonLine[] = [];
-  const { nextOffset, bytesRead } = await scanJsonLines(filePath, startOffset, endOffset, line => {
+  const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
     items.push(line);
   }, runtime);
-  return { items, nextOffset, bytesRead };
+  return { items, nextOffset };
 }
 
 async function lastCompleteJsonlOffset(
@@ -2395,7 +2339,6 @@ async function scanJsonLines(
   parseSuccessRecords: number;
   parseFailedRecords: number;
   maxRecordBytes: number;
-  bytesRead: number;
 }> {
   if (endOffset <= startOffset) {
     return {
@@ -2404,7 +2347,6 @@ async function scanJsonLines(
       parseSuccessRecords: 0,
       parseFailedRecords: 0,
       maxRecordBytes: 0,
-      bytesRead: 0,
     };
   }
   const handle = await fs.open(filePath, 'r');
@@ -2417,7 +2359,6 @@ async function scanJsonLines(
     let parseSuccessRecords = 0;
     let parseFailedRecords = 0;
     let maxRecordBytes = 0;
-    let totalBytesRead = 0;
 
     while (position < endOffset) {
       const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
@@ -2428,7 +2369,6 @@ async function scanJsonLines(
         runtime.observeRead(bytesRead, length, runtime.now() - readStartedAt);
       }
       if (bytesRead <= 0) break;
-      totalBytesRead += bytesRead;
       position += bytesRead;
 
       const data = pending.length > 0
@@ -2460,7 +2400,6 @@ async function scanJsonLines(
                   parseSuccessRecords,
                   parseFailedRecords,
                   maxRecordBytes,
-                  bytesRead: totalBytesRead,
                 };
               }
             } else {
@@ -2485,7 +2424,6 @@ async function scanJsonLines(
       parseSuccessRecords,
       parseFailedRecords,
       maxRecordBytes,
-      bytesRead: totalBytesRead,
     };
   } finally {
     await handle.close();
@@ -2900,23 +2838,6 @@ function codexTurnEndMarker(
       : {}),
     'agent.codex.turn_status': status,
   };
-}
-
-function codexSourceRead(
-  sessionId: string,
-  transcriptTurnId: string,
-  traceId: string | undefined,
-  bytes: number,
-): SourceReadMeasurement[] {
-  if (!Number.isFinite(bytes) || bytes <= 0) return [];
-  return [{
-    agentType: ClientType.CodexCliHook,
-    sessionId,
-    turnId: `${sessionId}:${transcriptTurnId}`,
-    ...(traceId ? { traceId } : {}),
-    bytes: Math.round(bytes),
-    basis: 'bytes_read',
-  }];
 }
 
 function serializedEntryBytes(entry: AgentActivityEntry): number {

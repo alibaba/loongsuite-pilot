@@ -21,6 +21,14 @@ describe('MultiFlusher', () => {
   });
 
   describe('sendBatch — parallel dispatch and fault isolation (T022)', () => {
+    it('forwards existing byte measurements unchanged and reads optional snapshots', async () => {
+      const send = vi.spyOn(f1, 'sendBatch');
+      const entries = [buildTestEntry()];
+      const sizes = [123];
+      await multi.sendBatch(entries, sizes);
+      expect(send).toHaveBeenCalledWith(entries, sizes);
+      expect(multi.getTraceRuntimeSnapshot()).toEqual([]);
+    });
     it('dispatches to all child flushers in parallel', async () => {
       const entries = [buildTestEntry(), buildTestEntry()];
       await multi.sendBatch(entries);
@@ -42,24 +50,6 @@ describe('MultiFlusher', () => {
     it('does not throw when one child fails', async () => {
       f2.shouldFail = true;
       await expect(multi.sendBatch([buildTestEntry()])).resolves.toBeUndefined();
-    });
-
-    it('forwards the same optional runtime context to every child', async () => {
-      const entries = [buildTestEntry(), buildTestEntry()];
-      const context = {
-        inputName: 'codex-transcript',
-        entryLogicalBytes: [11, 12],
-        sourceReads: [{
-          agentType: 'codex',
-          turnId: 'session:turn',
-          bytes: 20,
-          basis: 'bytes_read' as const,
-        }],
-      };
-      await multi.sendBatch(entries, context);
-
-      expect(f1.batchContexts[0]).toBe(context);
-      expect(f2.batchContexts[0]).toBe(context);
     });
   });
 

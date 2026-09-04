@@ -2146,61 +2146,6 @@ describe('QoderTraceInput multimodal', () => {
 });
 
 describe('QoderTraceInput bootstrap history filtering', () => {
-  it('measures exact consumed JSONL bytes in the existing tail pass', async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-source-bytes-'));
-    try {
-      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
-      const logFile = path.join(tmpDir, logFileName);
-      const first = JSON.stringify({
-        'event.id': 'source-one',
-        'event.name': 'llm.request',
-        'gen_ai.agent.type': 'qoder',
-        'gen_ai.session.id': 'session-1',
-        'gen_ai.turn.id': 'turn-1',
-        time_unix_nano: '1780000000000000000',
-      }) + '\n';
-      const invalid = '{invalid json}\n';
-      const second = JSON.stringify({
-        'event.id': 'source-two',
-        'event.name': 'llm.response',
-        'gen_ai.agent.type': 'qoder',
-        'gen_ai.session.id': 'session-1',
-        'gen_ai.turn.id': 'turn-1',
-        time_unix_nano: '1780000001000000000',
-      }) + '\n';
-      await fs.writeFile(logFile, first + invalid + second, 'utf8');
-      const stateStore = new MockStateStore();
-      stateStore.set('qoder-trace', { lastFile: logFileName, lastOffset: 0 });
-      const input = new QoderTraceInput({
-        stateStore: stateStore as any,
-        logDir: tmpDir,
-        pollIntervalMs: 60_000,
-      });
-
-      const result = await (input as any).readHookJsonl();
-
-      expect(result.entries).toHaveLength(2);
-      expect(result.sourceReads.reduce((sum: number, read: { bytes: number }) => sum + read.bytes, 0))
-        .toBe(Buffer.byteLength(first + invalid + second));
-      expect(result.sourceReads[0]).toMatchObject({
-        agentType: 'qoder',
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        bytes: Buffer.byteLength(first),
-        basis: 'offset_delta',
-      });
-      expect(result.sourceReads[1]).toMatchObject({
-        bytes: Buffer.byteLength(invalid),
-        basis: 'offset_delta',
-      });
-      expect(result.sourceReads[1].turnId).toBeUndefined();
-      expect(result.sourceReads[2].bytes).toBe(Buffer.byteLength(second));
-      expect(stateStore.get('qoder-trace').lastOffset).toBe(Buffer.byteLength(first + invalid + second));
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true });
-    }
-  });
-
   it('consumes every session batch created after startup with an empty history', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-empty-start-'));
     try {

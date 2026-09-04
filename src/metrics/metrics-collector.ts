@@ -2,11 +2,12 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { formatTime } from '../utils/time-utils.js';
+import { resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
-import { createRuntimeIdentity, type RuntimeIdentity } from './runtime-identity.js';
 
 const logger = createLogger('MetricsCollector');
 
@@ -472,7 +473,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; runtimeIdentity?: RuntimeIdentity; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -485,13 +486,20 @@ export class MetricsCollector {
     this.autoUpdateEnabled = opts.autoUpdateEnabled ?? true;
     this.updaterLiveness = opts.updaterLiveness
       ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
-    const runtimeIdentity = opts.runtimeIdentity ?? createRuntimeIdentity(opts);
-    this.startTimestamp = runtimeIdentity.startTimestamp;
-    this.startTime = runtimeIdentity.startTime;
-    this.localIp = runtimeIdentity.localIp;
-    this.hostname = runtimeIdentity.hostname;
-    this.instanceId = runtimeIdentity.instanceId;
-    this.runId = runtimeIdentity.runId;
+    this.startTimestamp = Math.floor(Date.now() / 1000);
+    this.startTime = formatTime(new Date());
+    this.localIp = resolveLocalIp();
+    this.hostname = os.hostname();
+    // Stable install identity: restart- and IP-invariant, independently derivable
+    // by any process on the host. Includes dataDir so multiple installs on one
+    // machine (e.g. several OS users, each with their own ~/.loongsuite-pilot) do
+    // not collide when hostname and configured userId coincide. dataDir is
+    // base64url-encoded (not plaintext) but remains reversible: strip the
+    // `${hostname}_${userId}_` prefix and base64url-decode to recover the path.
+    const dataDirEncoded = Buffer.from(opts.dataDir, 'utf8').toString('base64url');
+    this.instanceId = `${this.hostname}_${opts.userId}_${dataDirEncoded}`;
+    // Per-incarnation id: distinguishes runs / detects restarts.
+    this.runId = `${this.instanceId}_${this.startTimestamp}`;
     this.initType = readInitType(opts.dataDir);
   }
 

@@ -21,7 +21,6 @@ import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
-import type { InputEntriesMetadata } from '../metrics/trace-runtime-types.js';
 
 const logger = createLogger('InputManager');
 
@@ -160,11 +159,11 @@ export class InputManager extends EventEmitter {
     input.on('input-runtime-delta', (delta: InputRuntimeDelta) => {
       this.handleInputRuntimeDelta(input.id, delta);
     });
-    input.on('entries', (entries: AgentActivityEntry[], metadata?: InputEntriesMetadata) => {
+    input.on('entries', (entries: AgentActivityEntry[]) => {
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
       const next = previous
         .catch(() => undefined)
-        .then(() => this.handleEntries(input.id, entries, metadata))
+        .then(() => this.handleEntries(input.id, entries))
         .catch(err => {
           logger.error('entry handling failed', { inputId: input.id, error: String(err) });
         });
@@ -327,14 +326,8 @@ export class InputManager extends EventEmitter {
   private async handleEntries(
     inputId: string,
     entries: AgentActivityEntry[],
-    metadata?: InputEntriesMetadata,
   ): Promise<void> {
-    if (entries.length === 0) {
-      if ((metadata?.sourceReads?.length ?? 0) > 0) {
-        await this.dispatchEntries(inputId, [], 0, [], metadata);
-      }
-      return;
-    }
+    if (entries.length === 0) return;
 
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
@@ -396,19 +389,16 @@ export class InputManager extends EventEmitter {
           );
 
     const expandedEntries = expandAgentInputEvents(maskedEntries);
-    const entryLogicalBytes = expandedEntries.map(entry =>
-      Buffer.byteLength(JSON.stringify(entry), 'utf8'),
-    );
-    const outputBatchBytes = entryLogicalBytes.reduce((sum, bytes) => sum + bytes, 0);
+    let outputBatchBytes = 0;
+    // Reuse the existing serialization; only retain its numeric results.
+    const logicalBytes = expandedEntries.map(entry => {
+      const bytes = Buffer.byteLength(JSON.stringify(entry));
+      outputBatchBytes += bytes;
+      return bytes;
+    });
 
     logger.info('dispatching entries', { inputId, count: expandedEntries.length });
-    await this.dispatchEntries(
-      inputId,
-      expandedEntries,
-      outputBatchBytes,
-      entryLogicalBytes,
-      metadata,
-    );
+    await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes, logicalBytes);
   }
 
   markInputStarted(id: string): void {
@@ -418,13 +408,7 @@ export class InputManager extends EventEmitter {
     }
   }
 
-  private async dispatchEntries(
-    inputId: string,
-    entries: AgentActivityEntry[],
-    batchBytes: number,
-    entryLogicalBytes: readonly number[],
-    metadata?: InputEntriesMetadata,
-  ): Promise<void> {
+  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[]): Promise<void> {
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -437,21 +421,7 @@ export class InputManager extends EventEmitter {
 
     const counter = this.counters.get(inputId);
     try {
-      const alignedSizes = entryLogicalBytes.length === entries.length
-        ? entryLogicalBytes
-        : undefined;
-      if (!alignedSizes) {
-        logger.warn('diagnostic event byte alignment invalid; skipping byte attribution', {
-          inputId,
-          entries: entries.length,
-          byteValues: entryLogicalBytes.length,
-        });
-      }
-      await this.flusher.sendBatch(entries, {
-        inputName: inputId,
-        ...(alignedSizes ? { entryLogicalBytes: alignedSizes } : {}),
-        ...(metadata?.sourceReads ? { sourceReads: metadata.sourceReads } : {}),
-      });
+      await this.flusher.sendBatch(entries, logicalBytes);
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
