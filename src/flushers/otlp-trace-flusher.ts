@@ -810,9 +810,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
-    // stable end-of-run boundary in every supported version (>=2026.5.12).
+    // stable successful-run boundary. Legacy failed attempts can terminate
+    // before llm_output; the adapter explicitly seals those at agent_end.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
-      return entry['agent.openclaw.hook'] === 'llm_output';
+      return entry['agent.openclaw.hook'] === 'llm_output'
+        || (entry['agent.openclaw.compatibility'] === 'legacy'
+          && entry['agent.openclaw.hook'] === 'agent_end'
+          && entry['gen_ai.turn.end'] === true);
     }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'grok-build') {
       // The Grok processor emits one explicit turn-terminal `other` record.

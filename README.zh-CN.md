@@ -74,7 +74,7 @@ Pilot 主要帮助回答这些问题：
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 
-OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定，详见[兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)。
 
 DeepSeek Harness（`dsh`）通过用户级 `cordis.patch.yml` 加载 Pilot
 可观测插件，采集原生 LLM、reasoning、工具、Token 和首 Token

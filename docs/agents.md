@@ -21,7 +21,7 @@ type differences are called out in the notes.
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
-| OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.5.12 or later. Captures native LLM, ReAct, tool, token, error, and cancellation events. |
+| OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.3.8 or later. Automatic legacy/modern adaptation; model-call timing is inferred before 2026.5.12. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
 | Qoder | `qoder` | Hook integration. |
@@ -110,12 +110,27 @@ omits TTFT instead of fabricating zero.
 
 ## OpenClaw Compatibility And Lifecycle
 
-Pilot supports OpenClaw releases `>=2026.5.12`. The plugin package declares
-this minimum host version, and OpenClaw checks it against the running host when
-loading the plugin. Incompatible hosts skip the plugin with a diagnostic;
-Pilot never launches the OpenClaw CLI to determine its version. During
-deployment, Pilot adds its plugin package directory to `plugins.load.paths`
-and adds this entry to the active OpenClaw configuration:
+Pilot supports OpenClaw releases `>=2026.3.8`. Before writing host configuration,
+Pilot reads the selected installation's `package.json` using in-process filesystem
+operations. No version argument is needed, and version discovery starts no CLI,
+shell, or package-manager subprocess. It supports executable symlinks (npm/pnpm),
+npm and pnpm global wrappers, enterprise bundle layouts, `OPENCLAW_CLI_PATH`, and
+source containers whose working directory is the OpenClaw package root. Runtime
+`OPENCLAW_SERVICE_VERSION` / `OPENCLAW_BUNDLED_VERSION` are fallback sources only;
+installation-request variables such as `OPENCLAW_VERSION` are not trusted.
+Unknown/unsupported versions leave configuration untouched and remain retryable.
+Shared installations must be visible through these paths or runtime metadata.
+
+| Host version | Adapter | `hooks.allowConversationAccess` |
+| --- | --- | --- |
+| 2026.3.8–2026.4.23 | Legacy | Omitted; stale Pilot-owned key removed |
+| 2026.4.24–2026.5.11 | Legacy | Enabled |
+| 2026.5.12+ | Modern | Enabled |
+
+Pilot checks metadata again during deployment/repair so upgrades and downgrades
+select the appropriate configuration. The plugin independently selects its
+adapter from `api.runtime.version`. Config paths honor `OPENCLAW_CONFIG_PATH`
+and `OPENCLAW_STATE_DIR`. For hosts supporting conversation access, the entry is:
 
 ```json
 {
@@ -130,8 +145,19 @@ and adds this entry to the active OpenClaw configuration:
 }
 ```
 
-`allowConversationAccess` is required for the native conversation lifecycle
-hooks that carry per-call messages and usage. Pilot creates a private backup
+The legacy adapter uses `llm_input`, assistant `before_message_write`, tool hooks,
+and `llm_output` to preserve observed output, tool IDs and per-call token usage.
+Run aggregate usage is diagnostic-only, never added to model usage. LLM start
+times are inferred from the input or last persisted tool-result boundary and
+marked `agent.openclaw.timing.inferred=true` with `agent.openclaw.timing.source`.
+These intervals include orchestration overhead and are not precise provider
+latency. TTFT, transport metrics, and retries absent from persistence are omitted.
+Failed legacy runs close at `agent_end` even when `llm_output` never arrives.
+Missing messages or tokens are not fabricated; for overlapping runs on the same
+session, ambiguous session-only persistence is omitted and the aggregate carries
+`agent.openclaw.correlation.ambiguous=true` until all colliding runs end.
+
+Pilot creates a private backup
 before migrating a legacy plugin-array configuration. Upgrade also replaces
 the previous Pilot single-file load path with the package directory. Uninstall
 removes both forms plus Pilot's entry; unrelated plugins and their settings are
@@ -141,7 +167,15 @@ The injected plugin writes append-only source events below
 `~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
 mode `0600` on POSIX systems. Provider errors or cancelled calls can legitimately
 have no output message or token usage; Pilot reports the native finish reason
-and timing without inventing content or zero token counts.
+and available timing without inventing content or zero token counts. Content-off
+also removes error messages because provider/tool errors can contain user content.
+
+For real-provider acceptance, build Pilot and install exact OpenClaw 2026.3.8 into
+an isolated directory, then run `scripts/e2e/openclaw-compat.mjs` with
+`OPENCLAW_E2E_INSTALL` pointing at that directory and `DASHSCOPE_API_KEY` supplied
+through the environment. The harness uses the built container injection entry,
+real Qwen traffic, native transcript token parity, privacy checks and local span
+conversion. This does not replace separate container/EDR and SLS/ARMS acceptance.
 
 ## Choose Agents During Installation
 

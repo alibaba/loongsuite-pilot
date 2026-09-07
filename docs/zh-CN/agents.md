@@ -20,7 +20,7 @@
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
-| OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.5.12 及以上稳定版本；采集原生 LLM、ReAct、工具、Token、错误和取消事件。 |
+| OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
 | Qoder | `qoder` | Hook 集成。 |
@@ -101,10 +101,23 @@ Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream de
 
 ## OpenClaw 兼容性与生命周期
 
-Pilot 支持 OpenClaw `>=2026.5.12`。插件包会声明这一最低宿主版本，
-OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的宿主会跳过插件并
-输出诊断，Pilot 不再通过启动 OpenClaw CLI 获取版本。部署时，Pilot 会把
-插件包目录加入 `plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
+Pilot 支持 OpenClaw `>=2026.3.8`。在写入宿主配置之前，Pilot 使用进程内文件
+操作读取选中安装实例的 `package.json`，用户无需传入版本。版本探测不会启动
+OpenClaw、shell、which 或 npm 子进程。支持 npm/pnpm 软链接与全局包装器、
+企业 Bundle、`OPENCLAW_CLI_PATH`，以及工作目录位于 OpenClaw 包根目录的源码容器。
+`OPENCLAW_SERVICE_VERSION` / `OPENCLAW_BUNDLED_VERSION` 只作兜底；
+不采用可能过期的安装请求变量 `OPENCLAW_VERSION`。版本未知或不受支持时不修改配置，
+后续部署/修复可以重试。共享安装目录需要通过上述路径或运行时元数据可见。
+
+| 宿主版本 | 采集适配器 | `hooks.allowConversationAccess` |
+| --- | --- | --- |
+| 2026.3.8～2026.4.23 | Legacy 增强兼容 | 不写入，清除 Pilot 条目中残留的该字段 |
+| 2026.4.24～2026.5.11 | Legacy 增强兼容 | 启用 |
+| 2026.5.12+ | Modern | 启用 |
+
+部署和 watchdog 修复会重新读取版本，因此升级/降级后会重新选择配置。
+插件启动时独立使用 `api.runtime.version` 选择适配器。配置路径遵循
+`OPENCLAW_CONFIG_PATH` 和 `OPENCLAW_STATE_DIR`。支持会话权限的宿主使用以下条目：
 
 ```json
 {
@@ -119,15 +132,30 @@ OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的�
 }
 ```
 
-原生会话生命周期 Hook 通过 `allowConversationAccess` 提供每次 LLM 调用的
-消息和用量，因此该权限是必需的。迁移旧版插件数组配置前，Pilot 会创建
+Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
+工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。
+run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时间按输入或最后一个工具结果
+持久化边界推定，标记 `agent.openclaw.timing.inferred=true` 和
+`agent.openclaw.timing.source`；该时间包含编排开销，不能视为精确 Provider 延迟。
+缺失的 TTFT、传输指标和未持久化的重试不补造。失败 run 可通过 `agent_end` 立即收尾，
+无需等待可能不会出现的 `llm_output`。同 session 并发且持久化 Hook 无 runId 时，
+会跳过有歧义的持久化消息，并在聚合事件标记
+`agent.openclaw.correlation.ambiguous=true`，直到冲突的 run 全部结束。
+
+迁移旧版插件数组配置前，Pilot 会创建
 权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
 卸载会同时清理新旧两种路径和 Pilot 自己的条目，并保留其他插件及其配置。
 
 注入的插件会把 append-only 源事件写入
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，
 文件权限为 `0600`。Provider 错误或取消调用可能没有输出消息或 Token 用量；
-Pilot 会上报原生 finish reason 和耗时，不会伪造消息或补零 Token。
+Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造消息或补零 Token。
+关闭内容采集时也会删除可能包含用户内容的错误消息。
+
+真实 Provider 验证入口为 `scripts/e2e/openclaw-compat.mjs`：先构建 Pilot，在隔离
+目录安装精确的 OpenClaw 2026.3.8，再通过 `OPENCLAW_E2E_INSTALL` 指定该目录，
+通过环境提供 `DASHSCOPE_API_KEY`。脚本调用容器使用的构建后注入入口，执行真实 Qwen
+对话，核对 transcript Token、内容关闭和本地 span；容器/EDR 与 SLS/ARMS 需另行验收。
 
 ## 安装时选择 Agent
 

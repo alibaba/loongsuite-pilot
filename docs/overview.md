@@ -44,7 +44,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
 
-OpenClaw integration requires OpenClaw 2026.5.12 or later.
+OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
 
 ### Documented Windows Agent Support
 

@@ -1,6 +1,7 @@
 import type { AgentDefinition } from '../types/index.js';
 import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
 import { commandExists, detectAgent } from './detect-utils.js';
+import { resolveOpenClawHost } from './openclaw-version-resolver.js';
 import {
   DshRuntimeLocator,
   type DshRuntimeTarget,
@@ -76,6 +77,12 @@ export async function probeAgentDefinition(
   };
 
   if (options.listOnly) return result;
+
+  if (def.id === 'openclaw') {
+    const host = await resolveOpenClawHost();
+    return { ...result, detected: host !== null,
+      reason: host ? `${host.source} (${host.version}, ${host.adapter})` : '' };
+  }
 
   if (def.deployMode === 'dsh-yaml-patch') {
     try {

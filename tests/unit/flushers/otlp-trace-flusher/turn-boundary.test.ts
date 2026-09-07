@@ -43,6 +43,22 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     await flusher.shutdown();
   });
 
+  it('flushes a failed legacy OpenClaw turn without llm_output', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    await flusher.send(makeEntry({ 'gen_ai.agent.type': 'openclaw', 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({ 'gen_ai.agent.type': 'openclaw', 'gen_ai.response.finish_reasons': ['error'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(makeEntry({
+      'gen_ai.agent.type': 'openclaw', 'event.name': 'other',
+      'agent.openclaw.compatibility': 'legacy', 'agent.openclaw.hook': 'agent_end',
+      'agent.openclaw.success': false, 'gen_ai.turn.end': true,
+    }));
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(convert.mock.calls[0][0]).toHaveLength(3);
+  });
+
   it('Signal A: finish_reason=stop triggers immediate flush', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);

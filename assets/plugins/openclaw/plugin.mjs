@@ -1,10 +1,11 @@
 /**
  * loongsuite-pilot OpenClaw event_t plugin
  *
- * Runs inside the OpenClaw process (Node.js). Registers 16 plugin hooks
+ * Runs inside the OpenClaw process (Node.js). Modern hosts register 16 hooks
  * (7 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
  * converts OpenClaw hook events into ARMS GenAI event_t JSONL records for
- * consumption by loongsuite-pilot's BaseHookInput pipeline.
+ * consumption by loongsuite-pilot's BaseHookInput pipeline. Hosts before
+ * 2026.5.12 use the separate 9-hook legacy-adapter.mjs.
  *
  * Zero external dependencies — only Node.js built-in APIs. The plugin entry
  * shape mirrors what `definePluginEntry(...)` from `openclaw/plugin-sdk/core`
@@ -29,6 +30,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { MIN_OPENCLAW_VERSION, openClawCapabilities } from "./compatibility.mjs";
+import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -42,7 +45,6 @@ const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
-const MIN_OPENCLAW_VERSION = "2026.5.12";
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
   agentId: AGENT_TYPE,
   fieldMap: {
@@ -334,6 +336,7 @@ const CONTENT_RECORD_FIELDS = [
   "agent.openclaw.persisted_message",
   "agent.openclaw.message",
   "agent.openclaw.last_assistant_message",
+  "error.message",
 ];
 
 function redactRecordContent(record) {
@@ -1311,33 +1314,6 @@ function makeHandler(fn) {
   };
 }
 
-function parseOpenClawVersion(value) {
-  if (typeof value !== "string") return null;
-  const match = value.trim().match(
-    /^v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
-  );
-  if (!match) return null;
-  return {
-    core: [Number(match[1]), Number(match[2]), Number(match[3])],
-    suffix: match[4],
-  };
-}
-
-function isSupportedOpenClawVersion(value) {
-  const parsed = parseOpenClawVersion(value);
-  const minimum = parseOpenClawVersion(MIN_OPENCLAW_VERSION);
-  if (!parsed || !minimum) return false;
-
-  for (let i = 0; i < minimum.core.length; i++) {
-    if (parsed.core[i] > minimum.core[i]) return true;
-    if (parsed.core[i] < minimum.core[i]) return false;
-  }
-
-  // OpenClaw numeric suffixes are release corrections (for example -1),
-  // while named prereleases at the minimum core remain below the floor.
-  return !parsed.suffix || /^\d+(?:\.\d+)*$/.test(parsed.suffix);
-}
-
 function reportUnsupportedHost(api, detail) {
   const message =
     `[${PLUGIN_ID}] incompatible OpenClaw plugin API: `
@@ -1357,7 +1333,7 @@ export default {
   id: PLUGIN_ID,
   name: "loongsuite-pilot-openclaw",
   description:
-    "ARMS GenAI event_t producer: captures 16 OpenClaw plugin hooks and writes JSONL for loongsuite-pilot BaseHookInput.",
+    "ARMS GenAI event_t producer with automatic legacy/modern OpenClaw hook adaptation.",
 
   register(api) {
     // OpenClaw's CLI metadata discovery provides a stub runtime and noop hook
@@ -1373,7 +1349,8 @@ export default {
     }
 
     const hostVersion = api?.runtime?.version;
-    if (!isSupportedOpenClawVersion(hostVersion)) {
+    const capabilities = openClawCapabilities(hostVersion);
+    if (!capabilities) {
       const versionLabel = typeof hostVersion === "string" && hostVersion.length > 0
         ? hostVersion
         : "unavailable";
@@ -1396,6 +1373,17 @@ export default {
     const on = (name, fn) => {
       api.on(name, makeHandler(fn));
     };
+
+    if (capabilities.adapter === "legacy") {
+      const handlers = createLegacyHandlers({
+        resolveContextRun, safeStringify, buildAssistantOutputMessagesFromOpenClawMessage,
+        handleLlmInput, handleBeforeAgentRun, handleModelCallStarted, handleBeforeMessageWrite,
+        handleBeforeToolCall, handleAfterToolCall, handleToolResultPersist,
+        handleAgentEnd, handleLlmOutput, handleSessionStart, handleSessionEnd, completeRun,
+      });
+      for (const [name, handler] of Object.entries(handlers)) on(name, handler);
+      return;
+    }
 
     // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
     on("before_model_resolve", handleBeforeModelResolve);
