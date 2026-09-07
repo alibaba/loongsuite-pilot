@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import {
   multimodalUploadIncludesInput,
@@ -182,6 +183,7 @@ async function enrichInputAttachedImages(
   // When request_id is only on llm.response, fall back to same-turn input carrier.
   for (const [requestId, paths] of byRequest) {
     let carrier = carriersByRequest.get(requestId);
+    let synthesized = false;
     if (!carrier) {
       const response = entries.find(
         e => e['event.name'] === 'llm.response' && requestIdOf(e) === requestId,
@@ -197,6 +199,24 @@ async function enrichInputAttachedImages(
           && e['event.name'] === 'other'
           && Array.isArray(e['gen_ai.input.messages_delta']),
         );
+        if (!carrier) {
+          carrier = {
+            'event.id': crypto.randomUUID(),
+            'event.name': 'llm.request',
+            'gen_ai.turn.id': turnId,
+            'gen_ai.step.id': response['gen_ai.step.id'],
+            'gen_ai.session.id': response['gen_ai.session.id'],
+            'gen_ai.agent.type': response['gen_ai.agent.type'],
+            'gen_ai.provider.name': response['gen_ai.provider.name'],
+            'gen_ai.request.model': response['gen_ai.request.model'],
+            'user.id': response['user.id'],
+            'gen_ai.request.id': requestId,
+            'agent.request_id': requestId,
+            time_unix_nano: response.time_unix_nano,
+          } as AgentActivityEntry;
+          entries.push(carrier);
+          synthesized = true;
+        }
       }
     }
     if (!carrier) continue;
@@ -207,6 +227,8 @@ async function enrichInputAttachedImages(
       touched.add(carrier);
       // Consume paths so this request_id is not attached again on later batches.
       attachedPathsByRequestId.set(requestId, []);
+    } else if (synthesized) {
+      entries.pop();
     }
   }
 }

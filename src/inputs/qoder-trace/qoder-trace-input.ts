@@ -236,10 +236,18 @@ export class QoderTraceInput extends BaseInput {
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;
         if (this.multimodalStopped) break;
+        const before = sessionEntries.length;
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,
         });
+        for (let i = before; i < sessionEntries.length; i++) {
+          const entry = sessionEntries[i];
+          rawEntries.push(entry);
+          const turnId = (entry['gen_ai.turn.id'] as string) || 'unknown';
+          const group = turnGroups.get(turnId);
+          if (group) group.push(entry);
+        }
       }
       for (const turnEntries of cliTurns) {
         if (this.multimodalStopped) break;

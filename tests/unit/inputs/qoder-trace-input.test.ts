@@ -1825,33 +1825,40 @@ describe('QoderTraceInput multimodal', () => {
         expect((freshB['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
       });
 
-      it('keeps cached paths when carrier is missing so a later batch can attach', async () => {
+      it('synthesizes a uri-only llm.request when sqlite has images but no user carrier', async () => {
         const dir = makeMmTempDir();
-        const img = writePng(dir, 'late.png', 'late');
+        const img = writePng(dir, 'solo.png', 'solo');
         const pathToUri = vi.fn(fakePathToUri);
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-late', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', [img]]]));
 
         const responseOnly = mmEntry({
           'event.name': 'llm.response',
-          'gen_ai.request.id': 'req-late',
+          'gen_ai.request.id': 'req-solo',
           'gen_ai.output.messages': [
             { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
           ],
         });
-        await enrichIdeMultimodal([responseOnly], { uploadMode: 'input', pathToUri });
-        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
-        expect(pathToUri).not.toHaveBeenCalled();
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri });
 
-        const user = mmEntry({
+        expect(batch).toHaveLength(2);
+        const request = batch[1];
+        expect(request['event.name']).toBe('llm.request');
+        expect(request['gen_ai.request.id']).toBe('req-solo');
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toEqual([
+          { type: 'uri', mime_type: 'image/png', modality: 'image', uri: 'oss://test/solo' },
+        ]);
+
+        const laterUser = mmEntry({
           'event.name': 'other',
-          'gen_ai.request.id': 'req-late',
+          'gen_ai.request.id': 'req-solo',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
           ],
         });
-        await enrichIdeMultimodal([user], { uploadMode: 'input', pathToUri });
-        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
-        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        await enrichIdeMultimodal([laterUser], { uploadMode: 'input', pathToUri });
+        expect((laterUser['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect(pathToUri).toHaveBeenCalledTimes(1);
       });
 
       it('caches a confirmed empty lookup and does not re-query', async () => {
