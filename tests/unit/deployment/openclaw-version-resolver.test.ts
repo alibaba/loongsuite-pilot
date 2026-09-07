@@ -15,7 +15,7 @@ vi.mock('node:child_process', () => ({
 describe('OpenClaw read-only version discovery and injection', () => {
   let root: string;
   beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-oc-version-')); });
-  afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
+  afterEach(async () => { vi.unstubAllEnvs(); await fs.rm(root, { recursive: true, force: true }); });
   async function pkg(relative: string, version = '2026.3.8', name = 'openclaw') {
     const dir = path.join(root, relative);
     await fs.mkdir(dir, { recursive: true });
@@ -39,6 +39,19 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await pkg('.openclaw-bundle/openclaw', '1.0.0', 'openclaw-bundle-cli');
     await pkg('.openclaw-bundle/openclaw/node_modules/openclaw');
     expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry }, root)).toMatchObject({ version: '2026.3.8' });
+  });
+  it('resolves a pnpm global shell wrapper without reading or executing the script', async () => {
+    const entry = await pkg('pnpm/global/5/node_modules/openclaw');
+    await fs.writeFile(path.join(root, 'pnpm/openclaw'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+    const host = await resolveOpenClawHost({ PATH: path.join(root, 'pnpm') }, root);
+    expect(host?.source).toBe(await fs.realpath(path.join(path.dirname(entry), 'package.json')));
+  });
+  it('does not fall through to a second PATH installation when the first is unidentifiable', async () => {
+    await fs.mkdir(path.join(root, 'first'));
+    await fs.writeFile(path.join(root, 'first/openclaw'), 'opaque binary', { mode: 0o755 });
+    const entry = await pkg('second');
+    await fs.symlink(entry, path.join(root, 'second/openclaw'));
+    expect(await resolveOpenClawHost({ PATH: [path.join(root, 'first'), path.join(root, 'second')].join(path.delimiter) }, root)).toBeNull();
   });
   it('reads a source container working directory without a PATH command', async () => {
     await pkg('app');
@@ -113,5 +126,21 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await fs.unlink(configPath);
     expect((await strategy.deploy(definition)).success).toBe(false);
     await expect(fs.stat(configPath)).rejects.toThrow();
+  });
+  it('uses the container config path for both injection and cleanup', async () => {
+    const configPath = path.join(root, 'profile/openclaw.json');
+    vi.stubEnv('OPENCLAW_CONFIG_PATH', configPath);
+    const def: AgentDefinition = {
+      id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject', detection: { paths: [], commands: [] },
+      pluginInject: { configPaths: [path.join(root, 'unused.json')], configShape: 'openclaw-nested', createIfMissing: true,
+        pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' },
+    };
+    const entry = await pkg('app');
+    const strategy = new PluginInjectStrategy(root, root, () => resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry }, root));
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins.entries).toEqual({});
+    await expect(fs.stat(path.join(root, 'unused.json'))).rejects.toThrow();
   });
 });

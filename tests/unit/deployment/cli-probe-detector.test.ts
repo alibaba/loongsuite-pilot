@@ -30,6 +30,7 @@ describe('CLI probe detector', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -83,6 +84,19 @@ describe('CLI probe detector', () => {
       ].join('\0')),
     );
   }
+
+  it('discovers OpenClaw for the installer without calling which or generic detection', async () => {
+    const executable = path.join(tmpDir, 'openclaw.mjs');
+    await fs.writeFile(executable, '/* never executed */');
+    await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    vi.stubEnv('OPENCLAW_CLI_PATH', executable);
+    const def = { ...genericDef(), id: 'openclaw', displayName: 'OpenClaw' };
+    const result = await probeAgentDefinition(def);
+    expect(result.detected).toBe(true);
+    expect(result.reason).toContain('2026.3.8');
+    expect(detectAgent).not.toHaveBeenCalled();
+    expect(commandExists).not.toHaveBeenCalled();
+  });
 
   it('detects a Node-launched DSH from procfs when the installer environment misses it', async () => {
     const home = path.join(tmpDir, 'runtime-home');
