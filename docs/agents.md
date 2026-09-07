@@ -129,7 +129,12 @@ Shared installations must be visible through these paths or runtime metadata.
 
 Pilot checks metadata again during deployment/repair so upgrades and downgrades
 select the appropriate configuration. The plugin independently selects its
-adapter from `api.runtime.version`. Config paths honor `OPENCLAW_CONFIG_PATH`
+adapter from `api.runtime.version`. When that field is missing/empty/`unknown`
+(including the official 2026.3.8 npm bundle), it follows the executing Node
+entry's real path to the nearest OpenClaw `package.json`, with bounded depth
+and reads. This runtime fallback never searches PATH/cwd, executes a CLI, or
+uses a user-supplied version; explicit unsupported versions remain rejected.
+Config paths honor `OPENCLAW_CONFIG_PATH`
 and `OPENCLAW_STATE_DIR`. For hosts supporting conversation access, the entry is:
 
 ```json

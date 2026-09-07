@@ -116,7 +116,11 @@ OpenClaw、shell、which 或 npm 子进程。支持 npm/pnpm 软链接与全局�
 | 2026.5.12+ | Modern | 启用 |
 
 部署和 watchdog 修复会重新读取版本，因此升级/降级后会重新选择配置。
-插件启动时独立使用 `api.runtime.version` 选择适配器。配置路径遵循
+插件启动时独立使用 `api.runtime.version` 选择适配器。该字段缺失、为空或为
+`unknown` 时（包括官方 2026.3.8 npm 包），沿当前 Node 进程入口的真实路径，
+在限定深度和读取大小内查找最近的 OpenClaw `package.json`。运行时回退不搜索
+PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确不支持的版本仍拒绝注册。
+配置路径遵循
 `OPENCLAW_CONFIG_PATH` 和 `OPENCLAW_STATE_DIR`。支持会话权限的宿主使用以下条目：
 
 ```json

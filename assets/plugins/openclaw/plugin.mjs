@@ -30,7 +30,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { MIN_OPENCLAW_VERSION, openClawCapabilities } from "./compatibility.mjs";
+import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
+import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import {
   agentBaseFieldPatch,
@@ -1350,7 +1351,7 @@ export default {
     }
 
     const hostVersion = api?.runtime?.version;
-    const capabilities = openClawCapabilities(hostVersion);
+    const capabilities = resolveRuntimeCapabilities(hostVersion);
     if (!capabilities) {
       const versionLabel = typeof hostVersion === "string" && hostVersion.length > 0
         ? hostVersion

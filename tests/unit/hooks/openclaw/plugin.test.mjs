@@ -202,6 +202,26 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
   });
 
+  it('registers legacy hooks for the packaged 3.8 unknown-runtime regression', async () => {
+    const packageRoot = path.join(tmpDir, 'host', 'node_modules', 'openclaw');
+    fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    const entry = path.join(packageRoot, 'dist', 'entry.js');
+    fs.writeFileSync(entry, '');
+    const previous = process.argv;
+    process.argv = [previous[0], entry];
+    try {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+      const logger = { error: vi.fn() };
+      plugin.register({ runtime: { version: 'unknown' }, logger, on: name => registered.add(name) });
+      expect(registered.size).toBe(9);
+      expect(registered.has('before_message_write')).toBe(true);
+      expect(registered.has('model_call_started')).toBe(false);
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally { process.argv = previous; }
+  });
+
   it.each([
     ['missing', undefined],
     ['unparseable', 'not-a-version'],
