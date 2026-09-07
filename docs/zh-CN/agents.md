@@ -148,6 +148,13 @@ run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时�
 若 Provider fallback 在失败已收尾后复用 runId，新尝试会使用独立 turn/trace，
 并通过 `agent.openclaw.run_id` 保留原生 ID。
 
+2026.3.8 已知限制：持久化 Hook 关联需要原生 `sessionKey`，例如 Gateway 会话，
+或 `agent --local --agent main`。只传一个未绑定 Agent/会话存储的新 `--session-id`
+时缺少该键，Pilot 保留 run 级事件，不猜测逐次调用归属。另外，3.8 对非 OpenAI 官方
+Chat Completions 端点强制关闭流式 usage，DashScope 在该 API 路径可能产生原生
+零 Token 记录，Pilot 无法据此还原真实用量。严格真实 Provider 验收脚本在这些路径
+仍会失败，不能据此宣称 Token 覆盖通过。
+
 迁移旧版插件数组配置前，Pilot 会创建
 权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
 卸载会同时清理新旧两种路径和 Pilot 自己的条目，并保留其他插件及其配置。

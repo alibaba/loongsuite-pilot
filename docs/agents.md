@@ -164,6 +164,15 @@ Missing messages or tokens are not fabricated; for overlapping runs on the same
 session, ambiguous session-only persistence is omitted and the aggregate carries
 `agent.openclaw.correlation.ambiguous=true` until all colliding runs end.
 
+Known 2026.3.8 limits: persistence-hook correlation requires a native
+`sessionKey` (for example, a Gateway session or `agent --local --agent main`).
+A new standalone `--session-id` without an agent/session-store binding lacks
+that key; Pilot retains run-level events but does not guess per-call ownership.
+Also, 3.8 forces streaming usage off for non-OpenAI-native Chat Completions
+endpoints. DashScope on that API path can produce native zero-token records;
+Pilot cannot reconstruct actual usage from them. The strict real-provider
+acceptance harness remains failing for these paths, not a token-coverage PASS.
+
 Pilot creates a private backup
 before migrating a legacy plugin-array configuration. Upgrade also replaces
 the previous Pilot single-file load path with the package directory. Uninstall
