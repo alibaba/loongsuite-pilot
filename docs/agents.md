@@ -153,6 +153,8 @@ marked `agent.openclaw.timing.inferred=true` with `agent.openclaw.timing.source`
 These intervals include orchestration overhead and are not precise provider
 latency. TTFT, transport metrics, and retries absent from persistence are omitted.
 Failed legacy runs close at `agent_end` even when `llm_output` never arrives.
+If a fallback reuses the native run ID after that attempt is closed, it starts
+a separate turn/trace and retains the original ID in `agent.openclaw.run_id`.
 Missing messages or tokens are not fabricated; for overlapping runs on the same
 session, ambiguous session-only persistence is omitted and the aggregate carries
 `agent.openclaw.correlation.ambiguous=true` until all colliding runs end.

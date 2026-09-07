@@ -135,6 +135,20 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     expect(new Set(responses.map(r => r.trace_id)).size).toBe(2);
   });
 
+  it('opens a distinct turn for fallback reusing a native run ID after failure was flushed', () => {
+    input();
+    fire('before_message_write', { message: message('failed', [], 'error') });
+    fire('agent_end', { success: false, error: 'provider unavailable' });
+    input();
+    fire('before_message_write', { message: message('fallback') });
+    finish();
+    const responses = records().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(2);
+    expect(new Set(responses.map(r => r.trace_id)).size).toBe(2);
+    expect(new Set(responses.map(r => r['gen_ai.turn.id'])).size).toBe(2);
+    expect(responses[1]['agent.openclaw.run_id']).toBe('run-1');
+  });
+
   it('does not assign session-only persistence to an ambiguous overlapping run', () => {
     input('first'); input('second');
     fire('before_message_write', { message: message('ambiguous') });

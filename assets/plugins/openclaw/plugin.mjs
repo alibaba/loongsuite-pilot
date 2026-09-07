@@ -576,7 +576,8 @@ function buildCommonFields(run, sessionId, userId) {
   };
   if (run) {
     base.trace_id = run.traceId;
-    base["gen_ai.turn.id"] = run.runId;
+    base["gen_ai.turn.id"] = run.turnId || run.runId;
+    if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
     if (run.provider) base["gen_ai.provider.name"] = run.provider;
     if (run.model) base["gen_ai.request.model"] = run.model;

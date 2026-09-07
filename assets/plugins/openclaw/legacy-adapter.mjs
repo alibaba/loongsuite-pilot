@@ -78,6 +78,14 @@ export function createLegacyHandlers(shared) {
       if (!event?.runId) return;
       // sessionId belongs to the event in 3.8; the general context may omit it.
       const fullCtx = { ...ctx, runId: event.runId, sessionId: event.sessionId || ctx?.sessionId };
+      const previous = shared.resolveContextRun(event, fullCtx);
+      if (previous?.completed) {
+        // A provider fallback may reuse the native runId after its failed
+        // attempt was already flushed. Give the new attempt its own trace and
+        // turn identity, while retaining the native run ID for correlation.
+        previous.traceId = crypto.randomBytes(16).toString("hex");
+        previous.turnId = `${event.runId}:legacy:${crypto.randomUUID()}`;
+      }
       shared.handleLlmInput(event, fullCtx, userId, emit, cfg);
       const run = shared.resolveContextRun(event, fullCtx);
       const key = ctx?.sessionKey || event.sessionKey;

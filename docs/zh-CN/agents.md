@@ -141,6 +141,8 @@ run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时�
 无需等待可能不会出现的 `llm_output`。同 session 并发且持久化 Hook 无 runId 时，
 会跳过有歧义的持久化消息，并在聚合事件标记
 `agent.openclaw.correlation.ambiguous=true`，直到冲突的 run 全部结束。
+若 Provider fallback 在失败已收尾后复用 runId，新尝试会使用独立 turn/trace，
+并通过 `agent.openclaw.run_id` 保留原生 ID。
 
 迁移旧版插件数组配置前，Pilot 会创建
 权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
