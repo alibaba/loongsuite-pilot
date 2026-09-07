@@ -151,9 +151,14 @@ run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时�
 2026.3.8 已知限制：持久化 Hook 关联需要原生 `sessionKey`，例如 Gateway 会话，
 或 `agent --local --agent main`。只传一个未绑定 Agent/会话存储的新 `--session-id`
 时缺少该键，Pilot 保留 run 级事件，不猜测逐次调用归属。另外，3.8 对非 OpenAI 官方
-Chat Completions 端点强制关闭流式 usage，DashScope 在该 API 路径可能产生原生
-零 Token 记录，Pilot 无法据此还原真实用量。严格真实 Provider 验收脚本在这些路径
-仍会失败，不能据此宣称 Token 覆盖通过。
+Chat Completions 端点关闭流式请求的 `include_usage` 选项，DashScope 在该路径可能
+产生原生零 Token 记录，Pilot 无法据此还原真实用量。这取决于 Provider：真实 Gateway
+调用 DeepSeek 时已获得正值原生用量，并完成逐次调用及缓存 Token 对账。
+
+2026.3.8 暂不支持原生 sender 提取：旧 Hook 未提供新版的发送者身份。Pilot 保留
+配置/环境提供的用户身份，不从消息正文或 session 名称猜测 sender。
+`AGENTTEAMS_WORKER_NAME` 仍可使用，需在启动 Gateway 前设置，修改后重启 Gateway。
+worker 标识与 sender 身份是两回事。
 
 迁移旧版插件数组配置前，Pilot 会创建
 权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
@@ -165,10 +170,10 @@ Chat Completions 端点强制关闭流式 usage，DashScope 在该 API 路径可
 Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造消息或补零 Token。
 关闭内容采集时也会删除可能包含用户内容的错误消息。
 
-真实 Provider 验证入口为 `scripts/e2e/openclaw-compat.mjs`：先构建 Pilot，在隔离
-目录安装精确的 OpenClaw 2026.3.8，再通过 `OPENCLAW_E2E_INSTALL` 指定该目录，
-通过环境提供 `DASHSCOPE_API_KEY`。脚本调用容器使用的构建后注入入口，执行真实 Qwen
-对话，核对 transcript Token、内容关闭和本地 span；容器/EDR 与 SLS/ARMS 需另行验收。
+[真实 Provider Gateway 验证入口](../../scripts/e2e/openclaw-compat.md) 仅允许在一次性
+Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原生 Token、链路结构、worker、
+重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
+不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
 
 ## 安装时选择 Agent
 

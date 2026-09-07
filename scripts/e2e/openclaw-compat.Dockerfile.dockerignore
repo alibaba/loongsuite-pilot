@@ -1,0 +1,10 @@
+.git
+node_modules
+dist
+coverage
+container-evidence
+**/.env
+**/.env.*
+**/*secret*
+**/provider.json
+**/cms.json

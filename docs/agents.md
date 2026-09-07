@@ -168,10 +168,17 @@ Known 2026.3.8 limits: persistence-hook correlation requires a native
 `sessionKey` (for example, a Gateway session or `agent --local --agent main`).
 A new standalone `--session-id` without an agent/session-store binding lacks
 that key; Pilot retains run-level events but does not guess per-call ownership.
-Also, 3.8 forces streaming usage off for non-OpenAI-native Chat Completions
-endpoints. DashScope on that API path can produce native zero-token records;
-Pilot cannot reconstruct actual usage from them. The strict real-provider
-acceptance harness remains failing for these paths, not a token-coverage PASS.
+Also, 3.8 disables the streaming `include_usage` request option for non-OpenAI-native
+Chat Completions endpoints. DashScope on that path can produce native zero-token
+records; Pilot cannot reconstruct actual usage from them. This is provider-dependent:
+real Gateway calls to DeepSeek have returned positive native usage, verified against
+each collected model call, including cache tokens.
+
+Native sender extraction is not supported on 2026.3.8: its legacy hooks do not supply
+the modern sender identity. Pilot retains configured/environment identity; it does
+not infer a sender from message content or session names. `AGENTTEAMS_WORKER_NAME`
+remains supported; set it before starting the Gateway and restart the Gateway after
+changing it. Worker identity is independent of sender identity.
 
 Pilot creates a private backup
 before migrating a legacy plugin-array configuration. Upgrade also replaces
@@ -186,12 +193,12 @@ have no output message or token usage; Pilot reports the native finish reason
 and available timing without inventing content or zero token counts. Content-off
 also removes error messages because provider/tool errors can contain user content.
 
-For real-provider acceptance, build Pilot and install exact OpenClaw 2026.3.8 into
-an isolated directory, then run `scripts/e2e/openclaw-compat.mjs` with
-`OPENCLAW_E2E_INSTALL` pointing at that directory and `DASHSCOPE_API_KEY` supplied
-through the environment. The harness uses the built container injection entry,
-real Qwen traffic, native transcript token parity, privacy checks and local span
-conversion. This does not replace separate container/EDR and SLS/ARMS acceptance.
+The [real-provider Gateway acceptance harness](../scripts/e2e/openclaw-compat.md)
+runs only in a disposable Linux container and uses the actual Pilot installer and
+collector. It checks native token parity, trace topology, worker identity, restart
+deduplication, content-off, watchdog repair, reinstall and uninstall. The exact
+OpenClaw version is a test assertion, not an input to Pilot version detection.
+Local acceptance does not replace independent SLS/ARMS readback or customer EDR testing.
 
 ## Choose Agents During Installation
 

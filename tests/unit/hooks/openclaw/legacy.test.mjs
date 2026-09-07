@@ -49,6 +49,23 @@ function finish(runId = 'run-1', context = ctx, usage = { input: 20, output: 4, 
 }
 
 describe('OpenClaw 3.8 legacy adapter', () => {
+  it('retains configured identity and worker metadata without a native sender', async () => {
+    vi.stubEnv('AGENTTEAMS_WORKER_NAME', 'legacy-worker');
+    const pluginPath = path.resolve('assets/plugins/openclaw/plugin.mjs');
+    const plugin = (await import(/* @vite-ignore */ `${pluginPath}?legacy-worker=${++seq}`)).default;
+    handlers = {};
+    plugin.register({ runtime: { version: '2026.3.8' }, on(name, handler) { handlers[name] = handler; } });
+    expect(handlers.message_received).toBeUndefined();
+    input();
+    fire('before_message_write', { message: message('worker-response') });
+    finish();
+    for (const record of records()) {
+      expect(record['user.id']).toBe('test');
+      expect(record['gen_ai.agent.name']).toBe('legacy-worker');
+      expect(record.resourceAttributes['agentteams.worker.name']).toBe('legacy-worker');
+    }
+  });
+
   it('registers only hooks supported by 3.8 and emits a coherent text turn', () => {
     expect(Object.keys(handlers)).toHaveLength(9);
     expect(handlers.model_call_started).toBeUndefined();
