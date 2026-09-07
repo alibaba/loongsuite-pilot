@@ -129,6 +129,10 @@ describe('self-heal is reachable on a taskscheduler install', () => {
         selfHeal.includes('$initType = "taskscheduler"'),
         `${fn}: self-heal must mark $initType managed so wait failure cannot nohup/background`,
       ).toBe(true);
+      expect(
+        selfHeal.indexOf('$initType = "taskscheduler"'),
+        `${fn}: $initType must flip before wait, so a failed Set-Content cannot background`,
+      ).toBeLessThan(selfHeal.search(/Wait-For(?:CollectorHeartbeat|UpdaterAlive)/));
     });
 
     it(`${fn}: the unmanaged background fallback stays gated`, () => {

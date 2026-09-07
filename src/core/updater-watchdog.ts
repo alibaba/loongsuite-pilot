@@ -94,7 +94,7 @@ export interface UpdaterWatchdogOptions {
   sleepWakeGraceMs?: number;
   restartCooldownMs?: number;
   alarmManager?: AlarmManager;
-  updaterLiveness?: (pidFile: string) => ProcessLiveness;
+  updaterLiveness?: (pidFile: string) => ProcessLiveness | Promise<ProcessLiveness>;
 }
 
 /**
@@ -114,7 +114,7 @@ export class UpdaterWatchdog {
   private readonly sleepWakeGraceMs: number;
   private readonly restartCooldownMs: number;
   private readonly alarmManager: AlarmManager | null;
-  private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
+  private readonly updaterLiveness: (pidFile: string) => ProcessLiveness | Promise<ProcessLiveness>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt = Date.now();
   private lastTickAt = 0;
@@ -172,6 +172,7 @@ export class UpdaterWatchdog {
 
   async runCheck(): Promise<UpdaterWatchdogResult> {
     if (!this.enabled) return { status: 'disabled' };
+    if (this.stopping) return { status: 'disabled', reason: 'stopped' };
     if (isAgentShellCurrentVersion(this.dataDir)) return { status: 'disabled' };
     // 90s command timeout vs 60s tick: without this, an overlapping runCheck records
     // SERVICE_NOT_RUNNING_ALARM (no breadcrumb yet) then hits cooldown.
@@ -197,6 +198,8 @@ export class UpdaterWatchdog {
     this.lastTickAt = now;
 
     const processState = await this.readUpdaterProcess();
+    const stopped = this.stoppedResult();
+    if (stopped) return stopped;
     if (!processState.running) {
       // Grace-checked like every branch below, and for the same reason. start() runs the
       // first check immediately, and on a fresh install the collector is running before
@@ -225,6 +228,8 @@ export class UpdaterWatchdog {
     }
 
     const heartbeat = await readJsonFile<UpdaterRuntimeState>(updaterRuntimePath(this.dataDir));
+    const stoppedAfterHeartbeat = this.stoppedResult();
+    if (stoppedAfterHeartbeat) return stoppedAfterHeartbeat;
     if (!heartbeat) {
       const reason = 'updater heartbeat is missing';
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
@@ -257,7 +262,7 @@ export class UpdaterWatchdog {
     reason: string;
   }> {
     const pidFile = path.join(this.dataDir, 'loongsuite-pilot-updater.pid');
-    const liveness = this.updaterLiveness(pidFile);
+    const liveness = await this.updaterLiveness(pidFile);
     if (!liveness.running) {
       if (liveness.pid !== undefined && liveness.pidFileProcessAlive && liveness.pidFileCommandMatched === false) {
         return {
@@ -282,20 +287,35 @@ export class UpdaterWatchdog {
     return now - this.startedAt < this.startupGraceMs || now < this.sleepWakeGraceUntil;
   }
 
+  private stoppedResult(): UpdaterWatchdogResult | null {
+    if (!this.stopping) return null;
+    return { status: 'restart-failed', reason: 'aborted by stop', restarted: false };
+  }
+
   private async restart(
     status: Exclude<UpdaterWatchdogStatus, 'disabled' | 'healthy' | 'grace' | 'restart-rate-limited' | 'restart-attempted' | 'restart-failed'>,
     reason: string,
   ): Promise<UpdaterWatchdogResult> {
+    const stoppedBefore = this.stoppedResult();
+    if (stoppedBefore) return stoppedBefore;
+
     const now = Date.now();
     if (this.lastRestartAt > 0 && now - this.lastRestartAt < this.restartCooldownMs) {
       logger.warn('updater-watchdog restart skipped by cooldown', { reason });
       return { status: 'restart-rate-limited', reason, restarted: false };
     }
 
-    this.lastRestartAt = now;
-    const attemptStartedAt = now;
+    // Arm abort before spawn so a stop() that lands in this window still cancels.
     const abort = new AbortController();
     this.restartAbort = abort;
+    const stoppedAfterArm = this.stoppedResult();
+    if (stoppedAfterArm) {
+      this.restartAbort = null;
+      return stoppedAfterArm;
+    }
+
+    this.lastRestartAt = now;
+    const attemptStartedAt = now;
     try {
       const result = process.platform === 'win32'
         ? await execFileAsync('powershell.exe', [

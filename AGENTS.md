@@ -158,7 +158,8 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
   Stop 之后先等到 State 离开 Running 再 Start。Unix collector wait 只做 `kill -0` /
   `process_matches_installed_entry`，禁止经 `is_running` 删 pid。Unix updater wait 必须是新 pid
   （记录 stop 前 pid）。node 侧的命令超时因此提到 90s：30s 会在脚本诊断到一半时把它杀掉，亲手毁掉证据。
-  超时由 node 自己写 `stage=timeout` 面包屑；`UpdaterWatchdog.stop()` 必须 abort 进行中的 child。
+  超时由 node 自己写 `stage=timeout` 面包屑；`UpdaterWatchdog.stop()` 必须 abort 进行中的 child，
+  并且 `restart()` 在 spawn 之前就要看 `stopping`（health I/O 窗口里 stop 不得再拉起 90s 命令）。
 - 自愈不再看 `init_type`；注册一旦成功就把内存中的类型标成托管并跳过 background/nohup，wait 失败走
   `selfheal-not-running`。background/nohup 兜底**仍然**只对 `background|unknown|""` 开放（托管装机上
   它不是修复，是一个游离于服务管理器之外、会在下次注销时死掉的第二个 daemon），跳过时要上报，不许静默。

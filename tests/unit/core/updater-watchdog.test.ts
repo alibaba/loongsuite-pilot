@@ -624,6 +624,53 @@ describe('UpdaterWatchdog', () => {
     expect(alarms.serialize().filter((a) => a.alarm_type === 'UPDATER_FAILURE_ALARM')).toEqual([]);
   });
 
+  it('does not launch restart-updater after stop()', async () => {
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+    });
+    wd.stop();
+    const result = await wd.runCheck();
+    expect(result.status).toBe('disabled');
+    expect(result.reason).toBe('stopped');
+    expect(mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot')).toHaveLength(0);
+  });
+
+  it('does not launch restart-updater if stop() raced during the health probe', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let probeStarted!: () => void;
+    const probeStartedP = new Promise<void>((resolve) => {
+      probeStarted = resolve;
+    });
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      updaterLiveness: async () => {
+        probeStarted();
+        await held;
+        return { running: false, source: 'none', reason: 'missing pid file' };
+      },
+    });
+
+    const pending = wd.runCheck();
+    await probeStartedP;
+    wd.stop();
+    release();
+    const result = await pending;
+
+    expect(result.status).toBe('restart-failed');
+    expect(result.reason).toBe('aborted by stop');
+    expect(result.restarted).toBe(false);
+    expect(mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot')).toHaveLength(0);
+  });
+
   it('attaches the previous restart failure to the alarm raised before this restart', async () => {
     await writeBreadcrumb(tmpDir, {
       schema: 1,

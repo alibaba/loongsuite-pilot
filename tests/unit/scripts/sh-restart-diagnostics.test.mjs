@@ -170,6 +170,11 @@ describe('self-heal is reachable on a managed install', () => {
         body.slice(selfHealAt, fallbackAt).includes('init_type="$_new_init"'),
         `${fn}: self-heal must mark init_type managed so wait failure cannot nohup`,
       ).toBe(true);
+      const selfHeal = body.slice(selfHealAt, fallbackAt);
+      expect(
+        selfHeal.indexOf('init_type="$_new_init"'),
+        `${fn}: init_type must flip before wait`,
+      ).toBeLessThan(selfHeal.search(/wait_for_(?:collector|updater)_process/));
     });
 
     it(`${fn}: the unmanaged nohup fallback stays gated`, () => {

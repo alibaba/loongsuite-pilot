@@ -47,11 +47,18 @@ vi.mock('node:fs/promises', () => ({
   mkdtemp: (...args: [string]) => mockFsMkdtemp(...args),
 }));
 
+const mockWriteFileSync = vi.fn();
+const mockRenameSync = vi.fn();
+
 // --- Mock node:fs (createWriteStream) ---
 vi.mock('node:fs', () => ({
   createWriteStream: vi.fn(() => ({ fake: true })),
   createReadStream: vi.fn(),
   readdirSync: vi.fn(() => []),
+  mkdirSync: vi.fn(),
+  writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  renameSync: (...args: unknown[]) => mockRenameSync(...args),
+  rmSync: vi.fn(),
 }));
 
 // --- Mock stream pipeline ---
@@ -1278,6 +1285,23 @@ describe('Updater', () => {
       expect(message).toContain('stage=unknown');
       expect(message).not.toContain('register-denied');
       expect(message).not.toContain('stale evidence');
+    });
+
+    it('writes a timeout breadcrumb when restart-collector is killed', async () => {
+      failRestartWith(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const payload = mockWriteFileSync.mock.calls
+        .map((call) => String(call[1] ?? ''))
+        .find((text) => text.includes('"stage"'));
+      expect(payload).toBeTruthy();
+      expect(JSON.parse(payload as string).stage).toBe('timeout');
+      expect(JSON.parse(payload as string).target).toBe('collector');
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=timeout');
     });
 
     it('stays silent when the restart succeeds', async () => {

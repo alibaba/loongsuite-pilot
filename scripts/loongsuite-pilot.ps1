@@ -1623,11 +1623,14 @@ function Cmd-RestartCollector {
                     $detail = "Install-CollectorTask declined: collector-daemon.js missing under $BOOTSTRAP_DIR"
                     Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
                 } else {
-                    # Registration succeeded: this install is now managed. Skip the
-                    # background fallback even if wait fails -- otherwise empty/unknown
-                    # init_type would start a second unmanaged daemon next to the task.
-                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    # Registration succeeded: this install is now managed. Flip in-memory
+                    # type first so a Set-Content failure cannot fall through to background.
                     $initType = "taskscheduler"
+                    try {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    } catch {
+                        # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
+                    }
                     Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
                     if (Wait-ForCollectorHeartbeat 20) {
                         Write-Host "collector self-healed: registered with Task Scheduler"
@@ -1806,8 +1809,12 @@ function Cmd-RestartUpdater {
                     $detail = "Install-UpdaterTask declined: updater-daemon.js missing under $BOOTSTRAP_DIR"
                     Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
                 } else {
-                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
                     $initType = "taskscheduler"
+                    try {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    } catch {
+                        # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
+                    }
                     Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
                     if (Wait-ForUpdaterAlive) {
                         Write-Host "updater self-healed: registered with Task Scheduler"
