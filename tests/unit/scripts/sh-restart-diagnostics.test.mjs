@@ -80,6 +80,13 @@ describe('restart commands report every failure path', () => {
     expect(clearAt, 'cmd_restart_updater does not clear the updater breadcrumb').toBeGreaterThan(-1);
     expect(body.indexOf('write_restart_failure')).toBeGreaterThan(clearAt);
   });
+
+  it('cmd_restart_updater waits for a new pid, not the process it just signalled', () => {
+    const body = bodyOf('cmd_restart_updater');
+    expect(body).toContain('_old_pid=$(find_current_user_processes updater');
+    const waits = [...body.matchAll(/wait_for_updater_process \d+ "\$_old_pid"/g)];
+    expect(waits.length, 'every updater wait must exclude the pre-stop pid').toBeGreaterThan(2);
+  });
 });
 
 describe('restart commands verify the process actually came up', () => {
@@ -114,6 +121,27 @@ describe('restart commands verify the process actually came up', () => {
     const body = bodyOf('wait_for_updater_process');
     expect(body).toContain('find_current_user_processes updater');
     expect(body).not.toContain('updater_process_exists');
+    expect(body).toContain('exclude_pid');
+    expect(body).toContain('"$pid" != "$exclude_pid"');
+  });
+
+  it('wait_for_collector_process is read-only and does not call is_running', () => {
+    // is_running rm's a pid file whose cmdline has not yet become collector-daemon.js.
+    // A wait loop would do that up to timeout times. Probe with kill -0 /
+    // process_matches_installed_entry; stale cleanup stays in stop/status.
+    const body = bodyOf('wait_for_collector_process');
+    expect(body).not.toContain('is_running');
+    expect(body).not.toMatch(/\brm\b/);
+    expect(body).not.toMatch(/\bmv\b/);
+    expect(body).toContain('process_matches_installed_entry');
+    expect(body).toContain('find_installed_collector_pid');
+  });
+
+  it('stop_installed_updater_processes waits and SIGKILLs, matching stop_pid_file', () => {
+    const body = bodyOf('stop_installed_updater_processes');
+    expect(body).toContain('kill -0');
+    expect(body).toContain('kill -9');
+    expect(body).toMatch(/count.*-lt 10/);
   });
 });
 
@@ -138,6 +166,10 @@ describe('self-heal is reachable on a managed install', () => {
         body.slice(selfHealAt, fallbackAt).includes('$init_type'),
         `${fn}: the self-heal branch still consults $init_type`,
       ).toBe(false);
+      expect(
+        body.slice(selfHealAt, fallbackAt).includes('init_type="$_new_init"'),
+        `${fn}: self-heal must mark init_type managed so wait failure cannot nohup`,
+      ).toBe(true);
     });
 
     it(`${fn}: the unmanaged nohup fallback stays gated`, () => {

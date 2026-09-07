@@ -257,11 +257,25 @@ EOF
 # Bounded waits, replacing a single check one second after asking the service manager to
 # start: one second is not always enough for node to publish its pid file, and a false
 # "not running" verdict used to end in an unexplained restart failure.
+#
+# Read-only: is_running deletes a pid file whose cmdline has not yet become
+# collector-daemon.js, and wait would then fire that up to timeout times. Probe with
+# kill -0 / process_matches_installed_entry; stale-pid cleanup stays in stop/status.
 wait_for_collector_process() {
     local timeout="${1:-15}"
     local i=0
+    local pid=""
     while [ "$i" -lt "$timeout" ]; do
-        if is_running >/dev/null 2>&1; then return 0; fi
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE" 2>/dev/null || true)
+            if process_matches_installed_entry "$pid" collector; then
+                return 0
+            fi
+        fi
+        pid=$(find_installed_collector_pid)
+        if process_matches_installed_entry "$pid" collector; then
+            return 0
+        fi
         sleep 1
         i=$((i + 1))
     done
@@ -270,6 +284,7 @@ wait_for_collector_process() {
 
 wait_for_updater_process() {
     local timeout="${1:-15}"
+    local exclude_pid="${2:-}"
     local i=0
     local pid=""
     while [ "$i" -lt "$timeout" ]; do
@@ -279,11 +294,13 @@ wait_for_updater_process() {
         # whose registration silently did nothing still reported "self-healed", because the
         # real updater of this account was running. find_current_user_processes matches this
         # install's exact bootstrap path, so it cannot be fooled that way.
+        # exclude_pid is the process that was alive before stop: SIGTERM may not have
+        # finished, and accepting that pid would report a successful restart of the old one.
         pid=$(find_current_user_processes updater | head -n 1 || true)
         if [ -z "$pid" ]; then
             pid=$(find_current_user_processes updater-wrapper | head -n 1 || true)
         fi
-        if [ -n "$pid" ]; then return 0; fi
+        if [ -n "$pid" ] && [ "$pid" != "$exclude_pid" ]; then return 0; fi
         sleep 1
         i=$((i + 1))
     done
@@ -507,13 +524,37 @@ stop_installed_collector_processes() {
 stop_installed_updater_processes() {
     local pid
     local kind
+    local pids=""
     while read -r pid kind; do
         [ -n "$pid" ] || continue
-        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
+        if process_matches_installed_entry "$pid" "$kind"; then
+            kill "$pid" 2>/dev/null || true
+            pids="$pids $pid"
+        fi
     done < <({
         find_current_user_processes updater-wrapper | while read -r pid; do echo "$pid updater-wrapper"; done
         find_current_user_processes updater | while read -r pid; do echo "$pid updater"; done
     } | sort -u)
+
+    [ -n "$pids" ] || return 0
+
+    local count=0
+    local still
+    local p
+    while [ "$count" -lt 10 ]; do
+        still=false
+        for p in $pids; do
+            if kill -0 "$p" 2>/dev/null; then
+                still=true
+            fi
+        done
+        [ "$still" = true ] || return 0
+        sleep 1
+        count=$((count + 1))
+    done
+    for p in $pids; do
+        kill -9 "$p" 2>/dev/null || true
+    done
 }
 
 is_pid_file_running() {
@@ -1093,6 +1134,9 @@ start_collector_after_stop() {
             _detail="no usable init system detected for self-heal"
             echo "⚠️  self-heal skipped: no usable init system detected" >&2
         elif autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
+            # Registration succeeded: remember the managed type in-memory so a wait
+            # failure cannot fall through to nohup and start a second unmanaged daemon.
+            init_type="$_new_init"
             if wait_for_collector_process 20; then
                 echo "✅ collector self-healed: registered as $_new_init"
                 _restarted=true
@@ -1235,6 +1279,12 @@ cmd_restart_updater() {
     local _detail="no restart path succeeded"
     local _err=""
 
+    local _old_pid=""
+    _old_pid=$(find_current_user_processes updater | head -n 1 || true)
+    if [ -z "$_old_pid" ]; then
+        _old_pid=$(find_current_user_processes updater-wrapper | head -n 1 || true)
+    fi
+
     # Stop updater via service manager
     case "$(uname -s)" in
         Darwin)
@@ -1332,7 +1382,7 @@ cmd_restart_updater() {
     # Verify the service manager actually started the updater process. Bounded poll
     # instead of a single check after one second.
     if [ "$_restarted" = true ]; then
-        if ! wait_for_updater_process 15; then
+        if ! wait_for_updater_process 15 "$_old_pid"; then
             _stage="not-running-after-start"
             _detail="service manager reported success but no updater process appeared within 15s"
             echo "⚠️  service manager reported success but updater process not found" >&2
@@ -1350,7 +1400,8 @@ cmd_restart_updater() {
             _detail="no usable init system detected for self-heal"
             echo "⚠️  self-heal skipped: no usable init system detected" >&2
         elif autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
-            if wait_for_updater_process 15; then
+            init_type="$_new_init"
+            if wait_for_updater_process 15 "$_old_pid"; then
                 echo "✅ updater self-healed: registered as $_new_init"
                 _restarted=true
             else
@@ -1397,7 +1448,7 @@ cmd_restart_updater() {
         esac
     fi
 
-    if ! wait_for_updater_process 10; then
+    if ! wait_for_updater_process 10 "$_old_pid"; then
         write_restart_failure updater "not-running-after-start" \
             "no updater process found after the restart sequence completed (stage reached: $_stage)"
         echo "❌ updater process not found after restart" >&2

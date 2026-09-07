@@ -15,6 +15,7 @@ import {
   readRestartFailure,
   sanitizeAlarmText,
   summarizeRestartFailure,
+  writeRestartFailure,
 } from '../utils/restart-breadcrumb.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from '../updater/runtime-state.js';
 
@@ -120,6 +121,8 @@ export class UpdaterWatchdog {
   private sleepWakeGraceUntil = 0;
   private lastRestartAt = 0;
   private checking = false;
+  private stopping = false;
+  private restartAbort: AbortController | null = null;
 
   constructor(opts: UpdaterWatchdogOptions) {
     this.enabled = opts.enabled;
@@ -146,6 +149,7 @@ export class UpdaterWatchdog {
     }
     this.startedAt = Date.now();
     this.lastTickAt = 0;
+    this.stopping = false;
     logger.info('updater-watchdog started', {
       intervalMs: this.intervalMs,
       staleHeartbeatMs: this.staleHeartbeatMs,
@@ -157,9 +161,13 @@ export class UpdaterWatchdog {
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+    this.stopping = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.restartAbort?.abort();
+    this.restartAbort = null;
   }
 
   async runCheck(): Promise<UpdaterWatchdogResult> {
@@ -286,6 +294,8 @@ export class UpdaterWatchdog {
 
     this.lastRestartAt = now;
     const attemptStartedAt = now;
+    const abort = new AbortController();
+    this.restartAbort = abort;
     try {
       const result = process.platform === 'win32'
         ? await execFileAsync('powershell.exe', [
@@ -298,9 +308,11 @@ export class UpdaterWatchdog {
         ], {
           timeout: COMMAND_TIMEOUT_MS,
           windowsHide: true,
+          signal: abort.signal,
         })
         : await execFileAsync(this.loongsuitePilotBin, ['restart-updater'], {
           timeout: COMMAND_TIMEOUT_MS,
+          signal: abort.signal,
         });
       // Even a successful restart is worth its transcript: the script reports which
       // recovery path it had to take (plain start, re-register, self-heal), and a
@@ -313,10 +325,22 @@ export class UpdaterWatchdog {
       });
       return { status: 'restart-attempted', reason, restarted: true };
     } catch (err) {
+      if (this.stopping) {
+        logger.info('updater-watchdog restart aborted by stop');
+        return { status: 'restart-failed', reason: 'aborted by stop', restarted: false };
+      }
       const detail = describeRestartCommandError(err);
       // Freshness matters more than presence: a script that never ran (powershell.exe
       // missing, child killed before its first statement) would otherwise be "explained"
       // by whatever the previous attempt left on disk.
+      if (isRestartCommandTimeout(err)) {
+        // The script entry cleared the file; a killed wait never writes one. Persist
+        // stage=timeout so cooldown SERVICE_NOT_RUNNING_ALARM still has a live explanation.
+        writeRestartFailure(this.dataDir, 'updater', {
+          stage: 'timeout',
+          detail: 'restart command killed by timeout before it reported a stage',
+        });
+      }
       const breadcrumb = await this.readRestartFailure(attemptStartedAt);
       const diagnosis = breadcrumb
         ? summarizeRestartFailure(breadcrumb)
@@ -333,6 +357,8 @@ export class UpdaterWatchdog {
         diag: breadcrumb?.diag,
       });
       return { status: 'restart-failed', reason: message, restarted: false };
+    } finally {
+      if (this.restartAbort === abort) this.restartAbort = null;
     }
   }
 

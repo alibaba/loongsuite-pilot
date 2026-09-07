@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   clearRestartFailure,
+  coerceRestartDiag,
   describeRestartCommandError,
   isRestartCommandTimeout,
   isRestartFailureFresh,
@@ -11,6 +12,7 @@ import {
   restartFailurePath,
   sanitizeAlarmText,
   summarizeRestartFailure,
+  writeRestartFailure,
   type RestartFailureBreadcrumb,
 } from '../../../src/utils/restart-breadcrumb.js';
 
@@ -83,6 +85,55 @@ describe('restart-breadcrumb reader', () => {
   it('places the file under logs/ per target', () => {
     expect(restartFailurePath('/d', 'updater')).toBe(path.join('/d', 'logs', 'last-restart-failure-updater.json'));
     expect(restartFailurePath('/d', 'collector')).toBe(path.join('/d', 'logs', 'last-restart-failure-collector.json'));
+  });
+
+  it('maps 5.1 Key/Value arrays and ignores nested objects', () => {
+    expect(coerceRestartDiag([
+      { Key: 'definition_owner', Value: 'BUILTIN\\Administrators' },
+      { key: 'task_state', value: 'Ready' },
+    ])).toEqual({
+      definition_owner: 'BUILTIN\\Administrators',
+      task_state: 'Ready',
+    });
+    expect(coerceRestartDiag({ task_state: 'Ready' })).toEqual({ task_state: 'Ready' });
+    expect(coerceRestartDiag(null)).toBeUndefined();
+  });
+
+  it('coerces the 5.1 ConvertTo-Json nested-hashtable shape into a string map', async () => {
+    // Windows PowerShell 5.1 serializes `@{ diag = @{ definition_owner = "..." } }` as
+    // `"diag": [{ "Key": "...", "Value": "..." }, ...]`. CI writes JSON.stringify objects,
+    // so this fixture is the only thing that pins the real on-box shape.
+    writeBreadcrumb('updater', {
+      schema: 1,
+      ts: 1_700_000_000,
+      target: 'updater',
+      stage: 'register-denied',
+      init_type: 'taskscheduler',
+      detail: 'Access is denied.',
+      diag: [
+        { Key: 'definition_owner', Value: 'BUILTIN\\Administrators' },
+        { Key: 'task_state', Value: 'Ready' },
+        { Key: 'exists_schtasks', Value: 'yes' },
+      ],
+    });
+
+    const bc = await readRestartFailure(dataDir, 'updater');
+    expect(bc?.diag?.definition_owner).toBe('BUILTIN\\Administrators');
+    expect(bc?.diag?.task_state).toBe('Ready');
+    const summary = summarizeRestartFailure(bc!);
+    expect(summary).toContain('definition_owner="BUILTIN\\Administrators"');
+    expect(summary).toContain('task_state="Ready"');
+    expect(summary).not.toContain('[object Object]');
+  });
+
+  it('writeRestartFailure persists a timeout breadcrumb the cooldown alarm can read', async () => {
+    writeRestartFailure(dataDir, 'updater', {
+      stage: 'timeout',
+      detail: 'restart command killed by timeout before it reported a stage',
+    });
+    const bc = await readRestartFailure(dataDir, 'updater');
+    expect(bc?.stage).toBe('timeout');
+    expect(summarizeRestartFailure(bc!)).toContain('stage=timeout');
   });
 });
 

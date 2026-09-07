@@ -555,6 +555,73 @@ describe('UpdaterWatchdog', () => {
       .find((a) => a.alarm_message.includes('restart command failed'))?.alarm_message ?? '';
     expect(message).toContain('stage=timeout');
     expect(message).toContain('killed=true signal=SIGTERM');
+
+    const breadcrumbFile = path.join(tmpDir, 'logs', 'last-restart-failure-updater.json');
+    const written = JSON.parse(await fs.readFile(breadcrumbFile, 'utf-8'));
+    expect(written.stage).toBe('timeout');
+  });
+
+  it('attaches the timeout breadcrumb to cooldown SERVICE_NOT_RUNNING_ALARM', async () => {
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        return Promise.reject(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      restartCooldownMs: 60_000,
+      alarmManager: alarms,
+    });
+
+    expect((await wd.runCheck()).status).toBe('restart-failed');
+    expect((await wd.runCheck()).status).toBe('restart-rate-limited');
+    const service = alarms.serialize()
+      .filter((a) => a.alarm_type === 'SERVICE_NOT_RUNNING_ALARM')
+      .pop()?.alarm_message ?? '';
+    expect(service).toContain('last_restart_failure: stage=timeout');
+  });
+
+  it('aborts an in-flight restart on stop without recording a failure alarm', async () => {
+    let seenSignal: AbortSignal | undefined;
+    let commandStarted!: () => void;
+    const commandStartedP = new Promise<void>((resolve) => {
+      commandStarted = resolve;
+    });
+    mockExecFileAsync.mockImplementation((cmd: string, _args?: unknown, opts?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        seenSignal = opts?.signal;
+        commandStarted();
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' }));
+          });
+        });
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    const pending = wd.runCheck();
+    await commandStartedP;
+    wd.stop();
+    const result = await pending;
+
+    expect(seenSignal?.aborted).toBe(true);
+    expect(result.status).toBe('restart-failed');
+    expect(result.reason).toBe('aborted by stop');
+    expect(alarms.serialize().filter((a) => a.alarm_type === 'UPDATER_FAILURE_ALARM')).toEqual([]);
   });
 
   it('attaches the previous restart failure to the alarm raised before this restart', async () => {

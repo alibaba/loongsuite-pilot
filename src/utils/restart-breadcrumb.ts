@@ -86,7 +86,7 @@ export async function readRestartFailure(
 ): Promise<RestartFailureBreadcrumb | null> {
   const parsed = await readJsonFile<RestartFailureBreadcrumb>(restartFailurePath(dataDir, target));
   if (!parsed || parsed.schema !== 1 || !parsed.stage) return null;
-  return parsed;
+  return { ...parsed, diag: coerceRestartDiag(parsed.diag) };
 }
 
 /**
@@ -100,6 +100,71 @@ export function clearRestartFailure(dataDir: string, target: RestartTarget): voi
   } catch {
     // best-effort
   }
+}
+
+/**
+ * Persists a breadcrumb from the node caller. Used when the service script was
+ * killed before it could write one (timeout) so cooldown alarms still have a stage.
+ * Best-effort: diagnostics must never throw into recovery.
+ */
+export function writeRestartFailure(
+  dataDir: string,
+  target: RestartTarget,
+  fields: {
+    stage: string;
+    init_type?: string;
+    detail?: string;
+    diag?: Record<string, string>;
+  },
+): void {
+  try {
+    const breadcrumb: RestartFailureBreadcrumb = {
+      schema: 1,
+      ts: Math.floor(Date.now() / 1000),
+      target,
+      stage: fields.stage,
+      init_type: fields.init_type,
+      detail: fields.detail,
+      diag: fields.diag,
+    };
+    const file = restartFailurePath(dataDir, target);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(breadcrumb, null, 2)}\n`, 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * PowerShell 5.1 ConvertTo-Json emits a nested hashtable as [{Key, Value}, ...].
+ * Accept that shape (and a normal object) so definition_owner still reaches the alarm.
+ */
+export function coerceRestartDiag(raw: unknown): Record<string, string> | undefined {
+  if (raw == null) return undefined;
+  if (Array.isArray(raw)) {
+    const out: Record<string, string> = {};
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const key = rec.Key ?? rec.key;
+      const value = rec.Value ?? rec.value;
+      if (typeof key === 'string' && key.length > 0) {
+        out[key] = value == null ? '' : String(value);
+      }
+    }
+    return out;
+  }
+  if (typeof raw === 'object') {
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (value == null || typeof value === 'object') continue;
+      out[key] = String(value);
+    }
+    return out;
+  }
+  return undefined;
 }
 
 /**

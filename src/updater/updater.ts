@@ -21,6 +21,7 @@ import {
   isRestartFailureFresh,
   readRestartFailure,
   summarizeRestartFailure,
+  writeRestartFailure,
   type RestartFailureBreadcrumb,
 } from '../utils/restart-breadcrumb.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
@@ -1223,6 +1224,12 @@ export class Updater {
     breadcrumb: RestartFailureBreadcrumb | null;
   }> {
     const detail = describeRestartCommandError(err);
+    if (isRestartCommandTimeout(err)) {
+      writeRestartFailure(this.paths.dataDir, 'collector', {
+        stage: 'timeout',
+        detail: 'restart command killed by timeout before it reported a stage',
+      });
+    }
     let breadcrumb: RestartFailureBreadcrumb | null = null;
     try {
       breadcrumb = await readRestartFailure(this.paths.dataDir, 'collector');

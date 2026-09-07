@@ -154,16 +154,23 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
   和下游 SLS 配置不动。
 - 启动确认是**有界轮询**（`Wait-ForUpdaterAlive` / `wait_for_updater_process`），不是 `Start-Sleep 1`
   加一次探测 —— 一秒不够 `wscript.exe` → node 落 pid 文件，而这个误判在 `init_type=taskscheduler` 上是
-  终局判决。node 侧的命令超时因此提到 90s：30s 会在脚本诊断到一半时把它杀掉，亲手毁掉证据。
-- 自愈不再看 `init_type`；但 background/nohup 兜底**仍然**只对 `background|unknown|""` 开放（托管装机上
+  终局判决。updater 的 wait **只认本 install 的 pid 存活**，不许把 task `State=Running` 当进程已起来；
+  Stop 之后先等到 State 离开 Running 再 Start。Unix collector wait 只做 `kill -0` /
+  `process_matches_installed_entry`，禁止经 `is_running` 删 pid。Unix updater wait 必须是新 pid
+  （记录 stop 前 pid）。node 侧的命令超时因此提到 90s：30s 会在脚本诊断到一半时把它杀掉，亲手毁掉证据。
+  超时由 node 自己写 `stage=timeout` 面包屑；`UpdaterWatchdog.stop()` 必须 abort 进行中的 child。
+- 自愈不再看 `init_type`；注册一旦成功就把内存中的类型标成托管并跳过 background/nohup，wait 失败走
+  `selfheal-not-running`。background/nohup 兜底**仍然**只对 `background|unknown|""` 开放（托管装机上
   它不是修复，是一个游离于服务管理器之外、会在下次注销时死掉的第二个 daemon），跳过时要上报，不许静默。
+- Windows 5.1 的 `ConvertTo-Json` 把嵌套 hashtable 编成 `{Key,Value}[]`。writer 手写 `diag` JSON object
+  （CLM 继续用 hashtable，禁止 `[pscustomobject]`）；reader 把那种数组收成 `Record<string,string>`。
 
 | 测试 | 约束 |
 |------|------|
-| `tests/unit/scripts/ps1-restart-diagnostics.test.mjs` | `.ps1`：每个 `Write-Error` 之前都有 `Write-RestartFailure`；两个入口都先 `Clear-RestartFailure`；每个 `Start-ScheduledTask` 后面跟着等待；自愈块不提 `$initType` 而兜底仍然门禁；写文件带 `-Encoding UTF8` + `Move-Item`；诊断只读（不碰会删 pid 文件的 `Test-PidRunning`）；`schtasks` 交叉校验保持 prevEAP/`2>&1`/`$LASTEXITCODE` 那套写法 |
-| `tests/unit/scripts/sh-restart-diagnostics.test.mjs` | `.sh` 对称版，外加 `set -euo pipefail` 的两个坑（可能空手而归的探针必须自己 `\|\| true`）、手写 JSON 的每个插值都过 `json_escape`、面包屑路径与 node 侧 `restartFailurePath()` 对齐 |
+| `tests/unit/scripts/ps1-restart-diagnostics.test.mjs` | `.ps1`：每个 `Write-Error` 之前都有 `Write-RestartFailure`；两个入口都先 `Clear-RestartFailure`；每个 `Start-ScheduledTask` 后面跟着等待；自愈块不门禁 `$initType` 但注册成功会标成 `taskscheduler`；兜底仍然门禁；写文件带 `-Encoding UTF8` + `Move-Item`，diag 手写 JSON object 而不是嵌套 `ConvertTo-Json`；`Wait-ForUpdaterAlive` 只认 pid；诊断只读（不碰会删 pid 文件的 `Test-PidRunning`）；`schtasks` 交叉校验保持 prevEAP/`2>&1`/`$LASTEXITCODE` 那套写法 |
+| `tests/unit/scripts/sh-restart-diagnostics.test.mjs` | `.sh` 对称版，外加 `set -euo pipefail` 的两个坑（可能空手而归的探针必须自己 `\|\| true`）、手写 JSON 的每个插值都过 `json_escape`、面包屑路径与 node 侧 `restartFailurePath()` 对齐；`wait_for_collector_process` 不得调用 `is_running`/`rm`；updater wait 排除 stop 前 pid |
 | `tests/unit/scripts/ps1-restart-best-effort.test.mjs` | 被拒的重新注册不许跳过 `Start-ScheduledTask`（两个独立 try） |
-| `tests/unit/utils/restart-breadcrumb.test.ts` | 带 BOM 能读、未知 schema/截断文件返回 null、新鲜度窗口、摘要长度预算与引号换行清洗 |
+| `tests/unit/utils/restart-breadcrumb.test.ts` | 带 BOM 能读、未知 schema/截断文件返回 null、新鲜度窗口、摘要长度预算与引号换行清洗；5.1 `{Key,Value}[]` 能被收成 `definition_owner`；timeout writer 落盘 |
 
 ## 快速入口
 

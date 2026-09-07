@@ -120,10 +120,15 @@ describe('self-heal is reachable on a taskscheduler install', () => {
       const fallbackAt = body.indexOf('if ($initType -in @(');
       expect(selfHealAt, `${fn} has no self-heal branch`).toBeGreaterThan(-1);
       expect(fallbackAt, `${fn} has no init_type-gated fallback`).toBeGreaterThan(selfHealAt);
+      const selfHeal = body.slice(selfHealAt, fallbackAt);
       expect(
-        body.slice(selfHealAt, fallbackAt).includes('$initType'),
-        `${fn}: the self-heal branch still consults $initType`,
+        /if \(\$initType/.test(selfHeal),
+        `${fn}: the self-heal branch still gates on $initType`,
       ).toBe(false);
+      expect(
+        selfHeal.includes('$initType = "taskscheduler"'),
+        `${fn}: self-heal must mark $initType managed so wait failure cannot nohup/background`,
+      ).toBe(true);
     });
 
     it(`${fn}: the unmanaged background fallback stays gated`, () => {
@@ -145,7 +150,8 @@ describe('the breadcrumb writer is safe for the reader', () => {
     // Set-Content defaults to the ANSI codepage while node reads UTF-8: a localized
     // Windows message or a non-ASCII account name would arrive as mojibake.
     expect(writer).toContain('-Encoding UTF8');
-    expect(writer).toContain('ConvertTo-Json');
+    expect(writer).toContain('ConvertTo-RestartFailureJson');
+    expect(writer).not.toContain('ConvertTo-Json');
     expect(writer).toMatch(/Move-Item -LiteralPath \$tmp -Destination \$file -Force/);
   });
 
@@ -162,6 +168,18 @@ describe('the breadcrumb writer is safe for the reader', () => {
     expect(writer).not.toContain('pscustomobject');
     expect(writer).not.toContain('New-Object');
     expect(bodyOf('Get-RestartDiagnostics')).not.toContain('pscustomobject');
+    expect(bodyOf('ConvertTo-RestartFailureJson')).not.toContain('pscustomobject');
+  });
+
+  it('hand-writes diag as a JSON object, not nested ConvertTo-Json', () => {
+    // 5.1 ConvertTo-Json emits a nested hashtable as [{Key, Value}, ...]. The alarm
+    // renderer would then lose definition_owner / task_state. Writer must emit
+    // `"key": "value"` pairs the same way the .sh json_escape path does.
+    const json = bodyOf('ConvertTo-RestartFailureJson');
+    expect(json).not.toContain('ConvertTo-Json');
+    expect(json).toContain('Escape-RestartJsonString');
+    expect(json).toContain('"diag": {');
+    expect(json).toContain('": "');
   });
 
   it('collects diagnostics read-only', () => {
@@ -267,6 +285,25 @@ describe('wait loops do not delete pid files', () => {
       expect(body).toContain('Test-PidAlive');
       expect(body).not.toContain('Test-PidRunning');
       expect(body).not.toContain('Remove-Item');
+    });
+  }
+
+  it('Wait-ForUpdaterAlive does not treat task Running as the process being up', () => {
+    const body = bodyOf('Wait-ForUpdaterAlive');
+    expect(body).not.toContain('Get-TaskRunning');
+    expect(body).toContain('Test-PidAlive $UPDATER_PID_FILE');
+  });
+
+  for (const { fn, task } of [
+    { fn: 'Cmd-RestartCollector', task: 'TASK_NAME_COLLECTOR' },
+    { fn: 'Cmd-RestartUpdater', task: 'TASK_NAME_UPDATER' },
+  ]) {
+    it(`${fn}: Stop-ScheduledTask waits for State to leave Running before Start`, () => {
+      const body = bodyOf(fn);
+      const stopAt = body.indexOf('Stop-ScheduledTask');
+      expect(stopAt, `${fn} does not stop the task`).toBeGreaterThan(-1);
+      const window = body.slice(stopAt, stopAt + 400);
+      expect(window).toContain(`Wait-ForTaskNotRunning $${task}`);
     });
   }
 });

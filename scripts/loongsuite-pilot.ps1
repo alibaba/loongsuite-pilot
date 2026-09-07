@@ -321,7 +321,8 @@ function Test-PidRunning {
 
 # Read-only cousin of Test-PidRunning. Wait loops must not delete the pid file: a
 # successor can write a new pid between the probe and the Remove-Item, and Unix
-# wait_for_* is already read-only (kill -0). Stale-pid cleanup stays in Stop-PidFile.
+# wait_for_* is read-only (kill -0 / process_matches_installed_entry). Stale-pid
+# cleanup stays in Stop-PidFile.
 function Test-PidAlive {
     param([string]$pidFile)
     if (-not (Test-Path $pidFile)) { return $false }
@@ -608,13 +609,30 @@ function Wait-ForCollectorHeartbeat {
     return $false
 }
 
+# Task State=Running is not liveness. Start-ScheduledTask makes the task Running as
+# soon as wscript is up, before node has written a pid; Stop-ScheduledTask also leaves
+# State=Running until the old instance actually exits. Collector wait uses a pid check
+# (Get-CollectorRuntime / Test-PidAlive); updater must do the same.
 function Wait-ForUpdaterAlive {
     param([int]$TimeoutSeconds = 15)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if ((Get-TaskRunning $TASK_NAME_UPDATER) -or (Test-PidAlive $UPDATER_PID_FILE)) {
-            return $true
-        }
+        if (Test-PidAlive $UPDATER_PID_FILE) { return $true }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+# Best-effort: Start-ScheduledTask on a task that is still Running is often a no-op, so
+# restart would "succeed" against the outgoing instance. Mirror the 10s wait in
+# Start-CompatibleExistingCollectorTask. Failure to leave Running is not fatal; the
+# caller still Stop-PidFile / Start.
+function Wait-ForTaskNotRunning {
+    param([string]$TaskName, [int]$TimeoutSeconds = 10)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne "Running") { return $true }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
     return $false
@@ -672,6 +690,53 @@ function Test-AccessDeniedError {
 # would either reject this breadcrumb or accept a stale one.
 function Get-EpochSeconds {
     return [int](((Get-Date).ToUniversalTime() - (Get-Date -Date "1970-01-01 00:00:00")).TotalSeconds)
+}
+
+# 5.1 ConvertTo-Json serializes a nested hashtable as [{Key, Value}, ...], not a JSON
+# object. The reader then Object.keys the array and loses definition_owner / task_state.
+# Hand-write the diag object the way loongsuite-pilot.sh does. Hashtable-only: CLM.
+function Escape-RestartJsonString {
+    param([string]$Value)
+    $s = [string]$Value
+    if (-not $s) { return "" }
+    $s = $s.Replace("`r", " ").Replace("`n", " ").Replace("`t", " ")
+    $s = $s -replace '[\u0000-\u001F]', ''
+    return $s.Replace('\', '\\').Replace('"', '\"')
+}
+
+function ConvertTo-RestartFailureJson {
+    param(
+        [int]$Ts,
+        [string]$Target,
+        [string]$Stage,
+        [string]$InitType,
+        [string]$Detail,
+        [hashtable]$Diag
+    )
+    $diagLines = @()
+    if ($Diag) {
+        foreach ($key in ($Diag.Keys | Sort-Object)) {
+            $k = Escape-RestartJsonString ([string]$key)
+            if (-not $k) { continue }
+            $v = Escape-RestartJsonString ([string]$Diag[$key])
+            $diagLines += '    "' + $k + '": "' + $v + '"'
+        }
+    }
+    $diagBody = $diagLines -join ",`n"
+    $lines = @(
+        '{'
+        '  "schema": 1,'
+        ('  "ts": ' + $Ts + ',')
+        ('  "target": "' + (Escape-RestartJsonString $Target) + '",')
+        ('  "stage": "' + (Escape-RestartJsonString $Stage) + '",')
+        ('  "init_type": "' + (Escape-RestartJsonString $InitType) + '",')
+        ('  "detail": "' + (Escape-RestartJsonString $Detail) + '",')
+        '  "diag": {'
+        $diagBody
+        '  }'
+        '}'
+    )
+    return ($lines -join "`n")
 }
 
 # Everything worth knowing about why a restart did not take, as a flat string map
@@ -839,11 +904,20 @@ function Write-RestartFailure {
         }
         $file = Get-RestartFailureFile $Target
         $tmp = "$file.tmp"
+        # Hand-written JSON: 5.1 ConvertTo-Json turns a nested hashtable into
+        # [{Key,Value},...], which summarizeRestartFailure cannot read as diag fields.
         # -Encoding UTF8 is mandatory: Set-Content defaults to the ANSI codepage while
         # node reads this as UTF-8, and a non-ASCII account name or localized Windows
         # message in any field would come back mojibake. 5.1 always adds a BOM; the
         # reader goes through readJsonFile, which strips it.
-        ($payload | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $tmp -Encoding UTF8
+        $json = ConvertTo-RestartFailureJson `
+            -Ts ([int]$payload.ts) `
+            -Target ([string]$payload.target) `
+            -Stage ([string]$payload.stage) `
+            -InitType ([string]$payload.init_type) `
+            -Detail ([string]$payload.detail) `
+            -Diag $payload.diag
+        Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8
         Move-Item -LiteralPath $tmp -Destination $file -Force
     } catch {
         Write-Host "[restart-failure] breadcrumb write failed: $($_.Exception.Message)"
@@ -1425,6 +1499,7 @@ function Cmd-RestartCollector {
     $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        Wait-ForTaskNotRunning $TASK_NAME_COLLECTOR | Out-Null
     }
     Stop-PidFile $PID_FILE
 
@@ -1548,9 +1623,13 @@ function Cmd-RestartCollector {
                     $detail = "Install-CollectorTask declined: collector-daemon.js missing under $BOOTSTRAP_DIR"
                     Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
                 } else {
+                    # Registration succeeded: this install is now managed. Skip the
+                    # background fallback even if wait fails -- otherwise empty/unknown
+                    # init_type would start a second unmanaged daemon next to the task.
+                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    $initType = "taskscheduler"
                     Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
                     if (Wait-ForCollectorHeartbeat 20) {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
                         Write-Host "collector self-healed: registered with Task Scheduler"
                         $restarted = $true
                     } else {
@@ -1621,6 +1700,7 @@ function Cmd-RestartUpdater {
     $task = Get-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        Wait-ForTaskNotRunning $TASK_NAME_UPDATER | Out-Null
     }
     Stop-PidFile $UPDATER_PID_FILE
 
@@ -1687,7 +1767,7 @@ function Cmd-RestartUpdater {
                 $restarted = $true
             } else {
                 $stage = "not-running-after-start"
-                $detail = "Start-ScheduledTask returned success but neither the task reached Running nor an updater pid appeared within 15s"
+                $detail = "Start-ScheduledTask returned success but no updater pid appeared within 15s"
                 Write-Host "Task started but no updater came up: $TASK_NAME_UPDATER" -ForegroundColor Yellow
             }
         } catch {
@@ -1699,7 +1779,7 @@ function Cmd-RestartUpdater {
                     $restarted = $true
                 } else {
                     $stage = "not-running-after-start"
-                    $detail = "schtasks /Run returned success but neither the task reached Running nor an updater pid appeared within 15s"
+                    $detail = "schtasks /Run returned success but no updater pid appeared within 15s"
                     Write-Host "Task started via schtasks /Run but no updater came up: $TASK_NAME_UPDATER" -ForegroundColor Yellow
                 }
             } else {
@@ -1726,14 +1806,15 @@ function Cmd-RestartUpdater {
                     $detail = "Install-UpdaterTask declined: updater-daemon.js missing under $BOOTSTRAP_DIR"
                     Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
                 } else {
+                    Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    $initType = "taskscheduler"
                     Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
                     if (Wait-ForUpdaterAlive) {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
                         Write-Host "updater self-healed: registered with Task Scheduler"
                         $restarted = $true
                     } else {
                         $stage = "selfheal-not-running"
-                        $detail = "task re-registered but no updater came up within 15s"
+                        $detail = "task re-registered but no updater pid appeared within 15s"
                         Write-Host "Self-heal registered the task but nothing came up" -ForegroundColor Yellow
                     }
                 }
@@ -1772,7 +1853,7 @@ function Cmd-RestartUpdater {
                     Write-Host "updater restarted (background fallback after stage=$stage : $detail)" -ForegroundColor Yellow
                 } else {
                     Write-RestartFailure -Target "updater" -Stage "not-running-after-start" `
-                        -Detail "background fallback started but neither the task reached Running nor an updater pid appeared within 10s" `
+                        -Detail "background fallback started but no updater pid appeared within 10s" `
                         -Extra $extra
                     Write-Error "Service manager failed to restart updater (init_type=$initType stage=not-running-after-start): background fallback did not come up"
                     return
