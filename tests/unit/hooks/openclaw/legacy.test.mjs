@@ -156,6 +156,9 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     input();
     fire('before_message_write', { message: message('failed', [], 'error') });
     fire('agent_end', { success: false, error: 'provider unavailable' });
+    // Native 3.8 attempt.ts emits the old aggregate synchronously before the
+    // attempt returns and the fallback's next llm_input can run.
+    fire('llm_output', { runId: 'run-1', usage: { output: 99 } });
     input();
     fire('before_message_write', { message: message('fallback') });
     finish();
@@ -164,6 +167,86 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     expect(new Set(responses.map(r => r.trace_id)).size).toBe(2);
     expect(new Set(responses.map(r => r['gen_ai.turn.id'])).size).toBe(2);
     expect(responses[1]['agent.openclaw.run_id']).toBe('run-1');
+  });
+
+  it.each([false, true])('keeps same-millisecond spans positive/contained through clock rollback (tools=%s)', async withTool => {
+    input();
+    handlers.before_message_write({ message: withTool
+      ? message('r1', [{ type: 'toolCall', id: 't', name: 'read', arguments: {} }], 'toolUse')
+      : message('r1') }, ctx);
+    if (withTool) {
+      const tool = { runId: 'run-1', toolCallId: 't', toolName: 'read' };
+      handlers.before_tool_call(tool, ctx);
+      handlers.after_tool_call({ ...tool, durationMs: 0, result: 'ok' }, ctx);
+      handlers.tool_result_persist({ toolCallId: 't', message: { role: 'toolResult', toolCallId: 't', content: [{ type: 'text', text: 'ok' }] } }, ctx);
+    }
+    clock -= 1000;
+    handlers.before_message_write({ message: message('r2') }, ctx);
+    handlers.agent_end({ success: true }, ctx);
+    handlers.llm_output({ runId: 'run-1' }, ctx);
+    const result = await convertEventLogToReadableSpans(records(), { strict: false });
+    const nanos = t => BigInt(t[0]) * 1_000_000_000n + BigInt(t[1]);
+    for (const span of result.spans) {
+      if (['LLM', 'TOOL'].includes(span.attributes['gen_ai.span.kind'])) expect(nanos(span.duration)).toBeGreaterThan(0n);
+      const parent = result.spans.find(s => s.spanContext().spanId === span.parentSpanId);
+      if (parent) {
+        expect(nanos(span.startTime)).toBeGreaterThanOrEqual(nanos(parent.startTime));
+        expect(nanos(span.endTime)).toBeLessThanOrEqual(nanos(parent.endTime));
+      }
+    }
+    expect(result.spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(2);
+  });
+
+  it('seals ambiguous failure as incomplete without assigning native failure to every run', () => {
+    input('one'); input('two');
+    fire('agent_end', { success: false, error: 'private unassigned failure' });
+    const terminal = records().filter(r => r['agent.openclaw.hook'] === 'legacy_cleanup');
+    expect(terminal).toHaveLength(2);
+    for (const r of terminal) {
+      expect(r['gen_ai.turn.end']).toBe(true);
+      expect(r['agent.openclaw.collection.end_reason']).toBe('ambiguous_agent_end');
+      expect(r['agent.openclaw.success']).toBeUndefined();
+      expect(r['error.message']).toBeUndefined();
+    }
+    fire('llm_output', { runId: 'one' }); fire('llm_output', { runId: 'two' });
+    expect(records().filter(r => r['agent.openclaw.hook'] === 'llm_output')).toHaveLength(0);
+    input('three'); fire('before_message_write', { message: message('new') }); finish('three');
+    expect(records().filter(r => r['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
+  it.each([true, false])('cleans owners at session_end before a missing output (sessionKey=%s)', withKey => {
+    input('old');
+    handlers.session_end({ sessionId: ctx.sessionId, ...(withKey ? { sessionKey: ctx.sessionKey } : {}) }, {});
+    input('new'); fire('before_message_write', { message: message('new') }); finish('new');
+    expect(records().filter(r => r['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records().filter(r => r['agent.openclaw.collection.end_reason'] === 'session_end')).toHaveLength(1);
+  });
+
+  it('retains a long active run while hundreds of other sessions finish', () => {
+    input('held');
+    for (let i = 0; i < 210; i++) {
+      const c = { ...ctx, sessionKey: `other-${i}`, sessionId: `session-${i}` };
+      input(`r${i}`, c); finish(`r${i}`, c);
+    }
+    fire('before_message_write', { message: message('held') }); finish('held');
+    expect(records().filter(r => r['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records().find(r => r['event.name'] === 'llm.response')['gen_ai.turn.id']).toBe('held');
+  });
+
+  it('emits bounded incomplete terminals when every cached run is active', () => {
+    for (let i = 0; i < 205; i++) input(`active-${i}`, { ...ctx, sessionKey: `key-${i}`, sessionId: `session-${i}` });
+    const evicted = records().filter(r => r['agent.openclaw.collection.end_reason'] === 'capacity_evicted');
+    expect(evicted).toHaveLength(5);
+    expect(evicted.every(r => r['gen_ai.turn.end'] === true && r['error.type'] === undefined)).toBe(true);
+    fire('llm_output', { runId: 'active-0' });
+    expect(records().filter(r => r['agent.openclaw.hook'] === 'llm_output')).toHaveLength(0);
+  });
+
+  it('expires orphaned state on new traffic with an incomplete terminal', () => {
+    input('old'); clock += 31 * 60_000; input('new');
+    fire('before_message_write', { message: message('new') }); finish('new');
+    expect(records().filter(r => r['agent.openclaw.collection.end_reason'] === 'idle_expired')).toHaveLength(1);
+    expect(records().filter(r => r['event.name'] === 'llm.response')).toHaveLength(1);
   });
 
   it('does not assign session-only persistence to an ambiguous overlapping run', () => {

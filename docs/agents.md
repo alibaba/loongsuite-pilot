@@ -116,10 +116,14 @@ operations. No version argument is needed, and version discovery starts no CLI,
 shell, or package-manager subprocess. It supports executable symlinks (npm/pnpm),
 npm and pnpm global wrappers, enterprise bundle layouts, `OPENCLAW_CLI_PATH`, and
 source containers whose working directory is the OpenClaw package root. Runtime
-`OPENCLAW_SERVICE_VERSION` / `OPENCLAW_BUNDLED_VERSION` are fallback sources only;
-installation-request variables such as `OPENCLAW_VERSION` are not trusted.
+version labels (`OPENCLAW_SERVICE_VERSION`, `OPENCLAW_BUNDLED_VERSION`, and
+`OPENCLAW_VERSION`) alone never authorize installation or schema capabilities.
 Unknown/unsupported versions leave configuration untouched and remain retryable.
 Shared installations must be visible through these paths or runtime metadata.
+Conflicting PATH and source-package installations are rejected. If the Gateway
+starts from a different absolute path, its container launcher must expose that
+same entry as `OPENCLAW_CLI_PATH` (an installation path, not a version override).
+Pilot cannot infer an otherwise invisible Gateway executable from its own PATH.
 
 | Host version | Adapter | `hooks.allowConversationAccess` |
 | --- | --- | --- |
@@ -158,6 +162,16 @@ marked `agent.openclaw.timing.inferred=true` with `agent.openclaw.timing.source`
 These intervals include orchestration overhead and are not precise provider
 latency. TTFT, transport metrics, and retries absent from persistence are omitted.
 Failed legacy runs close at `agent_end` even when `llm_output` never arrives.
+Sub-millisecond inferred intervals are quantized to the converter's 1ms resolution
+and marked `agent.openclaw.timing.quantized_ms=1`; the same logical clock keeps
+subsequent tool/parent boundaries ordered. Observation time is retained separately.
+Completed run state is evicted before active state. Capacity eviction, session end,
+ambiguous failure and orphan expiry (30 minutes of inactivity, checked on new
+input) seal collection with `legacy_cleanup`, `gen_ai.turn.end=true`, and
+`agent.openclaw.collection.incomplete=true`, never a guessed native success/error.
+Structural deduplication has a 64Ki-character/1024-node budget. Oversized messages
+use bounded native response ID/timestamp identity when available; otherwise they
+are still collected without deduplication, never using truncated content hashes.
 If a fallback reuses the native run ID after that attempt is closed, it starts
 a separate turn/trace and retains the original ID in `agent.openclaw.run_id`.
 Missing messages or tokens are not fabricated; for overlapping runs on the same

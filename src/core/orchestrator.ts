@@ -534,7 +534,7 @@ export class Orchestrator extends EventEmitter {
         id: entryId,
         type: 'deploy-detection',
         watchPaths,
-        isAvailable: () => detectAgent(def.detection),
+        isAvailable: () => this.deploymentManager.isAgentDetected(def),
         enabled: () => this.isAgentGatedEnabled(def.id),
         start: async () => {
           logger.info('new agent discovered, deploying', { agentId: def.id });
@@ -640,7 +640,7 @@ export class Orchestrator extends EventEmitter {
             && !(await fileExists(pluginPath))
             && !(await directoryExists(pluginPath))
           ) return false;
-          return detectAgent(def.detection);
+          return this.deploymentManager.isAgentDetected(def);
         },
         check: async () => {
           // Healthy == spec still present in the agent's config file.
@@ -648,6 +648,9 @@ export class Orchestrator extends EventEmitter {
         },
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }

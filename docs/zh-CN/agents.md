@@ -105,9 +105,12 @@ Pilot 支持 OpenClaw `>=2026.3.8`。在写入宿主配置之前，Pilot 使用�
 操作读取选中安装实例的 `package.json`，用户无需传入版本。版本探测不会启动
 OpenClaw、shell、which 或 npm 子进程。支持 npm/pnpm 软链接与全局包装器、
 企业 Bundle、`OPENCLAW_CLI_PATH`，以及工作目录位于 OpenClaw 包根目录的源码容器。
-`OPENCLAW_SERVICE_VERSION` / `OPENCLAW_BUNDLED_VERSION` 只作兜底；
-不采用可能过期的安装请求变量 `OPENCLAW_VERSION`。版本未知或不受支持时不修改配置，
+`OPENCLAW_SERVICE_VERSION`、`OPENCLAW_BUNDLED_VERSION`、`OPENCLAW_VERSION`
+等版本标签不能单独作为安装或配置能力依据。版本未知或不受支持时不修改配置，
 后续部署/修复可以重试。共享安装目录需要通过上述路径或运行时元数据可见。
+PATH 与源码包目录指向不同安装时拒绝注入。若 Gateway 以另一绝对路径启动，
+容器入口需把同一入口传递为 `OPENCLAW_CLI_PATH`（安装路径，不是版本覆盖值）。
+Pilot 无法仅凭自己的 PATH 推断不可见的 Gateway 启动路径。
 
 | 宿主版本 | 采集适配器 | `hooks.allowConversationAccess` |
 | --- | --- | --- |
@@ -147,6 +150,15 @@ run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时�
 `agent.openclaw.correlation.ambiguous=true`，直到冲突的 run 全部结束。
 若 Provider fallback 在失败已收尾后复用 runId，新尝试会使用独立 turn/trace，
 并通过 `agent.openclaw.run_id` 保留原生 ID。
+
+低于 1ms 的推断区间按当前转换器的 1ms 精度量化，并标记
+`agent.openclaw.timing.quantized_ms=1`；后续工具和父级终端使用同一逻辑时钟，
+保持嵌套边界，观测时间单独保留。优先淘汰已结束 run；容量淘汰、session 结束、
+歧义失败或孤立状态过期（空闲 30 分钟，新输入时检查）使用 `legacy_cleanup`
+和 `gen_ai.turn.end=true` 收口，标记 `agent.openclaw.collection.incomplete=true`，
+不猜测模型成功/失败。结构去重限于 64Ki 字符/1024 个节点；超限时优先使用有界的
+原生 responseId/时间戳，无可靠原生标识的超限消息仍采集但不去重，
+不使用截断内容 hash 误合并不同消息。
 
 2026.3.8 已知限制：持久化 Hook 关联需要原生 `sessionKey`，例如 Gateway 会话，
 或 `agent --local --agent main`。只传一个未绑定 Agent/会话存储的新 `--session-id`

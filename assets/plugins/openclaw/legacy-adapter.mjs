@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { boundedMessageFingerprint } from "./legacy-utils.mjs";
 
 /** OpenClaw 2026.3.8 contract:
  * llm_input is run-level; before_message_write owns per-call output/usage.
@@ -8,8 +9,9 @@ import crypto from "node:crypto";
  */
 export function createLegacyHandlers(shared) {
   const states = new WeakMap(); // Lifetime bounded by shared MAX_RUNS eviction.
+  const active = new Map(); // runId -> run; released by completion/session/eviction.
   const owners = new Map(); // session-only hooks must never guess between runs.
-  const nanos = () => `${Date.now()}000000`;
+  const nanos = shared.nowNanos;
   const tagged = (emit, hook, extra = {}) => record => emit({
     ...record,
     "agent.openclaw.compatibility": "legacy",
@@ -20,7 +22,10 @@ export function createLegacyHandlers(shared) {
   function context(event, ctx) {
     const owner = owners.get(event?.sessionKey || ctx?.sessionKey);
     if (!event?.runId && !ctx?.runId && owner?.ambiguous) return null;
-    const run = shared.resolveContextRun(event, ctx);
+    const id = event?.runId || ctx?.runId || owner?.ids.values().next().value;
+    // Late/unknown events must not recreate an evicted shared run object.
+    const run = active.get(id);
+    if (run && states.has(run)) states.get(run).updated = Date.now();
     return run && !run.completed ? { run, ctx: { ...ctx, runId: run.runId } } : null;
   }
 
@@ -30,16 +35,24 @@ export function createLegacyHandlers(shared) {
     if (!match || message?.role !== "assistant") return;
     const state = states.get(match.run);
     if (!state) return;
-    const output = shared.buildAssistantOutputMessagesFromOpenClawMessage(message);
-    if (!output && typeof message.stopReason !== "string" && !message.usage && !message.responseId) return;
+    if (!message.content?.length && typeof message.stopReason !== "string" && !message.usage && !message.responseId) return;
     // Native response ID/timestamp + content distinguish repeated identical text
     // across calls, and suppress duplicate persistence of the same message.
-    const fingerprint = crypto.createHash("sha256").update(shared.safeStringify(message)).digest("hex");
-    if (state.seen.has(fingerprint)) return;
-    state.seen.add(fingerprint);
+    const fingerprint = boundedMessageFingerprint(message);
+    if (fingerprint && state.seen.has(fingerprint)) return;
+    if (fingerprint) state.seen.add(fingerprint);
     if (state.seen.size > 512) state.seen.delete(state.seen.values().next().value);
-    const end = nanos();
+    let end = nanos();
     if (!state.boundary || BigInt(end) < BigInt(state.boundary)) return;
+    // The current GenAI converter floors nanoseconds to whole milliseconds.
+    // Quantize only an otherwise-zero inferred interval, and advance the same
+    // logical clock used by tools/parent terminals so children cannot escape.
+    const quantized = BigInt(end) / 1_000_000n <= BigInt(state.boundary) / 1_000_000n;
+    if (quantized) {
+      end = ((BigInt(state.boundary) / 1_000_000n + 1n) * 1_000_000n).toString();
+      shared.advanceClockTo(end);
+    }
+    const timing = quantized ? { "agent.openclaw.timing.quantized_ms": 1 } : {};
     const source = state.boundarySource;
     shared.handleModelCallStarted({ runId: match.run.runId, provider: message.provider, model: message.model },
       match.ctx, userId, record => {
@@ -48,6 +61,7 @@ export function createLegacyHandlers(shared) {
         match.run.modelCallStartedAtNanos.set(record["gen_ai.step.id"], state.boundary);
         tagged(emit, "before_message_write", {
           time_unix_nano: state.boundary,
+          ...timing,
           "agent.openclaw.timing.inferred": true,
           "agent.openclaw.timing.source": source,
         })(record);
@@ -55,6 +69,7 @@ export function createLegacyHandlers(shared) {
     shared.handleBeforeMessageWrite(event, match.ctx, userId,
       tagged(emit, "before_message_write", {
         time_unix_nano: end,
+        ...timing,
         "agent.openclaw.timing.inferred": true,
         "agent.openclaw.timing.source": source,
       }));
@@ -69,13 +84,29 @@ export function createLegacyHandlers(shared) {
       const match = context(event, ctx);
       if (!match || !states.has(match.run)) return;
       if (!match.run.currentStepCallId) return;
-      fn(event, match.ctx, userId, tagged(emit, hook));
+      fn(event, match.ctx, userId, record => {
+        const start = match.run.toolStartedAtNanos.get(event?.toolCallId);
+        if (record["event.name"] === "tool.result" && start
+          && BigInt(record.time_unix_nano) / 1_000_000n <= BigInt(start) / 1_000_000n) {
+          record = { ...record,
+            time_unix_nano: ((BigInt(start) / 1_000_000n + 1n) * 1_000_000n).toString(),
+            "agent.openclaw.timing.inferred": true,
+            "agent.openclaw.timing.quantized_ms": 1 };
+        }
+        shared.advanceClockTo(record.time_unix_nano);
+        tagged(emit, hook)(record);
+      });
     };
   }
 
   return {
     llm_input(event, ctx, userId, emit, cfg) {
       if (!event?.runId) return;
+      // Lazy bounded expiry is driven by new work, never a live timer keeping
+      // Gateway alive. Expiry emits an incomplete terminal, not a fake failure.
+      for (const run of active.values()) {
+        if (Date.now() - states.get(run).updated > 30 * 60_000) abandon(run, "idle_expired");
+      }
       // sessionId belongs to the event in 3.8; the general context may omit it.
       const fullCtx = { ...ctx, runId: event.runId, sessionId: event.sessionId || ctx?.sessionId };
       const previous = shared.resolveContextRun(event, fullCtx);
@@ -91,17 +122,21 @@ export function createLegacyHandlers(shared) {
       const key = ctx?.sessionKey || event.sessionKey;
       if (key) {
         let owner = owners.get(key);
-        if (!owner || Date.now() - owner.updated > 30 * 60_000) owner = { ids: new Set(), ambiguous: false };
+        if (!owner) owner = { ids: new Set(), ambiguous: false };
         owner.ids.add(run.runId);
         owner.ambiguous ||= owner.ids.size > 1;
         owner.updated = Date.now();
-        if (owner.ids.size > 200) owner.ids.delete(owner.ids.values().next().value);
         owners.delete(key);
         owners.set(key, owner);
-        if (owners.size > 100) owners.delete(owners.keys().next().value);
       }
-      states.set(run, { boundary: nanos(), boundarySource: "llm_input", seen: new Set() });
-      shared.handleBeforeAgentRun(event, fullCtx, userId, tagged(emit, "llm_input"), cfg);
+      active.set(run.runId, run);
+      const state = { boundary: null, boundarySource: "llm_input", seen: new Set(), emit, userId, updated: Date.now() };
+      states.set(run, state);
+      run.onEvict = () => abandon(run, "capacity_evicted");
+      shared.handleBeforeAgentRun(event, fullCtx, userId, record => {
+        state.boundary = record.time_unix_nano;
+        tagged(emit, "llm_input")(record);
+      }, cfg);
     },
     before_message_write: assistant,
     before_tool_call: tool(shared.handleBeforeToolCall, "before_tool_call"),
@@ -120,13 +155,18 @@ export function createLegacyHandlers(shared) {
     },
     agent_end(event, ctx, userId, emit) {
       const match = context(event, ctx);
+      if (!match && event?.success === false) {
+        const owner = owners.get(event?.sessionKey || ctx?.sessionKey);
+        if (owner?.ambiguous) {
+          for (const id of [...owner.ids]) abandon(active.get(id), "ambiguous_agent_end");
+        }
+      }
       if (!match || !states.has(match.run)) return;
       // Failed attempts may never reach llm_output. End them immediately; a
       // later aggregate must not create a second empty trace after flushing.
       shared.handleAgentEnd(event, match.ctx, userId, tagged(emit, "agent_end",
         event?.success === false ? { "gen_ai.turn.end": true } : {}));
       if (event?.success === false) {
-        states.delete(match.run);
         shared.completeRun(match.run);
         release(match.run);
       }
@@ -139,14 +179,41 @@ export function createLegacyHandlers(shared) {
       const ambiguous = owners.get(match.run.sessionKey)?.ambiguous;
       shared.handleLlmOutput(event, match.ctx, userId, tagged(emit, "llm_output",
         ambiguous ? { "agent.openclaw.correlation.ambiguous": true } : {}));
-      states.delete(match.run);
       release(match.run);
     },
     session_start: shared.handleSessionStart,
-    session_end: shared.handleSessionEnd,
+    session_end(event, ctx, userId, emit) {
+      const key = event?.sessionKey || ctx?.sessionKey;
+      const sessionId = event?.sessionId || ctx?.sessionId;
+      for (const run of active.values()) {
+        if ((key && run.sessionKey === key) || (!key && sessionId && run.sessionId === sessionId)) {
+          abandon(run, "session_end");
+        }
+      }
+      shared.handleSessionEnd(event, ctx, userId, emit);
+    },
   };
 
+  function abandon(run, reason) {
+    const state = run && states.get(run);
+    if (!state) return;
+    try {
+      tagged(state.emit, "legacy_cleanup", {
+        "gen_ai.turn.end": true,
+        "agent.openclaw.collection.incomplete": true,
+        "agent.openclaw.collection.end_reason": reason,
+        ...(reason === "ambiguous_agent_end" ? { "agent.openclaw.correlation.ambiguous": true } : {}),
+      })({ ...shared.buildCommonFields(run, run.sessionId, state.userId), "event.name": "other" });
+    } finally {
+      shared.completeRun(run);
+      release(run);
+    }
+  }
+
   function release(run) {
+    states.delete(run);
+    active.delete(run.runId);
+    delete run.onEvict;
     const owner = owners.get(run.sessionKey);
     if (!owner) return;
     owner.ids.delete(run.runId);

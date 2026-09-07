@@ -21,6 +21,9 @@ Pin the Node base image by digest in a release acceptance environment. Exclude
 host `node_modules`, `.git`, evidence and secrets from the Docker build context.
 The adjacent `openclaw-compat.Dockerfile.dockerignore` provides these exclusions
 for Docker BuildKit; use an equivalent explicit `--ignorefile` with Podman.
+The root `.dockerignore` also protects classic Docker contexts. The Dockerfile
+copies only the required source directories; credentials must still stay outside
+the checkout, regardless of builder or ignore-file support.
 
 ## Supply credentials at runtime
 

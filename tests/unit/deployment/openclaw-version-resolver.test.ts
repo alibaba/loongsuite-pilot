@@ -57,6 +57,15 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await pkg('app');
     expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toMatchObject({ version: '2026.3.8' });
   });
+  it('rejects conflicting source-container and PATH installations, but honors a bound launch entry', async () => {
+    const oldEntry = await pkg('gateway', '2026.3.8');
+    const newEntry = await pkg('cli', '2026.6.10');
+    const bin = path.join(root, 'bin');
+    await fs.mkdir(bin); await fs.symlink(newEntry, path.join(bin, 'openclaw'));
+    expect(await resolveOpenClawHost({ PATH: bin }, path.join(root, 'gateway'))).toBeNull();
+    expect(await resolveOpenClawHost({ PATH: bin, OPENCLAW_CLI_PATH: oldEntry }, path.join(root, 'gateway')))
+      .toMatchObject({ version: '2026.3.8', conversationAccess: false });
+  });
   it('does not select another installation or stale environment when the selected package is unsupported', async () => {
     const entry = await pkg('old', '2026.3.2');
     await pkg('new', '2026.5.12');
@@ -76,9 +85,24 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await fs.symlink(path.join(root, 'loop'), path.join(root, 'loop'));
     expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: path.join(root, 'loop') }, root)).toBeNull();
   });
-  it('only accepts recognized runtime version environment variables as a fallback', async () => {
-    expect(await resolveOpenClawHost({ OPENCLAW_SERVICE_VERSION: '2026.3.8' }, root)).toMatchObject({ source: 'env:OPENCLAW_SERVICE_VERSION' });
+  it('never grants installation/schema capabilities from environment versions alone', async () => {
+    for (const key of ['OPENCLAW_SERVICE_VERSION', 'OPENCLAW_BUNDLED_VERSION']) {
+      for (const version of ['2026.3.8', '2026.6.10']) {
+        expect(await resolveOpenClawHost({ [key]: version }, root)).toBeNull();
+      }
+    }
     expect(await resolveOpenClawHost({ OPENCLAW_VERSION: '2026.5.12', npm_package_version: '2026.5.12' }, root)).toBeNull();
+  });
+  it.each(['{broken', ' '.repeat(256 * 1024 + 1)])('checks fixed sibling packages after unidentified wrapper metadata fails (%#)', async content => {
+    const entry = await pkg('wrapper', '1.0.0', 'wrapper');
+    await fs.writeFile(path.join(root, 'wrapper/package.json'), content);
+    await pkg('wrapper/node_modules/openclaw');
+    expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry }, root)).toMatchObject({ version: '2026.3.8' });
+  });
+  it('does not bypass a confirmed unsupported OpenClaw package via a nested candidate', async () => {
+    const entry = await pkg('wrapper', '2026.3.2');
+    await pkg('wrapper/node_modules/openclaw', '2026.6.10');
+    expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry }, root)).toBeNull();
   });
   it.each([
     ['2026.3.7', null, null], ['2026.3.8-beta.1', null, null],

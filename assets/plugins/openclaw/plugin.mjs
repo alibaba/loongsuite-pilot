@@ -33,6 +33,7 @@ import crypto from "node:crypto";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
+import { createObservationClock } from "./legacy-utils.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -146,8 +147,9 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+let legacyClock;
 function nowNanos() {
-  return `${Date.now()}000000`;
+  return legacyClock ? legacyClock() : `${Date.now()}000000`;
 }
 
 function completionNanos(startNanos, durationMs) {
@@ -452,11 +454,14 @@ function getRun(runId, event, ctx) {
     bindSessionRun(sessionKey, runId);
   }
   if (runs.size > MAX_RUNS) {
-    const oldest = runs.keys().next().value;
+    // Completed tombstones must not evict a long-running active turn.
+    const oldest = [...runs].find(([, run]) => run.completed)?.[0] ?? runs.keys().next().value;
+    const evicted = runs.get(oldest);
     runs.delete(oldest);
     for (const [key, value] of sessionRunIds) {
       if (value === oldest) sessionRunIds.delete(key);
     }
+    evicted?.onEvict?.();
   }
   return r;
 }
@@ -557,7 +562,7 @@ function buildCommonFields(run, sessionId, userId) {
   const resolvedUserId = run?.userId || userId;
   const base = {
     time_unix_nano: nowNanos(),
-    observed_time_unix_nano: nowNanos(),
+    observed_time_unix_nano: legacyClock ? legacyClock.observed() : nowNanos(),
     "event.id": crypto.randomUUID(),
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
@@ -1377,7 +1382,9 @@ export default {
     };
 
     if (capabilities.adapter === "legacy") {
+      legacyClock = createObservationClock();
       const handlers = createLegacyHandlers({
+        nowNanos, buildCommonFields, advanceClockTo: value => legacyClock.advanceTo(value),
         resolveContextRun, safeStringify, buildAssistantOutputMessagesFromOpenClawMessage,
         handleLlmInput, handleBeforeAgentRun, handleModelCallStarted, handleBeforeMessageWrite,
         handleBeforeToolCall, handleAfterToolCall, handleToolResultPersist,

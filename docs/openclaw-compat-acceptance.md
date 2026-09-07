@@ -1,5 +1,12 @@
 # OpenClaw compatibility closeout — 2026-09-07
 
+> Historical live evidence for the frozen runtime below. Subsequent reviewer
+> fixes change deployment, legacy lifecycle/timing and OTLP diagnostic projection;
+> this earlier PASS does **not** certify those new runtime changes. Their local
+> regression results are reported separately in PR #383. Actual Gateway entry
+> binding remains open where the container launches a different installation
+> that Pilot cannot discover; the PR is not ready to merge on this record alone.
+
 ## Result and scope
 
 Real Gateway acceptance passed for **2026.3.8** and **2026.6.10**, using

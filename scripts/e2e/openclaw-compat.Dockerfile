@@ -4,7 +4,13 @@ RUN npm install --prefix /opt/openclaw openclaw@${OPENCLAW_VERSION} --no-audit -
 WORKDIR /candidate
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY . .
+COPY build.mjs tsconfig.json vitest.config.ts ./
+COPY src ./src
+COPY assets ./assets
+COPY agents.d ./agents.d
+COPY deploy ./deploy
+COPY scripts ./scripts
+COPY tests ./tests
 RUN npm rebuild && npm run build
 # The real release packager creates both tar.gz and zip artifacts.
 RUN apt-get update && apt-get install -y --no-install-recommends zip
