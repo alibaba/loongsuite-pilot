@@ -94,6 +94,7 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     expect(result.at(-1)['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
     expect(new Set(result.map(r => r.trace_id)).size).toBe(1);
     expect(result.every(r => r['gen_ai.session.id'] === 'session-1')).toBe(true);
+    expect(result.every(r => r['agent.openclaw.session_key'] === ctx.sessionKey)).toBe(true);
   });
 
   it('preserves parallel tool IDs, per-call tokens and inferred timing through final spans', async () => {

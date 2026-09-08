@@ -107,6 +107,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     expect(records.length).toBeGreaterThan(10);
     expect(records.every(record => record['gen_ai.agent.type'] === ClientType.OpenClaw)).toBe(true);
     expect(records.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(records.every(record => typeof record['agent.openclaw.session_key'] === 'string')).toBe(true);
+    expect(new Set(records.map(record => record['agent.openclaw.session_key'])).size).toBe(1);
     expect(records.every(record =>
       !('agent.pilot.invocation.user.id' in record))).toBe(true);
     const agentRun = records.find(record =>

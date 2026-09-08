@@ -860,7 +860,7 @@ function Probe-Agents {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     if (Test-Path $probeScript) {
         try {
-            $raw = & $script:NODE_BIN $probeScript 2>$null
+            $raw = & $script:NODE_BIN $probeScript --installer --config-path (Join-Path $DataDir 'config.json') 2>$null
             if ($raw) {
                 $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
             }
@@ -880,6 +880,7 @@ function Probe-Agents {
 # Agent selection
 # ============================================================
 $script:SELECTED_AGENTS = $Agents
+$script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
     if ($script:SELECTED_AGENTS) {
@@ -937,6 +938,7 @@ if (lang === 'zh') {
     $rawSelection = Read-Host "    >"
     $selectInput = if ($null -eq $rawSelection) { "" } else { $rawSelection.Trim() }
     $selectInput = $selectInput -replace '[，、；]', ','
+    if ($selectInput) { $script:AGENT_SELECTION_EXPLICIT = '1' }
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
@@ -1327,6 +1329,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
         probeResult       = "$($script:PROBE_RESULT)"
@@ -1413,11 +1416,25 @@ if (opts.maskMode) {
 }
 if (opts.selectedAgents) {
   config.agents = config.agents || {};
+  const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
   const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
+    // A transient discovery miss is not consent to uninstall a live plugin.
+    if (agent.id === 'openclaw' && !agent.detected && opts.agentSelectionExplicit !== '1'
+        && previousOpenclaw !== undefined) {
+      console.log('OpenClaw: detection unavailable; preserving previous enabled state and entry');
+      continue;
+    }
     config.agents[agent.id].enabled = selected.includes(agent.id);
+    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
+      const previousEntry = config.agents[agent.id].cliPath;
+      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
+        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
+      }
+      config.agents[agent.id].cliPath = agent.openclawCliPath;
+    }
   }
 }
 

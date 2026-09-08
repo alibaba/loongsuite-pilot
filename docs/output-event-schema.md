@@ -64,6 +64,7 @@ Required levels follow OpenTelemetry wording:
 | `host.ip` | string | Recommended | Host IP or log source IP. |
 | `service.name` | string | Recommended | Service name used to distinguish agent instances or product lines. |
 | `gen_ai.session.id` | string | Conditionally Required when the agent maintains session context | User session or conversation ID. |
+| `agent.openclaw.session_key` | string | Recommended when exposed by OpenClaw | Native logical routing key; distinct from the conversation UUID in `gen_ai.session.id`. Preserved in canonical event logs and OpenClaw ENTRY/AGENT/STEP/LLM/TOOL Span attributes (not Resources) when the run has an unambiguous native key. |
 | `gen_ai.turn.id` | string | Recommended | One user request through the agent's final response. |
 | `gen_ai.step.id` | string | Recommended | One ReAct loop or intermediate agent step. |
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
@@ -113,6 +114,20 @@ Required levels follow OpenTelemetry wording:
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+
+## OpenClaw Session Key
+
+OpenClaw session keys are supported by both the legacy (2026.3.8+) and modern
+adapters. Run events (`other`, `agent.input`, `llm.request`, `llm.response`,
+`tool.call`, `tool.result`) retain the key when available; lifecycle-only
+`session_start`/`session_end` records remain excluded from canonical output.
+Missing, malformed, oversized (over 1024 characters), or conflicting keys are
+not guessed or replaced with session IDs. A reset may retain the routing key
+while changing the conversation UUID. Keys can contain channel/user identifiers,
+so they pass through configured masking rules before event/trace export; disabling
+message content alone does not remove this metadata. All other agent-scoped
+extensions retain their existing JSONL/SLS filtering behavior. This field does
+not automatically create an SLS index or a dedicated ARMS UI column.
 
 ## System Instructions
 

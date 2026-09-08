@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { OPENCLAW_SESSION_KEY, isOpenClawSessionKey } from './openclaw-session-key.js';
 import {
   type AgentActivityEntry,
   type AgentEventName,
@@ -268,7 +269,9 @@ export function projectLogEntry(
   for (const [key, value] of Object.entries(entry)) {
     if (value === undefined || value === null) continue;
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
-    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    if (key === OPENCLAW_SESSION_KEY) {
+      if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
+    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
     out[key] = value;
   }
 

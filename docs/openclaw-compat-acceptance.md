@@ -1,6 +1,23 @@
 # OpenClaw compatibility acceptance
 
-## Current reviewer closeout — 2026-09-08
+## Automatic entry follow-up — validation scope
+
+The follow-up on `fix/openclaw-auto-entry` removes mandatory `OPENCLAW_CLI_PATH`
+for unambiguous cwd/PATH/bundle installations and persists the selected entry
+in Pilot config. See [current deployment contract](agents.md#openclaw-compatibility-and-lifecycle).
+It also preserves existing OpenClaw state after default-selection discovery
+failures and avoids rewriting an already-correct plugin configuration.
+
+The historical Gateway/SLS runs below tested the earlier explicit-entry
+contract, **not this follow-up**. They must not be reused as proof of automatic
+entry installation, service-environment persistence or EDR acceptance. New
+automated coverage executes both installers' config-writing logic, then checks
+fresh-service discovery, legacy/modern permissions, ambiguous/missing entries,
+default versus explicit selection, and byte/mtime idempotence in isolated files.
+Real Gateway PID continuity, native Windows service startup and EDR backend
+alerts require separate installed-product validation.
+
+## Historical reviewer closeout — 2026-09-08
 
 **PASS for the tested head:** real OpenClaw 2026.3.8 and 2026.6.10 Gateway,
 public Pilot installer, strict canonical JSONL validation and independent

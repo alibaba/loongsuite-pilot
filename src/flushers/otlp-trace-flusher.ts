@@ -38,6 +38,10 @@ import {
   type ToolSpanIdReservations,
 } from './tool-span-id-reservation.js';
 
+import {
+  OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
+} from '../normalization/openclaw-session-key.js';
+
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
@@ -1090,6 +1094,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
         this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
+        this.enrichOpenClawSessionKey(records, spans);
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
       }
@@ -1315,6 +1320,37 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (span.attributes['gen_ai.span.kind'] === 'AGENT') {
           span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
         }
+      }
+    }
+  }
+
+  private enrichOpenClawSessionKey(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const keys = new Set<string>();
+    const scopes = new Set<string>();
+    for (const record of records) {
+      if (record['gen_ai.agent.type'] !== 'openclaw'
+        || record[OPENCLAW_SESSION_KEY_AMBIGUOUS] === true) return;
+      scopes.add(JSON.stringify([
+        record.trace_id, record['gen_ai.session.id'], record['gen_ai.turn.id'],
+        record['gen_ai.agent.id'], record['gen_ai.agent.name'], record['gen_ai.agent.scope'],
+      ]));
+      const value = record[OPENCLAW_SESSION_KEY];
+      if (value !== undefined && value !== null) {
+        if (!isOpenClawSessionKey(value)) return;
+        keys.add(value);
+      }
+    }
+    // Normal OpenClaw buffers contain a single native run. Do not guess for a
+    // mixed/fused scope (especially a child without its own key), or conflicts.
+    // This is deliberately post-conversion: passthrough can select a first value
+    // and not all synthetic parent/STEP spans carry the native turn identifier.
+    if (scopes.size !== 1 || keys.size !== 1) return;
+    const sessionKey = [...keys][0];
+    const traceId = records[0]?.trace_id;
+    for (const span of spans) {
+      if (span.spanContext().traceId === traceId
+        && ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL'].includes(String(span.attributes['gen_ai.span.kind']))) {
+        span.attributes[OPENCLAW_SESSION_KEY] = sessionKey;
       }
     }
   }

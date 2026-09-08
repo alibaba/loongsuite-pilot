@@ -113,26 +113,60 @@ omits TTFT instead of fabricating zero.
 Pilot supports OpenClaw releases `>=2026.3.8`. Before writing host configuration,
 Pilot reads the selected installation's `package.json` using in-process filesystem
 operations. No version argument is needed, and version discovery starts no CLI,
-shell, or package-manager subprocess. Before starting the installer and collector,
-set `OPENCLAW_CLI_PATH` to the **absolute actual Gateway launch entry** in their
-shared container/service environment. For `WORKDIR /app` and
-`node openclaw.mjs gateway ...`, set `OPENCLAW_CLI_PATH=/app/openclaw.mjs`.
-Both initial installation and every collector/watchdog restart must inherit it;
-a one-command shell assignment is not sufficient for a separately managed service.
-The bound entry supports executable symlinks (npm/pnpm), npm/pnpm global wrappers
-and enterprise bundle layouts. Runtime
-version labels (`OPENCLAW_SERVICE_VERSION`, `OPENCLAW_BUNDLED_VERSION`, and
-`OPENCLAW_VERSION`) alone never authorize installation or schema capabilities.
-Without this binding, PATH/cwd/bundle discovery only reports candidates: OpenClaw
-deployment is skipped with a diagnostic and configuration is left untouched,
-even when a candidate version is readable. Missing/relative/invalid entries and
-unknown/unsupported versions also remain non-ready and retryable; they never fall
-back to another installation. Existing configuration is not cleaned in that state.
-This is an intentional restriction on automatic deployment. An explicit entry
-selects its own metadata regardless of another installation on PATH. No version
-cache, process scan, runtime permission bootstrap, or Gateway reload is used.
-Configure the environment before the normal container deployment/start; applying
-new environment variables to an existing container may require redeployment.
+shell, or package-manager subprocess. `OPENCLAW_CLI_PATH` is optional.
+
+Entry resolution, in order:
+
+1. An explicitly supplied absolute `OPENCLAW_CLI_PATH` (override).
+2. `agents.openclaw.cliPath` saved in the Pilot config by the installer.
+3. Automatic discovery: the current OpenClaw package directory with
+   `openclaw.mjs`, the fixed `./openclaw` child package directory, the standard
+   `~/.openclaw-bundle` (or `OPENCLAW_BUNDLE_ROOT`)
+   nested installation, and the first OpenClaw command on PATH. Symlinks to the
+   same package are deduplicated. Distinct packages are ambiguous, even when
+   their versions match; Pilot does not guess which one runs the Gateway.
+
+For a source container with `WORKDIR /app` and `node openclaw.mjs gateway ...`,
+run installation from `/app`; no path/version variable is needed if discovery
+is unambiguous. `WORKDIR /app` with `node openclaw/openclaw.mjs gateway ...`
+is also supported: installation from `/app` checks `/app/openclaw/package.json`
+and `/app/openclaw/openclaw.mjs`. This is a fixed child lookup, not recursive
+directory discovery; both layouts still participate in ambiguity checks.
+If the parent's `package.json` is unreadable or malformed, Pilot still checks
+the fixed child only when the parent `openclaw.mjs` is confirmed absent. A valid
+child is required; this exception does not fall through to PATH alone. An
+unsupported parent OpenClaw, invalid child package, or uncertain directory
+access still blocks selection and reports the failing path.
+Shared installations exposed on PATH or in the standard bundle
+are also discovered without a manual override. The installer saves the selected
+entry, not the version, when OpenClaw is enabled. Collector/watchdog restarts
+read this config even when their PATH/cwd or service-manager environment differ.
+Custom Pilot config locations use `AGENT_DATA_COLLECTION_CONFIG`; the public
+installer passes its `--data-dir` config to the probe automatically.
+
+For conflicting or nonstandard installations, optionally supply the actual
+Gateway entry once during installation. Invalid explicit entries never fall back.
+Collector/watchdog also refuse to rebind an invalid persisted entry. Only the
+public installer enables recovery: if the saved entry is confirmed missing and
+automatic discovery finds exactly one valid installation, selecting OpenClaw
+(including accepting the default selection) saves the replacement. The probe
+reports the old path and never writes configuration itself. Existing but
+unsupported/unreadable entries and ambiguous candidates are not recovered.
+An implicit home Bundle whose fixed entry is confirmed missing is ignored as a
+leftover without deleting files; an existing unsupported/unreadable Bundle or
+invalid explicit `OPENCLAW_BUNDLE_ROOT` still blocks automatic selection.
+The resolver and collector use the same config-path/home expansion rules,
+including Windows `~\\` and the system home fallback.
+Unknown/unsupported versions remain
+non-ready and retryable. Version labels such as `OPENCLAW_SERVICE_VERSION`,
+`OPENCLAW_BUNDLED_VERSION`, and `OPENCLAW_VERSION` never authorize capabilities.
+On reinstall with automatic/default selection, a discovery miss preserves the
+existing OpenClaw enabled state and entry; an explicit `--agents`/menu selection
+can still disable it. Duplicate deployment leaves an already-correct config
+untouched. No process scan, version cache or Gateway reload command is used.
+Initial injection, explicit disable, or an actual compatibility/config change
+can still trigger the Gateway's own reload/restart: install before Gateway
+startup or arrange a maintenance window for these changes.
 
 | Host version | Adapter | `hooks.allowConversationAccess` |
 | --- | --- | --- |
