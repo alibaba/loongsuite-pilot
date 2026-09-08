@@ -1,5 +1,6 @@
-import * as crypto from 'node:crypto';
+import { v5 as uuidv5 } from 'uuid';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
+import { AGENT_INPUT_EVENT_NAMESPACE } from '../../normalization/agent-input-dual-write.js';
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesOutput,
@@ -200,20 +201,7 @@ async function enrichInputAttachedImages(
           && Array.isArray(e['gen_ai.input.messages_delta']),
         );
         if (!carrier) {
-          carrier = {
-            'event.id': crypto.randomUUID(),
-            'event.name': 'llm.request',
-            'gen_ai.turn.id': turnId,
-            'gen_ai.step.id': response['gen_ai.step.id'],
-            'gen_ai.session.id': response['gen_ai.session.id'],
-            'gen_ai.agent.type': response['gen_ai.agent.type'],
-            'gen_ai.provider.name': response['gen_ai.provider.name'],
-            'gen_ai.request.model': response['gen_ai.request.model'],
-            'user.id': response['user.id'],
-            'gen_ai.request.id': requestId,
-            'agent.request_id': requestId,
-            time_unix_nano: response.time_unix_nano,
-          } as AgentActivityEntry;
+          carrier = synthesizeUriOnlyRequest(response, requestId);
           entries.push(carrier);
           synthesized = true;
         }
@@ -430,6 +418,37 @@ export function extractMarkdownImagePaths(text: string, cwd?: string): string[] 
     matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]),
     cwd ? raw => resolveImagePath(raw, cwd) : undefined,
   );
+}
+
+export function deriveSyntheticIdeRequestEventId(responseEventId: string, requestId: string): string {
+  return uuidv5(
+    `qoder-ide-synthetic-llm.request\0${responseEventId}\0${requestId}`,
+    AGENT_INPUT_EVENT_NAMESPACE,
+  );
+}
+
+function synthesizeUriOnlyRequest(
+  response: AgentActivityEntry,
+  requestId: string,
+): AgentActivityEntry {
+  const carrier = { ...response } as AgentActivityEntry;
+  carrier['event.id'] = deriveSyntheticIdeRequestEventId(String(response['event.id'] ?? ''), requestId);
+  carrier['event.name'] = 'llm.request';
+  for (const key of Object.keys(carrier)) {
+    if (isResponseOnlyField(key)) delete carrier[key];
+  }
+  if (response['gen_ai.turn.start'] === true) {
+    delete response['gen_ai.turn.start'];
+  }
+  return carrier;
+}
+
+function isResponseOnlyField(key: string): boolean {
+  return key === 'gen_ai.turn.end'
+    || key.startsWith('gen_ai.output.')
+    || key.startsWith('gen_ai.response.')
+    || key.startsWith('gen_ai.usage.')
+    || key.startsWith('error.');
 }
 
 function cwdOf(entry: AgentActivityEntry): string | undefined {
