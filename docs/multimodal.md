@@ -25,7 +25,7 @@ Multimodal also requires global `config.multimodal` object-storage infrastructur
 
 Both must be ready:
 
-1. Global `config.multimodal.storage` (`type` / `target` / `auth`).
+1. Global `config.multimodal.storage`. Reuse only when there is exactly one SLS destination and it uses `apiKey`; set fields override it. AK/SK is not reused.
 2. A non-`none` `uploadMode` on the target agent, and that agent must implement extraction.
 
 Example (Codex + Qoder IDE):

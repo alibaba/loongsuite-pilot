@@ -1089,6 +1089,117 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('multimodal infer from unique sls flusher', () => {
+    const slsApiKey = {
+      enabled: true,
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'user-proj',
+      logstore: 'user-store',
+      mode: 'apiKey' as const,
+      apiKey: 'sls-api-key',
+    };
+
+    it('reuses a unique apiKey sls destination', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ sls: slsApiKey });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toEqual({
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+        auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+      });
+    });
+
+    it.each([
+      ['ak', {
+        sls: {
+          ...slsApiKey,
+          mode: 'ak' as const,
+          accessKeyId: 'sls-ak',
+          accessKeySecret: 'sls-sk',
+          apiKey: undefined,
+        },
+      }],
+      ['multiple destinations', {
+        sls: [
+          { name: 'one', ...slsApiKey },
+          { name: 'two', endpoint: 'https://cn-shanghai.log.aliyuncs.com', project: 'p2', logstore: 'l2', mode: 'apiKey' as const, apiKey: 'key-2' },
+        ],
+      }],
+    ])('does not reuse sls when it is not a unique apiKey target (%s)', async (_label, file) => {
+      mockReadJsonFile.mockResolvedValueOnce(file);
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('fills omitted multimodal fields from the unique apiKey sls', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { logstore: 'multimodal' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'multimodal',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://user-proj/multimodal',
+      });
+    });
+
+    it('lets explicit multimodal fields override the unique apiKey sls', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+              project: 'mm-proj',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'apiKey', apiKey: 'mm-key' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'mm-proj',
+            logstore: 'mm-store',
+          },
+          auth: { mode: 'apiKey', apiKey: 'mm-key' },
+        },
+        storageBasePath: 'sls://mm-proj/mm-store',
+      });
+    });
+
+    it('does not use inferred sls when explicit multimodal is invalid', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: { storage: { type: 's3' } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+  });
+
   describe('mask config', () => {
     it('defaults to none when mask config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);

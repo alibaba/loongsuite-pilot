@@ -25,7 +25,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 两处同时就绪：
 
-1. 全局 `config.multimodal.storage`（`type` / `target` / `auth`）。
+1. 全局 `config.multimodal.storage`。SLS 目标唯一且为 `apiKey` 时可复用，已写字段覆盖。AK/SK 不复用。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
 示例（Codex + Qoder IDE）：

@@ -77,7 +77,7 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, set `multimodal.storage` in `config.json`: `type`, `target`, and `auth`. Whether upload runs is controlled per agent by `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
 
-`type` is one of `sls`, `delegatedOss`, or `oss`. This is separate from the log `sls` flusher. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
+`type` is one of `sls`, `delegatedOss`, or `oss`. If there is exactly one SLS destination and it uses `apiKey`, Pilot reuses its endpoint / project / logstore / apiKey; fields in `multimodal.storage` override. AK/SK is not reused. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
 
 `auth` is one complete ApiKey or access-key set. If `mode` is omitted, Pilot infers it from that set.
 

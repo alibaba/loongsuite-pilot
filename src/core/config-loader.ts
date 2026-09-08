@@ -24,6 +24,7 @@ import type {
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
   SlsEndpoint,
+  SlsFlusherConfig,
   SlsMode,
   StatusBarConfig,
   UpstreamLinkConfig,
@@ -37,6 +38,7 @@ import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
+import { anyAgentMultimodalEnabled } from '../multimodal/agent-gate.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -275,6 +277,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
+  const flushers = buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -297,7 +300,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
+    flushers,
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
@@ -307,7 +310,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
-    multimodal: buildMultimodalConfig(file),
+    multimodal: buildMultimodalConfig(file, flushers.sls),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
 }
@@ -332,16 +335,26 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
 
-/** Parse global multimodal storage config; invalid → undefined. */
-function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
+type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>;
+type SlsApiKeyTarget = { endpoint: string; project: string; logstore: string; apiKey: string };
+
+/** Unique SLS apiKey target fills missing multimodal.storage fields. Invalid → undefined. */
+function buildMultimodalConfig(
+  file: ConfigFile | null,
+  sls?: SlsFlusherConfig,
+): MultimodalRuntimeConfig | undefined {
+  const slsTarget = findUniqueSlsApiKeyTarget(sls);
   const block = file?.multimodal;
-  if (!block || typeof block !== 'object') return undefined;
+  if (!block || typeof block !== 'object') {
+    return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
+  }
 
   try {
-    const storageRaw = block.storage;
-    if (!storageRaw || typeof storageRaw !== 'object') {
+    if (!block.storage || typeof block.storage !== 'object') {
+      if (slsTarget) return multimodalFromSlsApiKey(slsTarget);
       throw new Error('multimodal.storage is required');
     }
+    const storageRaw = fillMultimodalFromSlsApiKey(block.storage, slsTarget);
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
       const storage = buildMultimodalOssStorage(storageRaw);
@@ -359,6 +372,65 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
     logger.error('multimodal config invalid; disabled for process', { error: String(err) });
     return undefined;
   }
+}
+
+function findUniqueSlsApiKeyTarget(sls: SlsFlusherConfig | undefined): SlsApiKeyTarget | undefined {
+  const endpoints = sls?.endpoints ?? [];
+  if (endpoints.length !== 1) return undefined;
+  const ep = endpoints[0];
+  if (
+    ep.mode !== 'apiKey'
+    || !ep.apiKey?.trim()
+    || !ep.endpoint?.trim()
+    || !ep.project?.trim()
+    || !ep.logstore?.trim()
+    || hasAmbiguousSlsCredentials(ep)
+  ) {
+    return undefined;
+  }
+  return {
+    endpoint: ep.endpoint.replace(/\/+$/, ''),
+    project: ep.project,
+    logstore: ep.logstore,
+    apiKey: ep.apiKey!.trim(),
+  };
+}
+
+function multimodalFromSlsApiKey(target: SlsApiKeyTarget): MultimodalRuntimeConfig {
+  return {
+    storage: {
+      type: 'sls',
+      target: { endpoint: target.endpoint, project: target.project, logstore: target.logstore },
+      auth: { mode: 'apiKey', apiKey: target.apiKey },
+    },
+    storageBasePath: `sls://${target.project}/${target.logstore}`,
+  };
+}
+
+function fillMultimodalFromSlsApiKey(
+  raw: MultimodalStorageRaw,
+  sls: SlsApiKeyTarget | undefined,
+): MultimodalStorageRaw {
+  if (!sls) return raw;
+  const type = (raw.type ?? '').trim();
+  if (type === 'oss') return raw;
+  const userHasCreds = !!(
+    raw.auth
+    && [raw.auth.accessKeyId, raw.auth.accessKeySecret, raw.auth.securityToken, raw.auth.apiKey]
+      .some(value => typeof value === 'string' && value.trim() !== '')
+  );
+  return {
+    ...raw,
+    type: type || 'sls',
+    target: {
+      endpoint: (raw.target?.endpoint ?? '').trim() || sls.endpoint,
+      project: (raw.target?.project ?? '').trim() || sls.project,
+      logstore: (raw.target?.logstore ?? '').trim() || sls.logstore,
+      ossBucket: raw.target?.ossBucket,
+      storageBasePath: raw.target?.storageBasePath,
+    },
+    auth: userHasCreds ? raw.auth : { mode: 'apiKey', apiKey: sls.apiKey },
+  };
 }
 
 function buildMultimodalOssStorage(

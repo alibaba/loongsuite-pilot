@@ -77,7 +77,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。在 `config.json` 配置 `multimodal.storage`：`type`、`target`、`auth`。是否上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 决定；本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-`type` 选一种：`sls`、`delegatedOss` 或 `oss`。这和日志用的 `sls` flusher 不是同一块配置。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
+`type` 选一种：`sls`、`delegatedOss` 或 `oss`。SLS 目标唯一且为 `apiKey` 时，可复用其 endpoint / project / logstore / apiKey；`multimodal.storage` 已写字段覆盖复用值。AK/SK 不复用。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
 `auth` 填写一套完整的 ApiKey 或 AK。未填 `mode` 时按这套凭证推断。
 
