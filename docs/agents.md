@@ -140,8 +140,19 @@ Custom Pilot config locations use `AGENT_DATA_COLLECTION_CONFIG`; the public
 installer passes its `--data-dir` config to the probe automatically.
 
 For conflicting or nonstandard installations, optionally supply the actual
-Gateway entry once during installation. Invalid explicit or persisted entries
-do not fall back to a different installation. Unknown/unsupported versions remain
+Gateway entry once during installation. Invalid explicit entries never fall back.
+Collector/watchdog also refuse to rebind an invalid persisted entry. Only the
+public installer enables recovery: if the saved entry is confirmed missing and
+automatic discovery finds exactly one valid installation, selecting OpenClaw
+(including accepting the default selection) saves the replacement. The probe
+reports the old path and never writes configuration itself. Existing but
+unsupported/unreadable entries and ambiguous candidates are not recovered.
+An implicit home Bundle whose fixed entry is confirmed missing is ignored as a
+leftover without deleting files; an existing unsupported/unreadable Bundle or
+invalid explicit `OPENCLAW_BUNDLE_ROOT` still blocks automatic selection.
+The resolver and collector use the same config-path/home expansion rules,
+including Windows `~\\` and the system home fallback.
+Unknown/unsupported versions remain
 non-ready and retryable. Version labels such as `OPENCLAW_SERVICE_VERSION`,
 `OPENCLAW_BUNDLED_VERSION`, and `OPENCLAW_VERSION` never authorize capabilities.
 On reinstall with automatic/default selection, a discovery miss preserves the

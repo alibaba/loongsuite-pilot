@@ -1,5 +1,7 @@
 import { promises as fs, constants } from 'node:fs';
 import * as path from 'node:path';
+import { configJsonPathFrom } from '../utils/data-dir.js';
+import { resolveHome } from '../utils/fs-utils.js';
 import { openClawCapabilities, type OpenClawCapabilities } from '../../assets/plugins/openclaw/compatibility.mjs';
 
 export interface OpenClawHost extends OpenClawCapabilities {
@@ -7,6 +9,13 @@ export interface OpenClawHost extends OpenClawCapabilities {
   executable?: string;
   /** The entry is explicit, persisted by the installer, or uniquely discovered. */
   binding?: 'explicit-entry' | 'persisted-entry' | 'auto-entry';
+  /** Only an installer may propose replacing a confirmed-missing saved entry. */
+  recoveredFrom?: string;
+}
+
+export interface OpenClawResolveOptions {
+  mode?: 'runtime' | 'installer';
+  onProblem?: (detail: string) => void;
 }
 
 export function isOpenClawHostBound(host: OpenClawHost | null): host is OpenClawHost & { executable: string } {
@@ -14,8 +23,8 @@ export function isOpenClawHostBound(host: OpenClawHost | null): host is OpenClaw
     && path.isAbsolute(host.executable);
 }
 
-export function openClawBindingProblem(host: OpenClawHost | null): string {
-  return `${host ? `OpenClaw ${host.version} candidate found, but Gateway entry is unconfirmed` : 'OpenClaw >=2026.3.8 launch entry/version unavailable or unsupported'}; `
+export function openClawBindingProblem(host: OpenClawHost | null, detail?: string): string {
+  return `${detail ? `${detail}; ` : ''}${host ? `OpenClaw ${host.version} candidate found, but Gateway entry is unconfirmed` : 'OpenClaw >=2026.3.8 launch entry/version unavailable or unsupported'}; `
     + 'automatic entry discovery is unavailable or ambiguous; optionally set OPENCLAW_CLI_PATH to the absolute Gateway launch entry; config left unchanged';
 }
 
@@ -27,7 +36,13 @@ export function openClawBindingProblem(host: OpenClawHost | null): string {
 export async function resolveOpenClawHost(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd(),
+  options: OpenClawResolveOptions = {},
 ): Promise<OpenClawHost | null> {
+  const problem = (message: string) => { options.onProblem?.(message); return null; };
+  async function confirmedMissing(entry: string): Promise<boolean> {
+    try { await fs.stat(entry); return false; }
+    catch (err) { return (err as NodeJS.ErrnoException).code === 'ENOENT'; }
+  }
   const unreadable = Symbol('unidentified-package');
   async function readJson(file: string, limit = 256 * 1024): Promise<Record<string, unknown> | undefined | typeof unreadable> {
     try {
@@ -108,19 +123,21 @@ export async function resolveOpenClawHost(
 
   // Persist the entry, never its version: daemon cwd/PATH need not match the
   // installer, and every check must still read the currently installed package.
-  const home = env.HOME || env.USERPROFILE;
-  const configuredPath = env.AGENT_DATA_COLLECTION_CONFIG?.trim();
-  const configPath = configuredPath
-    ? (configuredPath.startsWith('~/') && home ? path.join(home, configuredPath.slice(2)) : configuredPath)
-    : home ? path.join(home, '.loongsuite-pilot/config.json') : undefined;
+  const home = resolveHome('~', { env });
+  const configPath = configJsonPathFrom(env);
+  let recoveredFrom: string | undefined;
   if (configPath) {
     const config = await readJson(configPath, 1024 * 1024);
-    if (config === unreadable) return null;
+    if (config === unreadable) return problem(`OpenClaw binding config unreadable: ${JSON.stringify(configPath)}`);
     const entry = (config as { agents?: { openclaw?: { cliPath?: unknown } } } | undefined)?.agents?.openclaw?.cliPath;
     if (entry !== undefined) {
-      if (typeof entry !== 'string' || !path.isAbsolute(entry)) return null;
+      if (typeof entry !== 'string' || !path.isAbsolute(entry)) return problem('Invalid persisted OpenClaw entry; refusing automatic rebinding');
       const host = await fromEntry(entry);
-      return host ? { ...host, binding: 'persisted-entry' } : null;
+      if (host) return { ...host, binding: 'persisted-entry' };
+      const missing = await confirmedMissing(entry);
+      options.onProblem?.(`Persisted OpenClaw entry ${missing ? 'is missing' : 'is unreadable or unsupported'}: ${JSON.stringify(entry)}`);
+      if (options.mode !== 'installer' || !missing) return null;
+      recoveredFrom = entry;
     }
   }
 
@@ -147,13 +164,18 @@ export async function resolveOpenClawHost(
   }
   const bundleRoot = env.OPENCLAW_BUNDLE_ROOT || (home ? path.join(home, '.openclaw-bundle') : undefined);
   if (bundleRoot) {
-    if (!path.isAbsolute(bundleRoot)) return null;
+    if (!path.isAbsolute(bundleRoot)) return problem(`OPENCLAW_BUNDLE_ROOT must be absolute: ${JSON.stringify(bundleRoot)}`);
     const packageDir = path.join(bundleRoot, 'openclaw/node_modules/openclaw');
-    const bundle = await readPackage(path.join(packageDir, 'package.json'));
-    if (bundle === null || bundle === unreadable) return null;
-    if (bundle) {
-      const host = await fromEntry(path.join(packageDir, 'openclaw.mjs'));
-      if (!host) return null;
+    const entry = path.join(packageDir, 'openclaw.mjs');
+    // Only a confirmed missing implicit entry is a harmless leftover.
+    // Existing unsupported or unreadable installations must not be bypassed.
+    if (!env.OPENCLAW_BUNDLE_ROOT && await confirmedMissing(entry)) {
+      // No directory enumeration and no removal of the leftover installation.
+    } else {
+      const bundle = await readPackage(path.join(packageDir, 'package.json'));
+      if (!bundle || bundle === unreadable) return problem(`OpenClaw bundle metadata unavailable or unsupported: ${JSON.stringify(packageDir)}`);
+      const host = await fromEntry(entry);
+      if (!host) return problem(`OpenClaw bundle entry unavailable: ${JSON.stringify(entry)}`);
       candidates.push(host);
     }
   }
@@ -180,5 +202,8 @@ export async function resolveOpenClawHost(
     const packages = new Set(await Promise.all(candidates.map(host => fs.realpath(host.source))));
     if (packages.size !== 1) return null; // Distinct installations are ambiguous, even at the same version.
   } catch { return null; }
-  return { ...candidates[0], binding: 'auto-entry' };
+  if (recoveredFrom && !await confirmedMissing(recoveredFrom)) {
+    return problem(`Persisted OpenClaw entry reappeared during discovery: ${JSON.stringify(recoveredFrom)}`);
+  }
+  return { ...candidates[0], binding: 'auto-entry', ...(recoveredFrom ? { recoveredFrom } : {}) };
 }

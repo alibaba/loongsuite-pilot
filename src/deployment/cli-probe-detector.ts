@@ -22,6 +22,7 @@ interface DshRuntimeLocatorLike {
 
 export interface CliProbeOptions {
   listOnly?: boolean;
+  installer?: boolean;
   /** Injectable for deterministic procfs tests. */
   dshRuntimeLocator?: DshRuntimeLocatorLike;
 }
@@ -82,10 +83,13 @@ export async function probeAgentDefinition(
   if (options.listOnly) return result;
 
   if (def.id === 'openclaw') {
-    const host = await resolveOpenClawHost();
+    let detail: string | undefined;
+    const host = await resolveOpenClawHost(process.env, process.cwd(), {
+      mode: options.installer ? 'installer' : 'runtime', onProblem: message => { detail = message; },
+    });
     return { ...result, detected: isOpenClawHostBound(host),
       ...(isOpenClawHostBound(host) ? { openclawCliPath: host.executable } : {}),
-      reason: isOpenClawHostBound(host) ? `${host.source} (${host.version}, ${host.adapter}, bound entry)` : openClawBindingProblem(host) };
+      reason: isOpenClawHostBound(host) ? `${host.source} (${host.version}, ${host.adapter}, bound entry)${host.recoveredFrom ? `; replacing missing entry ${JSON.stringify(host.recoveredFrom)}` : ''}` : openClawBindingProblem(host, detail) };
   }
 
   if (def.deployMode === 'dsh-yaml-patch') {

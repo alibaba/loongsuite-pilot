@@ -97,6 +97,33 @@ describe('CLI probe detector', () => {
     expect(detectAgent).not.toHaveBeenCalled();
     expect(commandExists).not.toHaveBeenCalled();
   });
+  it('exposes a replacement only to an installer probe and reports the missing path', async () => {
+    const entry = path.join(tmpDir, 'openclaw.mjs');
+    const old = path.join(tmpDir, 'old/openclaw.mjs');
+    const config = path.join(tmpDir, 'pilot.json');
+    await fs.writeFile(entry, '/* never executed */');
+    await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: old } } }));
+    vi.stubEnv('OPENCLAW_CLI_PATH', undefined);
+    vi.stubEnv('OPENCLAW_BUNDLE_ROOT', undefined);
+    vi.stubEnv('HOME', tmpDir);
+    // Vitest 1 stringifies undefined; keep restoration but actually unset hints.
+    delete process.env.OPENCLAW_CLI_PATH;
+    delete process.env.OPENCLAW_BUNDLE_ROOT;
+    vi.stubEnv('USERPROFILE', tmpDir);
+    vi.stubEnv('PATH', '');
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', config);
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(tmpDir);
+    const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject', detection: { paths: ['~/.openclaw'], commands: ['openclaw'] } };
+    try {
+      const strict = await probeAgentDefinition(def);
+      expect(strict.detected).toBe(false); expect(strict.reason).toContain(old);
+      const install = await probeAgentDefinition(def, { installer: true });
+      expect(install).toMatchObject({ detected: true, openclawCliPath: entry });
+      expect(install.reason).toContain('replacing missing entry');
+      expect(JSON.parse(await fs.readFile(config, 'utf8')).agents.openclaw.cliPath).toBe(old);
+    } finally { cwd.mockRestore(); }
+  });
 
   it('automatically selects a unique OpenClaw PATH candidate and exposes its persistent entry', async () => {
     const executable = path.join(tmpDir, process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw');

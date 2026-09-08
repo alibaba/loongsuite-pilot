@@ -622,7 +622,7 @@ PROBE_RESULT="[]"
 
 probe_agents() {
     msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
-    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" --config-path "$DATA_DIR/config.json" 2>/dev/null) || {
+    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" --installer --config-path "$DATA_DIR/config.json" 2>/dev/null) || {
         msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
         PROBE_RESULT="[]"
         return 0
@@ -1127,6 +1127,10 @@ if (selectedAgents) {
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
     if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
+      const previousEntry = config.agents[agent.id].cliPath;
+      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
+        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
+      }
       config.agents[agent.id].cliPath = agent.openclawCliPath;
     }
   }

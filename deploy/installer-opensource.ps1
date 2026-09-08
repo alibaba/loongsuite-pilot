@@ -860,7 +860,7 @@ function Probe-Agents {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     if (Test-Path $probeScript) {
         try {
-            $raw = & $script:NODE_BIN $probeScript --config-path (Join-Path $DataDir 'config.json') 2>$null
+            $raw = & $script:NODE_BIN $probeScript --installer --config-path (Join-Path $DataDir 'config.json') 2>$null
             if ($raw) {
                 $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
             }
@@ -1429,6 +1429,10 @@ if (opts.selectedAgents) {
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
     if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
+      const previousEntry = config.agents[agent.id].cliPath;
+      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
+        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
+      }
       config.agents[agent.id].cliPath = agent.openclawCliPath;
     }
   }

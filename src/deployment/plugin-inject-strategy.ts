@@ -81,7 +81,7 @@ export class PluginInjectStrategy implements DeployStrategy {
   private lastOpenClawProblem?: string;
 
   constructor(dataDir: string, _pilotDir: string,
-    private readonly resolveOpenClaw: () => Promise<OpenClawHost | null> = resolveOpenClawHost) {
+    private readonly resolveOpenClaw?: () => Promise<OpenClawHost | null>) {
     this.dataDir = dataDir;
   }
 
@@ -91,12 +91,15 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private async resolveDeploymentHost(): Promise<OpenClawHost | null> {
-    const host = await this.resolveOpenClaw();
+    let detail: string | undefined;
+    const host = await (this.resolveOpenClaw ? this.resolveOpenClaw() : resolveOpenClawHost(process.env, process.cwd(), {
+      onProblem: message => { detail = message; },
+    }));
     if (isOpenClawHostBound(host)) {
       this.lastOpenClawProblem = undefined;
       return host;
     }
-    const problem = openClawBindingProblem(host);
+    const problem = openClawBindingProblem(host, detail);
     // Re-evaluate metadata on every check, but do not spam an unchanged warning.
     if (problem !== this.lastOpenClawProblem) logger.warn(problem);
     this.lastOpenClawProblem = problem;

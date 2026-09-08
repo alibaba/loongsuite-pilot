@@ -14,6 +14,7 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
   let root: string;
   let dataDir: string;
   let configPath: string;
+  let writerOutput: string;
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-oc-install-'));
     dataDir = path.join(root, 'custom pilot data');
@@ -30,11 +31,11 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
       const start = installer.indexOf('write_config() {');
       const end = installer.indexOf('\n# ============================================================', start);
       const fn = installer.slice(start, end);
-      execFileSync('bash', ['-c', `set -eo pipefail\nmsg() { :; }\n${fn}\nwrite_config`], {
+      writerOutput = execFileSync('bash', ['-c', `set -eo pipefail\nmsg() { :; }\n${fn}\nwrite_config`], {
         env: { ...cleanEnv, DATA_DIR: dataDir, NODE_BIN: process.execPath,
           PROBE_RESULT: JSON.stringify(probe), SELECTED_AGENTS: selected, AGENT_SELECTION_EXPLICIT: explicit ? '1' : '0' },
         timeout: 10000,
-      });
+      }).toString();
     } else {
       const start = installer.indexOf("const fs = require('fs');\nlet raw = fs.readFileSync(process.argv[1]");
       const end = installer.indexOf("\n'@ $cfgTmp", start);
@@ -43,7 +44,7 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
       const opts = path.join(root, 'opts.json');
       await fs.writeFile(opts, JSON.stringify({ configPath, dataDir, selectedAgents: selected,
         probeResult: JSON.stringify(probe), agentSelectionExplicit: explicit ? '1' : '0' }));
-      execFileSync(process.execPath, ['-e', installer.slice(start, end), opts], { env: cleanEnv, timeout: 10000 });
+      writerOutput = execFileSync(process.execPath, ['-e', installer.slice(start, end), opts], { env: cleanEnv, timeout: 10000 }).toString();
     }
     return JSON.parse(await fs.readFile(configPath, 'utf8'));
   }
@@ -93,6 +94,26 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
   it('still honors an explicit disable selection', async () => {
     await fs.writeFile(configPath, JSON.stringify({ agents: { openclaw: { enabled: true } } }));
     expect((await writeConfig(probe(false), 'codex', true)).agents.openclaw.enabled).toBe(false);
+  });
+  it.each([false, true])('persists an installer recovery and survives a fresh service (explicit=%s)', async explicit => {
+    const old = path.join(root, 'old/openclaw.mjs');
+    const app = path.join(root, 'app'); await fs.mkdir(app);
+    const entry = path.join(app, 'openclaw.mjs');
+    await fs.writeFile(entry, '/* never executed */');
+    await fs.writeFile(path.join(app, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    await fs.writeFile(configPath, JSON.stringify({ agents: { openclaw: { enabled: true, cliPath: old, captureMessageContent: false } } }));
+    const env = { HOME: root, AGENT_DATA_COLLECTION_CONFIG: configPath, PATH: '' };
+    expect(await resolveOpenClawHost(env, app)).toBeNull();
+    const candidate = await resolveOpenClawHost(env, app, { mode: 'installer' });
+    expect(candidate?.recoveredFrom).toBe(old);
+    const updated = await writeConfig(probe(true, candidate!.executable), 'openclaw,codex', explicit);
+    expect(updated.agents.openclaw).toEqual({ enabled: true, cliPath: entry, captureMessageContent: false });
+    expect(writerOutput).toContain(`OpenClaw: updating launch entry ${JSON.stringify(old)} -> ${JSON.stringify(entry)}`);
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ executable: entry, binding: 'persisted-entry' });
+  });
+  it('enables recovery only in the public installer probe invocation', async () => {
+    const script = await fs.readFile(platform === 'shell' ? 'deploy/installer-opensource.sh' : 'deploy/installer-opensource.ps1', 'utf8');
+    expect(script).toContain('--installer --config-path');
   });
   it('does not enable a missing OpenClaw on first installation', async () => {
     expect((await writeConfig(probe(false), 'codex')).agents.openclaw.enabled).toBe(false);

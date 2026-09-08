@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   if (configIndex >= 0) {
     const configPath = process.argv[configIndex + 1];
     if (!configPath) throw new Error('--config-path requires a path');
-    process.env.AGENT_DATA_COLLECTION_CONFIG = path.resolve(configPath);
+    process.env.AGENT_DATA_COLLECTION_CONFIG = path.resolve(resolveHome(configPath));
   }
   // The installed service wrappers use this private probe to expose commands
   // that only make sense for the open-source distribution. Keep the edition
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   const listOnly = process.argv.includes('--list');
 
   const defs = await loader.load();
-  const results = await probeAgentDefinitions(defs, { listOnly });
+  const results = await probeAgentDefinitions(defs, { listOnly, installer: process.argv.includes('--installer') });
 
   process.stdout.write(JSON.stringify(results));
 }

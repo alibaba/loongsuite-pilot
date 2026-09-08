@@ -162,6 +162,60 @@ describe('OpenClaw read-only version discovery and injection', () => {
     expect(await resolveOpenClawHost({ HOME: path.join(root, 'home'), PATH: '' }, root))
       .toMatchObject({ executable: entry, binding: 'auto-entry', version: '2026.3.8' });
   });
+  it('only lets the installer recover a confirmed missing saved entry', async () => {
+    const entry = await pkg('app');
+    const old = path.join(root, 'missing/openclaw.mjs');
+    const config = path.join(root, 'config.json');
+    await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: old } } }));
+    const env = { HOME: root, AGENT_DATA_COLLECTION_CONFIG: config };
+    const details: string[] = [];
+    expect(await resolveOpenClawHost(env, path.dirname(entry), { onProblem: text => details.push(text) })).toBeNull();
+    expect(details.join()).toContain(old);
+    expect(await resolveOpenClawHost(env, path.dirname(entry), { mode: 'installer' }))
+      .toMatchObject({ executable: entry, binding: 'auto-entry', recoveredFrom: old });
+    expect(JSON.parse(await fs.readFile(config, 'utf8')).agents.openclaw.cliPath).toBe(old);
+    expect(await resolveOpenClawHost({ ...env, OPENCLAW_CLI_PATH: old }, path.dirname(entry), { mode: 'installer' })).toBeNull();
+  });
+  it.each(['unsupported', 'broken', 'directory', 'unreadable'])('does not recover an existing %s entry', async kind => {
+    const old = await pkg('old', kind === 'unsupported' ? '2026.3.2' : '2026.3.8');
+    const entry = await pkg('app');
+    if (kind === 'broken') await fs.writeFile(path.join(root, 'old/package.json'), '{');
+    if (kind === 'directory') { await fs.unlink(old); await fs.mkdir(old); }
+    if (kind === 'unreadable') await fs.chmod(path.join(root, 'old/package.json'), 0);
+    const config = path.join(root, 'config.json');
+    await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: old } } }));
+    try {
+      expect(await resolveOpenClawHost({ HOME: root, AGENT_DATA_COLLECTION_CONFIG: config }, path.dirname(entry), { mode: 'installer' })).toBeNull();
+    } finally { await fs.chmod(path.join(root, 'old/package.json'), 0o600); }
+  });
+  it('does not recover a missing entry when new candidates conflict', async () => {
+    await pkg('app'); await pkg('app/openclaw');
+    const config = path.join(root, 'config.json');
+    await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: path.join(root, 'missing.mjs') } } }));
+    expect(await resolveOpenClawHost({ HOME: root, AGENT_DATA_COLLECTION_CONFIG: config }, path.join(root, 'app'), { mode: 'installer' })).toBeNull();
+  });
+  it.each(['2026.3.2', '2026.3.8'])('skips an implicit leftover only after its entry is confirmed missing (%s)', async version => {
+    const leftover = await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw', version);
+    await fs.unlink(leftover);
+    const entry = await pkg('cli', '2026.6.10');
+    await fs.symlink(entry, path.join(root, 'cli/openclaw'));
+    const env = { HOME: path.join(root, 'home'), PATH: path.join(root, 'cli') };
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ executable: path.join(root, 'cli/openclaw'), binding: 'auto-entry' });
+    expect(await resolveOpenClawHost({ ...env, OPENCLAW_BUNDLE_ROOT: path.join(root, 'home/.openclaw-bundle') }, root)).toBeNull();
+    expect(await resolveOpenClawHost({ ...env, OPENCLAW_BUNDLE_ROOT: './bundle' }, root)).toBeNull();
+  });
+  it.each(['unsupported', 'broken', 'unreadable', 'missing-metadata'])('does not bypass an existing implicit bundle with %s metadata', async kind => {
+    const bundle = await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw', kind === 'unsupported' ? '2026.3.2' : '2026.3.8');
+    const metadata = path.join(path.dirname(bundle), 'package.json');
+    if (kind === 'broken') await fs.writeFile(metadata, '{');
+    if (kind === 'unreadable') await fs.chmod(metadata, 0);
+    if (kind === 'missing-metadata') await fs.unlink(metadata);
+    const entry = await pkg('cli', '2026.6.10');
+    await fs.symlink(entry, path.join(root, 'cli/openclaw'));
+    try {
+      expect(await resolveOpenClawHost({ HOME: path.join(root, 'home'), PATH: path.join(root, 'cli') }, root)).toBeNull();
+    } finally { if (kind !== 'missing-metadata') await fs.chmod(metadata, 0o600); }
+  });
   it('deduplicates bundle and PATH symlinks to the same package', async () => {
     const entry = await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw');
     await fs.mkdir(path.join(root, 'bin'));
