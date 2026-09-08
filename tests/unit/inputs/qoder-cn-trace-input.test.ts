@@ -225,10 +225,13 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     ]);
 
     const entries = await collectOnce();
-    // Only one llm.request for step 1 (last occurrence, ts = baseTs + 1)
+    // Only one llm.request for step 1. Enrichment places it one nanosecond
+    // after the Turn boundary without discarding the deduplication result.
     const step1Requests = entries.filter(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === 'turn-d:s1');
     expect(step1Requests).toHaveLength(1);
-    expect(step1Requests[0].time_unix_nano).toBe(`${baseTs + 1}000000`);
+    expect(step1Requests[0].time_unix_nano).toBe(
+      String(BigInt(baseTs) * 1_000_000n + 1n),
+    );
 
     // Only one llm.response for step 1
     const step1Responses = entries.filter(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id'] === 'turn-d:s1');
