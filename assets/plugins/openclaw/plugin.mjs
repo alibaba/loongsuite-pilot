@@ -415,6 +415,25 @@ function bindSessionRun(sessionKey, runId) {
   }
 }
 
+// Keep this validator aligned with normalization/openclaw-session-key.ts.
+function isSessionKey(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+    && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function observeSessionKey(run, event, ctx) {
+  // Separate telemetry identity from the existing native hook-routing cache.
+  // A conflicting key must not silently relabel this run or its exported spans.
+  for (const value of [event?.sessionKey, ctx?.sessionKey]) {
+    if (value == null || value === "") continue;
+    if (!isSessionKey(value) || (run.telemetrySessionKey && run.telemetrySessionKey !== value)) {
+      run.sessionKeyAmbiguous = true;
+    } else {
+      run.telemetrySessionKey = value;
+    }
+  }
+}
+
 function getRun(runId, event, ctx) {
   if (!runId) return null;
   let r = runs.get(runId);
@@ -448,6 +467,7 @@ function getRun(runId, event, ctx) {
     runs.delete(runId);
   }
   runs.set(runId, r);
+  observeSessionKey(r, event, ctx);
   const sessionKey = event?.sessionKey || ctx?.sessionKey || r.sessionKey;
   if (sessionKey && !r.completed) {
     r.sessionKey = sessionKey;
@@ -585,13 +605,15 @@ function buildCommonFields(run, sessionId, userId) {
     base["gen_ai.turn.id"] = run.turnId || run.runId;
     if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
+    if (run.sessionKeyAmbiguous) base["agent.openclaw.session_key.ambiguous"] = true;
+    else if (isSessionKey(run.telemetrySessionKey)) base["agent.openclaw.session_key"] = run.telemetrySessionKey;
     if (run.provider) base["gen_ai.provider.name"] = run.provider;
     if (run.model) base["gen_ai.request.model"] = run.model;
   } else if (sessionId) {
     const s = getSession(sessionId);
     base.trace_id = s.traceId;
     base["gen_ai.session.id"] = sessionId;
-    if (s.sessionKey) base["agent.openclaw.session_key"] = s.sessionKey;
+    if (isSessionKey(s.sessionKey)) base["agent.openclaw.session_key"] = s.sessionKey;
   }
   return base;
 }

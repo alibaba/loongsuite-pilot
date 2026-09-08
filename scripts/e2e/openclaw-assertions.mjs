@@ -1,5 +1,18 @@
 import assert from 'node:assert/strict';
 
+export function assertOpenClawSessionKey({ rawEvents, events, spans, sessionKey }) {
+  const key = 'agent.openclaw.session_key';
+  assert(typeof sessionKey === 'string' && sessionKey.length > 0, 'native session key required');
+  for (const [name, rows] of Object.entries({ rawEvents, events, spans })) {
+    assert(rows.length > 0, `empty ${name}`);
+    for (const row of rows) {
+      assert.equal((row.attributes ?? row)[key], sessionKey, `${name}: session key mismatch`);
+      assert.equal(row.resource?.[key], undefined, 'session key must not be a Resource');
+    }
+  }
+  return { sessionKey, rawEvents: rawEvents.length, events: events.length, spans: spans.length };
+}
+
 // Self-contained acceptance rules for this Gateway scenario, not a replacement
 // for every ARMS semantic convention. No untracked rules file is required.
 export function assertOpenClawEvidence({ events, spans, nativeMessages, provider, model, service, workerName, turns, expectedToolErrorTraceIds = [] }) {

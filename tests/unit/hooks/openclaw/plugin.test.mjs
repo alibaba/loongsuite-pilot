@@ -125,6 +125,42 @@ function todayStamp() {
 }
 
 describe('OpenClaw plugin stateful pipeline', () => {
+  it('caches the native routing key per run, never from a parent or a session UUID', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    for (const [runId, sessionId, sessionKey] of [
+      ['a', 'uuid-a', 'agent:main:shared'], ['b', 'uuid-b', 'agent:main:other'],
+      ['reset', 'uuid-reset', 'agent:main:shared'], ['child', 'uuid-child', undefined],
+    ]) {
+      await handlers.llm_input({ runId, prompt: 'test' }, { runId, sessionId, sessionKey });
+    }
+    for (const runId of ['a', 'b', 'reset', 'child']) {
+      await handlers.model_call_started({ runId, callId: runId, model: 'test' }, { runId });
+    }
+    const result = readOutputRecords().filter(r => r['event.name'] === 'llm.request');
+    expect(result).toHaveLength(4);
+    expect(result.map(r => r['agent.openclaw.session_key'])).toEqual([
+      'agent:main:shared', 'agent:main:other', 'agent:main:shared', undefined,
+    ]);
+    expect(result.map(r => r['gen_ai.session.id'])).toEqual(['uuid-a', 'uuid-b', 'uuid-reset', 'uuid-child']);
+  });
+
+  it.each(['x'.repeat(1025), 'bad\nkey', {}, ' '])('does not export malformed native keys %#', async sessionKey => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', prompt: 'test', sessionKey }, { runId: 'a', sessionId: 'uuid-a' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    expect(readOutputRecords().every(r => r['agent.openclaw.session_key'] === undefined)).toBe(true);
+  });
+
+  it('marks conflicting native sources instead of choosing the first key', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', sessionKey: 'agent:main:a' }, { runId: 'a', sessionKey: 'agent:main:b' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    for (const record of readOutputRecords()) {
+      expect(record['agent.openclaw.session_key']).toBeUndefined();
+      expect(record['agent.openclaw.session_key.ambiguous']).toBe(true);
+    }
+  });
+
   it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
     const packageJson = JSON.parse(fs.readFileSync(PLUGIN_PACKAGE_PATH, 'utf-8'));
     const agentDefinition = JSON.parse(fs.readFileSync(OPENCLAW_AGENT_DEF_PATH, 'utf-8'));

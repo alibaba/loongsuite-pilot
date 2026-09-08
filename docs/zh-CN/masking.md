@@ -114,6 +114,7 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - LLM 输入和输出消息。
 - 工具调用参数。
 - 工具调用结果。
+- OpenClaw 路由 key（`agent.openclaw.session_key`），其中可能包含渠道用户/群组标识。关闭消息内容采集时仍遵循脱敏规则；`mask.mode=none` 时保持原值。
 - 已知 Agent 内容字段，例如 `agent.content`、`agent.inline_diff_message` 和部分 compact 内容字段。
 
 模型名、token 数、耗时、Git 分支、workspace 路径等稳定元数据不作为密钥内容字段扫描。

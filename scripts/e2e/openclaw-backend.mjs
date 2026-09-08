@@ -31,9 +31,11 @@ const spans = remote.map(row => {
   assert.equal(String(row.endTime), original.endTimeUnixNano, 'Backend end changed');
   for (const key of ['gen_ai.span.kind', 'gen_ai.turn.id', 'gen_ai.session.id', 'gen_ai.user.id',
     'gen_ai.tool.call.id', 'gen_ai.response.id', 'gen_ai.agent.name', 'agent.openclaw.user.id.source',
+    'agent.openclaw.session_key',
     ...Object.keys(original.attributes).filter(k => k.startsWith('gen_ai.usage.'))]) {
     assert.deepEqual(attributes[key], original.attributes[key], `Backend attribute changed: ${key}`);
   }
+  assert.equal(resource['agent.openclaw.session_key'], undefined, 'Backend session key must not be a Resource');
   return { traceId: row.traceId, spanId: row.spanId, parentSpanId: row.parentSpanId,
     startTimeUnixNano: row.startTime, endTimeUnixNano: row.endTime, attributes, resource, status: { code: Number(row.statusCode) } };
 });

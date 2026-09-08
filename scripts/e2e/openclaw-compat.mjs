@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { assertOpenClawEvidence, assertContentOff } from './openclaw-assertions.mjs';
+import { assertOpenClawEvidence, assertContentOff, assertOpenClawSessionKey } from './openclaw-assertions.mjs';
 import { JSONL_VALIDATOR_JS } from './lib/e2e-scenarios.mjs';
 
 assert(process.env.OPENCLAW_E2E_DISPOSABLE === '1' && process.platform === 'linux'
@@ -207,6 +207,10 @@ try {
   const nativeMessages = (await rows(`${state}/agents/main/sessions`)).filter(r => r.type === 'message').map(r => r.message);
   report.validation = assertOpenClawEvidence({ events, spans, nativeMessages, provider: provider.provider, model: provider.model, service, workerName, turns: 4, expectedToolErrorTraceIds: privateTraceIds });
   report.privacyTraceIds = privateTraceIds;
+  report.sessionKeyValidation = assertOpenClawSessionKey({
+    rawEvents: (await rows(`${data}/logs/openclaw`)).filter(e => e['gen_ai.turn.id']),
+    events, spans, sessionKey,
+  });
   env._JV_LOG_DIR = `${data}/logs/output`;
   env.E2E_JSONL_STRICT = '1'; env.E2E_JSONL_AGENT_FILTER = 'openclaw';
   await command('strict-jsonl-validation', process.execPath, ['-e', JSONL_VALIDATOR_JS]);

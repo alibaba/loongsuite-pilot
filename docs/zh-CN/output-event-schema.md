@@ -8,6 +8,18 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 ## Event Names
 
+OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段
+`agent.openclaw.session_key`。已取得 key 的运行事件（`other`、`agent.input`、
+`llm.request`、`llm.response`、`tool.call`、`tool.result`）会保留该字段，
+同一轮上下文明确时也会填入 ENTRY、AGENT、STEP、LLM、TOOL Span 属性，
+不会放入 Resource。`session_start` / `session_end` 仍不进入规范化输出。
+
+该字段不替代 `gen_ai.session.id`：reset 后 UUID 可以变化而 key 不变。
+缺失、非法、超过 1024 字符或冲突时不猜测；混合父子 Agent 上下文也不继承父级 key。
+key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则；关闭消息内容采集
+不会移除这项元数据。JSONL/SLS 仅新增该精确字段的例外，不放开其他内部字段。
+不会自动创建 SLS 索引或 ARMS 专用展示列。
+
 | `event.name` | 说明 |
 |--------------|------|
 | `llm.request` | 一次 LLM 请求，包含用户输入、上下文增量和请求模型。消息角色在消息 payload 中表示。 |
