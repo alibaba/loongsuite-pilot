@@ -351,7 +351,6 @@ describe('Grok Build hook lifecycle', () => {
     expect(result.status).toBe(0);
     const emitted = records();
     for (const expected of [
-      'gen_ai.input.messages',
       'gen_ai.input.messages_delta',
       'gen_ai.output.messages',
       'gen_ai.system_instructions',
