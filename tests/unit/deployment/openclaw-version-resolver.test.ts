@@ -75,7 +75,7 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await pkg('app');
     expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry }, path.join(root, 'app'))).toBeNull();
   });
-  it.each(['path', 'cwd', 'bundle'])('keeps %s metadata discovery separate from deployment authority', async source => {
+  it.each(['path', 'cwd', 'bundle'])('automatically deploys a unique %s entry without CLI_PATH', async source => {
     const entry = await pkg(source === 'bundle' ? 'bundle/openclaw/node_modules/openclaw' : 'app', '2026.6.10');
     await fs.symlink(entry, path.join(path.dirname(entry), 'openclaw'));
     const env = source === 'path' ? { PATH: path.dirname(entry) }
@@ -83,23 +83,22 @@ describe('OpenClaw read-only version discovery and injection', () => {
     const cwd = source === 'cwd' ? path.dirname(entry) : root;
     const host = await resolveOpenClawHost(env, cwd);
     expect(host?.version).toBe('2026.6.10');
-    expect(isOpenClawHostBound(host)).toBe(false);
+    expect(isOpenClawHostBound(host)).toBe(true);
+    expect(host?.binding).toBe('auto-entry');
     const configPath = path.join(root, 'gateway.json');
     const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
       detection: { paths: [], commands: [] }, pluginInject: { configPaths: [configPath], configShape: 'openclaw-nested',
         createIfMissing: true, pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
     const strategy = new PluginInjectStrategy(root, root, () => resolveOpenClawHost(env, cwd));
-    expect(await strategy.detect(def)).toBe(false);
+    expect(await strategy.detect(def)).toBe(true);
     expect(await strategy.needsDeploy(def)).toBe(true);
-    expect(await strategy.deploy(def)).toMatchObject({ success: false, error: expect.stringContaining('OPENCLAW_CLI_PATH') });
-    await expect(fs.stat(configPath)).rejects.toThrow();
-    const before = '{"plugins":{"entries":{"third-party":{"enabled":true}}}}';
-    await fs.writeFile(configPath, before);
-    await strategy.deploy(def);
-    expect(await fs.readFile(configPath, 'utf8')).toBe(before);
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    const installed = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    expect(installed.plugins.entries['loongsuite-pilot-openclaw'].hooks.allowConversationAccess).toBe(true);
   });
   it.each([['2026.3.8', '2026.6.10', false], ['2026.6.10', '2026.3.8', true]])(
-    'binds Gateway %s despite PATH %s across collector cwd changes and lost bindings', async (gatewayVersion, pathVersion, access) => {
+    'persists Gateway %s despite PATH %s across collector cwd changes and lost environment', async (gatewayVersion, pathVersion, access) => {
       const entry = await pkg('app', gatewayVersion as string);
       const other = await pkg('other-cli', pathVersion as string);
       await fs.symlink(other, path.join(root, 'other-cli/openclaw'));
@@ -113,12 +112,78 @@ describe('OpenClaw read-only version discovery and injection', () => {
       const before = await fs.readFile(configPath, 'utf8');
       expect(JSON.parse(before).plugins.entries['loongsuite-pilot-openclaw'].hooks?.allowConversationAccess).toBe(access ? true : undefined);
       expect(await strategy().needsDeploy(def)).toBe(false);
+      env.AGENT_DATA_COLLECTION_CONFIG = path.join(root, 'pilot-config.json');
+      await fs.writeFile(env.AGENT_DATA_COLLECTION_CONFIG, JSON.stringify({ agents: { openclaw: { cliPath: entry } } }));
       delete env.OPENCLAW_CLI_PATH;
+      expect(await strategy().detect(def)).toBe(true);
+      expect(await strategy().needsDeploy(def)).toBe(false);
+      expect((await strategy().deploy(def)).success).toBe(true);
+      expect(await fs.readFile(configPath, 'utf8')).toBe(before);
+      // A missing persisted entry must never silently rebind to another CLI.
+      await fs.unlink(entry);
       expect(await strategy().detect(def)).toBe(false);
       expect(await strategy().needsDeploy(def)).toBe(true);
       expect((await strategy().deploy(def)).success).toBe(false);
       expect(await fs.readFile(configPath, 'utf8')).toBe(before);
     });
+  it('detects the standard home bundle with an empty service PATH', async () => {
+    const entry = await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw');
+    expect(await resolveOpenClawHost({ HOME: path.join(root, 'home'), PATH: '' }, root))
+      .toMatchObject({ executable: entry, binding: 'auto-entry', version: '2026.3.8' });
+  });
+  it('deduplicates bundle and PATH symlinks to the same package', async () => {
+    const entry = await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw');
+    await fs.mkdir(path.join(root, 'bin'));
+    await fs.symlink(entry, path.join(root, 'bin/openclaw'));
+    expect(isOpenClawHostBound(await resolveOpenClawHost({ HOME: path.join(root, 'home'), PATH: path.join(root, 'bin') }, root))).toBe(true);
+  });
+  it.each(['2026.3.8', '2026.6.10'])('rejects distinct bundle/PATH installs even when their versions match (%s)', async version => {
+    await pkg('home/.openclaw-bundle/openclaw/node_modules/openclaw', version);
+    const entry = await pkg('cli', version);
+    await fs.symlink(entry, path.join(root, 'cli/openclaw'));
+    expect(await resolveOpenClawHost({ HOME: path.join(root, 'home'), PATH: path.join(root, 'cli') }, root)).toBeNull();
+  });
+  it('requires an actual source entry rather than package metadata alone', async () => {
+    const entry = await pkg('app');
+    await fs.unlink(entry);
+    expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toBeNull();
+    await fs.mkdir(entry);
+    expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toBeNull();
+  });
+  it('leaves existing Gateway config byte-for-byte unchanged when auto discovery is ambiguous', async () => {
+    await pkg('app', '2026.3.8');
+    const other = await pkg('cli', '2026.6.10');
+    await fs.symlink(other, path.join(root, 'cli/openclaw'));
+    const configPath = path.join(root, 'gateway.json');
+    const before = '{"plugins":{"entries":{"third-party":{"enabled":true}}}}';
+    await fs.writeFile(configPath, before);
+    const mtime = (await fs.stat(configPath)).mtimeMs;
+    const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
+      detection: { paths: [], commands: [] }, pluginInject: { configPaths: [configPath], configShape: 'openclaw-nested',
+        createIfMissing: true, pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
+    const strategy = new PluginInjectStrategy(root, root, () => resolveOpenClawHost({ PATH: path.join(root, 'cli') }, path.join(root, 'app')));
+    expect(await strategy.detect(def)).toBe(false);
+    expect((await strategy.deploy(def)).success).toBe(false);
+    expect(await fs.readFile(configPath, 'utf8')).toBe(before);
+    expect((await fs.stat(configPath)).mtimeMs).toBe(mtime);
+    await fs.unlink(configPath);
+    expect((await strategy.deploy(def)).success).toBe(false);
+    await expect(fs.stat(configPath)).rejects.toThrow();
+  });
+  it('reads a saved entry from the custom config and rechecks versions on upgrade/downgrade', async () => {
+    const entry = await pkg('app');
+    const config = path.join(root, 'custom config.json');
+    await fs.writeFile(config, '\uFEFF' + JSON.stringify({ agents: { openclaw: { cliPath: entry } } }));
+    const env = { AGENT_DATA_COLLECTION_CONFIG: config };
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ binding: 'persisted-entry', conversationAccess: false });
+    await pkg('app', '2026.6.10');
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ conversationAccess: true });
+    await pkg('app');
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ conversationAccess: false });
+    await fs.writeFile(config, '{broken');
+    expect(await resolveOpenClawHost(env, path.dirname(entry))).toBeNull();
+    expect(await resolveOpenClawHost({ ...env, OPENCLAW_CLI_PATH: entry }, root)).toMatchObject({ binding: 'explicit-entry' });
+  });
   it('prefers installed metadata over stale environment version', async () => {
     const entry = await pkg('app');
     expect(await resolveOpenClawHost({ OPENCLAW_CLI_PATH: entry, OPENCLAW_SERVICE_VERSION: '2026.5.12' }, root))

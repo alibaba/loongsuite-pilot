@@ -5,58 +5,66 @@ import { openClawCapabilities, type OpenClawCapabilities } from '../../assets/pl
 export interface OpenClawHost extends OpenClawCapabilities {
   source: string;
   executable?: string;
-  /** Only an explicitly supplied absolute launch entry binds deployment. */
-  binding?: 'explicit-entry';
+  /** The entry is explicit, persisted by the installer, or uniquely discovered. */
+  binding?: 'explicit-entry' | 'persisted-entry' | 'auto-entry';
 }
 
-export function isOpenClawHostBound(host: OpenClawHost | null): host is OpenClawHost & { binding: 'explicit-entry'; executable: string } {
-  return host?.binding === 'explicit-entry' && typeof host.executable === 'string'
+export function isOpenClawHostBound(host: OpenClawHost | null): host is OpenClawHost & { executable: string } {
+  return !!host?.binding && typeof host.executable === 'string'
     && path.isAbsolute(host.executable);
 }
 
 export function openClawBindingProblem(host: OpenClawHost | null): string {
   return `${host ? `OpenClaw ${host.version} candidate found, but Gateway entry is unconfirmed` : 'OpenClaw >=2026.3.8 launch entry/version unavailable or unsupported'}; `
-    + 'set OPENCLAW_CLI_PATH to the absolute Gateway launch entry in both the installer and collector environment; config left unchanged';
+    + 'automatic entry discovery is unavailable or ambiguous; optionally set OPENCLAW_CLI_PATH to the absolute Gateway launch entry; config left unchanged';
 }
 
 /** In-process metadata lookup: never executes a CLI, shell or package manager.
- * An explicit deployment entry wins; otherwise conflicting PATH/source-package
- * evidence fails closed. No cache: watchdog sees upgrades too.
+ * An explicit entry wins, then the installer's persisted entry. Otherwise only
+ * a unique package among fixed cwd/bundle/PATH candidates authorizes deployment.
+ * No process inspection, recursive scan or cache: watchdog sees upgrades too.
  */
 export async function resolveOpenClawHost(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd(),
 ): Promise<OpenClawHost | null> {
   const unreadable = Symbol('unidentified-package');
-  async function readPackage(file: string): Promise<OpenClawHost | null | undefined | typeof unreadable> {
+  async function readJson(file: string, limit = 256 * 1024): Promise<Record<string, unknown> | undefined | typeof unreadable> {
     try {
       const handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK);
       let pkg;
       try {
         const stat = await handle.stat();
-        if (!stat.isFile() || stat.size > 256 * 1024) return unreadable;
-        const buffer = Buffer.alloc(256 * 1024 + 1);
+        if (!stat.isFile() || stat.size > limit) return unreadable;
+        const buffer = Buffer.alloc(limit + 1);
         let size = 0;
         while (size < buffer.length) {
           const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
           if (!bytesRead) break;
           size += bytesRead;
         }
-        if (size > 256 * 1024) return unreadable;
-        pkg = JSON.parse(buffer.toString('utf8', 0, size));
+        if (size > limit) return unreadable;
+        pkg = JSON.parse(buffer.toString('utf8', 0, size).replace(/^\uFEFF/, ''));
       } finally { await handle.close(); }
-      if (!pkg || typeof pkg !== 'object') return unreadable;
-      if (pkg.name !== 'openclaw') return undefined;
-      const caps = openClawCapabilities(pkg.version);
-      return caps ? { ...caps, source: file } : null;
+      return pkg && typeof pkg === 'object' && !Array.isArray(pkg) ? pkg : unreadable;
     } catch (err) {
       return (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : unreadable;
     }
   }
+  async function readPackage(file: string): Promise<OpenClawHost | null | undefined | typeof unreadable> {
+    const pkg = await readJson(file);
+    if (pkg === undefined || pkg === unreadable) return pkg;
+    if (pkg.name !== 'openclaw') return undefined;
+    const caps = openClawCapabilities(pkg.version);
+    return caps ? { ...caps, source: file } : null;
+  }
 
   async function fromEntry(entry: string): Promise<OpenClawHost | null> {
     let real: string;
-    try { real = await fs.realpath(entry); } catch { return null; }
+    try {
+      real = await fs.realpath(entry);
+      if (!(await fs.stat(real)).isFile()) return null;
+    } catch { return null; }
     let dir = path.dirname(real);
     for (let depth = 0; depth < 8; depth++) {
       // Stop before broad filesystem roots. Only fixed package candidates,
@@ -97,15 +105,49 @@ export async function resolveOpenClawHost(
     const host = await fromEntry(env.OPENCLAW_CLI_PATH);
     return host ? { ...host, binding: 'explicit-entry' } : null;
   }
-  if (env.OPENCLAW_BUNDLE_ROOT) {
-    const host = await readPackage(path.join(env.OPENCLAW_BUNDLE_ROOT, 'openclaw/node_modules/openclaw/package.json'));
-    if (host !== undefined) return host === unreadable ? null : host;
+
+  // Persist the entry, never its version: daemon cwd/PATH need not match the
+  // installer, and every check must still read the currently installed package.
+  const home = env.HOME || env.USERPROFILE;
+  const configuredPath = env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+  const configPath = configuredPath
+    ? (configuredPath.startsWith('~/') && home ? path.join(home, configuredPath.slice(2)) : configuredPath)
+    : home ? path.join(home, '.loongsuite-pilot/config.json') : undefined;
+  if (configPath) {
+    const config = await readJson(configPath, 1024 * 1024);
+    if (config === unreadable) return null;
+    const entry = (config as { agents?: { openclaw?: { cliPath?: unknown } } } | undefined)?.agents?.openclaw?.cliPath;
+    if (entry !== undefined) {
+      if (typeof entry !== 'string' || !path.isAbsolute(entry)) return null;
+      const host = await fromEntry(entry);
+      return host ? { ...host, binding: 'persisted-entry' } : null;
+    }
   }
+
+  const candidates: OpenClawHost[] = [];
   const sourceHost = await readPackage(path.join(cwd, 'package.json'));
+  if (sourceHost === null || sourceHost === unreadable) return null;
+  if (sourceHost) {
+    const host = await fromEntry(path.join(cwd, 'openclaw.mjs'));
+    if (!host) return null;
+    candidates.push(host);
+  }
+  const bundleRoot = env.OPENCLAW_BUNDLE_ROOT || (home ? path.join(home, '.openclaw-bundle') : undefined);
+  if (bundleRoot) {
+    if (!path.isAbsolute(bundleRoot)) return null;
+    const packageDir = path.join(bundleRoot, 'openclaw/node_modules/openclaw');
+    const bundle = await readPackage(path.join(packageDir, 'package.json'));
+    if (bundle === null || bundle === unreadable) return null;
+    if (bundle) {
+      const host = await fromEntry(path.join(packageDir, 'openclaw.mjs'));
+      if (!host) return null;
+      candidates.push(host);
+    }
+  }
   const extensions = process.platform === 'win32'
     ? ['', ...(env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').map(ext => ext.toLowerCase())]
     : [''];
-  for (const directory of (env.PATH || '').split(path.delimiter).filter(Boolean).slice(0, 128)) {
+  pathSearch: for (const directory of (env.PATH || '').split(path.delimiter).filter(Boolean).slice(0, 128)) {
     // Ignore implicit/current-directory PATH entries, just as a service should.
     if (!path.isAbsolute(directory)) continue;
     for (const ext of extensions) {
@@ -115,19 +157,15 @@ export async function resolveOpenClawHost(
         if (!(await fs.stat(candidate)).isFile()) continue;
       } catch { continue; }
       const selected = await fromEntry(candidate);
-      if (sourceHost === null) return null;
-      // A source-container cwd and PATH can expose distinct installations.
-      // Do not grant modern schema fields to a possibly legacy config. The
-      // container launcher can bind its actual executable via CLI_PATH.
-      if (selected && sourceHost && sourceHost !== unreadable
-        && await fs.realpath(selected.source) !== await fs.realpath(sourceHost.source)) return null;
-      return selected;
+      if (!selected) return null; // Do not bypass an opaque/unsupported PATH command.
+      candidates.push(selected);
+      break pathSearch; // Match shell PATH precedence, not every installed CLI.
     }
   }
-  // Source containers commonly run `node /app/openclaw.mjs` from the package
-  // root without installing a PATH command. Shared mounts can expose CLI_PATH.
-  if (sourceHost !== undefined) return sourceHost === unreadable ? null : sourceHost;
-  // Version labels do not identify the executable that will load the config.
-  // Never grant schema capabilities based solely on inherited environment.
-  return null;
+  if (!candidates.length) return null;
+  try {
+    const packages = new Set(await Promise.all(candidates.map(host => fs.realpath(host.source))));
+    if (packages.size !== 1) return null; // Distinct installations are ambiguous, even at the same version.
+  } catch { return null; }
+  return { ...candidates[0], binding: 'auto-entry' };
 }

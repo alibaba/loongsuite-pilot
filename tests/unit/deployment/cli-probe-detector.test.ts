@@ -98,21 +98,24 @@ describe('CLI probe detector', () => {
     expect(commandExists).not.toHaveBeenCalled();
   });
 
-  it('reports an unbound OpenClaw PATH candidate as not ready with an actionable reason', async () => {
+  it('automatically selects a unique OpenClaw PATH candidate and exposes its persistent entry', async () => {
     const executable = path.join(tmpDir, process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw');
     await fs.writeFile(executable, '/* never executed */');
     await fs.chmod(executable, 0o755);
     await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.6.10' }));
     vi.stubEnv('PATH', tmpDir);
+    vi.stubEnv('HOME', tmpDir);
+    vi.stubEnv('USERPROFILE', tmpDir);
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', path.join(tmpDir, 'pilot.json'));
     vi.stubEnv('OPENCLAW_CLI_PATH', undefined);
     vi.stubEnv('OPENCLAW_BUNDLE_ROOT', undefined);
     // Vitest 1 stringifies undefined; retain restoration but actually unset it.
     delete process.env.OPENCLAW_CLI_PATH;
     delete process.env.OPENCLAW_BUNDLE_ROOT;
     const result = await probeAgentDefinition({ ...genericDef(), id: 'openclaw', displayName: 'OpenClaw' });
-    expect(result.detected).toBe(false);
-    expect(result.reason).toContain('candidate found');
-    expect(result.reason).toContain('OPENCLAW_CLI_PATH');
+    expect(result.detected).toBe(true);
+    expect(result.reason).toContain('2026.6.10');
+    expect(result.openclawCliPath).toBe(executable);
     expect(detectAgent).not.toHaveBeenCalled();
     expect(commandExists).not.toHaveBeenCalled();
   });

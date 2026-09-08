@@ -12,6 +12,8 @@ export interface CliProbeResult {
   displayName: string;
   detected: boolean;
   reason: string;
+  /** Installer persists this entry so service-manager environment loss is harmless. */
+  openclawCliPath?: string;
 }
 
 interface DshRuntimeLocatorLike {
@@ -63,7 +65,7 @@ function describeDshTarget(target: DshRuntimeTarget): string {
  * in a running Node process environment, so the generic path/PATH boolean is
  * insufficient. DSH discovery failures remain local to DSH so one transient
  * or ambiguous procfs result cannot erase the complete installer menu. Other
- * OpenClaw additionally requires explicit entry binding before deployment.
+ * OpenClaw additionally requires an unambiguous entry before deployment.
  * Other Agents retain the generic detector's existing error behavior.
  */
 export async function probeAgentDefinition(
@@ -82,6 +84,7 @@ export async function probeAgentDefinition(
   if (def.id === 'openclaw') {
     const host = await resolveOpenClawHost();
     return { ...result, detected: isOpenClawHostBound(host),
+      ...(isOpenClawHostBound(host) ? { openclawCliPath: host.executable } : {}),
       reason: isOpenClawHostBound(host) ? `${host.source} (${host.version}, ${host.adapter}, bound entry)` : openClawBindingProblem(host) };
   }
 

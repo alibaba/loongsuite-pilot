@@ -481,15 +481,14 @@ export class PluginInjectStrategy implements DeployStrategy {
       }
     }
 
-    if (paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
-      const before = paths.length;
+    const desiredPath = this.toOpenclawPath(resolvedSpec);
+    const ownedPaths = paths.filter((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId));
+    // Leave the existing canonical entry (and its ordering) untouched. Removing
+    // and re-adding it on every deploy rewrites a live Gateway's config needlessly.
+    if (ownedPaths.length !== 1 || ownedPaths[0] !== desiredPath) {
       load.paths = paths.filter((entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId));
       paths = load.paths as unknown[];
-      if ((load.paths as unknown[]).length !== before) mutated = true;
-    }
-
-    if (!paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
-      paths.push(this.toOpenclawPath(resolvedSpec));
+      paths.push(desiredPath);
       mutated = true;
     }
 

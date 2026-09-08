@@ -8,6 +8,12 @@ import { resolveHome } from './utils/fs-utils.js';
 const __probe_dirname = __dirname;
 
 async function main(): Promise<void> {
+  const configIndex = process.argv.indexOf('--config-path');
+  if (configIndex >= 0) {
+    const configPath = process.argv[configIndex + 1];
+    if (!configPath) throw new Error('--config-path requires a path');
+    process.env.AGENT_DATA_COLLECTION_CONFIG = path.resolve(configPath);
+  }
   // The installed service wrappers use this private probe to expose commands
   // that only make sense for the open-source distribution. Keep the edition
   // decision tied to the existing compile-time build flag instead of mutable

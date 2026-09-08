@@ -103,19 +103,31 @@ Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream de
 
 Pilot 支持 OpenClaw `>=2026.3.8`。在写入宿主配置之前，Pilot 使用进程内文件
 操作读取选中安装实例的 `package.json`，用户无需传入版本。版本探测不会启动
-OpenClaw、shell、which 或 npm 子进程。需在安装器与 collector 共用的容器/服务环境中，
-将 `OPENCLAW_CLI_PATH` 设置为 **Gateway 实际启动入口的绝对路径**。
-例如 `WORKDIR /app` 下执行 `node openclaw.mjs gateway ...`，设置
-`OPENCLAW_CLI_PATH=/app/openclaw.mjs`。首次安装以及后续 collector/watchdog
-重启都必须继承该变量；只给一次安装命令赋值，不能保证独立服务继承。
-绑定入口支持 npm/pnpm 软链接、全局包装器及企业 Bundle。
+OpenClaw、shell、which 或 npm 子进程。`OPENCLAW_CLI_PATH` 为可选覆盖项，不再必填。
+
+入口按以下优先级解析：
+
+1. 显式指定的绝对路径 `OPENCLAW_CLI_PATH`。
+2. 安装器保存在 Pilot 配置中的 `agents.openclaw.cliPath`。
+3. 自动探测当前 OpenClaw 包工作目录中的 `openclaw.mjs`、标准
+   `~/.openclaw-bundle`（或 `OPENCLAW_BUNDLE_ROOT`）内的安装，以及 PATH 上首个
+   OpenClaw 命令。指向同一包的软链接会去重；发现不同安装实例时不猜测，版本相同也视为冲突。
+
+对于 `WORKDIR /app`、`node openclaw.mjs gateway ...` 的源码容器，在 `/app` 下安装，
+探测无冲突时无需手动传入路径或版本。PATH 或标准 Bundle 暴露的共享安装也支持自动识别。
+启用 OpenClaw 时，安装器保存选中的入口，而非缓存版本。后台 collector/watchdog 即使
+工作目录、PATH 或服务环境改变，也会从 Pilot 配置重新读取入口并验证当前版本。
+自定义配置位置遵循 `AGENT_DATA_COLLECTION_CONFIG`；公共安装器会自动将 `--data-dir`
+对应的配置路径传给探测器。
+
+仅在多套安装冲突或非标准目录无法自动识别时，才需要在安装时指定实际 Gateway 入口。
+显式或已保存入口失效时，不回退到另一套安装；未知或不受支持的版本保持非就绪、可重试。
 `OPENCLAW_SERVICE_VERSION`、`OPENCLAW_BUNDLED_VERSION`、`OPENCLAW_VERSION`
-等版本标签不能单独作为安装或配置能力依据。未绑定时，PATH、工作目录和 Bundle
-探测仅报告候选安装；即使能读取版本，也会提示原因并跳过 OpenClaw 配置注入。
-入口缺失、相对路径、失效或版本不受支持时同样保持非就绪、可重试，不回退到其他安装，
-也不清理既有配置。这是对自动部署准入的有意收紧。显式绑定后，即使 PATH 指向另一版本，
-也只按绑定入口读取元数据。不缓存版本、不扫描进程、不采用运行时权限引导或 Gateway 重载。
-请在正常容器部署/启动前配置环境；给已有容器新增环境变量可能仍需要重新部署。
+等版本标签不能单独作为配置能力依据。重装采用自动/默认选择时，探测失败会保留已有
+OpenClaw 启用状态和入口；显式 `--agents` 或菜单选择仍可以禁用。重复部署不重写已正确的
+配置。不扫描进程、不缓存版本、不执行 Gateway 重载命令。
+首次注入、明确禁用或确有配置/兼容性变化时，Gateway 自身仍可能因配置变化重载/重启；
+请在 Gateway 启动前安装，或为这些变更安排维护窗口。
 
 | 宿主版本 | 采集适配器 | `hooks.allowConversationAccess` |
 | --- | --- | --- |

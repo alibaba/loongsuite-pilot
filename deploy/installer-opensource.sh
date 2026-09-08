@@ -69,6 +69,7 @@ CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
+AGENT_SELECTION_EXPLICIT=0
 MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
@@ -134,8 +135,8 @@ while [[ $# -gt 0 ]]; do
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
         --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
-        --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
-        --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
+        --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
+        --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
@@ -621,7 +622,7 @@ PROBE_RESULT="[]"
 
 probe_agents() {
     msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
-    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" 2>/dev/null) || {
+    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" --config-path "$DATA_DIR/config.json" 2>/dev/null) || {
         msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
         PROBE_RESULT="[]"
         return 0
@@ -702,6 +703,7 @@ rl.question('    > ', (answer) => {
     }
 
     # Compute final selection: empty input = detected agents, otherwise use exact input
+    if [ -n "$select_input" ]; then AGENT_SELECTION_EXPLICIT=1; fi
     SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
 const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
@@ -1002,6 +1004,7 @@ write_config() {
     printf '%s' "$PROBE_RESULT" | \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
+        LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
 const fs = require('fs');
@@ -1111,11 +1114,21 @@ if (maskMode) {
 
 if (selectedAgents) {
   config.agents = config.agents || {};
+  const previousOpenclaw = config.agents.openclaw;
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
   const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
+    // A transient discovery miss is not consent to uninstall a live plugin.
+    if (agent.id === 'openclaw' && !agent.detected && process.env.LP_AGENT_SELECTION_EXPLICIT !== '1'
+        && previousOpenclaw !== undefined) {
+      console.log('OpenClaw: detection unavailable; preserving previous enabled state and entry');
+      continue;
+    }
     config.agents[agent.id].enabled = selected.includes(agent.id);
+    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
+      config.agents[agent.id].cliPath = agent.openclawCliPath;
+    }
   }
 }
 
