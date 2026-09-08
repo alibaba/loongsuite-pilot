@@ -1077,6 +1077,115 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[4]['tool.result.status']).toBe('failure');
       expect(entries[5].time_unix_nano).toBe(ms(base + 4202));
     });
+
+    it('starts a later request after the latest preceding tool result', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 1200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 1800),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 9999),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 2500),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-tools', requestId: 'request-tools', messageId: 'message-1',
+          gmtCreate: base + 200, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+        {
+          sessionId: 'sess-tools', requestId: 'request-tools', messageId: 'message-2',
+          gmtCreate: base + 2500, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[4].time_unix_nano).toBe(ms(base + 1801));
+    });
+
+    it('clamps request to one millisecond before its SQLite response when clocks conflict', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base + 200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base + 6000),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s2',
+          time_unix_nano: ms(base + 6001),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s2',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-clamp', requestId: 'request-clamp', messageId: 'message-1',
+          gmtCreate: base + 200, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+        {
+          sessionId: 'sess-clamp', requestId: 'request-clamp', messageId: 'message-2',
+          gmtCreate: base + 5000, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[3].time_unix_nano).toBe(ms(base + 4999));
+    });
   });
 
   describe('enrichIdeTurn (timestamp-based fallback)', () => {

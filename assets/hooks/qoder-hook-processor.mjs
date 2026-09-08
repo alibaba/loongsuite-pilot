@@ -919,7 +919,7 @@ function hookEventOf(row) {
 
 // --- LLM Boundary Detection --------------------------------------------------
 
-export function buildLlmBoundaries(progressEvents, contentEvents) {
+export function buildLlmBoundaries(_progressEvents, contentEvents) {
   // Step 1: Group assistant blocks into LLM calls. Qoder transcript assistant
   // rows do not carry message.id, and progress windows are hook timing signals,
   // not reliable provider-call boundaries.
@@ -932,19 +932,26 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
   // the next assistant row starts a new LLM call.
   const assistantGroups = [];
   let currentGroup = [];
+  let currentGroupStartIndex = -1;
   let currentToolIds = new Set();
   let resolvedToolIds = new Set();
-  let currentToolStartNanos = null;
 
-  function flushGroup() {
-    if (currentGroup.length > 0) assistantGroups.push(currentGroup);
+  function flushGroup(contentEndIndex) {
+    if (currentGroup.length > 0) {
+      assistantGroups.push({
+        rows: currentGroup,
+        contentStartIndex: currentGroupStartIndex,
+        contentEndIndex,
+      });
+    }
     currentGroup = [];
+    currentGroupStartIndex = -1;
     currentToolIds = new Set();
     resolvedToolIds = new Set();
-    currentToolStartNanos = null;
   }
 
-  for (const row of contentEvents) {
+  for (let rowIndex = 0; rowIndex < contentEvents.length; rowIndex++) {
+    const row = contentEvents[rowIndex];
     if (row.type !== 'assistant') {
       if (isToolResult(row)) {
         for (const block of row.message?.content || []) {
@@ -961,69 +968,38 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
     const toolCycleComplete = currentGroup.length > 0 &&
       currentToolIds.size > 0 &&
       [...currentToolIds].every(id => resolvedToolIds.has(id));
-    // A cancelled/interrupted tool can omit its transcript tool_result even
-    // though Qoder emitted a completion hook. Count completion signals only
-    // within this group and require enough signals to cover every tool already
-    // declared; this preserves late parallel tool_use blocks after an early
-    // result while preventing an unresolved tool from swallowing all later LLMs.
-    const completedByHook = currentGroup.length > 0 &&
-      currentToolIds.size > 0 &&
-      currentToolStartNanos !== null &&
-      progressEvents.filter(pe => {
-        const peTs = timestampOrderNanos(pe.ts);
-        return peTs !== null && peTs > currentToolStartNanos && peTs < ts && (
-          pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'PostToolUseFailure'
-        );
-      }).length >= currentToolIds.size;
-    if (toolCycleComplete || completedByHook) flushGroup();
+    // Progress hooks carry no tool id and third-party hooks share the same
+    // transcript. They cannot safely close an LLM group. If a transcript ever
+    // omits tool_result, conservatively retain later assistant rows in this
+    // group instead of inventing a boundary and an orphan request.
+    if (toolCycleComplete) flushGroup(rowIndex);
 
+    if (currentGroup.length === 0) currentGroupStartIndex = rowIndex;
     currentGroup.push(row);
     for (const block of row.message?.content || []) {
       if (block?.type === 'tool_use' && block.id) {
         currentToolIds.add(block.id);
-        if (currentToolStartNanos === null) currentToolStartNanos = ts;
       }
     }
   }
-  flushGroup();
+  flushGroup(contentEvents.length);
 
-  // Step 2: For each assistant group (= one LLM call), find timing from progress
+  // Step 2: Keep each group's exact transcript range. Timing is only fallback
+  // metadata and must never be used to reconstruct content ownership.
   const boundaries = [];
   for (let i = 0; i < assistantGroups.length; i++) {
     const group = assistantGroups[i];
-    const groupStartNanos = timestampOrderNanos(group[0].timestamp);
-    const groupEndNanos = timestampOrderNanos(group[group.length - 1].timestamp) ?? groupStartNanos;
+    const firstAssistant = group.rows[0];
+    const lastAssistant = group.rows[group.rows.length - 1];
+    const groupStartNanos = timestampOrderNanos(firstAssistant.timestamp);
+    const groupEndNanos = timestampOrderNanos(lastAssistant.timestamp) ?? groupStartNanos;
     if (groupStartNanos === null || groupEndNanos === null) continue;
 
-    // Find start time: last tool completion or UserPromptSubmit BEFORE this group
-    let startTs = null;
-    for (const pe of progressEvents) {
-      const peTs = timestampOrderNanos(pe.ts);
-      if (peTs === null) continue;
-      if (peTs >= groupStartNanos) break;
-      if (
-        pe.hookEvent === 'PostToolUse' ||
-        pe.hookEvent === 'PostToolUseFailure' ||
-        pe.hookEvent === 'UserPromptSubmit'
-      ) {
-        startTs = pe.ts;
-      }
-    }
-
-    // Find end time: first PreToolUse or Stop AFTER this group
-    let endTs = null;
-    for (const pe of progressEvents) {
-      const peTs = timestampOrderNanos(pe.ts);
-      if (peTs === null || peTs <= groupEndNanos) continue;
-      if (pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop') {
-        endTs = pe.ts;
-        break;
-      }
-    }
-
     boundaries.push({
-      startTs: startTs || group[0].timestamp,
-      endTs: endTs || group[group.length - 1].timestamp,
+      startTs: firstAssistant.timestamp,
+      endTs: lastAssistant.timestamp,
+      contentStartIndex: group.contentStartIndex,
+      contentEndIndex: group.contentEndIndex,
     });
   }
 
@@ -1068,7 +1044,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  // If no progress boundaries detected, fall back to legacy behavior. The turn
+  // If no assistant boundaries were detected, fall back to legacy behavior. The turn
   // entry `other` is already in `records`, so hand the legacy path only the rows
   // it still owns. Qoder encodes tool results as type=user, so they must survive.
   if (boundaries.length === 0) {
@@ -1079,20 +1055,27 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     return finalizeRecords(legacyRecords, cwd);
   }
 
-  // Assign content events to boundaries.
-  // Use extended ranges: each boundary "owns" content from its startTs up to the NEXT boundary's startTs.
-  // This ensures tool_result events (which occur between boundaries) are assigned to the preceding boundary.
-  const assignedContent = assignContentToBoundaries(boundaries, contentEvents);
-
   // For each LLM call boundary, produce events
   let toolCallsForNextStep = [];
   let toolResultsForNextStep = [];
+  let previousResponseNanos = '';
   for (let i = 0; i < boundaries.length; i++) {
     const boundary = boundaries[i];
     const stepId = `${turnId}:s${i + 1}`;
-    const content = assignedContent[i] || [];
-    const startNanos = isoToUnixNanos(boundary.startTs);
-    const endNanos = boundary.endTs ? isoToUnixNanos(boundary.endTs) : startNanos;
+    const content = contentEvents.slice(boundary.contentStartIndex, boundary.contentEndIndex);
+    const responseEndNanos = isoToUnixNanos(boundary.endTs) || isoToUnixNanos(boundary.startTs);
+    const precedingNanos = [];
+    if (i === 0 && userRow?.timestamp) {
+      precedingNanos.push(isoToUnixNanos(userRow.timestamp));
+    } else {
+      precedingNanos.push(previousResponseNanos);
+      for (const result of toolResultsForNextStep) {
+        if (result.resultTs) precedingNanos.push(isoToUnixNanos(result.resultTs));
+      }
+    }
+    const startNanos = requestStartBeforeResponse(precedingNanos, responseEndNanos)
+      || isoToUnixNanos(boundary.startTs);
+    const endNanos = responseEndNanos || startNanos;
     const previousToolCallIds = new Set(toolCallsForNextStep.map(tc => tc.id).filter(Boolean));
     const currentContentToolResults = extractToolResults(content);
     const inputToolResultsById = new Map();
@@ -1155,7 +1138,6 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     const toolCalls = [];
     let responseId = undefined;
     let clientRequestId = undefined;
-    let lastAssistantTs = null;
     let firstAssistantTs = null;
 
     for (const row of content) {
@@ -1170,7 +1152,6 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
             typeof msg.usage.request_id === 'string' && msg.usage.request_id) {
           clientRequestId = msg.usage.request_id;
         }
-        if (row.timestamp) lastAssistantTs = row.timestamp;
         if (row.timestamp && !firstAssistantTs) firstAssistantTs = row.timestamp;
         for (const block of blocks) {
           if (block.type === 'thinking') {
@@ -1199,12 +1180,6 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       name: tc.name,
       input: tc.input,
     }));
-
-    // When startTs == endTs (no distinguishable progress boundary), use assistant timestamp as end
-    let responseEndNanos = endNanos;
-    if (startNanos === endNanos && lastAssistantTs) {
-      responseEndNanos = isoToUnixNanos(lastAssistantTs) || endNanos;
-    }
 
     // Determine finish reason from the last assistant row's stop_reason (authoritative),
     // falling back to inference when not available.
@@ -1265,6 +1240,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         observed_time_unix_nano: observedTs,
       });
     }
+    previousResponseNanos = responseEndNanos;
 
     // tool.call + tool.result events. Parallel tools may finish out of order,
     // so array position is not a valid association key.
@@ -1372,38 +1348,6 @@ export function markTurnBoundaries(records) {
   return records;
 }
 
-// --- Content assignment to boundaries ----------------------------------------
-
-function assignContentToBoundaries(boundaries, contentEvents) {
-  const assigned = boundaries.map(() => []);
-
-  for (const row of contentEvents) {
-    // Skip the user prompt row (already handled as user-hook outside boundaries)
-    if (row.type === 'user' && !isToolResult(row)) continue;
-
-    const rowTs = timestampOrderNanos(row.timestamp);
-    if (rowTs === null) continue;
-
-    // Each boundary "owns" from its startTs to the NEXT boundary's startTs (exclusive).
-    // This ensures tool_result events (which occur between endTs and next startTs)
-    // are assigned to the current boundary, not lost in the gap.
-    let bestIdx = -1;
-    for (let i = 0; i < boundaries.length; i++) {
-      const startTs = timestampOrderNanos(boundaries[i].startTs);
-      const nextStartTs = (i + 1 < boundaries.length)
-        ? timestampOrderNanos(boundaries[i + 1].startTs)
-        : null;
-      if (startTs !== null && rowTs >= startTs && (nextStartTs === null || rowTs < nextStartTs)) {
-        bestIdx = i;
-        break;
-      }
-    }
-    if (bestIdx >= 0) assigned[bestIdx].push(row);
-  }
-
-  return assigned;
-}
-
 // --- Helpers -----------------------------------------------------------------
 
 /**
@@ -1444,6 +1388,21 @@ function ensureEndAfterStart(startNanos, candidateEndNanos) {
     return String(start + 1_000_000n);
   } catch {
     return candidateEndNanos || startNanos;
+  }
+}
+
+function requestStartBeforeResponse(precedingNanos, responseNanos) {
+  try {
+    const preceding = precedingNanos
+      .filter(value => typeof value === 'string' && /^\d+$/.test(value))
+      .map(value => BigInt(value));
+    if (preceding.length === 0 || !responseNanos) return '';
+    const response = BigInt(responseNanos);
+    let request = preceding.reduce((latest, value) => value > latest ? value : latest) + 1_000_000n;
+    if (request >= response) request = response - 1_000_000n;
+    return request >= 0n ? String(request) : '';
+  } catch {
+    return '';
   }
 }
 

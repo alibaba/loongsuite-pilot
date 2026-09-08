@@ -470,18 +470,12 @@ export function enrichIdeTurn(
   }
   matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
 
-  // Find the user-boundary entry for step 1's request time.
-  // The normalizer emits user prompts as 'other' (not 'llm.request'), so match both.
-  const userBoundary = entries.find(e =>
-    !e['gen_ai.step.id'] &&
-    (e['event.name'] === 'llm.request' || (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
-  );
-
   for (let i = 0; i < matchedPairs.length; i++) {
     const { entry: respEntry, gmtCreate } = matchedPairs[i];
+    const responseTime = BigInt(gmtCreate) * 1_000_000n;
 
     // llm.response: use gmt_create as real response time
-    respEntry.time_unix_nano = String(BigInt(gmtCreate) * 1_000_000n);
+    respEntry.time_unix_nano = String(responseTime);
 
     // Find the llm.request for this response's step (same step.id).
     // Restrict to the same step to avoid cross-turn contamination in
@@ -507,38 +501,52 @@ export function enrichIdeTurn(
     }
 
     if (req) {
-      if (i > 0) {
-        // Start after the previous response and all of its tools. Hook records
-        // now carry per-tool result timestamps, so a fixed +1ms after the
-        // response would make the next LLM overlap a still-running tool.
-        let requestStart = BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n;
-        const previousResponseIndex = entries.indexOf(matchedPairs[i - 1].entry);
+      const turnId = respEntry['gen_ai.turn.id'];
+      const previousPair = matchedPairs
+        .slice(0, i)
+        .reverse()
+        .find(pair => pair.entry['gen_ai.turn.id'] === turnId);
+      let requestStart: bigint | undefined;
+
+      if (previousPair) {
+        // Start strictly after every event that precedes this provider call:
+        // the previous response and all tool results produced by that Step.
+        let latestPredecessor = BigInt(previousPair.gmtCreate) * 1_000_000n;
+        const previousResponseIndex = entries.indexOf(previousPair.entry);
         const currentResponseIndex = entries.indexOf(respEntry);
         for (let j = previousResponseIndex + 1; j < currentResponseIndex; j++) {
           if (entries[j]['event.name'] !== 'tool.result') continue;
           const resultTime = parseUnixNanos(entries[j].time_unix_nano);
-          if (resultTime !== undefined && resultTime >= requestStart) {
-            requestStart = resultTime + 1_000_000n;
+          if (resultTime !== undefined && resultTime > latestPredecessor) {
+            latestPredecessor = resultTime;
           }
         }
-        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
-        if (hookRequestTime !== undefined && hookRequestTime > requestStart) {
-          requestStart = hookRequestTime;
-        }
-        req.time_unix_nano = String(requestStart);
-      } else if (userBoundary) {
-        // Use userBoundary.time + 1ms so the LLM request starts strictly after
-        // the user prompt event. When both share the same timestamp the converter
-        // generates a duplicate empty STEP (0ms, no LLM children) because it
-        // sees two events at the same instant inside step s1.
-        const ubNs = BigInt(String(userBoundary.time_unix_nano));
-        const minimumRequestTime = ubNs + 1_000_000n;
-        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
-        req.time_unix_nano = String(
-          hookRequestTime !== undefined && hookRequestTime > minimumRequestTime
-            ? hookRequestTime
-            : minimumRequestTime,
+        requestStart = latestPredecessor + 1_000_000n;
+      } else {
+        // The normalizer emits user prompts as `other`; find the opening event
+        // for this Turn instead of borrowing one from another Turn in the batch.
+        const userBoundary = entries.find(e =>
+          e['gen_ai.turn.id'] === turnId &&
+          !e['gen_ai.step.id'] &&
+          (e['event.name'] === 'llm.request' ||
+            (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
         );
+        if (userBoundary) {
+          // Use userBoundary.time + 1ms so the LLM request starts strictly after
+          // the user prompt event. When both share the same timestamp the converter
+          // generates a duplicate empty STEP (0ms, no LLM children) because it
+          // sees two events at the same instant inside step s1.
+          const ubNs = parseUnixNanos(userBoundary.time_unix_nano);
+          if (ubNs !== undefined) requestStart = ubNs + 1_000_000n;
+        }
+      }
+
+      if (requestStart !== undefined) {
+        // Inconsistent source clocks can place all predecessors at or after the
+        // SQLite response. Preserve a positive LLM interval instead of emitting
+        // a zero/negative duration.
+        if (requestStart >= responseTime) requestStart = responseTime - 1_000_000n;
+        if (requestStart >= 0n) req.time_unix_nano = String(requestStart);
       }
     }
 
