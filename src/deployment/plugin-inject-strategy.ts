@@ -10,6 +10,7 @@ import type {
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
 
 const logger = createLogger('PluginInjectStrategy');
 
@@ -77,18 +78,36 @@ function stripJsoncComments(text: string): string {
 
 export class PluginInjectStrategy implements DeployStrategy {
   private readonly dataDir: string;
+  private lastOpenClawProblem?: string;
 
-  constructor(dataDir: string, _pilotDir: string) {
+  constructor(dataDir: string, _pilotDir: string,
+    private readonly resolveOpenClaw: () => Promise<OpenClawHost | null> = resolveOpenClawHost) {
     this.dataDir = dataDir;
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
+    if (def.id === 'openclaw') return (await this.resolveDeploymentHost()) !== null;
     return detectAgent(def.detection);
+  }
+
+  private async resolveDeploymentHost(): Promise<OpenClawHost | null> {
+    const host = await this.resolveOpenClaw();
+    if (isOpenClawHostBound(host)) {
+      this.lastOpenClawProblem = undefined;
+      return host;
+    }
+    const problem = openClawBindingProblem(host);
+    // Re-evaluate metadata on every check, but do not spam an unchanged warning.
+    if (problem !== this.lastOpenClawProblem) logger.warn(problem);
+    this.lastOpenClawProblem = problem;
+    return null;
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
     const config = def.pluginInject;
     if (!config) return true;
+    const host = this.isOpenclawNested(config) ? await this.resolveDeploymentHost() : null;
+    if (this.isOpenclawNested(config) && !host) return true;
 
     const configPath = await this.findConfigFile(config, false);
     if (!configPath) return true;
@@ -100,7 +119,9 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       if (this.isOpenclawNested(config)) {
         if (Array.isArray(json.plugin) || Array.isArray(json.plugins)) return true;
-        const desiredEntry = config.entryConfig ?? DEFAULT_OPENCLAW_ENTRY_CONFIG;
+        const desiredEntry = this.openclawEntry(config, host!);
+        const entry = (json.plugins as any)?.entries?.[config.pluginId];
+        if (!host!.conversationAccess && entry?.hooks && 'allowConversationAccess' in entry.hooks) return true;
         return !this.openclawHasPlugin(json, resolvedSpec, config.pluginId, desiredEntry);
       }
       const pluginKey = this.resolvePluginKey(json, config);
@@ -120,6 +141,11 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
+      const host = this.isOpenclawNested(config) ? await this.resolveDeploymentHost() : null;
+      if (this.isOpenclawNested(config) && !host) {
+        return { success: false, agentId: def.id, deployMode: 'plugin-inject',
+          error: this.lastOpenClawProblem ?? openClawBindingProblem(null) };
+      }
       const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {
         return {
@@ -138,7 +164,8 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       let mutated: boolean;
       if (this.isOpenclawNested(config)) {
-        mutated = this.openclawInject(json, resolvedSpec, config);
+        mutated = this.openclawInject(json, resolvedSpec, config, host!);
+        logger.info('OpenClaw compatibility selected', { version: host!.version, adapter: host!.adapter, source: host!.source });
       } else {
         mutated = this.flatArrayInject(json, resolvedSpec, config);
       }
@@ -210,13 +237,19 @@ export class PluginInjectStrategy implements DeployStrategy {
     config: PluginInjectConfig,
     createIfMissing: boolean,
   ): Promise<string | null> {
-    for (const p of config.configPaths) {
+    // Use the same active profile as the host in containers/shared mounts.
+    const configPaths = this.isOpenclawNested(config) && process.env.OPENCLAW_CONFIG_PATH
+      ? [process.env.OPENCLAW_CONFIG_PATH]
+      : this.isOpenclawNested(config) && process.env.OPENCLAW_STATE_DIR
+        ? [path.join(process.env.OPENCLAW_STATE_DIR, 'openclaw.json'), path.join(process.env.OPENCLAW_STATE_DIR, 'config.json')]
+        : config.configPaths;
+    for (const p of configPaths) {
       const resolved = resolveHome(p);
       if (await fileExists(resolved)) return resolved;
     }
 
-    if (createIfMissing && config.configPaths.length > 0) {
-      const resolved = resolveHome(config.configPaths[0]);
+    if (createIfMissing && configPaths.length > 0) {
+      const resolved = resolveHome(configPaths[0]);
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, '{}\n', {
         encoding: 'utf-8',
@@ -401,6 +434,7 @@ export class PluginInjectStrategy implements DeployStrategy {
     json: Record<string, unknown>,
     resolvedSpec: string,
     config: PluginInjectConfig,
+    host: OpenClawHost,
   ): boolean {
     let mutated = false;
     const legacyEntries: unknown[] = [];
@@ -459,8 +493,16 @@ export class PluginInjectStrategy implements DeployStrategy {
       mutated = true;
     }
 
-    const desiredEntry = config.entryConfig ?? DEFAULT_OPENCLAW_ENTRY_CONFIG;
+    const desiredEntry = this.openclawEntry(config, host);
     const existing = entries[config.pluginId];
+    if (!host.conversationAccess && existing && typeof existing === 'object' && !Array.isArray(existing)) {
+      const hooks = (existing as Record<string, unknown>).hooks;
+      if (hooks && typeof hooks === 'object' && !Array.isArray(hooks) && 'allowConversationAccess' in hooks) {
+        delete (hooks as Record<string, unknown>).allowConversationAccess;
+        if (Object.keys(hooks).length === 0) delete (existing as Record<string, unknown>).hooks;
+        mutated = true;
+      }
+    }
     if (
       typeof existing !== 'object' ||
       existing === null ||
@@ -477,6 +519,12 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     return mutated;
+  }
+
+  private openclawEntry(config: PluginInjectConfig, host: OpenClawHost): Record<string, unknown> {
+    const entry = this.deepMerge({}, config.entryConfig ?? DEFAULT_OPENCLAW_ENTRY_CONFIG);
+    if (!host.conversationAccess) delete entry.hooks;
+    return entry;
   }
 
   private openclawRemove(

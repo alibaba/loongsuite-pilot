@@ -30,6 +30,7 @@ describe('CLI probe detector', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -83,6 +84,38 @@ describe('CLI probe detector', () => {
       ].join('\0')),
     );
   }
+
+  it('discovers OpenClaw for the installer without calling which or generic detection', async () => {
+    const executable = path.join(tmpDir, 'openclaw.mjs');
+    await fs.writeFile(executable, '/* never executed */');
+    await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    vi.stubEnv('OPENCLAW_CLI_PATH', executable);
+    const def = { ...genericDef(), id: 'openclaw', displayName: 'OpenClaw' };
+    const result = await probeAgentDefinition(def);
+    expect(result.detected).toBe(true);
+    expect(result.reason).toContain('2026.3.8');
+    expect(detectAgent).not.toHaveBeenCalled();
+    expect(commandExists).not.toHaveBeenCalled();
+  });
+
+  it('reports an unbound OpenClaw PATH candidate as not ready with an actionable reason', async () => {
+    const executable = path.join(tmpDir, process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw');
+    await fs.writeFile(executable, '/* never executed */');
+    await fs.chmod(executable, 0o755);
+    await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.6.10' }));
+    vi.stubEnv('PATH', tmpDir);
+    vi.stubEnv('OPENCLAW_CLI_PATH', undefined);
+    vi.stubEnv('OPENCLAW_BUNDLE_ROOT', undefined);
+    // Vitest 1 stringifies undefined; retain restoration but actually unset it.
+    delete process.env.OPENCLAW_CLI_PATH;
+    delete process.env.OPENCLAW_BUNDLE_ROOT;
+    const result = await probeAgentDefinition({ ...genericDef(), id: 'openclaw', displayName: 'OpenClaw' });
+    expect(result.detected).toBe(false);
+    expect(result.reason).toContain('candidate found');
+    expect(result.reason).toContain('OPENCLAW_CLI_PATH');
+    expect(detectAgent).not.toHaveBeenCalled();
+    expect(commandExists).not.toHaveBeenCalled();
+  });
 
   it('detects a Node-launched DSH from procfs when the installer environment misses it', async () => {
     const home = path.join(tmpDir, 'runtime-home');

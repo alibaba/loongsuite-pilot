@@ -20,7 +20,7 @@
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
-| OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.5.12 及以上稳定版本；采集原生 LLM、ReAct、工具、Token、错误和取消事件。 |
+| OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
 | Qoder | `qoder` | Hook 集成。 |
@@ -101,10 +101,35 @@ Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream de
 
 ## OpenClaw 兼容性与生命周期
 
-Pilot 支持 OpenClaw `>=2026.5.12`。插件包会声明这一最低宿主版本，
-OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的宿主会跳过插件并
-输出诊断，Pilot 不再通过启动 OpenClaw CLI 获取版本。部署时，Pilot 会把
-插件包目录加入 `plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
+Pilot 支持 OpenClaw `>=2026.3.8`。在写入宿主配置之前，Pilot 使用进程内文件
+操作读取选中安装实例的 `package.json`，用户无需传入版本。版本探测不会启动
+OpenClaw、shell、which 或 npm 子进程。需在安装器与 collector 共用的容器/服务环境中，
+将 `OPENCLAW_CLI_PATH` 设置为 **Gateway 实际启动入口的绝对路径**。
+例如 `WORKDIR /app` 下执行 `node openclaw.mjs gateway ...`，设置
+`OPENCLAW_CLI_PATH=/app/openclaw.mjs`。首次安装以及后续 collector/watchdog
+重启都必须继承该变量；只给一次安装命令赋值，不能保证独立服务继承。
+绑定入口支持 npm/pnpm 软链接、全局包装器及企业 Bundle。
+`OPENCLAW_SERVICE_VERSION`、`OPENCLAW_BUNDLED_VERSION`、`OPENCLAW_VERSION`
+等版本标签不能单独作为安装或配置能力依据。未绑定时，PATH、工作目录和 Bundle
+探测仅报告候选安装；即使能读取版本，也会提示原因并跳过 OpenClaw 配置注入。
+入口缺失、相对路径、失效或版本不受支持时同样保持非就绪、可重试，不回退到其他安装，
+也不清理既有配置。这是对自动部署准入的有意收紧。显式绑定后，即使 PATH 指向另一版本，
+也只按绑定入口读取元数据。不缓存版本、不扫描进程、不采用运行时权限引导或 Gateway 重载。
+请在正常容器部署/启动前配置环境；给已有容器新增环境变量可能仍需要重新部署。
+
+| 宿主版本 | 采集适配器 | `hooks.allowConversationAccess` |
+| --- | --- | --- |
+| 2026.3.8～2026.4.23 | Legacy 增强兼容 | 不写入，清除 Pilot 条目中残留的该字段 |
+| 2026.4.24～2026.5.11 | Legacy 增强兼容 | 启用 |
+| 2026.5.12+ | Modern | 启用 |
+
+部署和 watchdog 修复会重新读取版本，因此升级/降级后会重新选择配置。
+插件启动时独立使用 `api.runtime.version` 选择适配器。该字段缺失、为空或为
+`unknown` 时（包括官方 2026.3.8 npm 包），沿当前 Node 进程入口的真实路径，
+在限定深度和读取大小内查找最近的 OpenClaw `package.json`。运行时回退不搜索
+PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确不支持的版本仍拒绝注册。
+配置路径遵循
+`OPENCLAW_CONFIG_PATH` 和 `OPENCLAW_STATE_DIR`。支持会话权限的宿主使用以下条目：
 
 ```json
 {
@@ -119,15 +144,53 @@ OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的�
 }
 ```
 
-原生会话生命周期 Hook 通过 `allowConversationAccess` 提供每次 LLM 调用的
-消息和用量，因此该权限是必需的。迁移旧版插件数组配置前，Pilot 会创建
+Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
+工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。
+run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时间按输入或最后一个工具结果
+持久化边界推定，标记 `agent.openclaw.timing.inferred=true` 和
+`agent.openclaw.timing.source`；该时间包含编排开销，不能视为精确 Provider 延迟。
+缺失的 TTFT、传输指标和未持久化的重试不补造。失败 run 可通过 `agent_end` 立即收尾，
+无需等待可能不会出现的 `llm_output`。同 session 并发且持久化 Hook 无 runId 时，
+会跳过有歧义的持久化消息，并在聚合事件标记
+`agent.openclaw.correlation.ambiguous=true`，直到冲突的 run 全部结束。
+若 Provider fallback 在失败已收尾后复用 runId，新尝试会使用独立 turn/trace，
+并通过 `agent.openclaw.run_id` 保留原生 ID。
+
+低于 1ms 的推断区间按当前转换器的 1ms 精度量化，并标记
+`agent.openclaw.timing.quantized_ms=1`；后续工具和父级终端使用同一逻辑时钟，
+保持嵌套边界，观测时间单独保留。优先淘汰已结束 run；容量淘汰、session 结束、
+歧义失败或孤立状态过期（空闲 30 分钟，新输入时检查）使用 `legacy_cleanup`
+和 `gen_ai.turn.end=true` 收口，标记 `agent.openclaw.collection.incomplete=true`，
+不猜测模型成功/失败。结构去重限于 64Ki 字符/1024 个节点；超限时优先使用有界的
+原生 responseId/时间戳，无可靠原生标识的超限消息仍采集但不去重，
+不使用截断内容 hash 误合并不同消息。
+
+2026.3.8 已知限制：持久化 Hook 关联需要原生 `sessionKey`，例如 Gateway 会话，
+或 `agent --local --agent main`。只传一个未绑定 Agent/会话存储的新 `--session-id`
+时缺少该键，Pilot 保留 run 级事件，不猜测逐次调用归属。另外，3.8 对非 OpenAI 官方
+Chat Completions 端点关闭流式请求的 `include_usage` 选项，DashScope 在该路径可能
+产生原生零 Token 记录，Pilot 无法据此还原真实用量。这取决于 Provider：真实 Gateway
+调用 DeepSeek 时已获得正值原生用量，并完成逐次调用及缓存 Token 对账。
+
+2026.3.8 暂不支持原生 sender 提取：旧 Hook 未提供新版的发送者身份。Pilot 保留
+配置/环境提供的用户身份，不从消息正文或 session 名称猜测 sender。
+`AGENTTEAMS_WORKER_NAME` 仍可使用，需在启动 Gateway 前设置，修改后重启 Gateway。
+worker 标识与 sender 身份是两回事。
+
+迁移旧版插件数组配置前，Pilot 会创建
 权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
 卸载会同时清理新旧两种路径和 Pilot 自己的条目，并保留其他插件及其配置。
 
 注入的插件会把 append-only 源事件写入
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，
 文件权限为 `0600`。Provider 错误或取消调用可能没有输出消息或 Token 用量；
-Pilot 会上报原生 finish reason 和耗时，不会伪造消息或补零 Token。
+Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造消息或补零 Token。
+关闭内容采集时也会删除可能包含用户内容的错误消息。
+
+[真实 Provider Gateway 验证入口](../../scripts/e2e/openclaw-compat.md) 仅允许在一次性
+Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原生 Token、链路结构、worker、
+重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
+不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
 
 ## 安装时选择 Agent
 

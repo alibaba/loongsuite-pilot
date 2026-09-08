@@ -35,6 +35,7 @@ import {
   PiSdkRegistryBusyError,
 } from '../../../src/pi-sdk/pi-sdk-agent-registry.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
+import { HookWatchdog } from '../../../src/core/hook-watchdog.js';
 
 const DATA_DIR = '/tmp/orch-plugin-inject-test';
 
@@ -96,6 +97,7 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
   let undeployAgent: ReturnType<typeof vi.fn>;
+  let isAgentDetected: ReturnType<typeof vi.fn>;
   let orch: Orchestrator;
 
   beforeEach(() => {
@@ -104,7 +106,8 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
     undeployAgent = vi.fn();
-    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle, undeployAgent });
+    isAgentDetected = vi.fn((def: AgentDefinition) => detectAgent(def.detection));
+    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle, undeployAgent, isAgentDetected });
   });
 
   it('only builds targets for plugin-inject agents', () => {
@@ -239,6 +242,30 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
   });
 
   describe('repair (re-inject via deploySingle)', () => {
+    it('does not count not-detected races as repairs and recovers within the same day', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef({ id: 'openclaw' })]);
+      isAgentDetected.mockResolvedValue(true);
+      vi.mocked(fileExists).mockResolvedValue(true);
+      needsRedeploy.mockResolvedValue(true);
+      deploySingle.mockResolvedValue({ success: true, skipped: true, reason: 'not-detected' });
+      const [target] = callBuild(orch);
+      const watchdog = new HookWatchdog({ enabled: true, intervalMs: 1000, repairCooldownMs: 0 }, [], [target]);
+      for (let i = 0; i < 4; i++) expect((await watchdog.runCheck()).repaired).toBe(0);
+      deploySingle.mockResolvedValue({ success: true });
+      expect((await watchdog.runCheck()).repaired).toBe(1);
+      expect(deploySingle).toHaveBeenCalledTimes(5);
+    });
+
+    it('waits for strategy metadata despite the generic presence detector returning true', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef({ id: 'openclaw' })]);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+      vi.mocked(fileExists).mockResolvedValue(true);
+      isAgentDetected.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      const [target] = callBuild(orch);
+      expect(await target.precondition()).toBe(false);
+      expect(await target.precondition()).toBe(true);
+      expect(isAgentDetected).toHaveBeenCalledWith(expect.objectContaining({ id: 'openclaw' }));
+    });
     it('calls deploySingle on repair', async () => {
       getDefinitions.mockReturnValue([pluginInjectDef()]);
       deploySingle.mockResolvedValue({ success: true, agentId: 'opencode', deployMode: 'plugin-inject' });

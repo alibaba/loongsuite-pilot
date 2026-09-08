@@ -161,7 +161,7 @@ describe('OpenClawPluginInput', () => {
         'event.id': 'agent-run',
         'agent.openclaw.hook': 'before_agent_run',
         'gen_ai.input.messages_delta': prompt,
-        'gen_ai.system_instructions': 'system prompt',
+        'gen_ai.system_instructions': [{ type: 'text', content: 'system prompt' }],
       },
     ];
     await fs.writeFile(
@@ -186,7 +186,7 @@ describe('OpenClawPluginInput', () => {
     expect(modelResolve?.['gen_ai.input.messages_delta']).toBeUndefined();
     const agentRun = entries.find(entry => entry['agent.openclaw.hook'] === 'before_agent_run');
     expect(agentRun?.['gen_ai.input.messages_delta']).toEqual(prompt);
-    expect(agentRun?.['gen_ai.system_instructions']).toBe('system prompt');
+    expect(agentRun?.['gen_ai.system_instructions']).toEqual([{ type: 'text', content: 'system prompt' }]);
   });
 
   it('tightens an existing log directory when the input starts', async () => {

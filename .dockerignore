@@ -1,0 +1,13 @@
+.git
+node_modules
+dist
+coverage
+container-evidence
+**/.env
+**/.env.*
+**/.npmrc
+**/*secret*
+**/provider.json
+**/cms.json
+**/*.pem
+**/*.key

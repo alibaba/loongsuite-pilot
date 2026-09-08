@@ -47,6 +47,34 @@ const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',
   'loongsuite.grok.timing.source',
 ] as const;
+const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
+  'agent.openclaw.compatibility',
+  'agent.openclaw.timing.inferred',
+  'agent.openclaw.timing.source',
+  'agent.openclaw.timing.quantized_ms',
+  'agent.openclaw.collection.incomplete',
+  'agent.openclaw.collection.end_reason',
+  'agent.openclaw.correlation.ambiguous',
+] as const;
+
+function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
+  const endings = new Map<string, Partial<AgentActivityEntry>>();
+  for (const r of records) {
+    if (r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup') {
+      endings.set(key(r), {
+        'agent.openclaw.collection.incomplete': true,
+        'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        ...(r['agent.openclaw.correlation.ambiguous'] === true
+          ? { 'agent.openclaw.correlation.ambiguous': true } : {}),
+      });
+    }
+  }
+  // The converter discards non-input `other` records before collecting span
+  // attributes. Carry only content-free terminal diagnostics on same-turn
+  // copies so an incomplete trace does not look like complete collection.
+  return endings.size ? records.map(r => ({ ...r, ...endings.get(key(r)) })) : records;
+}
 // Hard cap on simultaneously-open turn buffers. Above this, the oldest
 // incomplete buffers are force-flushed to bound memory in pathological
 // cases (e.g. an agent that never emits a terminal llm.response AND never
@@ -810,9 +838,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
-    // stable end-of-run boundary in every supported version (>=2026.5.12).
+    // stable successful-run boundary. Legacy failed attempts can terminate
+    // before llm_output; the adapter explicitly seals those at agent_end.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
-      return entry['agent.openclaw.hook'] === 'llm_output';
+      return entry['agent.openclaw.hook'] === 'llm_output'
+        || (entry['agent.openclaw.compatibility'] === 'legacy'
+          && (entry['agent.openclaw.hook'] === 'agent_end' || entry['agent.openclaw.hook'] === 'legacy_cleanup')
+          && entry['gen_ai.turn.end'] === true);
     }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'grok-build') {
       // The Grok processor emits one explicit turn-terminal `other` record.
@@ -969,7 +1001,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
-        const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS : [];
+        const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
+          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
@@ -987,6 +1020,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               return copy;
             });
         if (agentType === 'openclaw') {
+          recordsForConversion = prepareOpenClawCollectionRecords(recordsForConversion);
           const prepared = prepareOpenClawIdentityRecords(recordsForConversion);
           recordsForConversion = prepared.records;
           openClawIdentity = prepared.metadata;
