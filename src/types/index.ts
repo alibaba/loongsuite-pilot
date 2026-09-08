@@ -64,6 +64,7 @@ export interface OtlpTraceRawConfig {
   resourceAttributes?: Record<string, string>;
   serviceName?: string;
   debug?: boolean;
+  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
@@ -233,7 +234,8 @@ export interface AgentMultimodalConfig {
 
 export interface AgentConfig {
   enabled?: boolean;
-  captureMessageContent: boolean;
+  /** @deprecated Ignored. Message content capture is always enabled. */
+  captureMessageContent?: boolean;
   multimodal?: AgentMultimodalConfig;
 }
 
@@ -265,6 +267,7 @@ export interface OtlpTraceFlusherConfig {
   /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
   appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
+  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;

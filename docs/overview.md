@@ -15,7 +15,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Trace reporting | Export GenAI conversations and tool activity as OTLP traces. |
 | Token usage | Capture input, output, cache read, and cache creation tokens when the source agent exposes them. |
 | Tool activity | Capture tool call names, arguments, results, durations, and errors when available. |
-| Privacy controls | Disable message content capture per agent and mask secrets before output. |
+| Privacy controls | Mask secrets and personal sensitive data before output. |
 | Runtime operations | Manage the background service, inspect status, use the built-in local dashboard, and rollback versions. |
 
 ## Supported Agents
@@ -75,7 +75,7 @@ Pilot focuses on activity that is useful for usage analysis, audit, and traceabi
 - Host and service metadata.
 - Agent-specific extension fields when a source exposes additional context.
 
-Message content, tool arguments, and tool results can contain sensitive information. These fields are documented as opt-in in the [Output Event Schema](output-event-schema.md), can be disabled per agent, and can be masked before export.
+Message content, tool arguments, and tool results can contain sensitive information. These fields enter the reporting pipeline and can be masked before export. See the [Output Event Schema](output-event-schema.md) and [Data Masking](masking.md).
 
 ## Output Destinations
 

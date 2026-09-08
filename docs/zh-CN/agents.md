@@ -61,9 +61,7 @@ Pilot 通过 `~/.grok` 检测 Grok Build，并在
 
 采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
 由于 Grok 会异步持久化取消终态，取消 turn 可能在下一次
-`user_prompt_submit` 或 `session_end` 时补采。将
-`agents["grok-build"].captureMessageContent` 设置为 `false`，会同时清除
-user、assistant、system 内容、工具参数、工具结果和原始错误详情。
+`user_prompt_submit` 或 `session_end` 时补采。
 
 安装产物同时包含 POSIX 和 PowerShell 启动器。Grok 专用 watchdog
 检查会修复缺失或被修改的 Pilot Hook 资产和配置；卸载只删除
@@ -87,7 +85,6 @@ home，会报告歧义而不会静默选择其中一个。
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
 `0700`，文件权限为 `0600`。这些源文件包含归一化所需的原生消息和
 工具数据，应当作敏感数据保护；插件在落盘前会过滤类似凭据的 key。
-`captureMessageContent` 只控制归一化输出，不会删除这些源日志中的内容。
 Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream delta
 的时间差计算 LLM TTFT，并以纳秒写入
 `gen_ai.response.time_to_first_token`。
@@ -230,18 +227,18 @@ bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,curs
 loongsuite-pilot restart
 ```
 
-## 按 Agent 配置内容采集
+## 按 Agent 配置
 
-如果需要控制消息内容采集，使用 `config.json`：
+使用 `config.json` 配置各 Agent 的启停和多模态策略：
 
 ```json
 {
   "agents": {
-    "claude-code": { "enabled": true, "captureMessageContent": false },
-    "codex": { "enabled": true, "captureMessageContent": false },
-    "dsh": { "enabled": true, "captureMessageContent": false },
-    "openclaw": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "claude-code": { "enabled": true },
+    "codex": { "enabled": true },
+    "dsh": { "enabled": true },
+    "openclaw": { "enabled": true },
+    "cursor": { "enabled": true }
   }
 }
 ```
@@ -249,11 +246,10 @@ loongsuite-pilot restart
 | 配置项 | 说明 |
 |--------|------|
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
-| `captureMessageContent` | 设置为 `false` 可避免采集完整 Prompt、Completion、工具参数和工具结果，前提是对应集成支持该策略。 |
 | `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `tool` / `output` / `both` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
+消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
 
 ## 验证 Agent 采集
 

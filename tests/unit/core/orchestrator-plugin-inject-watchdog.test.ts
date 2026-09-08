@@ -310,8 +310,8 @@ describe('Orchestrator PI SDK shared input gating', () => {
     const orch = new Orchestrator({
       dataDir: DATA_DIR,
       agents: {
-        'pi-coding-agent': { enabled: false, captureMessageContent: true },
-        'acme-code': { enabled: true, captureMessageContent: true },
+        'pi-coding-agent': { enabled: false },
+        'acme-code': { enabled: true },
       },
     } as never);
     (orch as unknown as { deploymentManager: unknown }).deploymentManager = {

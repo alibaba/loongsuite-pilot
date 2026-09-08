@@ -612,7 +612,7 @@ describe('Hermes Agent native plugin', () => {
     ]);
   });
 
-  it('does not persist tool definitions when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for tool definitions', () => {
     const marker = 'private-tool-description-marker';
     const { records, raw } = replay(toolDefinitionsTurn({
       tools: [{
@@ -622,8 +622,10 @@ describe('Hermes Agent native plugin', () => {
     }), { captureMessageContent: false });
     const request = records.find(record => record['event.name'] === 'llm.request');
 
-    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
-    expect(raw).not.toContain(marker);
+    expect(request['gen_ai.tool.definitions']).toEqual([
+      expect.objectContaining({ name: 'private_tool', description: marker }),
+    ]);
+    expect(raw).toContain(marker);
   });
 
   it('normalizes each Hermes provider system prompt shape and ignores blank prompts', () => {
@@ -708,7 +710,7 @@ describe('Hermes Agent native plugin', () => {
     expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
   });
 
-  it('does not persist the system prompt when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for the system prompt', () => {
     const marker = 'private-system-prompt-marker';
     const { records, raw } = replay(
       toolDefinitionsTurn({ system: marker }),
@@ -716,19 +718,21 @@ describe('Hermes Agent native plugin', () => {
     );
     const request = records.find(record => record['event.name'] === 'llm.request');
 
-    expect(request).not.toHaveProperty('gen_ai.system_instructions');
-    expect(raw).not.toContain(marker);
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: marker },
+    ]);
+    expect(raw).toContain(marker);
   });
 
-  it('redacts provider error messages when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for provider error messages', () => {
     const { records, raw } = replay(failedApiTurn(), {
       captureMessageContent: false,
     });
     const response = records.find(record => record['event.name'] === 'llm.response');
 
     expect(response['error.type']).toBe('RateLimitError');
-    expect(response['error.message']).toBe('provider request failed');
-    expect(raw).not.toContain('Too many requests');
+    expect(response['error.message']).toBe('Too many requests');
+    expect(raw).toContain('Too many requests');
   });
 
   it('does not consume the successful assistant response for a failed API retry', () => {
@@ -751,7 +755,7 @@ describe('Hermes Agent native plugin', () => {
       .toContain('The retried request succeeded.');
   });
 
-  it('adds skill metadata to skill_view even when message content capture is disabled', () => {
+  it('keeps skill metadata and content when legacy captureMessageContent is false', () => {
     const { records } = replay(skillViewTurn(), { captureMessageContent: false });
     const skillRecords = records.filter(record => record['gen_ai.tool.name'] === 'skill_view');
 
@@ -762,8 +766,8 @@ describe('Hermes Agent native plugin', () => {
       expect(record['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
       expect(record['gen_ai.skill.version']).toBe('1.2.3');
     }
-    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeUndefined();
-    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeUndefined();
+    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeDefined();
   });
 
   it('uses Hermes 0.18 observer-v1 correlation and tool lifecycle fields', () => {
@@ -820,21 +824,21 @@ describe('Hermes Agent native plugin', () => {
     expect(partTypes(requests[2]['gen_ai.input.messages_delta'])).toEqual(expect.arrayContaining(['tool_call', 'tool_call_response']));
   });
 
-  it('keeps message and correlation structure while removing captured content', () => {
+  it('keeps message content and correlation when legacy boolean false is configured', () => {
     const { records, raw } = replay(firstTurn({ senderId: 'sender-user' }), { captureMessageContent: false });
     expect(records.every(record => record['user.id'] === 'sender-user')).toBe(true);
     expect(records.every(record =>
       record[INVOCATION_USER_ID_FIELD] === 'sender-user')).toBe(true);
     expect(records.every(record =>
       record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
-    expect(raw).not.toContain('approved files');
-    expect(raw).not.toContain('wc -l /etc/hosts');
-    expect(raw).not.toContain('17 /etc/hosts');
-    expect(raw).not.toContain('The files have');
+    expect(raw).toContain('approved files');
+    expect(raw).toContain('wc -l /etc/hosts');
+    expect(raw).toContain('17 /etc/hosts');
+    expect(raw).toContain('The files have');
     const toolCall = records.find(record => record['event.name'] === 'tool.call');
     const toolResult = records.find(record => record['event.name'] === 'tool.result');
-    expect(toolCall).not.toHaveProperty('gen_ai.tool.call.arguments');
-    expect(toolResult).not.toHaveProperty('gen_ai.tool.call.result');
+    expect(toolCall['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(toolResult['gen_ai.tool.call.result']).toBeDefined();
     expect(toolCall['gen_ai.tool.call.id']).toBe(toolResult['gen_ai.tool.call.id']);
     for (const record of records.filter(record => record['event.name'].startsWith('llm.'))) {
       const messages = record['event.name'] === 'llm.request'
@@ -847,21 +851,21 @@ describe('Hermes Agent native plugin', () => {
       ...(record['gen_ai.input.messages'] || []),
       ...(record['gen_ai.output.messages'] || []),
     ]).flatMap(message => message.parts);
-    expect(allParts.filter(part => part.type === 'text').every(part => part.content === '')).toBe(true);
-    expect(allParts.filter(part => part.type === 'tool_call').every(part => !('arguments' in part))).toBe(true);
-    expect(allParts.filter(part => part.type === 'tool_call_response').every(part => part.response === '')).toBe(true);
+    expect(allParts.some(part => part.type === 'text' && part.content !== '')).toBe(true);
+    expect(allParts.filter(part => part.type === 'tool_call').every(part => 'arguments' in part)).toBe(true);
+    expect(allParts.filter(part => part.type === 'tool_call_response').every(part => part.response !== '')).toBe(true);
   });
 
-  it('treats string false as disabled before writing the raw JSONL', () => {
+  it('ignores legacy string false before writing the raw JSONL', () => {
     const { records, raw } = replay(firstTurn(), { captureMessageContent: 'false' });
 
-    expect(raw).not.toContain('approved files');
-    expect(raw).not.toContain('wc -l /etc/hosts');
-    expect(raw).not.toContain('17 /etc/hosts');
+    expect(raw).toContain('approved files');
+    expect(raw).toContain('wc -l /etc/hosts');
+    expect(raw).toContain('17 /etc/hosts');
     expect(records.find(record => record['event.name'] === 'tool.call'))
-      .not.toHaveProperty('gen_ai.tool.call.arguments');
+      .toHaveProperty('gen_ai.tool.call.arguments');
     expect(records.find(record => record['event.name'] === 'tool.result'))
-      .not.toHaveProperty('gen_ai.tool.call.result');
+      .toHaveProperty('gen_ai.tool.call.result');
   });
 
   it.each(['marker', 'config'])(

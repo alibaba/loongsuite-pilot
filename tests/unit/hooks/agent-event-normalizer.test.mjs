@@ -43,7 +43,7 @@ describe('asset hook agent event normalizer', () => {
     expect(record['agent.raw']).toBeUndefined();
   });
 
-  it('applies hook-side content policy before history write', () => {
+  it('ignores legacy content policy before history write', () => {
     const record = buildCursorHookRecord({
       hook_event_name: 'postToolUse',
       session_id: 'sess-2',
@@ -58,7 +58,7 @@ describe('asset hook agent event normalizer', () => {
       },
     });
 
-    expect(record['gen_ai.tool.call.result']).toBeUndefined();
+    expect(record['gen_ai.tool.call.result']).toEqual({ secret: 'value' });
     expect(record['agent.raw']).toBeUndefined();
     expect(record.tool_output).toBeUndefined();
     expect(record.tool_input).toBeUndefined();
@@ -67,7 +67,7 @@ describe('asset hook agent event normalizer', () => {
     expect(record['gen_ai.session.id']).toBe('sess-2');
   });
 
-  it('recursively removes source raw content when content policy is disabled', () => {
+  it('keeps canonical source content when legacy content policy is disabled', () => {
     const record = buildQoderHookRecord({
       type: 'user',
       uuid: 'row-policy',
@@ -91,7 +91,7 @@ describe('asset hook agent event normalizer', () => {
       },
     });
 
-    expect(record['gen_ai.tool.call.result']).toBeUndefined();
+    expect(record['gen_ai.tool.call.result']).toEqual({ stdout: 'secret stdout' });
     expect(record['agent.raw']).toBeUndefined();
     expect(record.toolUseResult).toBeUndefined();
     expect(record.message).toBeUndefined();

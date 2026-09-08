@@ -48,4 +48,4 @@ Keep local JSONL enabled while first integrating HTTP output. It lets you confir
 
 ## Privacy Notes
 
-HTTP output is a remote destination. Review [Agent Configuration](agents.md) for content capture controls and [Data Masking](masking.md) for secret masking before enabling it in sensitive environments.
+HTTP output is a remote destination. Enable [Data Masking](masking.md) before using it in sensitive environments.

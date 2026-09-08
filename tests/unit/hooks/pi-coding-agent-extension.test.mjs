@@ -130,8 +130,9 @@ describe('Pi Coding Agent extension', () => {
     });
 
     const records = readRecords();
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
+    expect(records).toHaveLength(2);
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    expect(request).toMatchObject({
       'event.name': 'llm.request',
       'gen_ai.agent.type': 'acme-code',
       'gen_ai.agent.id': 'acme-code',
@@ -140,7 +141,7 @@ describe('Pi Coding Agent extension', () => {
       'gen_ai.framework': 'pi-coding-agent',
       'agent.acme-code.cwd': '/workspace/example',
     });
-    expect(records[0]['gen_ai.input.messages']).toBeUndefined();
+    expect(request['gen_ai.input.messages']).toBeDefined();
     expect(fs.readdirSync(path.join(tmpDir, 'logs', 'pi-coding-agent'))).toContain(
       'pi-coding-agent-2026-07-16.jsonl',
     );
@@ -856,7 +857,7 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.step.id']).toBe(`${request['gen_ai.turn.id']}:s1`);
   });
 
-  it('omits sensitive message and tool payloads when content capture is disabled', async () => {
+  it('ignores legacy captureMessageContent=false and retains content', async () => {
     const runtime = await createRuntime({
       agents: { 'pi-coding-agent': { captureMessageContent: false } },
     });
@@ -896,16 +897,19 @@ describe('Pi Coding Agent extension', () => {
     });
 
     const records = readRecords();
-    expect(records.some(record => record['event.name'] === 'other')).toBe(false);
-    expect(records[0]).not.toHaveProperty('gen_ai.input.messages');
-    expect(records[0]).not.toHaveProperty('gen_ai.input.messages_delta');
-    expect(records[0]).not.toHaveProperty('gen_ai.system_instructions');
-    expect(records[0]).not.toHaveProperty('gen_ai.tool.definitions');
-    expect(records[1]).not.toHaveProperty('gen_ai.output.messages');
-    expect(records[1]['error.type']).toBe('llm_error');
-    expect(records[1]).not.toHaveProperty('error.message');
-    expect(records[2]).not.toHaveProperty('gen_ai.tool.call.arguments');
-    expect(records[3]).not.toHaveProperty('gen_ai.tool.call.result');
+    expect(records.some(record => record['event.name'] === 'other')).toBe(true);
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const response = records.find(record => record['event.name'] === 'llm.response');
+    const toolCall = records.find(record => record['event.name'] === 'tool.call');
+    const toolResult = records.find(record => record['event.name'] === 'tool.result');
+    expect(request['gen_ai.input.messages']).toBeDefined();
+    expect(request['gen_ai.system_instructions']).toBeDefined();
+    expect(request['gen_ai.tool.definitions']).toBeDefined();
+    expect(response['gen_ai.output.messages']).toBeDefined();
+    expect(response['error.type']).toBe('llm_error');
+    expect(response['error.message']).toBe('provider echoed secret prompt');
+    expect(toolCall['gen_ai.tool.call.arguments']).toEqual({ command: 'echo secret' });
+    expect(toolResult['gen_ai.tool.call.result']).toEqual({ output: 'secret' });
   });
 
   it('keeps LLM error diagnostics when content capture is enabled', async () => {

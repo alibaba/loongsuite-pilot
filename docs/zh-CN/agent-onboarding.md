@@ -333,7 +333,7 @@ per-session spool：
 
 ### 隐私与 fixture
 
-- 源 Agent 提供相关字段时，Prompt、Completion、reasoning、工具参数和工具结果必须支持 `captureMessageContent: false`。
+- 源 Agent 提供相关字段时，Prompt、Completion、reasoning、工具参数和工具结果应完整进入统一上报与脱敏链路。
 - 除非必须并可被脱敏，否则不要将密钥放入 source-specific 扩展字段。
 - 验证 `mask.mode: all` 能在输出中脱敏已支持的密钥和个人敏感信息。见 [数据脱敏](masking.md)。
 - Hook 或插件必须 fail open，遥测失败不能阻塞源 Agent。
@@ -342,7 +342,7 @@ per-session spool：
 
 ### 必测场景
 
-覆盖检测/部署、Hook 或插件记录、checkpoint、关闭内容采集和开启脱敏，并至少验证：
+覆盖检测/部署、Hook 或插件记录、checkpoint、内容上报和开启脱敏，并至少验证：
 
 - 纯文本 turn；
 - 单次工具调用；

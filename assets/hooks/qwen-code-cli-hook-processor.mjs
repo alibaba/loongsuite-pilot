@@ -46,7 +46,6 @@ import {
   sanitizeObject,
   loadHookRuntimeConfig,
   resolveUserId,
-  applyHookContentPolicy,
 } from './agent-event-normalizer.mjs';
 
 import {
@@ -363,7 +362,7 @@ async function exportSession(state, stopReason) {
   // so the byte offset advances past them and they aren't re-processed.
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
-  const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
+  const cleaned = allRecords.map((r) => sanitizeObject(r) || r);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 }
 

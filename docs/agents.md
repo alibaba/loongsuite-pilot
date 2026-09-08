@@ -64,9 +64,7 @@ Each completed turn is reconstructed from three Grok-owned JSONL sources:
 Collection starts with the turn observed after installation and does not replay
 older session history. Because Grok persists cancellation asynchronously, a
 cancelled turn can be emitted on the next `user_prompt_submit` or
-`session_end`. Setting `agents["grok-build"].captureMessageContent` to `false`
-removes user, assistant, and system content as well as tool arguments, tool
-results, and raw error details.
+`session_end`.
 
 The installed assets include POSIX and PowerShell launchers. The Grok-specific
 watchdog check repairs missing or changed Pilot Hook assets and configuration;
@@ -94,8 +92,7 @@ The plugin writes append-only native events to
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory
 is mode `0700` and files are mode `0600`. These source files contain the native
 message and tool data needed for normalization, so treat them as sensitive;
-credential-shaped keys are filtered before writing. `captureMessageContent`
-controls normalized output and does not remove content from these source logs.
+credential-shaped keys are filtered before writing.
 Pilot derives LLM TTFT from the native request boundary to the first reasoning,
 text, or tool-call stream delta and reports it in nanoseconds as
 `gen_ai.response.time_to_first_token`.
@@ -261,18 +258,18 @@ Restart Pilot after changing this file:
 loongsuite-pilot restart
 ```
 
-## Configure Content Capture Per Agent
+## Configure Agents
 
-Use `config.json` when you need to control message content capture:
+Use `config.json` when you need to enable or disable individual agents:
 
 ```json
 {
   "agents": {
-    "claude-code": { "enabled": true, "captureMessageContent": false },
-    "codex": { "enabled": true, "captureMessageContent": false },
-    "dsh": { "enabled": true, "captureMessageContent": false },
-    "openclaw": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "claude-code": { "enabled": true },
+    "codex": { "enabled": true },
+    "dsh": { "enabled": true },
+    "openclaw": { "enabled": true },
+    "cursor": { "enabled": true }
   }
 }
 ```
@@ -280,11 +277,10 @@ Use `config.json` when you need to control message content capture:
 | Setting | Description |
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
-| `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `tool` / `output` / `both` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
 
 ## Verify Agent Collection
 

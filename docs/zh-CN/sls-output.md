@@ -163,4 +163,4 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 
 ## 隐私说明
 
-SLS 是远端输出目标。敏感环境中开启前，请先查看 [Agent 配置](agents.md) 的内容采集控制和 [数据脱敏](masking.md)。
+SLS 是远端输出目标。敏感环境中开启前，请先配置[数据脱敏](masking.md)。

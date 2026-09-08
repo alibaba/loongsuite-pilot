@@ -163,4 +163,4 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 
 ## Privacy Notes
 
-SLS is a remote destination. Review [Agent Configuration](agents.md) for content capture controls and [Data Masking](masking.md) for secret masking before enabling SLS in sensitive environments.
+SLS is a remote destination. Enable [Data Masking](masking.md) before using SLS in sensitive environments.

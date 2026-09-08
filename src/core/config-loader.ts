@@ -40,6 +40,26 @@ import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/gl
 
 const logger = createLogger('ConfigLoader');
 
+function warnIgnoredCaptureMessageContentConfig(file: ConfigFile): void {
+  const locations: string[] = [];
+  if (file.otlpTrace && Object.prototype.hasOwnProperty.call(file.otlpTrace, 'captureMessageContent')) {
+    locations.push('otlpTrace.captureMessageContent');
+  }
+  if (file.agents && typeof file.agents === 'object') {
+    for (const [agentType, policy] of Object.entries(file.agents)) {
+      if (policy && typeof policy === 'object'
+        && Object.prototype.hasOwnProperty.call(policy, 'captureMessageContent')) {
+        locations.push(`agents.${agentType}.captureMessageContent`);
+      }
+    }
+  }
+  if (locations.length > 0) {
+    logger.warn('captureMessageContent is deprecated and ignored; message content capture is always enabled', {
+      locations,
+    });
+  }
+}
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -177,6 +197,7 @@ export interface ConfigFile {
     resourceAttributes?: Record<string, string>;
     serviceName?: string;
     debug?: boolean;
+    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
@@ -185,6 +206,7 @@ export interface ConfigFile {
 
   agents?: Record<string, {
     enabled?: boolean;
+    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean | string;
     multimodal?: {
       uploadMode?: string;
@@ -262,6 +284,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   if (file) {
     logger.info('loaded config file', { path: configPath });
+    warnIgnoredCaptureMessageContentConfig(file);
   } else {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
@@ -476,16 +499,8 @@ function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, st
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
   if (!file?.otlpTrace) return undefined;
-  return { ...file.otlpTrace };
-}
-
-function parseOptionalBool(value: unknown): boolean | undefined {
-  if (typeof value === 'boolean') return value;
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'true') return true;
-  if (normalized === 'false') return false;
-  return undefined;
+  const { captureMessageContent: _ignored, ...config } = file.otlpTrace;
+  return config;
 }
 
 function buildCmsConfig(file: ConfigFile | null): CmsConfig {
@@ -507,11 +522,9 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 
   for (const [agentType, policy] of Object.entries(file.agents)) {
     if (!agentType || !policy || typeof policy !== 'object') continue;
-    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
     const multimodal = buildAgentMultimodalConfig(policy.multimodal);
     result[agentType] = {
-      enabled: policy.enabled,
-      captureMessageContent,
+      ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
       ...(multimodal ? { multimodal } : {}),
     };
   }
@@ -738,7 +751,7 @@ function buildFlushersConfig(
  *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
  * Endpoints are deduped by normalized URL + license-key + project. Conversion
- * happens once; serviceName / resourceAttributes / captureMessageContent are
+ * happens once; serviceName and resourceAttributes are
  * therefore shared across all backends. Requires collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
@@ -814,7 +827,6 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   if (deduped.length === 0) return undefined;
 
   const otlp = config.otlpTrace;
-  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
   const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
@@ -825,7 +837,6 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     serviceName,
     appendAgentTypeToServiceName: config.serviceName ? false : undefined,
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
-    captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
@@ -915,12 +926,6 @@ function extractArmsProject(endpoint: string): string {
   } catch {
     return '';
   }
-}
-
-function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
-  const values = Object.values(agents);
-  if (values.length === 0) return true;
-  return values.every(a => a.captureMessageContent !== false);
 }
 
 function inferSlsMode(args: {

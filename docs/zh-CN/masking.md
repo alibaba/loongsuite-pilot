@@ -4,12 +4,7 @@
 
 LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密钥和个人敏感信息进行脱敏。适用于 Prompt、Completion、工具参数或工具结果中可能出现凭证、身份证、电话、邮箱、IPv4 或银行卡的场景。
 
-脱敏和消息内容采集是两层不同控制：
-
-- `captureMessageContent: false` 会减少是否采集完整消息或工具内容。
-- `mask` 会扫描已配置的输出字段，并替换仍然存在的高置信密钥。
-
-敏感环境建议两者同时使用。
+消息内容默认进入上报链路。`mask` 会在输出前扫描已配置的字段，并替换其中的高置信密钥；历史 `captureMessageContent` 配置会被忽略。
 
 ## 如何开启脱敏
 
@@ -128,7 +123,7 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - 手机号和银行卡号基于号码格式识别；同形的 11 位数值 ID，或通过卡组织前缀和 Luhn 校验的 15-19 位业务编号，也可能被脱敏。数值型业务 ID 较多时建议使用 `custom` 模式按需开启类型。
 - 车牌、地址、公司名、职称、自定义键值和 Secret Key 不在本期范围。
 
-## 推荐隐私配置
+## 推荐脱敏配置
 
 敏感或团队统一管理的环境建议：
 
@@ -136,16 +131,11 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 {
   "mask": {
     "mode": "all"
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
   }
 }
 ```
 
-只有当分析确实需要完整 Prompt、Completion、工具参数或工具结果，并且下游存储已被批准时，才建议使用 `captureMessageContent: true`。
+启用消息内容上报前，应确认下游存储和访问权限符合团队的数据安全要求。
 
 ## 验证脱敏
 

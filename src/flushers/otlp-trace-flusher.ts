@@ -574,10 +574,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .map(prefix => prefix.trim())
       .filter(prefix => prefix.length > 0);
 
-    if (cfg.captureMessageContent !== false) {
-      process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
-      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
-    }
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
 
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
