@@ -919,20 +919,24 @@ function hookEventOf(row) {
 
 export function buildLlmBoundaries(_progressEvents, contentEvents) {
   // Step 1: Group assistant blocks into LLM calls. Qoder transcript assistant
-  // rows do not carry message.id, and progress windows are hook timing signals,
-  // not reliable provider-call boundaries.
+  // rows do not consistently carry message.id, and progress windows are hook
+  // timing signals, not reliable provider-call boundaries.
   //
   // IDE transcript rows are content blocks, not one row per provider call. A
   // complete response may therefore be spread over thinking, text and multiple
   // tool_use rows, and parallel tool execution may even place an early
   // tool_result between later tool_use rows. The deterministic boundary is:
-  // after every tool_use in the current response has a matching tool_result,
-  // the next assistant row starts a new LLM call.
+  // a non-empty stop_reason marks the current provider response complete. The
+  // actual split is delayed until the next assistant row so any intervening
+  // tool_result remains in the completed response's transcript range. For old
+  // rows without stop_reason, matching every tool_use to a tool_result remains
+  // the structural fallback.
   const assistantGroups = [];
   let currentGroup = [];
   let currentGroupStartIndex = -1;
   let currentToolIds = new Set();
   let resolvedToolIds = new Set();
+  let currentResponseComplete = false;
 
   function flushGroup(contentEndIndex) {
     if (currentGroup.length > 0) {
@@ -946,6 +950,7 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
     currentGroupStartIndex = -1;
     currentToolIds = new Set();
     resolvedToolIds = new Set();
+    currentResponseComplete = false;
   }
 
   for (let rowIndex = 0; rowIndex < contentEvents.length; rowIndex++) {
@@ -967,10 +972,10 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
       currentToolIds.size > 0 &&
       [...currentToolIds].every(id => resolvedToolIds.has(id));
     // Progress hooks carry no tool id and third-party hooks share the same
-    // transcript. They cannot safely close an LLM group. If a transcript ever
-    // omits tool_result, conservatively retain later assistant rows in this
-    // group instead of inventing a boundary and an orphan request.
-    if (toolCycleComplete) flushGroup(rowIndex);
+    // transcript, so they cannot safely close an LLM group. stop_reason belongs
+    // to the provider response itself and preserves a following terminal
+    // response even when a cancelled/interrupted tool omitted tool_result.
+    if (currentResponseComplete || toolCycleComplete) flushGroup(rowIndex);
 
     if (currentGroup.length === 0) currentGroupStartIndex = rowIndex;
     currentGroup.push(row);
@@ -978,6 +983,9 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
       if (block?.type === 'tool_use' && block.id) {
         currentToolIds.add(block.id);
       }
+    }
+    if (typeof row.message?.stop_reason === 'string' && row.message.stop_reason.length > 0) {
+      currentResponseComplete = true;
     }
   }
   flushGroup(contentEvents.length);
