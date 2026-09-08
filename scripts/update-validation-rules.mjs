@@ -260,7 +260,7 @@ const OPTIONAL_TO_SHOULD = {
   'EMBEDDING:gen_ai.usage.total_tokens': true,
 };
 
-// Attributes that require captureMessageContent
+// Attributes that require observed message content
 const MESSAGE_CONTENT_KEYS = new Set([
   'gen_ai.input.messages', 'gen_ai.output.messages',
   'gen_ai.system_instructions', 'gen_ai.tool.definitions',

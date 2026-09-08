@@ -80,12 +80,12 @@ is a safety opt-in, not permission to run against an existing installation.
 | Gate | Evidence |
 | --- | --- |
 | Bound-entry install | Version-compatible config despite a different PATH candidate; real `openclaw config validate`; unrelated settings retained |
-| Gateway traffic | One text turn, a two-read-tool turn, a post-restart turn, a content-off turn |
+| Gateway traffic | One text turn, a two-read-tool turn, a post-restart turn, and a turn with legacy content config set to `false` |
 | Source fidelity | Every native assistant response collected once; positive input/output/cache token parity |
 | Trace semantics | One ENTRY/AGENT per turn; STEP → LLM/TOOL; paired tool IDs; positive nested times; exact service/worker |
 | Canonical schema | Repository strict JSONL validator, including system-instruction text-part arrays |
 | Recovery | Gateway and collector restart keep the session and do not replay historical responses |
-| Privacy | Marker and content-field absence in raw plugin events, canonical events and converted spans, including a missing-file result |
+| Legacy config | Message, tool, and error fields plus a synthetic marker remain present in raw plugin events, canonical events, and converted spans when legacy content config is `false` |
 | Lifecycle | Watchdog restores a removed load path and repairs version-specific hooks; reinstall is idempotent; uninstall preserves unrelated config |
 
 `openclaw-assertions.mjs` is a self-contained **scenario-specific** validator with
@@ -93,13 +93,13 @@ positive and negative unit tests. It does not require the untracked
 `docs/trace-validation-rules.json`, and is not a claim of full ARMS semantic-rule
 coverage. CMS configuration and zero persisted export failures alone do **not**
 prove ingestion: independently read back every reported trace and compare span
-IDs, topology, service, worker, token totals and content-off fields. A local-only
+IDs, topology, service, worker, token totals and legacy-config content fields. A local-only
 receiver PASS must be labelled local-only.
 
 After independently querying SLS for the exact `result.json` service and time
 window, run `node scripts/e2e/openclaw-backend.mjs <evidence-directory> <SLS-JSONL>`.
 It fails on missing/duplicate spans, changed identities/timestamps/tokens and
-privacy violations; it writes a separate `backend-validation.json` on success.
+unexpected legacy-config content removal; it writes a separate `backend-validation.json` on success.
 Readiness uses the native loopback `/readyz` endpoint. This does not create a
 read-only CLI device before the first real agent RPC requests its write scope.
 Gateway token authentication and native device pairing remain enabled.

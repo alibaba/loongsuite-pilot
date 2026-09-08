@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { assertOpenClawEvidence, assertContentOff } from './openclaw-assertions.mjs';
+import { assertOpenClawEvidence, assertContentPresent } from './openclaw-assertions.mjs';
 
 const [root, backendFile] = process.argv.slice(2);
 assert(root && backendFile, 'Usage: node openclaw-backend.mjs <evidence-directory> <SLS-JSONL>');
@@ -39,10 +39,10 @@ const spans = remote.map(row => {
 });
 const validation = assertOpenClawEvidence({ events, spans, nativeMessages, provider: report.provider,
   model: report.model, service: report.service, workerName: report.workerName, turns: 4,
-  expectedToolErrorTraceIds: report.privacyTraceIds });
+  expectedToolErrorTraceIds: report.legacyConfigTraceIds });
 // The random marker is retained only in this private synthetic workspace.
-const marker = await fs.readFile(path.join(root, 'workspace/private.txt'), 'utf8');
-assertContentOff(remote.filter(s => report.privacyTraceIds.includes(s.traceId)).map(s => ({ ...s, attributes: JSON.parse(s.attributes) })), [marker]);
+const marker = await fs.readFile(path.join(root, 'workspace/legacy-config.txt'), 'utf8');
+assertContentPresent(remote.filter(s => report.legacyConfigTraceIds.includes(s.traceId)).map(s => ({ ...s, attributes: JSON.parse(s.attributes) })), [marker]);
 const result = { verdict: 'PASS', service: report.service, backendSpans: remote.length, ...validation };
 await fs.writeFile(path.join(root, 'backend-validation.json'), JSON.stringify(result, null, 2), { mode: 0o600 });
 console.log(JSON.stringify(result));

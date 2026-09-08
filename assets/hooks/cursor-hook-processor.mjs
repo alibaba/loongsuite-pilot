@@ -17,7 +17,6 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { decodePayload } from './shared/decode-payload.mjs';
 import {
-  applyHookContentPolicy,
   hashJson,
   loadHookRuntimeConfig,
   sanitizeObject,
@@ -145,7 +144,7 @@ function compactJournal(allEvents, consumedConversationIds) {
 }
 
 function applyPolicy(record, runtimeConfig) {
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+  return sanitizeObject(record) || {};
 }
 
 function injectSkillRecords(records, skills, runtimeConfig = {}) {

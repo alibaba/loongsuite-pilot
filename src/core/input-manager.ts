@@ -11,7 +11,6 @@ import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
-import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
@@ -377,14 +376,10 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const policyAppliedEntries = entries.map(entry =>
-      applyAgentContentPolicy(entry, this.agentsConfig),
-    );
-
     const maskedEntries =
       this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
-        ? policyAppliedEntries
-        : policyAppliedEntries.map(entry =>
+        ? entries
+        : entries.map(entry =>
             maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
           );
 

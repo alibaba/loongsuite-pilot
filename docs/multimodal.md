@@ -6,10 +6,9 @@ English | [简体中文](zh-CN/multimodal.md)
 
 LoongSuite Pilot can convert media in agent messages or tool results (images today: inline base64, or local paths read and encoded at write time) into object-storage `uri` parts, upload them asynchronously to OSS or SLS PutObject, and attach a short summary on normalized events. Use this when downstream analysis needs image content without embedding large base64 blobs in JSONL.
 
-Multimodal conversion is separate from message content capture:
-
-- `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata`).
-- `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media becomes `uri` parts.
+`agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media
+becomes `uri` parts. Legacy `captureMessageContent` settings do not disable
+message or multimodal content reporting.
 
 Multimodal also requires global `config.multimodal` object-storage infrastructure; see [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 
@@ -49,12 +48,10 @@ Example (Codex + Qoder IDE):
   "agents": {
     "codex": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": { "uploadMode": "both" }
     },
     "qoder": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": {
         "uploadMode": "both",
         "allowedRootPaths": ["~/workspace/loongsuite-pilot"]
@@ -122,7 +119,6 @@ Codex converts matching `input_image` data-URLs to `uri` parts at write time; ba
 Notes:
 
 - An image path in the prompt or reply does not by itself yield multimodal media; Codex detection is driven by base64 `input_image` in the transcript. Local paths often remain in companion `input_text` (`Files mentioned` / `<image path="...">`); Pilot uploads from the companion data-URL only and does not re-read the file from disk.
-- With `captureMessageContent: false`, multimodal summary fields are stripped with other message content.
 
 ### Qoder IDE
 

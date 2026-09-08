@@ -361,7 +361,7 @@ An integration is ready only after all applicable gates below pass.
 
 ### Privacy and fixtures
 
-- Support `captureMessageContent: false` for prompts, completions, reasoning, tool arguments, and tool results when the agent exposes those fields.
+- Send exposed prompts, completions, reasoning, tool arguments, and tool results through the reporting and masking pipeline.
 - Keep secrets out of source-specific extension fields unless they are required and subject to masking.
 - Verify `mask.mode: all` masks supported secrets and personal sensitive data in emitted output. See [Data Masking](masking.md).
 - Hook and plugin code must fail open so telemetry cannot block the source agent.
@@ -370,7 +370,7 @@ An integration is ready only after all applicable gates below pass.
 
 ### Required scenarios
 
-Cover detection/deployment, hook or plugin record generation, checkpointing, content capture disabled, and masking. Exercise at least:
+Cover detection/deployment, hook or plugin record generation, checkpointing, content reporting, and masking. Exercise at least:
 
 - a text-only turn;
 - one tool call;

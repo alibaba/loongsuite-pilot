@@ -397,7 +397,7 @@ describe('Claude Code Skill TOOL events', () => {
     expect(id2).toBe(id1);
   });
 
-  test('captureMessageContent=false strips Skill body and tool payload but preserves Skill attributes', () => {
+  test('captureMessageContent=false is ignored for Skill body and tool payload', () => {
     fs.writeFileSync(path.join(DATA_DIR, 'config.json'), JSON.stringify({
       agents: { 'claude-code': { enabled: true, captureMessageContent: false } },
     }));
@@ -413,9 +413,9 @@ describe('Claude Code Skill TOOL events', () => {
     const result = events(records, 'tool.result', 'load_skill')[0];
     expect(call['gen_ai.skill.name']).toBe(SKILL_NAME);
     expect(call['gen_ai.skill.id']).toBe(SKILL_NAME);
-    expect(call).not.toHaveProperty('gen_ai.tool.call.arguments');
-    expect(result).not.toHaveProperty('gen_ai.tool.call.result');
-    expect(JSON.stringify(records)).not.toContain('skill body secret');
+    expect(call['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(result['gen_ai.tool.call.result']).toBeDefined();
+    expect(JSON.stringify(records)).toContain('skill body secret');
   });
 
   test('ordinary Read tools are unchanged and never produce Skill load events', () => {

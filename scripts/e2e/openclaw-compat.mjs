@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { assertOpenClawEvidence, assertContentOff } from './openclaw-assertions.mjs';
+import { assertOpenClawEvidence, assertContentPresent } from './openclaw-assertions.mjs';
 import { JSONL_VALIDATOR_JS } from './lib/e2e-scenarios.mjs';
 
 assert(process.env.OPENCLAW_E2E_DISPOSABLE === '1' && process.platform === 'linux'
@@ -169,14 +169,14 @@ try {
   report.checks.push('bound entry version detection independent of PATH; config validation; existing user/plugin settings preserved');
   await command('stop-before-config', cli, ['stop']);
   const cfg = await read(pilotConfig);
-  cfg.serviceName = service; cfg.otlpTrace = { debug: true, captureMessageContent: true }; cfg.collectTrace = true; cfg.collectLog = true;
+  cfg.serviceName = service; cfg.otlpTrace = { debug: true }; cfg.collectTrace = true; cfg.collectLog = true;
   if (cms) cfg.cms = { ...cms, debug: true };
   else {
     sink = http.createServer((req, res) => { req.resume(); req.on('end', () => { sinkRequests++; res.writeHead(200, { 'Content-Type': 'application/x-protobuf' }); res.end(); }); });
     await new Promise(resolve => sink.listen(0, '127.0.0.1', resolve));
     cfg.otlpTrace.endpoint = `http://127.0.0.1:${sink.address().port}/v1/traces`;
   }
-  cfg.agents.openclaw.captureMessageContent = true; cfg.hookWatchdog = { enabled: true, intervalMs: 3000, repairCooldownMs: 1000 };
+  cfg.hookWatchdog = { enabled: true, intervalMs: 3000, repairCooldownMs: 1000 };
   await write(pilotConfig, cfg); await command('start-collector', cli, ['start']); await startGateway();
   await traffic('text', `Do not use tools. Reply with exactly ${nonce}.`);
   await traffic('tools', `Use the read tool twice: read ${workspace}/alpha.txt and ${workspace}/beta.txt separately. Add the two numbers and reply with the sum and ${nonce}.`);
@@ -188,30 +188,30 @@ try {
   const afterRestart = await rows(`${data}/logs/output`);
   for (const id of previousIds) assert.equal(afterRestart.filter(e => e['event.id'] === id).length, 1, 'restart replay');
   report.checks.push('Gateway and collector restart; same native session; no replay');
-  await stopGateway(); await command('stop-privacy', cli, ['stop']);
-  const privateMarker = `PRIVATE_${crypto.randomBytes(12).toString('hex')}`;
-  await fs.writeFile(`${workspace}/private.txt`, privateMarker);
-  const privateCfg = await read(pilotConfig); privateCfg.otlpTrace.captureMessageContent = false;
-  privateCfg.agents.openclaw.captureMessageContent = false; await write(pilotConfig, privateCfg);
-  await command('start-privacy', cli, ['start']); await startGateway();
-  await traffic('privacy', `Read ${workspace}/private.txt and ${workspace}/missing-${privateMarker}.txt using read separately. Reply with ${privateMarker} and acknowledge the missing file.`, privateMarker);
+  await stopGateway(); await command('stop-legacy-config', cli, ['stop']);
+  const legacyMarker = `LEGACY_CONFIG_${crypto.randomBytes(12).toString('hex')}`;
+  await fs.writeFile(`${workspace}/legacy-config.txt`, legacyMarker);
+  const legacyCfg = await read(pilotConfig); legacyCfg.otlpTrace.captureMessageContent = false;
+  legacyCfg.agents.openclaw.captureMessageContent = false; await write(pilotConfig, legacyCfg);
+  await command('start-legacy-config', cli, ['start']); await startGateway();
+  await traffic('legacy-config', `Read ${workspace}/legacy-config.txt and ${workspace}/missing-${legacyMarker}.txt using read separately. Reply with ${legacyMarker} and acknowledge the missing file.`, legacyMarker);
   // OTLP and canonical JSONL fan out independently. A terminal debug span
   // does not prove all JSONL writes completed; drain before taking evidence.
   await stopGateway(); await command('stop-before-validation', cli, ['stop']);
   const events = await rows(`${data}/logs/output`), spans = await rows(`${data}/logs/otlp-debug`);
-  const privateEvents = events.filter(e => e['gen_ai.turn.id'] === `${run}-privacy`);
-  const privateTraceIds = [...new Set(privateEvents.map(e => e.trace_id))];
-  assertContentOff(privateEvents, [privateMarker]);
-  assertContentOff(spans.filter(s => privateTraceIds.includes(s.traceId)), [privateMarker]);
-  assertContentOff((await rows(`${data}/logs/openclaw`)).filter(e => e['gen_ai.turn.id'] === `${run}-privacy`), [privateMarker]);
+  const legacyEvents = events.filter(e => e['gen_ai.turn.id'] === `${run}-legacy-config`);
+  const legacyTraceIds = [...new Set(legacyEvents.map(e => e.trace_id))];
+  assertContentPresent(legacyEvents, [legacyMarker]);
+  assertContentPresent(spans.filter(s => legacyTraceIds.includes(s.traceId)), [legacyMarker]);
+  assertContentPresent((await rows(`${data}/logs/openclaw`)).filter(e => e['gen_ai.turn.id'] === `${run}-legacy-config`), [legacyMarker]);
   const nativeMessages = (await rows(`${state}/agents/main/sessions`)).filter(r => r.type === 'message').map(r => r.message);
-  report.validation = assertOpenClawEvidence({ events, spans, nativeMessages, provider: provider.provider, model: provider.model, service, workerName, turns: 4, expectedToolErrorTraceIds: privateTraceIds });
-  report.privacyTraceIds = privateTraceIds;
+  report.validation = assertOpenClawEvidence({ events, spans, nativeMessages, provider: provider.provider, model: provider.model, service, workerName, turns: 4, expectedToolErrorTraceIds: legacyTraceIds });
+  report.legacyConfigTraceIds = legacyTraceIds;
   env._JV_LOG_DIR = `${data}/logs/output`;
   env.E2E_JSONL_STRICT = '1'; env.E2E_JSONL_AGENT_FILTER = 'openclaw';
   await command('strict-jsonl-validation', process.execPath, ['-e', JSONL_VALIDATOR_JS]);
   report.checks.push('repository strict JSONL validator including system instruction text-part arrays');
-  report.checks.push('native per-call tokens/cache parity; worker identity; trace topology/timing; content-off including missing-file result');
+  report.checks.push('native per-call tokens/cache parity; worker identity; trace topology/timing; legacy content config ignored including missing-file result');
   await command('start-watchdog', cli, ['start']);
   const broken = await read(configPath), entry = broken.plugins.entries['loongsuite-pilot-openclaw'];
   if (versionNumber < 20260424) entry.hooks = { allowConversationAccess: true }; else delete entry.hooks;

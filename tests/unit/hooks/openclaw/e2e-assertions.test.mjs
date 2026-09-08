@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assertOpenClawEvidence, assertContentOff } from '../../../../scripts/e2e/openclaw-assertions.mjs';
+import { assertOpenClawEvidence, assertContentPresent } from '../../../../scripts/e2e/openclaw-assertions.mjs';
 
 // Deliberately synthetic validator tests, not evidence of native hook behavior.
 function fixture() {
@@ -59,11 +59,11 @@ describe('OpenClaw Gateway E2E acceptance assertions', () => {
   ])('rejects %s', (_name, mutate) => {
     const f = fixture(); mutate(f); expect(() => assertOpenClawEvidence(f)).toThrow();
   });
-  it('rejects empty privacy evidence, content fields and source-specific marker leaks', () => {
-    expect(() => assertContentOff([], ['secret'])).toThrow();
-    expect(() => assertContentOff([{ attributes: { 'error.message': 'anything' } }], ['secret'])).toThrow();
-    expect(() => assertContentOff([{ 'agent.openclaw.error': 'secret' }], ['secret'])).toThrow();
-    expect(() => assertContentOff([{ 'gen_ai.usage.input_tokens': 1 }], ['secret'])).not.toThrow();
+  it('requires reported content and the synthetic marker when legacy content config is false', () => {
+    expect(() => assertContentPresent([], ['secret'])).toThrow();
+    expect(() => assertContentPresent([{ 'gen_ai.usage.input_tokens': 1 }], ['secret'])).toThrow();
+    expect(() => assertContentPresent([{ 'gen_ai.input.messages': [{ content: 'different' }] }], ['secret'])).toThrow();
+    expect(() => assertContentPresent([{ 'gen_ai.input.messages': [{ content: 'secret' }] }], ['secret'])).not.toThrow();
   });
   it('allows only an explicitly expected read-tool error, not an LLM error', () => {
     const f = fixture(); f.expectedToolErrorTraceIds = ['trace'];

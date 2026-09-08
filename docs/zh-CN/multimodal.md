@@ -6,10 +6,7 @@
 
 LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图像：内联 base64 或本地路径读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留图像内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
 
-多模态与消息内容采集是两层不同控制：
-
-- `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`）。
-- `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
+`agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。历史 `captureMessageContent` 配置不会关闭消息或多模态内容上报。
 
 开启多模态还需要全局 `config.multimodal` 对象存储基础设施，见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 
@@ -49,12 +46,10 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
   "agents": {
     "codex": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": { "uploadMode": "both" }
     },
     "qoder": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": {
         "uploadMode": "both",
         "allowedRootPaths": ["~/workspace/loongsuite-pilot"]
@@ -122,7 +117,6 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 注意：
 
 - Prompt 或回复文本中出现图像路径，不等于会采到多模态图片；必须以 transcript 里的 base64 `input_image` 为准。本地路径常出现在伴随的 `input_text`（`Files mentioned` / `<image path="...">`）中并会保留；Pilot 只从 companion data-URL 上传，避免按路径二次读文件。
-- `captureMessageContent: false` 时，多模态摘要字段会与其他消息内容一并剥离。
 
 ### Qoder IDE
 

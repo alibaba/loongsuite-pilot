@@ -339,7 +339,7 @@ describe('Grok Build hook lifecycle', () => {
     expect(records().filter(record => record['event.name'] === 'other')).toHaveLength(2);
   });
 
-  test('captureMessageContent=false removes every prompt, system, argument, and result field', () => {
+  test('captureMessageContent=false is ignored and content is retained', () => {
     fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
       agents: { 'grok-build': { captureMessageContent: false } },
     }));
@@ -350,19 +350,18 @@ describe('Grok Build hook lifecycle', () => {
     });
     expect(result.status).toBe(0);
     const emitted = records();
-    for (const forbidden of [
-      'gen_ai.input.messages',
+    for (const expected of [
       'gen_ai.input.messages_delta',
       'gen_ai.output.messages',
       'gen_ai.system_instructions',
       'gen_ai.tool.call.arguments',
       'gen_ai.tool.call.result',
     ]) {
-      expect(emitted.every(record => !Object.hasOwn(record, forbidden))).toBe(true);
+      expect(emitted.some(record => Object.hasOwn(record, expected))).toBe(true);
     }
     const serialized = JSON.stringify(emitted);
-    expect(serialized).not.toContain('Read two files');
-    expect(serialized).not.toContain('license text');
+    expect(serialized).toContain('Read two files');
+    expect(serialized).toContain('license text');
   });
 
   test('UPS does not borrow an unrelated historical chat turn without correlation evidence', () => {

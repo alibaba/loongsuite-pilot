@@ -45,7 +45,6 @@ describe('Hermes Agent plugin to trace flow', () => {
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
       userId: 'plugin-config-user',
-      agents: { 'hermes-agent': { captureMessageContent: true } },
     }));
     // The callback ordering/content fixture is a sanitized Hermes 0.9 capture.
     // It predates the typed request field, so augment only that field with a
@@ -123,7 +122,7 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     });
     const flusher = new MockFlusher();
     const manager = new InputManager();
-    manager.setAgentsConfig({ [ClientType.Hermes]: { captureMessageContent: true } });
+    manager.setAgentsConfig({ [ClientType.Hermes]: {} });
     manager.setConfiguredUserId('collector-config-user');
     manager.setUserId('collector-fallback-user');
     manager.setFlusher(flusher);

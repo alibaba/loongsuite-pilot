@@ -391,7 +391,7 @@ describe('MetricsWriter', () => {
     expect(hasManagedLogFile(metricDir, 'pilot-flusher-metrics')).toBe(false);
   });
 
-  it('includes capture_message_disabled_agents in L1 metrics', async () => {
+  it('keeps capture_message_disabled_agents empty for compatibility', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -410,7 +410,7 @@ describe('MetricsWriter', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
-    expect(entry.capture_message_disabled_agents).toBe('qoder');
+    expect(entry.capture_message_disabled_agents).toBe('');
   });
 
   describe('process resource thresholds', () => {

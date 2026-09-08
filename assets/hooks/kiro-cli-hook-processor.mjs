@@ -42,7 +42,6 @@ import {
   toJsonValue,
   loadHookRuntimeConfig,
   resolveUserId,
-  applyHookContentPolicy,
 } from './agent-event-normalizer.mjs';
 
 import { readTranscriptForCwd, parseConversationValue } from './kiro-cli/transcript-parser.mjs';
@@ -390,7 +389,7 @@ async function runCollect(ctx) {
   );
   if (records.length === 0) return 'ok';
 
-  const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
+  const cleaned = records.map((r) => sanitizeObject(r) || r);
 
   let writeOk = false;
   try {

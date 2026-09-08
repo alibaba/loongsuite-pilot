@@ -25,7 +25,6 @@ import fs from 'node:fs';
 import {
   resolveUserId,
   timestampToUnixNanos,
-  applyHookContentPolicy,
   sanitizeObject,
   toJsonValue,
   parseMaybeJson,
@@ -535,5 +534,5 @@ function inferProvider(model) {
 }
 
 function applyPolicy(record, runtimeConfig) {
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+  return sanitizeObject(record) || {};
 }

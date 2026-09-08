@@ -20,7 +20,6 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
-    "captureMessageContent": false,
     "debug": false,
     "turnIdleTimeoutMs": 0
   }
@@ -35,7 +34,6 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
 | `otlpTrace.headers` | Headers sent to the OTLP endpoint. |
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
-| `otlpTrace.captureMessageContent` | Whether trace export may include message content. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
 | `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
 
@@ -86,7 +84,7 @@ Backends are **deduplicated** by normalized endpoint URL + full request headers,
 
 Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
 
-- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Shared across all backends:** `resourceAttributes`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
 - **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
 A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>-YYYY-MM-DD.jsonl`.
@@ -232,7 +230,7 @@ Alternatively, add to `~/.loongsuite-pilot/config.json` (not recommended for sha
 
 Open [http://localhost:3000](http://localhost:3000) and navigate to **Traces** to view agent sessions with model name, token usage, and cost details.
 
-> **Note:** Langfuse uses HTTP for OTLP — gRPC (port 4317) is not supported. LLM message content is included in traces by default (`captureMessageContent` defaults to `true`). To disable it, explicitly set `captureMessageContent` to `false` in config.
+> **Note:** Langfuse uses HTTP for OTLP — gRPC (port 4317) is not supported. LLM message content is included in traces.
 
 ## Token Usage Aggregation
 
@@ -253,22 +251,18 @@ This caveat applies to OTLP trace backends that aggregate across a span hierarch
 
 ## Content Capture In Traces
 
-Trace spans can carry sensitive content if message capture is enabled. For sensitive or team-managed setups, prefer:
+Trace spans can carry sensitive content. Legacy `captureMessageContent` settings
+are ignored. For sensitive or team-managed setups, enable masking:
 
 ```json
 {
-  "otlpTrace": {
-    "captureMessageContent": false
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
+  "mask": {
+    "mode": "all"
   }
 }
 ```
 
-Also enable [Data Masking](masking.md) when trace data may include secrets.
+See [Data Masking](masking.md) for supported rules and custom modes.
 
 ## Custom Span Attributes
 

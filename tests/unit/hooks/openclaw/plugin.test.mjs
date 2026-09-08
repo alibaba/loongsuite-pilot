@@ -1154,26 +1154,14 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-b');
   });
 
-  it('redacts content before persistence while retaining token usage', async () => {
+  it('ignores legacy Pilot captureMessageContent=false', async () => {
     fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
       agents: { openclaw: { captureMessageContent: false } },
     }));
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
-    const sensitiveFields = [
-      'gen_ai.input.messages',
-      'gen_ai.input.messages_delta',
-      'gen_ai.output.messages',
-      'gen_ai.tool.call.arguments',
-      'gen_ai.tool.call.result',
-      'gen_ai.system_instructions',
-      'gen_ai.tool.definitions',
-      'agent.openclaw.persisted_message',
-      'agent.openclaw.last_assistant_message',
-    ];
-    for (const record of records) {
-      for (const field of sensitiveFields) expect(record[field]).toBeUndefined();
-    }
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
     const response = records.find((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(response['gen_ai.usage.input_tokens']).toBeGreaterThan(0);
     expect(response['gen_ai.usage.output_tokens']).toBeGreaterThan(0);
@@ -1197,13 +1185,13 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(configReads).toHaveLength(1);
   });
 
-  it('honors the OpenClaw plugin-level captureMessageContent=false setting', async () => {
+  it('ignores the legacy OpenClaw plugin-level captureMessageContent=false setting', async () => {
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
       pluginConfig: { captureMessageContent: false },
     });
-    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(false);
-    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(false);
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
   });
 
   it('writes the log directory and JSONL file with private permissions', async () => {

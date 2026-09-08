@@ -1219,7 +1219,7 @@ export class Orchestrator extends EventEmitter {
     // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
     // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
-    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
+    const qoderAgentCfg = this.config.agents.qoder ?? {};
     const qoderMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
@@ -1364,7 +1364,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
-    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
+    const codexAgentCfg = this.config.agents.codex ?? {};
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexTranscriptInput = new CodexTranscriptInput({

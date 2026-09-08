@@ -20,7 +20,6 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
-    "captureMessageContent": false,
     "debug": false,
     "turnIdleTimeoutMs": 0
   }
@@ -35,7 +34,6 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | `otlpTrace.headers` | 发送到 OTLP endpoint 的请求头。 |
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
-| `otlpTrace.captureMessageContent` | Trace 输出是否可以包含消息内容。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
 | `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
 
@@ -86,7 +84,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 
 共享 vs 单后端设置(span 按不同 `service.name` 各转换一次):
 
-- **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
+- **所有后端共享:** `resourceAttributes`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
 - **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
 
 某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<服务>-<Agent>__<后端名>-YYYY-MM-DD.jsonl`。
@@ -232,7 +230,7 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 打开 [http://localhost:3000](http://localhost:3000)，进入 **Traces** 页面查看 Agent 会话，包括模型名称、Token 用量和费用详情。
 
-> **注意：** Langfuse 使用 HTTP 接收 OTLP 数据，不支持 gRPC（端口 4317）。LLM 消息内容默认包含在 Trace 中（`captureMessageContent` 默认为 `true`）。如需关闭，请在配置中显式设置 `captureMessageContent` 为 `false`。
+> **注意：** Langfuse 使用 HTTP 接收 OTLP 数据，不支持 gRPC（端口 4317）。LLM 消息内容会包含在 Trace 中。
 
 ## Token 用量聚合口径
 
@@ -253,22 +251,17 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
 
 ## Trace 中的内容采集
 
-如果开启消息内容采集，Trace span 可能包含敏感内容。敏感或团队统一管理的环境建议：
+Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。历史 `captureMessageContent` 配置会被忽略；敏感或团队统一管理的环境建议开启脱敏：
 
 ```json
 {
-  "otlpTrace": {
-    "captureMessageContent": false
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
+  "mask": {
+    "mode": "all"
   }
 }
 ```
 
-如果 Trace 数据可能包含密钥，也建议开启 [数据脱敏](masking.md)。
+完整规则和边界见[数据脱敏](masking.md)。
 
 ## 自定义 Span 属性
 

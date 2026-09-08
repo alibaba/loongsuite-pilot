@@ -287,17 +287,6 @@ function resolveUserId(cfg) {
   return resolveUserIdentity(cfg).userId;
 }
 
-function isExplicitlyFalse(value) {
-  return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
-}
-
-let openClawPluginConfig = {};
-
-function shouldCaptureContent(pilotConfig) {
-  return !isExplicitlyFalse(openClawPluginConfig?.captureMessageContent)
-    && !isExplicitlyFalse(pilotConfig?.agents?.openclaw?.captureMessageContent);
-}
-
 // Working directory of the OpenClaw instance, captured once at register().
 // Emitted as agent.openclaw.cwd so the pilot pipeline can enrich git context.
 let agentCwd;
@@ -328,35 +317,14 @@ function appendPrivateFile(filePath, content) {
   }
 }
 
-const CONTENT_RECORD_FIELDS = [
-  "gen_ai.input.messages",
-  "gen_ai.input.messages_delta",
-  "gen_ai.output.messages",
-  "gen_ai.tool.call.arguments",
-  "gen_ai.tool.call.result",
-  "gen_ai.system_instructions",
-  "gen_ai.tool.definitions",
-  "agent.openclaw.persisted_message",
-  "agent.openclaw.message",
-  "agent.openclaw.last_assistant_message",
-  "error.message",
-];
-
-function redactRecordContent(record) {
-  const redacted = { ...record };
-  for (const field of CONTENT_RECORD_FIELDS) delete redacted[field];
-  return redacted;
-}
-
-function writeRecord(record, captureContent = true) {
+function writeRecord(record) {
   try {
     if (!_logDirReady) {
       ensureDir(logDir());
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `openclaw-${todayStamp()}.jsonl`);
-    const persistedRecord = captureContent ? record : redactRecordContent(record);
-    appendPrivateFile(filePath, safeStringify(persistedRecord) + "\n");
+    appendPrivateFile(filePath, safeStringify(record) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -1313,7 +1281,7 @@ function makeHandler(fn) {
     try {
       const cfg = loadPilotConfig();
       const userId = resolveUserId(cfg);
-      const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
+      const emit = (record) => writeRecord(record);
       fn(event, ctx, userId, emit, cfg);
     } catch (err) {
       writeError(fn.name || "handler", err);
@@ -1366,9 +1334,6 @@ export default {
     }
 
     agentCwd = process.cwd() || undefined;
-    openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
-      ? api.pluginConfig
-      : {};
     try {
       ensureDir(logDir());
       _logDirReady = true;

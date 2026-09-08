@@ -266,7 +266,7 @@ describe('injectSkillRecords', () => {
     expect(toolResult.observed_time_unix_nano).toBe(String(BigInt(baseTime) + 2n));
   });
 
-  it('should apply captureMessageContent=false to injected response and tool records', () => {
+  it('should ignore legacy captureMessageContent=false for injected records', () => {
     const skillPath = '/Users/alice/.cursor/skills/private-skill/SKILL.md';
     const records = [makeLlmResponse()];
     const runtimeConfig = {
@@ -281,11 +281,11 @@ describe('injectSkillRecords', () => {
       runtimeConfig,
     );
 
-    expect(records[0]['gen_ai.output.messages']).toBeUndefined();
-    expect(records[1]['gen_ai.tool.call.arguments']).toBeUndefined();
+    expect(records[0]['gen_ai.output.messages']).toBeDefined();
+    expect(records[1]['gen_ai.tool.call.arguments']).toBeDefined();
     expect(records[1]['gen_ai.skill.name']).toBe('private-skill');
     expect(records[2]['gen_ai.skill.name']).toBe('private-skill');
-    expect(JSON.stringify(records)).not.toContain(skillPath);
+    expect(JSON.stringify(records)).toContain(skillPath);
   });
 
   it('should synthesize Read records for a manually attached skill path', () => {

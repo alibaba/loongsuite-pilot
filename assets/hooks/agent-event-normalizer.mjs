@@ -4,42 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
 
-const MESSAGE_CONTENT_FIELDS = new Set([
-  'gen_ai.input.messages',
-  'gen_ai.input.messages_delta',
-  'gen_ai.output.messages',
-  'gen_ai.tool.call.arguments',
-  'gen_ai.tool.call.result',
-  'input.messages',
-  'input.messages_delta',
-  'output.messages',
-  'tool.arguments',
-  'tool.result.payload',
-  'content',
-  'inlineDiffMessage',
-  'agent.content',
-  'agent.inline_diff_message',
-]);
-
-const MESSAGE_CONTENT_SOURCE_KEYS = new Set([
-  'attachments',
-  'content',
-  'inlineDiffMessage',
-  'input',
-  'input_messages',
-  'input_messages_delta',
-  'new_string',
-  'old_string',
-  'output_messages',
-  'prompt',
-  'result_json',
-  'text',
-  'toolUseResult',
-  'tool_input',
-  'tool_output',
-  'tool_results',
-]);
-
 const CURSOR_MAPPED_SOURCE_KEYS = new Set([
   'cache_read_tokens',
   'cache_write_tokens',
@@ -297,65 +261,12 @@ export function resolveUserId(record, runtimeConfig = {}) {
     || os.hostname();
 }
 
-const AGENT_TYPE_TO_CONFIG_KEY = {
-  'qoder-cli': 'qoder',
-  'qoder-cli-hook': 'qoder',
-  'qoder-cn': 'qoder-cn',
-  'qoder-cn-hook': 'qoder-cn',
-  'cursor-hook': 'cursor',
-  'cursor-cli': 'cursor',
-  'openclaw': 'openclaw',
-};
-
-export function applyHookContentPolicy(record, runtimeConfig = {}) {
-  const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
-  const agents = runtimeConfig.agents;
-  const policy = agentType && agents
-    ? (agents[agentType] || agents[AGENT_TYPE_TO_CONFIG_KEY[agentType] || ''])
-    : undefined;
-  const capture = parseCaptureMessageContent(policy?.captureMessageContent);
-  if (capture !== false) return record;
-
-  return removeContentFields(record);
-}
-
-function removeContentFields(value) {
-  if (Array.isArray(value)) {
-    const list = value.map(item => removeContentFields(item)).filter(item => item !== undefined);
-    return list.length > 0 ? list : undefined;
-  }
-  if (!value || typeof value !== 'object') return value;
-
-  const next = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (isContentSourceKey(key)) continue;
-    const cleaned = removeContentFields(raw);
-    if (cleaned !== undefined) next[key] = cleaned;
-  }
-  return next;
-}
-
-function isContentSourceKey(key) {
-  if (MESSAGE_CONTENT_FIELDS.has(key) || MESSAGE_CONTENT_SOURCE_KEYS.has(key)) return true;
-  const last = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key;
-  return MESSAGE_CONTENT_SOURCE_KEYS.has(last);
-}
-
 function addSourceAttributes(record, source, raw, mappedKeys) {
   for (const [key, value] of Object.entries(raw ?? {})) {
     if (mappedKeys.has(key)) continue;
     const json = toJsonValue(value);
     if (json !== undefined) record[`agent.${source}.${key}`] = json;
   }
-}
-
-function parseCaptureMessageContent(value) {
-  if (typeof value === 'boolean') return value;
-  if (typeof value !== 'string') return true;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'false') return false;
-  if (normalized === 'true') return true;
-  return true;
 }
 
 export function getSourceHookEvent(payload) {
@@ -454,7 +365,7 @@ export function buildCursorHookRecord(payload, options = {}) {
     time_unix_nano: getStringValue(payload, 'time_unix_nano') || timestampToUnixNanos(payload.timestamp ?? now),
   };
   addSourceAttributes(record, 'cursor', payload, CURSOR_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+  return sanitizeObject(record) || {};
 }
 
 export function buildQoderHookRecord(row, options = {}) {
@@ -517,7 +428,7 @@ export function buildQoderHookRecord(row, options = {}) {
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
   addSourceAttributes(record, sourceNamespace, row, QODER_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+  return sanitizeObject(record) || {};
 }
 
 function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) {
@@ -559,7 +470,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
   addSourceAttributes(record, sourceNamespace, data, QODER_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+  return sanitizeObject(record) || {};
 }
 
 function qoderSourceNamespace(variant) {
