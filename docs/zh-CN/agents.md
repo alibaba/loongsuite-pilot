@@ -109,12 +109,15 @@ OpenClaw、shell、which 或 npm 子进程。`OPENCLAW_CLI_PATH` 为可选覆盖
 
 1. 显式指定的绝对路径 `OPENCLAW_CLI_PATH`。
 2. 安装器保存在 Pilot 配置中的 `agents.openclaw.cliPath`。
-3. 自动探测当前 OpenClaw 包工作目录中的 `openclaw.mjs`、标准
+3. 自动探测当前 OpenClaw 包工作目录中的 `openclaw.mjs`、固定的 `./openclaw` 子目录中的包、标准
    `~/.openclaw-bundle`（或 `OPENCLAW_BUNDLE_ROOT`）内的安装，以及 PATH 上首个
    OpenClaw 命令。指向同一包的软链接会去重；发现不同安装实例时不猜测，版本相同也视为冲突。
 
 对于 `WORKDIR /app`、`node openclaw.mjs gateway ...` 的源码容器，在 `/app` 下安装，
 探测无冲突时无需手动传入路径或版本。PATH 或标准 Bundle 暴露的共享安装也支持自动识别。
+对于 `WORKDIR /app`、`node openclaw/openclaw.mjs gateway ...`，在 `/app` 下安装也会检查
+`/app/openclaw/package.json` 和 `/app/openclaw/openclaw.mjs`。只增加这一固定子目录，
+不递归搜索任意目录；当前目录和子目录中的不同安装仍按冲突处理。
 启用 OpenClaw 时，安装器保存选中的入口，而非缓存版本。后台 collector/watchdog 即使
 工作目录、PATH 或服务环境改变，也会从 Pilot 配置重新读取入口并验证当前版本。
 自定义配置位置遵循 `AGENT_DATA_COLLECTION_CONFIG`；公共安装器会自动将 `--data-dir`

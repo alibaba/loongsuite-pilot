@@ -120,14 +120,19 @@ Entry resolution, in order:
 1. An explicitly supplied absolute `OPENCLAW_CLI_PATH` (override).
 2. `agents.openclaw.cliPath` saved in the Pilot config by the installer.
 3. Automatic discovery: the current OpenClaw package directory with
-   `openclaw.mjs`, the standard `~/.openclaw-bundle` (or `OPENCLAW_BUNDLE_ROOT`)
+   `openclaw.mjs`, the fixed `./openclaw` child package directory, the standard
+   `~/.openclaw-bundle` (or `OPENCLAW_BUNDLE_ROOT`)
    nested installation, and the first OpenClaw command on PATH. Symlinks to the
    same package are deduplicated. Distinct packages are ambiguous, even when
    their versions match; Pilot does not guess which one runs the Gateway.
 
 For a source container with `WORKDIR /app` and `node openclaw.mjs gateway ...`,
 run installation from `/app`; no path/version variable is needed if discovery
-is unambiguous. Shared installations exposed on PATH or in the standard bundle
+is unambiguous. `WORKDIR /app` with `node openclaw/openclaw.mjs gateway ...`
+is also supported: installation from `/app` checks `/app/openclaw/package.json`
+and `/app/openclaw/openclaw.mjs`. This is a fixed child lookup, not recursive
+directory discovery; both layouts still participate in ambiguity checks.
+Shared installations exposed on PATH or in the standard bundle
 are also discovered without a manual override. The installer saves the selected
 entry, not the version, when OpenClaw is enabled. Collector/watchdog restarts
 read this config even when their PATH/cwd or service-manager environment differ.

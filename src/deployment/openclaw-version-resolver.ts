@@ -125,12 +125,25 @@ export async function resolveOpenClawHost(
   }
 
   const candidates: OpenClawHost[] = [];
-  const sourceHost = await readPackage(path.join(cwd, 'package.json'));
-  if (sourceHost === null || sourceHost === unreadable) return null;
-  if (sourceHost) {
-    const host = await fromEntry(path.join(cwd, 'openclaw.mjs'));
-    if (!host) return null;
-    candidates.push(host);
+  // Fixed source layouts only: WORKDIR may be the package or its parent.
+  // Never enumerate arbitrary children or prefer one conflicting package.
+  for (const packageDir of [cwd, path.join(cwd, 'openclaw')]) {
+    if (packageDir !== cwd) {
+      try {
+        // An executable named ./openclaw is not a child package directory.
+        if (!(await fs.stat(packageDir)).isDirectory()) continue;
+      } catch (err) {
+        if (['ENOENT', 'ENOTDIR'].includes((err as NodeJS.ErrnoException).code || '')) continue;
+        return null;
+      }
+    }
+    const sourceHost = await readPackage(path.join(packageDir, 'package.json'));
+    if (sourceHost === null || sourceHost === unreadable) return null;
+    if (sourceHost) {
+      const host = await fromEntry(path.join(packageDir, 'openclaw.mjs'));
+      if (!host) return null;
+      candidates.push(host);
+    }
   }
   const bundleRoot = env.OPENCLAW_BUNDLE_ROOT || (home ? path.join(home, '.openclaw-bundle') : undefined);
   if (bundleRoot) {

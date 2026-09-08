@@ -57,6 +57,37 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await pkg('app');
     expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toMatchObject({ version: '2026.3.8' });
   });
+  it.each(['2026.3.8', '2026.6.10'])('discovers a fixed openclaw child from its container workdir (%s)', async version => {
+    const entry = await pkg('app/openclaw', version);
+    await pkg('app', '1.0.0', 'customer-container');
+    expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toMatchObject({
+      executable: entry, version, binding: 'auto-entry',
+    });
+  });
+  it('does not recursively search arbitrary nested directories', async () => {
+    await pkg('app/vendor/openclaw');
+    expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toBeNull();
+  });
+  it.each(['2026.3.8', '2026.6.10'])('rejects distinct cwd and child installations (%s)', async version => {
+    await pkg('app');
+    await pkg('app/openclaw', version);
+    expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toBeNull();
+  });
+  it('deduplicates a child installation also exposed on PATH', async () => {
+    const entry = await pkg('app/openclaw');
+    await fs.mkdir(path.join(root, 'bin'));
+    await fs.symlink(entry, path.join(root, 'bin/openclaw'));
+    expect(await resolveOpenClawHost({ PATH: path.join(root, 'bin') }, path.join(root, 'app')))
+      .toMatchObject({ executable: entry, binding: 'auto-entry' });
+  });
+  it.each(['missing-entry', 'unsupported', 'broken-metadata'])('does not bypass an invalid fixed child (%s)', async problem => {
+    const entry = await pkg('app/openclaw', problem === 'unsupported' ? '2026.3.2' : '2026.3.8');
+    if (problem === 'missing-entry') await fs.unlink(entry);
+    if (problem === 'broken-metadata') await fs.writeFile(path.join(path.dirname(entry), 'package.json'), '{');
+    const other = await pkg('cli');
+    await fs.symlink(other, path.join(root, 'cli/openclaw'));
+    expect(await resolveOpenClawHost({ PATH: path.join(root, 'cli') }, path.join(root, 'app'))).toBeNull();
+  });
   it('rejects conflicting source-container and PATH installations, but honors a bound launch entry', async () => {
     const oldEntry = await pkg('gateway', '2026.3.8');
     const newEntry = await pkg('cli', '2026.6.10');
