@@ -1032,6 +1032,19 @@ describe('claude-code 一级子 Agent 上报', () => {
       record['gen_ai.agent.scope'] === 'subagent');
 
     expect(parentAgentTool?.['gen_ai.tool.name']).toBe('Agent');
+    // Both transcripts lack promptId: request timestamps must survive export
+    // as source-time fallbacks, including the recursively parsed child turn.
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    const childRequest = requests.find((record) => record['gen_ai.agent.scope'] === 'subagent');
+    expect(childRequest.time_unix_nano).toBe('1780541855900000000');
+    for (const request of requests) {
+      const response = records.find((record) => record['event.name'] === 'llm.response'
+        && record.span_id === request.span_id);
+      expect(response).toBeDefined();
+      expect(BigInt(request.time_unix_nano)).toBeGreaterThan(0n);
+      expect(BigInt(request.time_unix_nano)).toBeLessThanOrEqual(BigInt(response.time_unix_nano));
+    }
     expect(childRecords.length).toBeGreaterThan(0);
     for (const record of childRecords) {
       expect(record.trace_id).toBe(parentAgentTool.trace_id);
