@@ -434,6 +434,8 @@ function synthesizeUriOnlyRequest(
   const carrier = { ...response } as AgentActivityEntry;
   carrier['event.id'] = deriveSyntheticIdeRequestEventId(String(response['event.id'] ?? ''), requestId);
   carrier['event.name'] = 'llm.request';
+  const earlier = earlierByOneNano(response.time_unix_nano);
+  if (earlier !== undefined) carrier.time_unix_nano = earlier;
   for (const key of Object.keys(carrier)) {
     if (isResponseOnlyField(key)) delete carrier[key];
   }
@@ -441,6 +443,18 @@ function synthesizeUriOnlyRequest(
     delete response['gen_ai.turn.start'];
   }
   return carrier;
+}
+
+/** Image-only turns have no request clock; 1ns earlier keeps the pair ordered. */
+function earlierByOneNano(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
+  try {
+    const n = BigInt(value);
+    if (n < 1n) return undefined;
+    return String(n - 1n);
+  } catch {
+    return undefined;
+  }
 }
 
 function isResponseOnlyField(key: string): boolean {

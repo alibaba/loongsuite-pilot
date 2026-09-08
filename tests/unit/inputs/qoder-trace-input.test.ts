@@ -1859,6 +1859,7 @@ describe('QoderTraceInput multimodal', () => {
         expect(request['gen_ai.request.id']).toBe('req-solo');
         expect(request['gen_ai.turn.start']).toBe(true);
         expect(request['gen_ai.turn.end']).toBeUndefined();
+        expect(request.time_unix_nano).toBe(String(BigInt(responseOnly.time_unix_nano) - 1n));
         expect(responseOnly['gen_ai.turn.start']).toBeUndefined();
         expect(responseOnly['gen_ai.turn.end']).toBe(true);
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toEqual([
@@ -1910,6 +1911,7 @@ describe('QoderTraceInput multimodal', () => {
         expect(request['agent.source']).toBe('qoder-hook');
         expect(request['workspace.path']).toBe('/tmp/ws');
         expect(request['git.repo']).toBe('org/repo');
+        expect(request.time_unix_nano).toBe(String(BigInt(responseOnly.time_unix_nano) - 1n));
         expect(request.observed_time_unix_nano).toBe('1700000000000000001');
         expect(request.resourceAttributes).toEqual({ 'service.version': '1.0.0' });
         expect(request['multica.issue.id']).toBe('ISSUE-1');
@@ -2320,7 +2322,7 @@ describe('QoderTraceInput multimodal', () => {
       }
     });
 
-    it('collect emits the synthetic request before its response with the same trace_id', async () => {
+    it('collect inserts the synthetic request before its response with a 1ns clock and a positive OTLP span', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-solo-'));
       const imgPath = path.join(tmpDir, 'solo.png');
       await fs.writeFile(imgPath, Buffer.from('solo'));
@@ -2339,6 +2341,7 @@ describe('QoderTraceInput multimodal', () => {
           'gen_ai.request.id': 'req-solo',
           'gen_ai.turn.start': true,
           'gen_ai.turn.end': true,
+          'gen_ai.response.finish_reasons': ['stop'],
           'gen_ai.output.messages': [
             { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
           ],
@@ -2373,11 +2376,22 @@ describe('QoderTraceInput multimodal', () => {
         expect(entries[1]['gen_ai.turn.start']).toBeUndefined();
         expect(entries[0].trace_id).toBe(entries[1].trace_id);
         expect(entries[0].trace_id).toBeTruthy();
+        expect(entries[0].time_unix_nano).toBe('1779999999999999999');
+        expect(entries[1].time_unix_nano).toBe('1780000000000000000');
 
         new TurnBoundaryProcessor().enrich(entries);
         expect(entries[0]['gen_ai.turn.start']).toBe(true);
         expect(entries[1]['gen_ai.turn.end']).toBe(true);
         expect(entries[1]['gen_ai.turn.start']).toBeUndefined();
+
+        process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
+        process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
+        const { convertEventLogToReadableSpans } = await import('@loongsuite/otel-util-genai');
+        const result = await convertEventLogToReadableSpans(entries as never, { strict: false });
+        const llm = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+        expect(llm).toBeDefined();
+        const durationNs = llm!.duration[0] * 1_000_000_000 + llm!.duration[1];
+        expect(durationNs).toBeGreaterThan(0);
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
         clearAttachedImagePathsCache();
