@@ -170,10 +170,14 @@ describe('selectTurnSegmentsForCollection', () => {
 });
 
 describe('buildLlmBoundaries complete-response priority', () => {
-  const assistant = (timestamp, content) => ({
+  const assistant = (timestamp, content, stopReason) => ({
     type: 'assistant',
     timestamp,
-    message: { role: 'assistant', content },
+    message: {
+      role: 'assistant',
+      content,
+      ...(stopReason ? { stop_reason: stopReason } : {}),
+    },
   });
   const toolResult = (timestamp, id) => ({
     type: 'user',
@@ -339,7 +343,7 @@ describe('buildLlmBoundaries complete-response priority', () => {
       ]);
   });
 
-  it('conservatively merges later assistant rows when tool_result is missing', () => {
+  it('preserves a terminal response when tool_result is missing', () => {
     const rows = [
       {
         type: 'user',
@@ -348,10 +352,13 @@ describe('buildLlmBoundaries complete-response priority', () => {
       },
       assistant('2026-07-30T01:00:00.000Z', [
         { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'missing' } },
+      ], 'tool_use'),
+      assistant('2026-07-30T01:00:01.900Z', [
+        { type: 'thinking', thinking: 'the tool was cancelled' },
       ]),
       assistant('2026-07-30T01:00:02.000Z', [
         { type: 'text', text: 'the tool was cancelled' },
-      ]),
+      ], 'end_turn'),
     ];
     const progress = [
       { hookEvent: 'UserPromptSubmit', ts: '2026-07-30T00:59:59.000Z' },
@@ -361,7 +368,7 @@ describe('buildLlmBoundaries complete-response priority', () => {
     ];
 
     const boundaries = buildLlmBoundaries(progress, rows);
-    expect(boundaries).toHaveLength(1);
+    expect(boundaries).toHaveLength(2);
     const records = buildEventsFromBoundaries(
       boundaries, rows, rows, 'turn-missing-result', 'session-1', 'qoder', {}, undefined,
     );
@@ -371,12 +378,33 @@ describe('buildLlmBoundaries complete-response priority', () => {
       .toEqual([
         ['llm.request', 'turn-missing-result:s1'],
         ['llm.response', 'turn-missing-result:s1'],
+        ['llm.request', 'turn-missing-result:s2'],
+        ['llm.response', 'turn-missing-result:s2'],
       ]);
     expect(records.filter(record => record['event.name'] === 'tool.call')).toHaveLength(1);
     expect(records.filter(record => record['event.name'] === 'tool.result')).toHaveLength(0);
-    expect(records.find(record => record['event.name'] === 'llm.response')
-      ['gen_ai.output.messages'][0].parts.map(part => part.type))
-      .toEqual(['tool_call', 'text']);
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    expect(responses.map(record => ({
+      parts: record['gen_ai.output.messages'][0].parts.map(part => part.type),
+      finishReasons: record['gen_ai.response.finish_reasons'],
+      turnEnd: record['gen_ai.turn.end'],
+    }))).toEqual([
+      { parts: ['tool_call'], finishReasons: ['tool_call'], turnEnd: undefined },
+      { parts: ['reasoning', 'text'], finishReasons: ['end_turn'], turnEnd: true },
+    ]);
+  });
+
+  it('conservatively merges later assistant rows when both tool_result and stop_reason are missing', () => {
+    const rows = [
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'missing' } },
+      ]),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'text', text: 'the tool state is unknown' },
+      ]),
+    ];
+
+    expect(buildLlmBoundaries([], rows)).toHaveLength(1);
   });
 
   it('keeps structure and content identical when third-party PostToolUse progress is present', () => {
