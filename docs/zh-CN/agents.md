@@ -118,6 +118,9 @@ OpenClaw、shell、which 或 npm 子进程。`OPENCLAW_CLI_PATH` 为可选覆盖
 对于 `WORKDIR /app`、`node openclaw/openclaw.mjs gateway ...`，在 `/app` 下安装也会检查
 `/app/openclaw/package.json` 和 `/app/openclaw/openclaw.mjs`。只增加这一固定子目录，
 不递归搜索任意目录；当前目录和子目录中的不同安装仍按冲突处理。
+父目录的 `package.json` 损坏或不可读时，仅在父目录 `openclaw.mjs` 确认不存在的情况下
+继续检查固定子包，且必须找到有效子包，不会仅凭 PATH 回退。已确认不支持的父 OpenClaw、
+损坏的子包或无法确认的目录访问异常仍阻止自动选择，并报告失败路径。
 启用 OpenClaw 时，安装器保存选中的入口，而非缓存版本。后台 collector/watchdog 即使
 工作目录、PATH 或服务环境改变，也会从 Pilot 配置重新读取入口并验证当前版本。
 自定义配置位置遵循 `AGENT_DATA_COLLECTION_CONFIG`；公共安装器会自动将 `--data-dir`

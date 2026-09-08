@@ -142,6 +142,7 @@ export async function resolveOpenClawHost(
   }
 
   const candidates: OpenClawHost[] = [];
+  let unidentifiedParentEntry: string | undefined;
   // Fixed source layouts only: WORKDIR may be the package or its parent.
   // Never enumerate arbitrary children or prefer one conflicting package.
   for (const packageDir of [cwd, path.join(cwd, 'openclaw')]) {
@@ -150,17 +151,31 @@ export async function resolveOpenClawHost(
         // An executable named ./openclaw is not a child package directory.
         if (!(await fs.stat(packageDir)).isDirectory()) continue;
       } catch (err) {
-        if (['ENOENT', 'ENOTDIR'].includes((err as NodeJS.ErrnoException).code || '')) continue;
-        return null;
+        const code = (err as NodeJS.ErrnoException).code || 'unknown';
+        if (['ENOENT', 'ENOTDIR'].includes(code)) continue;
+        return problem(`OpenClaw child directory lookup failed (${code}): ${JSON.stringify(packageDir)}`);
       }
     }
     const sourceHost = await readPackage(path.join(packageDir, 'package.json'));
-    if (sourceHost === null || sourceHost === unreadable) return null;
+    if (sourceHost === null) return problem(`Unsupported OpenClaw package: ${JSON.stringify(packageDir)}`);
+    if (sourceHost === unreadable) {
+      const entry = path.join(packageDir, 'openclaw.mjs');
+      // Unidentified parent metadata need not describe the fixed child package.
+      // Do not bypass a possible parent installation or an invalid child.
+      if (packageDir !== cwd || !await confirmedMissing(entry)) {
+        return problem(`OpenClaw package metadata unavailable: ${JSON.stringify(path.join(packageDir, 'package.json'))}`);
+      }
+      unidentifiedParentEntry = entry;
+      continue;
+    }
     if (sourceHost) {
       const host = await fromEntry(path.join(packageDir, 'openclaw.mjs'));
       if (!host) return null;
       candidates.push(host);
     }
+  }
+  if (unidentifiedParentEntry && !candidates.length) {
+    return problem(`Unidentified parent package has no valid fixed OpenClaw child: ${JSON.stringify(cwd)}`);
   }
   const bundleRoot = env.OPENCLAW_BUNDLE_ROOT || (home ? path.join(home, '.openclaw-bundle') : undefined);
   if (bundleRoot) {
@@ -204,6 +219,9 @@ export async function resolveOpenClawHost(
   } catch { return null; }
   if (recoveredFrom && !await confirmedMissing(recoveredFrom)) {
     return problem(`Persisted OpenClaw entry reappeared during discovery: ${JSON.stringify(recoveredFrom)}`);
+  }
+  if (unidentifiedParentEntry && !await confirmedMissing(unidentifiedParentEntry)) {
+    return problem(`Unidentified parent entry appeared or became inaccessible during discovery: ${JSON.stringify(unidentifiedParentEntry)}`);
   }
   return { ...candidates[0], binding: 'auto-entry', ...(recoveredFrom ? { recoveredFrom } : {}) };
 }

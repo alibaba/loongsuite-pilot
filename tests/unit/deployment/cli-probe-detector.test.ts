@@ -97,12 +97,15 @@ describe('CLI probe detector', () => {
     expect(detectAgent).not.toHaveBeenCalled();
     expect(commandExists).not.toHaveBeenCalled();
   });
-  it('exposes a replacement only to an installer probe and reports the missing path', async () => {
-    const entry = path.join(tmpDir, 'openclaw.mjs');
+  it.each(['package', 'child-behind-broken-parent'])('exposes a replacement only to an installer probe (%s)', async layout => {
+    const packageDir = layout === 'package' ? tmpDir : path.join(tmpDir, 'openclaw');
+    await fs.mkdir(packageDir, { recursive: true });
+    const entry = path.join(packageDir, 'openclaw.mjs');
     const old = path.join(tmpDir, 'old/openclaw.mjs');
     const config = path.join(tmpDir, 'pilot.json');
     await fs.writeFile(entry, '/* never executed */');
-    await fs.writeFile(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    await fs.writeFile(path.join(packageDir, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    if (layout !== 'package') await fs.writeFile(path.join(tmpDir, 'package.json'), '{');
     await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: old } } }));
     vi.stubEnv('OPENCLAW_CLI_PATH', undefined);
     vi.stubEnv('OPENCLAW_BUNDLE_ROOT', undefined);

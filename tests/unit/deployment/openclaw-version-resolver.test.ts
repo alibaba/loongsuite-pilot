@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as probeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveOpenClawHost, isOpenClawHostBound } from '../../../src/deployment/openclaw-version-resolver.js';
@@ -67,6 +68,75 @@ describe('OpenClaw read-only version discovery and injection', () => {
   it('does not recursively search arbitrary nested directories', async () => {
     await pkg('app/vendor/openclaw');
     expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toBeNull();
+  });
+  it.each(['broken', 'unreadable', 'directory'])('checks the fixed child after unidentified parent metadata (%s)', async kind => {
+    const entry = await pkg('app/openclaw');
+    const metadata = path.join(root, 'app/package.json');
+    if (kind === 'directory') await fs.mkdir(metadata);
+    else await fs.writeFile(metadata, kind === 'unreadable' ? JSON.stringify({ name: 'customer-container' }) : '{');
+    if (kind === 'unreadable') await fs.chmod(metadata, 0);
+    try {
+      expect(await resolveOpenClawHost({ HOME: root, PATH: '' }, path.join(root, 'app')))
+        .toMatchObject({ executable: entry, version: '2026.3.8', binding: 'auto-entry' });
+    } finally { if (kind === 'unreadable') await fs.chmod(metadata, 0o600); }
+  });
+  it.each(['present', 'loop'])('does not bypass an unidentified parent with a %s launch entry', async kind => {
+    await pkg('app/openclaw');
+    await fs.writeFile(path.join(root, 'app/package.json'), '{');
+    const entry = path.join(root, 'app/openclaw.mjs');
+    if (kind === 'present') await fs.writeFile(entry, '/* unknown installation */');
+    else await fs.symlink(entry, entry);
+    expect(await resolveOpenClawHost({ HOME: root }, path.join(root, 'app'))).toBeNull();
+  });
+  it('rechecks an unidentified parent entry before selecting its fixed child', async () => {
+    await pkg('app/openclaw');
+    await fs.writeFile(path.join(root, 'app/package.json'), '{');
+    const parentEntry = path.join(root, 'app/openclaw.mjs');
+    const originalStat = probeFs.stat;
+    let parentChecks = 0;
+    const stat = vi.spyOn(probeFs, 'stat').mockImplementation(async (...args) => {
+      if (args[0] === parentEntry && ++parentChecks === 2) await fs.writeFile(parentEntry, '/* appeared during discovery */');
+      return Reflect.apply(originalStat, probeFs, args);
+    });
+    const onProblem = vi.fn();
+    try {
+      expect(await resolveOpenClawHost({ HOME: root }, path.join(root, 'app'), { onProblem })).toBeNull();
+      expect(parentChecks).toBe(2);
+      expect(onProblem).toHaveBeenCalledWith(expect.stringContaining('appeared or became inaccessible'));
+    } finally { stat.mockRestore(); }
+  });
+  it.each(['missing', 'unrelated'])('does not escape unidentified parent metadata to PATH when the child is %s', async kind => {
+    const entry = await pkg('cli');
+    await fs.symlink(entry, path.join(root, 'cli/openclaw'));
+    await fs.mkdir(path.join(root, 'app'));
+    await fs.writeFile(path.join(root, 'app/package.json'), '{');
+    if (kind === 'unrelated') await pkg('app/openclaw', '1.0.0', 'unrelated');
+    expect(await resolveOpenClawHost({ HOME: root, PATH: path.join(root, 'cli') }, path.join(root, 'app'))).toBeNull();
+  });
+  it('keeps the conflict guard after recovering a child from unidentified parent metadata', async () => {
+    await pkg('app/openclaw');
+    await fs.writeFile(path.join(root, 'app/package.json'), '{');
+    const entry = await pkg('cli', '2026.6.10');
+    await fs.symlink(entry, path.join(root, 'cli/openclaw'));
+    expect(await resolveOpenClawHost({ HOME: root, PATH: path.join(root, 'cli') }, path.join(root, 'app'))).toBeNull();
+  });
+  it('does not bypass a confirmed unsupported cwd package via its fixed child', async () => {
+    await pkg('app', '2026.3.2'); await pkg('app/openclaw');
+    expect(await resolveOpenClawHost({ HOME: root }, path.join(root, 'app'))).toBeNull();
+  });
+  it.each(['EACCES', 'EPERM', 'ELOOP'])('reports child stat %s instead of silently selecting PATH', async code => {
+    const child = path.join(root, 'app/openclaw');
+    await pkg('app/openclaw');
+    const other = await pkg('cli');
+    await fs.symlink(other, path.join(root, 'cli/openclaw'));
+    const stat = vi.spyOn(probeFs, 'stat').mockRejectedValueOnce(Object.assign(new Error('lookup failed'), { code }));
+    const onProblem = vi.fn();
+    try {
+      expect(await resolveOpenClawHost({ HOME: root, PATH: path.join(root, 'cli') }, path.join(root, 'app'), { onProblem })).toBeNull();
+      expect(stat).toHaveBeenCalledWith(child);
+      expect(onProblem).toHaveBeenCalledWith(expect.stringContaining(child));
+      expect(onProblem).toHaveBeenCalledWith(expect.stringContaining(code));
+    } finally { stat.mockRestore(); }
   });
   it.each(['2026.3.8', '2026.6.10'])('rejects distinct cwd and child installations (%s)', async version => {
     await pkg('app');

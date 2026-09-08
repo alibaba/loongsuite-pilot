@@ -115,6 +115,30 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
     const script = await fs.readFile(platform === 'shell' ? 'deploy/installer-opensource.sh' : 'deploy/installer-opensource.ps1', 'utf8');
     expect(script).toContain('--installer --config-path');
   });
+  it.each([false, true])('installs the fixed child behind broken parent metadata (recover=%s)', async recover => {
+    const app = path.join(root, 'app');
+    const child = path.join(app, 'openclaw');
+    await fs.mkdir(child, { recursive: true });
+    const entry = path.join(child, 'openclaw.mjs');
+    await fs.writeFile(entry, '/* never executed */');
+    await fs.writeFile(path.join(child, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    await fs.writeFile(path.join(app, 'package.json'), '{');
+    const old = path.join(root, 'removed/openclaw.mjs');
+    if (recover) await fs.writeFile(configPath, JSON.stringify({ agents: { openclaw: { enabled: true, cliPath: old, captureMessageContent: false } } }));
+    const before = recover ? await fs.readFile(configPath, 'utf8') : undefined;
+    const env = { HOME: root, AGENT_DATA_COLLECTION_CONFIG: configPath, PATH: '' };
+    if (recover) expect(await resolveOpenClawHost(env, app)).toBeNull();
+    const candidate = await resolveOpenClawHost(env, app, { mode: 'installer' });
+    expect(candidate).toMatchObject({ executable: entry, binding: 'auto-entry' });
+    if (recover) {
+      expect(candidate?.recoveredFrom).toBe(old);
+      expect(await fs.readFile(configPath, 'utf8')).toBe(before);
+    } else await expect(fs.stat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const updated = await writeConfig(probe(true, candidate!.executable));
+    expect(updated.agents.openclaw).toMatchObject({ enabled: true, cliPath: entry });
+    if (recover) expect(updated.agents.openclaw.captureMessageContent).toBe(false);
+    expect(await resolveOpenClawHost(env, root)).toMatchObject({ executable: entry, binding: 'persisted-entry', conversationAccess: false });
+  });
   it('does not enable a missing OpenClaw on first installation', async () => {
     expect((await writeConfig(probe(false), 'codex')).agents.openclaw.enabled).toBe(false);
   });

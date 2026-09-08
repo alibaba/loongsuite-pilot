@@ -132,6 +132,11 @@ is unambiguous. `WORKDIR /app` with `node openclaw/openclaw.mjs gateway ...`
 is also supported: installation from `/app` checks `/app/openclaw/package.json`
 and `/app/openclaw/openclaw.mjs`. This is a fixed child lookup, not recursive
 directory discovery; both layouts still participate in ambiguity checks.
+If the parent's `package.json` is unreadable or malformed, Pilot still checks
+the fixed child only when the parent `openclaw.mjs` is confirmed absent. A valid
+child is required; this exception does not fall through to PATH alone. An
+unsupported parent OpenClaw, invalid child package, or uncertain directory
+access still blocks selection and reports the failing path.
 Shared installations exposed on PATH or in the standard bundle
 are also discovered without a manual override. The installer saves the selected
 entry, not the version, when OpenClaw is enabled. Collector/watchdog restarts
