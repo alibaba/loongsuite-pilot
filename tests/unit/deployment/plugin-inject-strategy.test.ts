@@ -173,6 +173,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     strategy = new PluginInjectStrategy(dataDir, tmpDir, async () => ({
       version: '2026.5.12', adapter: 'modern', conversationAccess: true, source: 'test',
+      binding: 'explicit-entry', executable: path.join(tmpDir, 'openclaw.mjs'),
     }));
   });
 

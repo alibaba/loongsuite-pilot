@@ -427,7 +427,11 @@ describe('OpenClaw plugin stateful pipeline', () => {
     const requests = records.filter((r) => r['event.name'] === 'llm.request');
     expect(requests.length).toBe(2);
     // First request: full input data (system instructions + tools + user prompt delta)
-    expect(requests[0]['gen_ai.system_instructions']).toBeTruthy();
+    expect(requests[0]['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: expect.any(String) },
+    ]);
+    expect(records.find(r => r['agent.openclaw.hook'] === 'before_agent_run')['gen_ai.system_instructions'])
+      .toEqual(requests[0]['gen_ai.system_instructions']);
     expect(Array.isArray(requests[0]['gen_ai.tool.definitions'])).toBe(true);
     expect(requests[0]['gen_ai.input.messages_delta'][0].role).toBe('user');
     // Second request: the two prior parallel tool results are incremental input.

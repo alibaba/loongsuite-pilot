@@ -5,6 +5,18 @@ import { openClawCapabilities, type OpenClawCapabilities } from '../../assets/pl
 export interface OpenClawHost extends OpenClawCapabilities {
   source: string;
   executable?: string;
+  /** Only an explicitly supplied absolute launch entry binds deployment. */
+  binding?: 'explicit-entry';
+}
+
+export function isOpenClawHostBound(host: OpenClawHost | null): host is OpenClawHost & { binding: 'explicit-entry'; executable: string } {
+  return host?.binding === 'explicit-entry' && typeof host.executable === 'string'
+    && path.isAbsolute(host.executable);
+}
+
+export function openClawBindingProblem(host: OpenClawHost | null): string {
+  return `${host ? `OpenClaw ${host.version} candidate found, but Gateway entry is unconfirmed` : 'OpenClaw >=2026.3.8 launch entry/version unavailable or unsupported'}; `
+    + 'set OPENCLAW_CLI_PATH to the absolute Gateway launch entry in both the installer and collector environment; config left unchanged';
 }
 
 /** In-process metadata lookup: never executes a CLI, shell or package manager.
@@ -78,7 +90,13 @@ export async function resolveOpenClawHost(
     return null;
   }
 
-  if (env.OPENCLAW_CLI_PATH) return fromEntry(path.resolve(env.OPENCLAW_CLI_PATH));
+  if (env.OPENCLAW_CLI_PATH !== undefined) {
+    // A relative entry changes meaning after a daemon/service changes cwd.
+    // Invalid explicit bindings must never fall back to another installation.
+    if (!path.isAbsolute(env.OPENCLAW_CLI_PATH)) return null;
+    const host = await fromEntry(env.OPENCLAW_CLI_PATH);
+    return host ? { ...host, binding: 'explicit-entry' } : null;
+  }
   if (env.OPENCLAW_BUNDLE_ROOT) {
     const host = await readPackage(path.join(env.OPENCLAW_BUNDLE_ROOT, 'openclaw/node_modules/openclaw/package.json'));
     if (host !== undefined) return host === unreadable ? null : host;

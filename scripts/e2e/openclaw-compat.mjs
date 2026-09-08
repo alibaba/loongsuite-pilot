@@ -9,6 +9,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { assertOpenClawEvidence, assertContentOff } from './openclaw-assertions.mjs';
+import { JSONL_VALIDATOR_JS } from './lib/e2e-scenarios.mjs';
 
 assert(process.env.OPENCLAW_E2E_DISPOSABLE === '1' && process.platform === 'linux'
   && (existsSync('/.dockerenv') || existsSync('/run/.containerenv')),
@@ -21,6 +22,11 @@ const write = (p, value) => fs.writeFile(p, JSON.stringify(value, null, 2), { mo
 const install = process.env.OPENCLAW_E2E_INSTALL, version = process.env.OPENCLAW_E2E_VERSION;
 assert(install && /^2026\.\d+\.\d+$/.test(version ?? ''), 'Set OPENCLAW_E2E_INSTALL and exact OPENCLAW_E2E_VERSION');
 assert.equal((await read(path.join(install, 'node_modules/openclaw/package.json'))).version, version);
+const gatewayEntry = process.env.OPENCLAW_CLI_PATH;
+assert(gatewayEntry && path.isAbsolute(gatewayEntry), 'Bind OPENCLAW_CLI_PATH to the absolute real Gateway entry');
+assert.equal((await read(path.join(path.dirname(gatewayEntry), 'package.json'))).version, version);
+const pathInstall = process.env.OPENCLAW_E2E_PATH_INSTALL ?? install;
+const pathVersion = (await read(path.join(pathInstall, 'node_modules/openclaw/package.json'))).version;
 const versionNumber = Number(version.split('.').map((v, i) => i ? v.padStart(2, '0') : v).join(''));
 const provider = await read(process.env.OPENCLAW_E2E_PROVIDER_FILE);
 assert(provider.provider && provider.model && provider.apiKey, 'Provider JSON requires provider, model, apiKey');
@@ -36,12 +42,12 @@ const workspace = path.join(evidence, 'workspace'), configPath = path.join(state
 const pilotConfig = path.join(data, 'config.json'), cli = path.join(home, '.local/bin/loongsuite-pilot');
 const service = process.env.OPENCLAW_E2E_SERVICE ?? `pilot-openclaw-gateway-${run}`, workerName = `worker-${run}`;
 const env = { ...process.env, HOME: home,
-  PATH: `${install}/node_modules/.bin:${home}/.local/bin:${process.env.PATH}`,
+  PATH: `${pathInstall}/node_modules/.bin:${home}/.local/bin:${process.env.PATH}`,
   OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: configPath, LOONGSUITE_PILOT_DATA_DIR: data,
   LOONGSUITE_PILOT_NODE_MODULES_URL: `file://${evidence}/deps`,
   OPENCLAW_E2E_MODEL_KEY: provider.apiKey, OPENCLAW_GATEWAY_TOKEN: crypto.randomBytes(24).toString('hex'),
   AGENTTEAMS_WORKER_NAME: workerName };
-for (const key of ['NODE_OPTIONS', 'BASH_ENV', 'OPENCLAW_CLI_PATH', 'OPENCLAW_BUNDLE_ROOT', 'OPENCLAW_VERSION',
+for (const key of ['NODE_OPTIONS', 'BASH_ENV', 'OPENCLAW_BUNDLE_ROOT', 'OPENCLAW_VERSION',
   'OPENCLAW_SERVICE_VERSION', 'OPENCLAW_BUNDLED_VERSION', 'OPENAI_API_KEY', 'DASHSCOPE_API_KEY',
   'OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_HEADERS', 'LOONGSUITE_PILOT_OTLP_ENDPOINT',
   'LOONGSUITE_PILOT_OTLP_HEADERS', 'CMS_ENDPOINT', 'CMS_LICENSE_KEY', 'CMS_WORKSPACE', 'USER_ID', 'LOONGSUITE_USER_ID']) delete env[key];
@@ -53,6 +59,9 @@ async function safeFile(p, text) {
 }
 function killGroup(child, signal) { try { process.kill(-child.pid, signal); } catch (e) { if (e.code !== 'ESRCH') throw e; } }
 async function command(label, exe, args, timeout = 240_000) {
+  // Native CLI commands address the same bound installation as Gateway, even
+  // when PATH deliberately selects another installation for the regression.
+  if (exe === 'openclaw') { exe = process.execPath; args = [gatewayEntry, ...args]; }
   const chunks = [], child = spawn(exe, args, { cwd: repo, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => chunks.push(chunk));
   const timer = setTimeout(() => killGroup(child, 'SIGKILL'), timeout);
@@ -90,8 +99,8 @@ async function archiveTree(src, dst) {
 }
 const gwChunks = []; let gateway, gatewayClosed, installed = false, sink, sinkRequests = 0;
 async function startGateway() {
-  gateway = spawn('openclaw', ['gateway', 'run', '--bind', 'loopback', '--port', '18789'],
-    { cwd: workspace, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  gateway = spawn(process.execPath, [path.basename(gatewayEntry), 'gateway', '--allow-unconfigured', '--bind', 'loopback', '--port', '18789'],
+    { cwd: path.dirname(gatewayEntry), env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   gatewayClosed = new Promise((resolve, reject) => { gateway.on('error', reject); gateway.on('close', resolve); });
   for (const stream of [gateway.stdout, gateway.stderr]) stream.on('data', chunk => gwChunks.push(chunk));
   await until('Gateway readiness', async () => {
@@ -132,6 +141,7 @@ const report = { run, service, workerName, openclaw: version, adapter: versionNu
   provider: provider.provider, model: provider.model, endpoint: provider.baseUrl, sessionKey,
   backend: cms ? 'CMS configured; independent readback required' : 'local OTLP receiver', workspace: cms?.workspace,
   node: process.version, platform: `${process.platform}-${process.arch}`,
+  gatewayEntry, gatewayCwd: path.dirname(gatewayEntry), pathVersion,
   harnessSha256: crypto.createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex'),
   assertionsSha256: crypto.createHash('sha256').update(await fs.readFile(new URL('./openclaw-assertions.mjs', import.meta.url))).digest('hex'),
   startMs: Date.now(), checks: [] };
@@ -156,7 +166,7 @@ try {
     '--user.id', run, '--collect-log', 'true', '--collect-trace', 'true', '--package-url', `file://${evidence}/pilot.tar.gz`];
   await command('install', 'bash', installArgs); installed = true;
   await assertConfig(); await command('config-valid', 'openclaw', ['config', 'validate']);
-  report.checks.push('automatic version detection and config validation; existing user/plugin settings preserved');
+  report.checks.push('bound entry version detection independent of PATH; config validation; existing user/plugin settings preserved');
   await command('stop-before-config', cli, ['stop']);
   const cfg = await read(pilotConfig);
   cfg.serviceName = service; cfg.otlpTrace = { debug: true, captureMessageContent: true }; cfg.collectTrace = true; cfg.collectLog = true;
@@ -194,6 +204,10 @@ try {
   const nativeMessages = (await rows(`${state}/agents/main/sessions`)).filter(r => r.type === 'message').map(r => r.message);
   report.validation = assertOpenClawEvidence({ events, spans, nativeMessages, provider: provider.provider, model: provider.model, service, workerName, turns: 4, expectedToolErrorTraceIds: privateTraceIds });
   report.privacyTraceIds = privateTraceIds;
+  env._JV_LOG_DIR = `${data}/logs/output`;
+  env.E2E_JSONL_STRICT = '1'; env.E2E_JSONL_AGENT_FILTER = 'openclaw';
+  await command('strict-jsonl-validation', process.execPath, ['-e', JSONL_VALIDATOR_JS]);
+  report.checks.push('repository strict JSONL validator including system instruction text-part arrays');
   report.checks.push('native per-call tokens/cache parity; worker identity; trace topology/timing; content-off including missing-file result');
   await stopGateway();
   const broken = await read(configPath), entry = broken.plugins.entries['loongsuite-pilot-openclaw'];

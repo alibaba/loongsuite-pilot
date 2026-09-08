@@ -918,8 +918,8 @@ const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
   const status = lang === 'zh'
-    ? (a.detected ? '已检测到: ' + a.reason : '未检测到')
-    : (a.detected ? 'detected: ' + a.reason : 'not detected');
+    ? (a.detected ? '已检测到: ' + a.reason : '未检测到' + (a.reason ? ': ' + a.reason : ''))
+    : (a.detected ? 'detected: ' + a.reason : 'not detected' + (a.reason ? ': ' + a.reason : ''));
   console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
   if (a.detected) defaults.push(i+1);
 }

@@ -113,17 +113,26 @@ omits TTFT instead of fabricating zero.
 Pilot supports OpenClaw releases `>=2026.3.8`. Before writing host configuration,
 Pilot reads the selected installation's `package.json` using in-process filesystem
 operations. No version argument is needed, and version discovery starts no CLI,
-shell, or package-manager subprocess. It supports executable symlinks (npm/pnpm),
-npm and pnpm global wrappers, enterprise bundle layouts, `OPENCLAW_CLI_PATH`, and
-source containers whose working directory is the OpenClaw package root. Runtime
+shell, or package-manager subprocess. Before starting the installer and collector,
+set `OPENCLAW_CLI_PATH` to the **absolute actual Gateway launch entry** in their
+shared container/service environment. For `WORKDIR /app` and
+`node openclaw.mjs gateway ...`, set `OPENCLAW_CLI_PATH=/app/openclaw.mjs`.
+Both initial installation and every collector/watchdog restart must inherit it;
+a one-command shell assignment is not sufficient for a separately managed service.
+The bound entry supports executable symlinks (npm/pnpm), npm/pnpm global wrappers
+and enterprise bundle layouts. Runtime
 version labels (`OPENCLAW_SERVICE_VERSION`, `OPENCLAW_BUNDLED_VERSION`, and
 `OPENCLAW_VERSION`) alone never authorize installation or schema capabilities.
-Unknown/unsupported versions leave configuration untouched and remain retryable.
-Shared installations must be visible through these paths or runtime metadata.
-Conflicting PATH and source-package installations are rejected. If the Gateway
-starts from a different absolute path, its container launcher must expose that
-same entry as `OPENCLAW_CLI_PATH` (an installation path, not a version override).
-Pilot cannot infer an otherwise invisible Gateway executable from its own PATH.
+Without this binding, PATH/cwd/bundle discovery only reports candidates: OpenClaw
+deployment is skipped with a diagnostic and configuration is left untouched,
+even when a candidate version is readable. Missing/relative/invalid entries and
+unknown/unsupported versions also remain non-ready and retryable; they never fall
+back to another installation. Existing configuration is not cleaned in that state.
+This is an intentional restriction on automatic deployment. An explicit entry
+selects its own metadata regardless of another installation on PATH. No version
+cache, process scan, runtime permission bootstrap, or Gateway reload is used.
+Configure the environment before the normal container deployment/start; applying
+new environment variables to an existing container may require redeployment.
 
 | Host version | Adapter | `hooks.allowConversationAccess` |
 | --- | --- | --- |

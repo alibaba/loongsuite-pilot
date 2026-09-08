@@ -10,7 +10,7 @@ import type {
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveOpenClawHost, type OpenClawHost } from './openclaw-version-resolver.js';
+import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
 
 const logger = createLogger('PluginInjectStrategy');
 
@@ -78,6 +78,7 @@ function stripJsoncComments(text: string): string {
 
 export class PluginInjectStrategy implements DeployStrategy {
   private readonly dataDir: string;
+  private lastOpenClawProblem?: string;
 
   constructor(dataDir: string, _pilotDir: string,
     private readonly resolveOpenClaw: () => Promise<OpenClawHost | null> = resolveOpenClawHost) {
@@ -85,14 +86,27 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    if (def.id === 'openclaw') return (await this.resolveOpenClaw()) !== null;
+    if (def.id === 'openclaw') return (await this.resolveDeploymentHost()) !== null;
     return detectAgent(def.detection);
+  }
+
+  private async resolveDeploymentHost(): Promise<OpenClawHost | null> {
+    const host = await this.resolveOpenClaw();
+    if (isOpenClawHostBound(host)) {
+      this.lastOpenClawProblem = undefined;
+      return host;
+    }
+    const problem = openClawBindingProblem(host);
+    // Re-evaluate metadata on every check, but do not spam an unchanged warning.
+    if (problem !== this.lastOpenClawProblem) logger.warn(problem);
+    this.lastOpenClawProblem = problem;
+    return null;
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
     const config = def.pluginInject;
     if (!config) return true;
-    const host = this.isOpenclawNested(config) ? await this.resolveOpenClaw() : null;
+    const host = this.isOpenclawNested(config) ? await this.resolveDeploymentHost() : null;
     if (this.isOpenclawNested(config) && !host) return true;
 
     const configPath = await this.findConfigFile(config, false);
@@ -127,10 +141,10 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
-      const host = this.isOpenclawNested(config) ? await this.resolveOpenClaw() : null;
+      const host = this.isOpenclawNested(config) ? await this.resolveDeploymentHost() : null;
       if (this.isOpenclawNested(config) && !host) {
         return { success: false, agentId: def.id, deployMode: 'plugin-inject',
-          error: 'OpenClaw >=2026.3.8 package version unavailable or unsupported; config left unchanged' };
+          error: this.lastOpenClawProblem ?? openClawBindingProblem(null) };
       }
       const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {

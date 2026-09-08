@@ -49,6 +49,17 @@ function finish(runId = 'run-1', context = ctx, usage = { input: 20, output: 4, 
 }
 
 describe('OpenClaw 3.8 legacy adapter', () => {
+  it('emits system instructions as canonical text parts', () => {
+    fire('llm_input', { runId: 'run-1', sessionId: ctx.sessionId, provider: 'openai', model: 'gpt-test',
+      prompt: 'private prompt', systemPrompt: 'system rules' });
+    fire('before_message_write', { message: message('response-1') });
+    finish();
+    const instructions = records().filter(r => r['gen_ai.system_instructions'] !== undefined);
+    expect(instructions).toHaveLength(2);
+    for (const record of instructions) expect(record['gen_ai.system_instructions'])
+      .toEqual([{ type: 'text', content: 'system rules' }]);
+  });
+
   it('retains configured identity and worker metadata without a native sender', async () => {
     vi.stubEnv('AGENTTEAMS_WORKER_NAME', 'legacy-worker');
     const pluginPath = path.resolve('assets/plugins/openclaw/plugin.mjs');

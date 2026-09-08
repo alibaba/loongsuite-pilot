@@ -871,7 +871,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
     "gen_ai.system_instructions": run.systemPrompt
-      ? truncate(run.systemPrompt, MAX_CONTENT_SIZE)
+      ? [{ type: "text", content: truncate(run.systemPrompt, MAX_CONTENT_SIZE) }]
       : undefined,
   };
   emit(record);
@@ -950,7 +950,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
         ? run.pendingToolInputMessages.splice(0)
         : undefined);
   const systemInstructions = startsAgentCycle && stash?.systemPrompt
-    ? truncate(stash.systemPrompt, MAX_CONTENT_SIZE)
+    ? [{ type: "text", content: truncate(stash.systemPrompt, MAX_CONTENT_SIZE) }]
     : undefined;
   const toolDefinitions = startsAgentCycle ? buildToolDefinitions(stash?.tools) : undefined;
   if (startsAgentCycle) run.llmInputStash = null;

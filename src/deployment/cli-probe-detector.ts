@@ -1,7 +1,7 @@
 import type { AgentDefinition } from '../types/index.js';
 import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
 import { commandExists, detectAgent } from './detect-utils.js';
-import { resolveOpenClawHost } from './openclaw-version-resolver.js';
+import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem } from './openclaw-version-resolver.js';
 import {
   DshRuntimeLocator,
   type DshRuntimeTarget,
@@ -59,11 +59,12 @@ function describeDshTarget(target: DshRuntimeTarget): string {
 /**
  * Probe one installer-selectable Agent.
  *
- * DSH is intentionally the only special case: its runtime home may exist only
+ * DSH's runtime home may exist only
  * in a running Node process environment, so the generic path/PATH boolean is
  * insufficient. DSH discovery failures remain local to DSH so one transient
  * or ambiguous procfs result cannot erase the complete installer menu. Other
- * Agents retain the generic detector's existing error behavior.
+ * OpenClaw additionally requires explicit entry binding before deployment.
+ * Other Agents retain the generic detector's existing error behavior.
  */
 export async function probeAgentDefinition(
   def: AgentDefinition,
@@ -80,8 +81,8 @@ export async function probeAgentDefinition(
 
   if (def.id === 'openclaw') {
     const host = await resolveOpenClawHost();
-    return { ...result, detected: host !== null,
-      reason: host ? `${host.source} (${host.version}, ${host.adapter})` : '' };
+    return { ...result, detected: isOpenClawHostBound(host),
+      reason: isOpenClawHostBound(host) ? `${host.source} (${host.version}, ${host.adapter}, bound entry)` : openClawBindingProblem(host) };
   }
 
   if (def.deployMode === 'dsh-yaml-patch') {

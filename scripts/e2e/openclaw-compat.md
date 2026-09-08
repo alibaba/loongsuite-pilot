@@ -62,7 +62,15 @@ bind-mounting credentials. Remove only run-scoped containers/secrets afterwards;
 do not prune unrelated workloads. Evidence includes synthetic prompts, model
 responses and logs and should remain private; commit only sanitized summaries.
 
-`OPENCLAW_E2E_INSTALL` selects the real installed CLI on PATH. The exact
+`OPENCLAW_CLI_PATH` binds the actual absolute Gateway entry (the Dockerfile sets
+it to the installed npm entry). Gateway runs as `node openclaw.mjs gateway
+--allow-unconfigured --bind loopback --port 18789` from the entry directory;
+loopback isolates the test, while native token authentication stays enabled.
+`OPENCLAW_E2E_INSTALL` identifies the actual package installation.
+`OPENCLAW_E2E_PATH_INSTALL` optionally selects a different installation for PATH,
+to verify that neither the installer nor the restarted collector uses its version.
+For the customer layout, expose the actual package at `/app` and set
+`OPENCLAW_CLI_PATH=/app/openclaw.mjs`. The exact
 `OPENCLAW_E2E_VERSION` is only asserted by the test: Pilot receives no version
 override and must discover the package metadata itself. `OPENCLAW_E2E_DISPOSABLE=1`
 is a safety opt-in, not permission to run against an existing installation.
@@ -71,10 +79,11 @@ is a safety opt-in, not permission to run against an existing installation.
 
 | Gate | Evidence |
 | --- | --- |
-| Automatic install | Version-compatible config, real `openclaw config validate`, unrelated settings retained |
+| Bound-entry install | Version-compatible config despite a different PATH candidate; real `openclaw config validate`; unrelated settings retained |
 | Gateway traffic | One text turn, a two-read-tool turn, a post-restart turn, a content-off turn |
 | Source fidelity | Every native assistant response collected once; positive input/output/cache token parity |
 | Trace semantics | One ENTRY/AGENT per turn; STEP → LLM/TOOL; paired tool IDs; positive nested times; exact service/worker |
+| Canonical schema | Repository strict JSONL validator, including system-instruction text-part arrays |
 | Recovery | Gateway and collector restart keep the session and do not replay historical responses |
 | Privacy | Marker and content-field absence in raw plugin events, canonical events and converted spans, including a missing-file result |
 | Lifecycle | Watchdog restores a removed load path and repairs version-specific hooks; reinstall is idempotent; uninstall preserves unrelated config |

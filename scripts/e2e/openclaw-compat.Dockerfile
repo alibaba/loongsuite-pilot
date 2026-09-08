@@ -19,4 +19,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends zip
 RUN if [ -d /root/.openclaw ]; then mv /root/.openclaw /opt/openclaw-build-state; fi
 ENV OPENCLAW_E2E_DISPOSABLE=1 OPENCLAW_E2E_INSTALL=/opt/openclaw
 ENV OPENCLAW_E2E_VERSION=${OPENCLAW_VERSION}
+ENV OPENCLAW_CLI_PATH=/opt/openclaw/node_modules/openclaw/openclaw.mjs
 CMD ["node", "scripts/e2e/openclaw-compat.mjs"]
