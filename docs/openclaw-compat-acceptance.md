@@ -1,6 +1,10 @@
 # OpenClaw compatibility acceptance
 
-## Current reviewer closeout — 2026-09-08
+> Historical evidence notice: the reports below validate commits from before
+> `captureMessageContent` was retired. Their content-off results apply only to
+> those tested heads; current code ignores the legacy setting and reports content.
+
+## Historical reviewer closeout — 2026-09-08
 
 **PASS for the tested head:** real OpenClaw 2026.3.8 and 2026.6.10 Gateway,
 public Pilot installer, strict canonical JSONL validation and independent
@@ -21,8 +25,8 @@ CMS/XTrace SLS readback. Native sender on 3.8 remains out of scope.
   shell, package manager, procfs scan or runtime permission bootstrap.
   No Gateway reload/restart is introduced by this compatibility fix. Applying
   a new environment to an existing container may still require redeployment.
-- Legacy and modern `gen_ai.system_instructions` now use canonical text-part
-  arrays. Content-off still removes them.
+- Legacy and modern `gen_ai.system_instructions` use canonical text-part arrays
+  on the historical tested head.
 
 ### Exact target and execution
 

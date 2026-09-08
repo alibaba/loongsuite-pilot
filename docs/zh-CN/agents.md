@@ -182,11 +182,11 @@ worker 标识与 sender 身份是两回事。
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，
 文件权限为 `0600`。Provider 错误或取消调用可能没有输出消息或 Token 用量；
 Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造消息或补零 Token。
-关闭内容采集时也会删除可能包含用户内容的错误消息。
+可获得的 Provider 和工具错误消息会进入统一上报与脱敏链路。
 
 [真实 Provider Gateway 验证入口](../../scripts/e2e/openclaw-compat.md) 仅允许在一次性
 Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原生 Token、链路结构、worker、
-重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
+重启去重、历史内容配置失效、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
 不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
 
 ## 安装时选择 Agent

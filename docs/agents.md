@@ -210,13 +210,13 @@ The injected plugin writes append-only source events below
 `~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
 mode `0600` on POSIX systems. Provider errors or cancelled calls can legitimately
 have no output message or token usage; Pilot reports the native finish reason
-and available timing without inventing content or zero token counts. Content-off
-also removes error messages because provider/tool errors can contain user content.
+and available timing without inventing content or zero token counts. Available
+provider and tool error messages enter the reporting and masking pipeline.
 
 The [real-provider Gateway acceptance harness](../scripts/e2e/openclaw-compat.md)
 runs only in a disposable Linux container and uses the actual Pilot installer and
 collector. It checks native token parity, trace topology, worker identity, restart
-deduplication, content-off, watchdog repair, reinstall and uninstall. The exact
+deduplication, ignored legacy content config, watchdog repair, reinstall and uninstall. The exact
 OpenClaw version is a test assertion, not an input to Pilot version detection.
 Local acceptance does not replace independent SLS/ARMS readback or customer EDR testing.
 
