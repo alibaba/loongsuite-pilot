@@ -156,7 +156,14 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
         previousAssistantToolMessage,
         prevToolResults,
       );
-      inputMessageDelta.push(...exchangeMessages.map(cloneMessage));
+      const deltaExchangeMessages = exchangeMessages.map(message => {
+        if (message.role !== 'assistant') return cloneMessage(message);
+        return {
+          ...cloneMessage(message),
+          parts: message.parts.filter(part => part.type === 'tool_call').map(cloneMessage),
+        };
+      });
+      inputMessageDelta.push(...deltaExchangeMessages);
       cumulativeInputMessages.push(...exchangeMessages.map(cloneMessage));
     }
     const inputMessages = cumulativeInputMessages.map(cloneMessage);
