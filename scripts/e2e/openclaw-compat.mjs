@@ -195,6 +195,9 @@ try {
   privateCfg.agents.openclaw.captureMessageContent = false; await write(pilotConfig, privateCfg);
   await command('start-privacy', cli, ['start']); await startGateway();
   await traffic('privacy', `Read ${workspace}/private.txt and ${workspace}/missing-${privateMarker}.txt using read separately. Reply with ${privateMarker} and acknowledge the missing file.`, privateMarker);
+  // OTLP and canonical JSONL fan out independently. A terminal debug span
+  // does not prove all JSONL writes completed; drain before taking evidence.
+  await stopGateway(); await command('stop-before-validation', cli, ['stop']);
   const events = await rows(`${data}/logs/output`), spans = await rows(`${data}/logs/otlp-debug`);
   const privateEvents = events.filter(e => e['gen_ai.turn.id'] === `${run}-privacy`);
   const privateTraceIds = [...new Set(privateEvents.map(e => e.trace_id))];
@@ -209,7 +212,7 @@ try {
   await command('strict-jsonl-validation', process.execPath, ['-e', JSONL_VALIDATOR_JS]);
   report.checks.push('repository strict JSONL validator including system instruction text-part arrays');
   report.checks.push('native per-call tokens/cache parity; worker identity; trace topology/timing; content-off including missing-file result');
-  await stopGateway();
+  await command('start-watchdog', cli, ['start']);
   const broken = await read(configPath), entry = broken.plugins.entries['loongsuite-pilot-openclaw'];
   if (versionNumber < 20260424) entry.hooks = { allowConversationAccess: true }; else delete entry.hooks;
   broken.plugins.load.paths = broken.plugins.load.paths.filter(p => !p.includes('plugins/openclaw'));
