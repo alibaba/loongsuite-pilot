@@ -185,8 +185,9 @@ async function enrichInputAttachedImages(
   for (const [requestId, paths] of byRequest) {
     let carrier = carriersByRequest.get(requestId);
     let synthesized = false;
+    let response: AgentActivityEntry | undefined;
     if (!carrier) {
-      const response = entries.find(
+      response = entries.find(
         e => e['event.name'] === 'llm.response' && requestIdOf(e) === requestId,
       );
       if (response) {
@@ -217,6 +218,9 @@ async function enrichInputAttachedImages(
       attachedPathsByRequestId.set(requestId, []);
     } else if (synthesized) {
       entries.pop();
+      if (response && carrier['gen_ai.turn.start'] === true) {
+        response['gen_ai.turn.start'] = true;
+      }
     }
   }
 }
@@ -434,8 +438,6 @@ function synthesizeUriOnlyRequest(
   const carrier = { ...response } as AgentActivityEntry;
   carrier['event.id'] = deriveSyntheticIdeRequestEventId(String(response['event.id'] ?? ''), requestId);
   carrier['event.name'] = 'llm.request';
-  const earlier = earlierByOneNano(response.time_unix_nano);
-  if (earlier !== undefined) carrier.time_unix_nano = earlier;
   for (const key of Object.keys(carrier)) {
     if (isResponseOnlyField(key)) delete carrier[key];
   }
@@ -445,20 +447,11 @@ function synthesizeUriOnlyRequest(
   return carrier;
 }
 
-/** Image-only turns have no request clock; 1ns earlier keeps the pair ordered. */
-function earlierByOneNano(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
-  try {
-    const n = BigInt(value);
-    if (n < 1n) return undefined;
-    return String(n - 1n);
-  } catch {
-    return undefined;
-  }
-}
-
 function isResponseOnlyField(key: string): boolean {
   return key === 'gen_ai.turn.end'
+    || key === 'agent.stop_reason'
+    || key === 'agent.client_request_id'
+    || key === 'agent.qoder.match_ts'
     || key.startsWith('gen_ai.output.')
     || key.startsWith('gen_ai.response.')
     || key.startsWith('gen_ai.usage.')
