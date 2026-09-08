@@ -166,19 +166,17 @@ function clampInteger(value, fallback, min, max) {
 // --- Timestamp helpers -------------------------------------------------------
 
 function isoToUnixNanos(isoString) {
-  if (!isoString) return '';
-  const ms = Date.parse(isoString);
-  if (Number.isNaN(ms)) return '';
-  return String(BigInt(ms) * 1_000_000n);
+  const nanos = timestampOrderNanos(isoString);
+  return nanos === null ? '' : String(nanos);
 }
 
 function timestampToUnixNanos(value) {
   if (!value) return String(BigInt(Date.now()) * 1_000_000n);
   if (typeof value === 'number') return String(BigInt(Math.round(value)) * 1_000_000n);
   if (typeof value === 'string') {
-    const ms = Date.parse(value);
-    if (!Number.isNaN(ms)) return String(BigInt(ms) * 1_000_000n);
     if (/^\d+$/.test(value)) return value;
+    const nanos = timestampOrderNanos(value);
+    if (nanos !== null) return String(nanos);
   }
   return String(BigInt(Date.now()) * 1_000_000n);
 }
@@ -1063,7 +1061,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     const boundary = boundaries[i];
     const stepId = `${turnId}:s${i + 1}`;
     const content = contentEvents.slice(boundary.contentStartIndex, boundary.contentEndIndex);
-    const responseEndNanos = isoToUnixNanos(boundary.endTs) || isoToUnixNanos(boundary.startTs);
+    const candidateResponseEndNanos = isoToUnixNanos(boundary.endTs) || isoToUnixNanos(boundary.startTs);
     const precedingNanos = [];
     if (i === 0 && userRow?.timestamp) {
       precedingNanos.push(isoToUnixNanos(userRow.timestamp));
@@ -1073,9 +1071,11 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         if (result.resultTs) precedingNanos.push(isoToUnixNanos(result.resultTs));
       }
     }
-    const startNanos = requestStartBeforeResponse(precedingNanos, responseEndNanos)
-      || isoToUnixNanos(boundary.startTs);
-    const endNanos = responseEndNanos || startNanos;
+    const { startNanos, endNanos: responseEndNanos } = orderedLlmInterval(
+      precedingNanos,
+      candidateResponseEndNanos,
+      isoToUnixNanos(boundary.startTs),
+    );
     const previousToolCallIds = new Set(toolCallsForNextStep.map(tc => tc.id).filter(Boolean));
     const currentContentToolResults = extractToolResults(content);
     const inputToolResultsById = new Map();
@@ -1252,7 +1252,9 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     for (let ti = 0; ti < toolCalls.length; ti++) {
       const tc = toolCalls[ti];
       const tr = toolResultsById.get(tc.id);
-      const toolCallTs = tc.callTs ? isoToUnixNanos(tc.callTs) || endNanos : endNanos;
+      const toolCallTs = tc.callTs
+        ? isoToUnixNanos(tc.callTs) || responseEndNanos
+        : responseEndNanos;
 
       records.push({
         'event.id': crypto.randomUUID(),
@@ -1385,24 +1387,39 @@ function ensureEndAfterStart(startNanos, candidateEndNanos) {
     if (candidateEndNanos && BigInt(candidateEndNanos) > start) {
       return candidateEndNanos;
     }
-    return String(start + 1_000_000n);
+    return String(start + 1n);
   } catch {
     return candidateEndNanos || startNanos;
   }
 }
 
-function requestStartBeforeResponse(precedingNanos, responseNanos) {
+function orderedLlmInterval(precedingNanos, candidateResponseNanos, fallbackStartNanos) {
   try {
     const preceding = precedingNanos
       .filter(value => typeof value === 'string' && /^\d+$/.test(value))
       .map(value => BigInt(value));
-    if (preceding.length === 0 || !responseNanos) return '';
-    const response = BigInt(responseNanos);
-    let request = preceding.reduce((latest, value) => value > latest ? value : latest) + 1_000_000n;
-    if (request >= response) request = response - 1_000_000n;
-    return request >= 0n ? String(request) : '';
+    const fallbackStart = /^\d+$/.test(fallbackStartNanos || '')
+      ? BigInt(fallbackStartNanos)
+      : null;
+    let response = /^\d+$/.test(candidateResponseNanos || '')
+      ? BigInt(candidateResponseNanos)
+      : null;
+    let request = preceding.length > 0
+      ? preceding.reduce((latest, value) => value > latest ? value : latest) + 1n
+      : fallbackStart;
+
+    if (request === null && response !== null) request = response - 1n;
+    if (request === null) return { startNanos: '', endNanos: '' };
+    if (response === null || response <= request) response = request + 1n;
+    return {
+      startNanos: request >= 0n ? String(request) : '',
+      endNanos: response >= 0n ? String(response) : '',
+    };
   } catch {
-    return '';
+    return {
+      startNanos: fallbackStartNanos || '',
+      endNanos: candidateResponseNanos || fallbackStartNanos || '',
+    };
   }
 }
 

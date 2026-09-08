@@ -472,7 +472,7 @@ export function enrichIdeTurn(
 
   for (let i = 0; i < matchedPairs.length; i++) {
     const { entry: respEntry, gmtCreate } = matchedPairs[i];
-    const responseTime = BigInt(gmtCreate) * 1_000_000n;
+    let responseTime = BigInt(gmtCreate) * 1_000_000n;
 
     // llm.response: use gmt_create as real response time
     respEntry.time_unix_nano = String(responseTime);
@@ -511,17 +511,19 @@ export function enrichIdeTurn(
       if (previousPair) {
         // Start strictly after every event that precedes this provider call:
         // the previous response and all tool results produced by that Step.
-        let latestPredecessor = BigInt(previousPair.gmtCreate) * 1_000_000n;
+        let latestPredecessor = parseUnixNanos(previousPair.entry.time_unix_nano)
+          ?? BigInt(previousPair.gmtCreate) * 1_000_000n;
         const previousResponseIndex = entries.indexOf(previousPair.entry);
         const currentResponseIndex = entries.indexOf(respEntry);
         for (let j = previousResponseIndex + 1; j < currentResponseIndex; j++) {
-          if (entries[j]['event.name'] !== 'tool.result') continue;
+          if (entries[j]['event.name'] !== 'tool.result' ||
+              entries[j]['gen_ai.turn.id'] !== turnId) continue;
           const resultTime = parseUnixNanos(entries[j].time_unix_nano);
           if (resultTime !== undefined && resultTime > latestPredecessor) {
             latestPredecessor = resultTime;
           }
         }
-        requestStart = latestPredecessor + 1_000_000n;
+        requestStart = latestPredecessor + 1n;
       } else {
         // The normalizer emits user prompts as `other`; find the opening event
         // for this Turn instead of borrowing one from another Turn in the batch.
@@ -532,30 +534,34 @@ export function enrichIdeTurn(
             (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
         );
         if (userBoundary) {
-          // Use userBoundary.time + 1ms so the LLM request starts strictly after
+          // Advance by the smallest representable unit so the LLM request starts strictly after
           // the user prompt event. When both share the same timestamp the converter
           // generates a duplicate empty STEP (0ms, no LLM children) because it
           // sees two events at the same instant inside step s1.
           const ubNs = parseUnixNanos(userBoundary.time_unix_nano);
-          if (ubNs !== undefined) requestStart = ubNs + 1_000_000n;
+          if (ubNs !== undefined) requestStart = ubNs + 1n;
         }
       }
 
       if (requestStart !== undefined) {
-        // Inconsistent source clocks can place all predecessors at or after the
-        // SQLite response. Preserve a positive LLM interval instead of emitting
-        // a zero/negative duration.
-        if (requestStart >= responseTime) requestStart = responseTime - 1_000_000n;
-        if (requestStart >= 0n) req.time_unix_nano = String(requestStart);
+        // SQLite stores only milliseconds. Equal gmt_create values and source-clock
+        // conflicts can leave no point between the previous Step and this response.
+        // Move the response forward by the minimum amount instead of clamping the
+        // request backwards into the previous Step.
+        if (requestStart >= responseTime) responseTime = requestStart + 1n;
+        if (requestStart >= 0n) {
+          req.time_unix_nano = String(requestStart);
+          respEntry.time_unix_nano = String(responseTime);
+        }
       }
     }
 
     // Preserve per-tool timestamps emitted by the hook. SQLite has no tool ID
-    // or tool-finished timestamp, so it cannot improve those values. The old
-    // gmt_create/+1ms fallback is retained only for legacy records whose tool
-    // timestamps are missing or malformed.
-    const toolCallTs = String(BigInt(gmtCreate) * 1_000_000n);
-    const toolResultTs = String(BigInt(gmtCreate + 1) * 1_000_000n);
+    // or tool-finished timestamp, so it cannot improve those values. For legacy
+    // records whose tool timestamps are missing or malformed, place the call and
+    // result immediately after the ordered response.
+    const toolCallTs = String(responseTime + 1n);
+    const toolResultTs = String(responseTime + 2n);
     const respIdx = entries.indexOf(respEntry);
     const rightBound = i < matchedPairs.length - 1
       ? entries.indexOf(matchedPairs[i + 1].entry)

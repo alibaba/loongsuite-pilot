@@ -279,8 +279,8 @@ describe('buildLlmBoundaries complete-response priority', () => {
       .filter(record => record['event.name'] === 'llm.request')
       .map(record => record.time_unix_nano))
       .toEqual([
-        String(BigInt(Date.parse('2026-08-03T09:22:25.101Z')) * 1_000_000n),
-        String(BigInt(Date.parse('2026-08-03T09:22:26.669Z')) * 1_000_000n),
+        String(BigInt(Date.parse('2026-08-03T09:22:25.100Z')) * 1_000_000n + 1n),
+        String(BigInt(Date.parse('2026-08-03T09:22:26.668Z')) * 1_000_000n + 419_001n),
       ]);
   });
 
@@ -445,7 +445,60 @@ describe('buildLlmBoundaries complete-response priority', () => {
 
     expect(boundaries.map(boundary => [boundary.contentStartIndex, boundary.contentEndIndex]))
       .toEqual([[1, 3], [3, 4]]);
-    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(2);
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-same-ts:s2');
+    const firstToolResult = records.find(record => record['event.name'] === 'tool.result');
+
+    expect(responses).toHaveLength(2);
+    expect(BigInt(responses[0].time_unix_nano))
+      .toBeLessThan(BigInt(secondRequest.time_unix_nano));
+    expect(BigInt(firstToolResult.time_unix_nano))
+      .toBeLessThan(BigInt(secondRequest.time_unix_nano));
+    expect(BigInt(secondRequest.time_unix_nano))
+      .toBeLessThan(BigInt(responses[1].time_unix_nano));
+  });
+
+  it('preserves sub-millisecond transcript order in emitted timestamps', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-09-05T02:35:59.999900Z',
+        message: { role: 'user', content: 'go' },
+      },
+      assistant('2026-09-05T02:36:00.000100Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-09-05T02:36:00.000300Z', 'tool-a'),
+      assistant('2026-09-05T02:36:00.000900Z', [{ type: 'text', text: 'done' }]),
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries([], rows),
+      rows,
+      rows,
+      'turn-microsecond-order',
+      'session-1',
+      'qoder',
+      {},
+      undefined,
+    );
+    const firstResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s1');
+    const toolResultRecord = records.find(record => record['event.name'] === 'tool.result');
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s2');
+    const secondResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s2');
+
+    const second = BigInt(Date.parse('2026-09-05T02:36:00Z')) * 1_000_000n;
+    expect(firstResponse.time_unix_nano).toBe(String(second + 100_000n));
+    expect(toolResultRecord.time_unix_nano).toBe(String(second + 300_000n));
+    expect(secondRequest.time_unix_nano).toBe(String(second + 300_001n));
+    expect(secondResponse.time_unix_nano).toBe(String(second + 900_000n));
   });
 
   it('uses the final assistant timestamp when SQLite enrichment is unavailable', () => {
