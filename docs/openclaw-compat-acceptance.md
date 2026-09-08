@@ -1,11 +1,111 @@
-# OpenClaw compatibility closeout — 2026-09-07
+# OpenClaw compatibility acceptance
 
-> Historical live evidence for the frozen runtime below. Subsequent reviewer
-> fixes change deployment, legacy lifecycle/timing and OTLP diagnostic projection;
-> this earlier PASS does **not** certify those new runtime changes. Their local
-> regression results are reported separately in PR #383. Actual Gateway entry
-> binding remains open where the container launches a different installation
-> that Pilot cannot discover; the PR is not ready to merge on this record alone.
+## Current reviewer closeout — 2026-09-08
+
+**PASS for the tested head:** real OpenClaw 2026.3.8 and 2026.6.10 Gateway,
+public Pilot installer, strict canonical JSONL validation and independent
+CMS/XTrace SLS readback. Native sender on 3.8 remains out of scope.
+
+### Fix and deployment contract
+
+- Runtime fix: `ca132f668f5129b325122f00c8a9afc79b691b94`.
+- The installer and collector/watchdog require an absolute `OPENCLAW_CLI_PATH`
+  identifying the actual Gateway entry. For `WORKDIR /app` and
+  `node openclaw.mjs gateway ...`, set `/app/openclaw.mjs` in their shared
+  container environment before normal installation/start. No version argument.
+- PATH/cwd/bundle-only discovery is diagnostic, not deployment authority.
+  Unbound, missing, relative, invalid or unsupported entries leave config
+  unchanged and remain non-ready/retryable, even with a modern CLI on PATH.
+  This also applies after the collector loses its binding on restart.
+- Version detection reads the bound installation's metadata, without a CLI,
+  shell, package manager, procfs scan or runtime permission bootstrap.
+  No Gateway reload/restart is introduced by this compatibility fix. Applying
+  a new environment to an existing container may still require redeployment.
+- Legacy and modern `gen_ai.system_instructions` now use canonical text-part
+  arrays. Content-off still removes them.
+
+### Exact target and execution
+
+- Tested immutable head: `799c2692acb10be74154999259e615d5d05c87c7`.
+  Its only delta from the runtime fix is an E2E evidence-drain correction.
+  Subsequent documentation-only commits do not change the tested runtime.
+  This is head acceptance, **not** a claim that a moving PR merge ref was tested.
+- PR base reported during this review: `4631bd760a586e9ac4e79bd992f6ffc120334f96`.
+- Candidate image: `4c19b3924cd3eacae0220013633340467bdada1bd9c3798a9b1271c701818b24`.
+- Linux arm64, Node 22.23.2, disposable Podman containers; no host Pilot changes.
+- Real provider: DeepSeek `deepseek-v4-flash`, `https://api.deepseek.com`.
+  Runtime secrets only; no credential in source, images or archived evidence.
+- CMS workspace `pilot-e2e-test`, XTrace region `cn-hongkong`. No new ARMS UI
+  inspection or official OpenAI endpoint acceptance is claimed in this round.
+
+Both containers contain a real `/app` package directory and launch
+`node openclaw.mjs gateway --allow-unconfigured --bind loopback --port 18789`
+from `/app`. Native token authentication remains enabled. Loopback isolates the
+test instead of using the customer's LAN bind; no wrapper replaces Gateway.
+The installer runs outside `/app`, and collector restart keeps the binding.
+
+| Actual Gateway | PATH candidate | Run ID / service suffix | Events | Native LLM calls / tools | SLS traces / spans |
+| --- | --- | --- | ---: | ---: | ---: |
+| 2026.3.8 | 2026.6.10 | `oc-binding-final-38` | 39 | 6 / 4 | 4 / 24 |
+| 2026.6.10 | 2026.3.8 | `oc-binding-final-610` | 47 | 6 / 4 | 4 / 24 |
+
+Exact service names are `pilot-openclaw-gateway-` plus the run ID.
+SLS query windows (Asia/Shanghai, 2026-09-08): 14:13:19–14:18:21 for 3.8 and
+14:13:21–14:18:20 for 6.10. All local/backend span identities, parents,
+timestamps, per-call input/output/cache tokens and worker metadata agree.
+
+| Version | Release package SHA-256 |
+| --- | --- |
+| 3.8 | `6ee5ff17cf1190f29de08c8500d086641f70829862a3968c05968e20f63d7fb8` |
+| 6.10 | `787aba86081c4566746760eed5993f5fbf28f2ebaf8c3903127f6788ab65025b` |
+
+| Scenario | 3.8 trace ID | 6.10 trace ID |
+| --- | --- | --- |
+| Text | `089fea5ccb78eb31e0fb40b9c336dfa8` | `0a7964cf4002084ed3f5fdec9972f67b` |
+| Two read tools | `d116bffad5c70b677978f65b8909cf33` | `5b4c141a021fa16aa824dfc7c4b38062` |
+| Restart | `5cfa2e21387c94310877aff3755a5ed2` | `2c92e37461fb66b7e46731513cbb3ffe` |
+| Content-off / missing file | `b57a2c1a0d8152e3646585e9bc4c36b4` | `9374c9d23e29160caa0993a43649672d` |
+
+### Gates and limitations
+
+- Executed on the tested head: typecheck/build PASS; full Linux non-root suite
+  **323 files, 4,263 passed, 70 skipped**, no provider credentials or network in
+  the final unit-test container. Runtime-fix targeted suite: 11 files, 192 passed.
+- Strict JSONL: 39/47 events, **zero errors** for both versions. Modern still
+  has 11 non-LLM events with `provider=unknown` reported as placeholder warnings;
+  all actual LLM calls have the verified provider/model. These are not new errors.
+- System instructions: 9 canonical events and 7 local/backend spans per run
+  contain valid text-part arrays; privacy-turn events/spans contain none.
+- Text, two-tool, post-restart and content-off/missing-file turns pass. Restart
+  keeps native session identity without replay. The restart/privacy scenarios
+  deliberately restart the test Gateway; compatibility installation does not.
+- Watchdog repairs load paths and version-specific hooks; reinstall is
+  idempotent; uninstall preserves unrelated plugin/user settings. Real packaged
+  CLI probe also rejects an unbound modern PATH candidate with a diagnostic.
+- Every LLM call has positive native input/output/cache usage; agent totals and
+  SLS parity pass. 3.8's 6 inferred LLM spans preserve the inference marker.
+  No incomplete spans or unexpected error spans; each run has one intentional
+  missing-file TOOL error. No persisted OTLP failures.
+- First 6.10 attempt `oc-binding-0908-610` remains recorded as **FAIL**: its live
+  snapshot raced JSONL fan-out (5 canonical responses vs 6 spans). After shutdown,
+  the same archive had all 6 native/canonical responses and 24 coherent spans.
+  The harness now stops/drains collection before final evidence validation;
+  both fresh final runs above passed. The failed run was not relabelled PASS.
+- Windows, EDR, intermediate OpenClaw releases, live version switching and every
+  concurrency/cancellation path are not live-certified. Unknown bindings do
+  not repair an already-invalid configuration. Legacy standalone session-ID and
+  zero-native-token limitations remain unchanged; 3.8 native sender is excluded.
+
+Private evidence is retained by run ID: `result.json`, strict-validator log,
+native/Pilot logs, `backend-sls.jsonl`, `backend-validation.json`, and
+`extra-validation.json`. Only this sanitized summary is committed.
+PR #383 remains Draft for reviewer re-review; this record does not approve,
+resolve review threads, merge or release it.
+
+## Historical closeout — 2026-09-07
+
+> The record below applies only to its older frozen runtime. The current
+> reviewer fixes and their acceptance are documented above.
 
 ## Result and scope
 
