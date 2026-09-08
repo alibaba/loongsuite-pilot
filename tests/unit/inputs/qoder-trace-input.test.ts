@@ -38,6 +38,7 @@ import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/interce
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import {
   readAttachedImagePathsForRequestIds,
+  readChatRecordGmtCreateMs,
   type SqliteTokenData,
 } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
@@ -51,10 +52,12 @@ vi.mock('../../../src/inputs/qoder-trace/sqlite-token-reader.js', async (importO
   return {
     ...actual,
     readAttachedImagePathsForRequestIds: vi.fn(),
+    readChatRecordGmtCreateMs: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 const mockReadAttachedImagePaths = vi.mocked(readAttachedImagePathsForRequestIds);
+const mockReadChatRecordGmtCreateMs = vi.mocked(readChatRecordGmtCreateMs);
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -1533,6 +1536,8 @@ describe('QoderTraceInput multimodal', () => {
         clearAttachedImagePathsCache();
         mockReadAttachedImagePaths.mockReset();
         mockReadAttachedImagePaths.mockResolvedValue(new Map());
+        mockReadChatRecordGmtCreateMs.mockReset();
+        mockReadChatRecordGmtCreateMs.mockResolvedValue(undefined);
       });
 
       it('attaches paths onto llm.request messages_delta by request_id', async () => {
@@ -1876,6 +1881,25 @@ describe('QoderTraceInput multimodal', () => {
         await enrichIdeMultimodal([laterUser], { uploadMode: 'input', pathToUri });
         expect((laterUser['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
         expect(pathToUri).toHaveBeenCalledTimes(1);
+      });
+
+      it('uses chat_record.gmt_create on the synthetic request when it is earlier than Stop', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'clock.png', 'clock');
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-clock', [img]]]));
+        mockReadChatRecordGmtCreateMs.mockResolvedValue(1_699_999_995_000);
+
+        const responseOnly = mmEntry({
+          'event.id': 'resp-clock',
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-clock',
+          time_unix_nano: '1700000000000000000',
+        });
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri: fakePathToUri });
+
+        expect(batch[1].time_unix_nano).toBe('1699999995000000000');
+        expect(responseOnly.time_unix_nano).toBe('1700000000000000000');
       });
 
       it('inherits shared context and strips response-only fields on the synthetic request', async () => {
@@ -2330,13 +2354,15 @@ describe('QoderTraceInput multimodal', () => {
       }
     });
 
-    it('collect inserts the synthetic request before its response and keeps the source response clock', async () => {
+    it('collect inserts the synthetic request before its response on the chat_record clock', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-solo-'));
       const imgPath = path.join(tmpDir, 'solo.png');
       await fs.writeFile(imgPath, Buffer.from('solo'));
       clearAttachedImagePathsCache();
       mockReadAttachedImagePaths.mockReset();
       mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', [imgPath]]]));
+      mockReadChatRecordGmtCreateMs.mockReset();
+      mockReadChatRecordGmtCreateMs.mockResolvedValue(1_779_999_995_000);
       try {
         const logFileName = `qoder-${getTodayDateString()}.jsonl`;
         const logFile = path.join(tmpDir, logFileName);
@@ -2383,7 +2409,7 @@ describe('QoderTraceInput multimodal', () => {
         expect(entries[1]['gen_ai.turn.start']).toBeUndefined();
         expect(entries[0].trace_id).toBe(entries[1].trace_id);
         expect(entries[0].trace_id).toBeTruthy();
-        expect(entries[0].time_unix_nano).toBe('1780000000000000000');
+        expect(entries[0].time_unix_nano).toBe('1779999995000000000');
         expect(entries[1].time_unix_nano).toBe('1780000000000000000');
 
         new TurnBoundaryProcessor().enrich(entries);
@@ -2398,7 +2424,7 @@ describe('QoderTraceInput multimodal', () => {
         const llm = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
         expect(llm).toBeDefined();
         const durationNs = llm!.duration[0] * 1_000_000_000 + llm!.duration[1];
-        expect(durationNs).toBe(0);
+        expect(durationNs).toBe(5_000_000_000);
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
         clearAttachedImagePathsCache();

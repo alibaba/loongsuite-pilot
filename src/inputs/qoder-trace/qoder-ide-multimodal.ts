@@ -18,7 +18,7 @@ import {
 } from '../../multimodal/index.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
 import { createLogger } from '../../utils/logger.js';
-import { readAttachedImagePathsForRequestIds } from './sqlite-token-reader.js';
+import { readAttachedImagePathsForRequestIds, readChatRecordGmtCreateMs } from './sqlite-token-reader.js';
 
 const logger = createLogger('QoderIdeMultimodal');
 
@@ -202,7 +202,11 @@ async function enrichInputAttachedImages(
           && Array.isArray(e['gen_ai.input.messages_delta']),
         );
         if (!carrier) {
-          carrier = synthesizeUriOnlyRequest(response, requestId);
+          carrier = synthesizeUriOnlyRequest(
+            response,
+            requestId,
+            await readChatRecordGmtCreateMs(requestId),
+          );
           entries.push(carrier);
           synthesized = true;
         }
@@ -434,10 +438,15 @@ export function deriveSyntheticIdeRequestEventId(responseEventId: string, reques
 function synthesizeUriOnlyRequest(
   response: AgentActivityEntry,
   requestId: string,
+  gmtCreateMs?: number,
 ): AgentActivityEntry {
   const carrier = { ...response } as AgentActivityEntry;
   carrier['event.id'] = deriveSyntheticIdeRequestEventId(String(response['event.id'] ?? ''), requestId);
   carrier['event.name'] = 'llm.request';
+  const startNano = msToUnixNano(gmtCreateMs);
+  if (startNano !== undefined && isStrictlyBefore(startNano, response.time_unix_nano)) {
+    carrier.time_unix_nano = startNano;
+  }
   for (const key of Object.keys(carrier)) {
     if (isResponseOnlyField(key)) delete carrier[key];
   }
@@ -445,6 +454,20 @@ function synthesizeUriOnlyRequest(
     delete response['gen_ai.turn.start'];
   }
   return carrier;
+}
+
+function msToUnixNano(ms: number | undefined): string | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return String(BigInt(Math.trunc(ms)) * 1_000_000n);
+}
+
+function isStrictlyBefore(candidateNano: string, responseNano: unknown): boolean {
+  if (typeof responseNano !== 'string' || !/^\d+$/.test(responseNano)) return true;
+  try {
+    return BigInt(candidateNano) < BigInt(responseNano);
+  } catch {
+    return true;
+  }
 }
 
 function isResponseOnlyField(key: string): boolean {

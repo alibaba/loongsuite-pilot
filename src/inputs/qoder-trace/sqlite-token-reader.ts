@@ -67,6 +67,31 @@ export async function readAttachedImagePathsForRequestIds(
   return result;
 }
 
+/**
+ * Request-row create time from chat_record.gmt_create (unix ms).
+ * Fail-open: missing column / missing row / query error → undefined.
+ */
+export async function readChatRecordGmtCreateMs(requestId: string): Promise<number | undefined> {
+  const id = requestId.trim();
+  if (!id) return undefined;
+
+  const dbPaths = resolveAllQoderDbPaths();
+  if (dbPaths.length === 0) return undefined;
+
+  const sql = 'SELECT gmt_create AS gmt_create FROM chat_record WHERE request_id = ? LIMIT 1';
+  for (const dbPath of dbPaths) {
+    try {
+      const rows = await queryReadonly<{ gmt_create: number | string | null }>(dbPath, sql, [id]);
+      const raw = rows[0]?.gmt_create;
+      const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+      if (Number.isFinite(n) && n > 0) return n;
+    } catch (err) {
+      logger.debug('sqlite chat_record gmt_create query failed', { dbPath, error: String(err) });
+    }
+  }
+  return undefined;
+}
+
 function parseAttachedImagePaths(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
