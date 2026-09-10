@@ -24,17 +24,23 @@ export interface SqliteTokenResult {
   matchedDbPath: string | null;
 }
 
+export interface AttachedImageLookup {
+  paths: string[];
+  /** Earliest user chat_message.gmt_create (unix ms). */
+  startMs?: number;
+}
+
 /**
  * Batch-read user-attached image paths from chat_record.extra.
- * Keys are request_id; values are local image paths for that request.
+ * Keys are request_id. Also returns the user-message start clock when present.
  * DB paths are resolved the same way as token enrichment (not caller-supplied).
  * Fail-open: query errors are logged and skipped.
- * Only request_ids that appear in a row are recorded (`[]` if extra has no images).
+ * Only request_ids that appear in a row are recorded (`paths: []` if extra has no images).
  */
 export async function readAttachedImagePathsForRequestIds(
   requestIds: string[],
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, AttachedImageLookup>> {
+  const result = new Map<string, AttachedImageLookup>();
   const unique = [...new Set(requestIds.map(id => id.trim()).filter(Boolean))];
   if (unique.length === 0) return result;
 
@@ -43,13 +49,25 @@ export async function readAttachedImagePathsForRequestIds(
 
   const placeholders = unique.map(() => '?').join(', ');
   const sql = `
-    SELECT request_id AS request_id, extra AS extra
-    FROM chat_record
-    WHERE request_id IN (${placeholders})
+    SELECT
+      cr.request_id AS request_id,
+      cr.extra AS extra,
+      (
+        SELECT MIN(cm.gmt_create)
+        FROM chat_message cm
+        WHERE cm.request_id = cr.request_id
+          AND cm.role = 'user'
+      ) AS user_gmt_create
+    FROM chat_record cr
+    WHERE cr.request_id IN (${placeholders})
   `;
 
   for (const dbPath of dbPaths) {
-    let rows: Array<{ request_id: string; extra: string | null }>;
+    let rows: Array<{
+      request_id: string;
+      extra: string | null;
+      user_gmt_create?: number | string | null;
+    }>;
     try {
       rows = await queryReadonly(dbPath, sql, unique);
     } catch (err) {
@@ -59,37 +77,19 @@ export async function readAttachedImagePathsForRequestIds(
     for (const row of rows) {
       const requestId = row.request_id?.trim();
       if (!requestId || result.has(requestId)) continue;
-      const paths = parseAttachedImagePaths(row.extra);
-      result.set(requestId, paths);
+      const lookup: AttachedImageLookup = { paths: parseAttachedImagePaths(row.extra) };
+      const startMs = parseGmtCreateMs(row.user_gmt_create);
+      if (startMs !== undefined) lookup.startMs = startMs;
+      result.set(requestId, lookup);
     }
     if (result.size >= unique.length) break;
   }
   return result;
 }
 
-/**
- * Request-row create time from chat_record.gmt_create (unix ms).
- * Fail-open: missing column / missing row / query error → undefined.
- */
-export async function readChatRecordGmtCreateMs(requestId: string): Promise<number | undefined> {
-  const id = requestId.trim();
-  if (!id) return undefined;
-
-  const dbPaths = resolveAllQoderDbPaths();
-  if (dbPaths.length === 0) return undefined;
-
-  const sql = 'SELECT gmt_create AS gmt_create FROM chat_record WHERE request_id = ? LIMIT 1';
-  for (const dbPath of dbPaths) {
-    try {
-      const rows = await queryReadonly<{ gmt_create: number | string | null }>(dbPath, sql, [id]);
-      const raw = rows[0]?.gmt_create;
-      const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
-      if (Number.isFinite(n) && n > 0) return n;
-    } catch (err) {
-      logger.debug('sqlite chat_record gmt_create query failed', { dbPath, error: String(err) });
-    }
-  }
-  return undefined;
+function parseGmtCreateMs(raw: number | string | null | undefined): number | undefined {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 function parseAttachedImagePaths(raw: string | null | undefined): string[] {

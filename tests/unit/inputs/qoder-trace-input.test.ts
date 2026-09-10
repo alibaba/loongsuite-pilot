@@ -38,7 +38,7 @@ import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/interce
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import {
   readAttachedImagePathsForRequestIds,
-  readChatRecordGmtCreateMs,
+  type AttachedImageLookup,
   type SqliteTokenData,
 } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
@@ -52,12 +52,14 @@ vi.mock('../../../src/inputs/qoder-trace/sqlite-token-reader.js', async (importO
   return {
     ...actual,
     readAttachedImagePathsForRequestIds: vi.fn(),
-    readChatRecordGmtCreateMs: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 const mockReadAttachedImagePaths = vi.mocked(readAttachedImagePathsForRequestIds);
-const mockReadChatRecordGmtCreateMs = vi.mocked(readChatRecordGmtCreateMs);
+
+function attached(paths: string[], startMs?: number): AttachedImageLookup {
+  return startMs === undefined ? { paths } : { paths, startMs };
+}
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -1536,8 +1538,6 @@ describe('QoderTraceInput multimodal', () => {
         clearAttachedImagePathsCache();
         mockReadAttachedImagePaths.mockReset();
         mockReadAttachedImagePaths.mockResolvedValue(new Map());
-        mockReadChatRecordGmtCreateMs.mockReset();
-        mockReadChatRecordGmtCreateMs.mockResolvedValue(undefined);
       });
 
       it('attaches paths onto llm.request messages_delta by request_id', async () => {
@@ -1553,7 +1553,7 @@ describe('QoderTraceInput multimodal', () => {
         });
         mockReadAttachedImagePaths.mockImplementation(async (ids) => {
           expect(ids).toEqual(['req-1']);
-          return new Map([['req-1', [img]]]);
+          return new Map([['req-1', attached([img])]]);
         });
 
         await enrichIdeMultimodal([request], {
@@ -1579,7 +1579,7 @@ describe('QoderTraceInput multimodal', () => {
             { role: 'user', parts: [{ type: 'text', content: 'look' }] },
           ],
         });
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-in-gate', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-in-gate', attached([img])]]));
 
         for (const mode of ['tool', 'output'] as const) {
           clearAttachedImagePathsCache();
@@ -1615,7 +1615,7 @@ describe('QoderTraceInput multimodal', () => {
             { role: 'user', parts: [{ type: 'text', content: 'ctx' }] },
           ],
         });
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-pref', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-pref', attached([img])]]));
 
         await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
 
@@ -1652,9 +1652,9 @@ describe('QoderTraceInput multimodal', () => {
         mockReadAttachedImagePaths.mockImplementation(async (ids) => {
           expect(ids.sort()).toEqual(['req-a', 'req-b', 'req-empty'].sort());
           return new Map([
-            ['req-a', [imgA]],
-            ['req-b', [imgB]],
-            ['req-empty', []],
+            ['req-a', attached([imgA])],
+            ['req-b', attached([imgB])],
+            ['req-empty', attached([])],
           ]);
         });
 
@@ -1726,7 +1726,7 @@ describe('QoderTraceInput multimodal', () => {
         });
         mockReadAttachedImagePaths
           .mockRejectedValueOnce(new Error('sqlite busy'))
-          .mockResolvedValueOnce(new Map([['req-recovered', [img]]]));
+          .mockResolvedValueOnce(new Map([['req-recovered', attached([img])]]));
 
         await enrichIdeMultimodal([request], {
           uploadMode: 'input',
@@ -1757,7 +1757,7 @@ describe('QoderTraceInput multimodal', () => {
             { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
           ],
         });
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fb', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fb', attached([img])]]));
 
         await enrichIdeMultimodal([other, response], {
           uploadMode: 'input',
@@ -1772,7 +1772,7 @@ describe('QoderTraceInput multimodal', () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'cached.png', 'cached');
         const pathToUri = vi.fn(fakePathToUri);
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', attached([img])]]));
 
         const first = mmEntry({
           'event.name': 'other',
@@ -1804,7 +1804,7 @@ describe('QoderTraceInput multimodal', () => {
         const imgB = writePng(dir, 'b.png', 'b');
         const pathToUri = fakePathToUri;
 
-        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', [imgA]]]));
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', attached([imgA])]]));
         const first = mmEntry({
           'event.name': 'other',
           'gen_ai.request.id': 'req-a',
@@ -1814,7 +1814,7 @@ describe('QoderTraceInput multimodal', () => {
         });
         await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
 
-        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', [imgB]]]));
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', attached([imgB])]]));
         const againA = mmEntry({
           'event.name': 'other',
           'gen_ai.request.id': 'req-a',
@@ -1841,7 +1841,7 @@ describe('QoderTraceInput multimodal', () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'solo.png', 'solo');
         const pathToUri = vi.fn(fakePathToUri);
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', attached([img])]]));
 
         const responseOnly = mmEntry({
           'event.id': 'resp-solo',
@@ -1883,11 +1883,12 @@ describe('QoderTraceInput multimodal', () => {
         expect(pathToUri).toHaveBeenCalledTimes(1);
       });
 
-      it('uses chat_record.gmt_create on the synthetic request when it is earlier than Stop', async () => {
+      it('uses the user chat_message clock on the synthetic request when it is earlier than Stop', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'clock.png', 'clock');
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-clock', [img]]]));
-        mockReadChatRecordGmtCreateMs.mockResolvedValue(1_699_999_995_000);
+        mockReadAttachedImagePaths.mockResolvedValue(
+          new Map([['req-clock', attached([img], 1_699_999_995_000)]]),
+        );
 
         const responseOnly = mmEntry({
           'event.id': 'resp-clock',
@@ -1905,7 +1906,7 @@ describe('QoderTraceInput multimodal', () => {
       it('inherits shared context and strips response-only fields on the synthetic request', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'ctx.png', 'ctx');
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-ctx', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-ctx', attached([img])]]));
 
         const responseOnly = mmEntry({
           'event.id': 'resp-ctx',
@@ -1964,7 +1965,7 @@ describe('QoderTraceInput multimodal', () => {
       it('derives the same synthetic event.id when the same response is replayed', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'replay.png', 'replay');
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-replay', [img]]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-replay', attached([img])]]));
 
         const makeResponse = () => mmEntry({
           'event.id': 'resp-replay',
@@ -1982,7 +1983,7 @@ describe('QoderTraceInput multimodal', () => {
       });
 
       it('drops the synthetic request when pathToUri fails', async () => {
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fail', ['/tmp/missing.png']]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fail', attached(['/tmp/missing.png'])]]));
         const responseOnly = mmEntry({
           'event.name': 'llm.response',
           'gen_ai.request.id': 'req-fail',
@@ -2004,7 +2005,7 @@ describe('QoderTraceInput multimodal', () => {
           ],
         });
 
-        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-empty', []]]));
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-empty', attached([])]]));
         await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
         await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
         expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
@@ -2025,7 +2026,7 @@ describe('QoderTraceInput multimodal', () => {
 
         mockReadAttachedImagePaths
           .mockResolvedValueOnce(new Map())
-          .mockResolvedValueOnce(new Map([['req-retry', [img]]]));
+          .mockResolvedValueOnce(new Map([['req-retry', attached([img])]]));
 
         await enrichIdeMultimodal([request], { uploadMode: 'input', pathToUri });
 
@@ -2354,15 +2355,15 @@ describe('QoderTraceInput multimodal', () => {
       }
     });
 
-    it('collect inserts the synthetic request before its response on the chat_record clock', async () => {
+    it('collect inserts the synthetic request before its response on the user chat_message clock', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-solo-'));
       const imgPath = path.join(tmpDir, 'solo.png');
       await fs.writeFile(imgPath, Buffer.from('solo'));
       clearAttachedImagePathsCache();
       mockReadAttachedImagePaths.mockReset();
-      mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', [imgPath]]]));
-      mockReadChatRecordGmtCreateMs.mockReset();
-      mockReadChatRecordGmtCreateMs.mockResolvedValue(1_779_999_995_000);
+      mockReadAttachedImagePaths.mockResolvedValue(
+        new Map([['req-solo', attached([imgPath], 1_779_999_995_000)]]),
+      );
       try {
         const logFileName = `qoder-${getTodayDateString()}.jsonl`;
         const logFile = path.join(tmpDir, logFileName);

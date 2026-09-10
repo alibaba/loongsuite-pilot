@@ -18,7 +18,10 @@ import {
 } from '../../multimodal/index.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
 import { createLogger } from '../../utils/logger.js';
-import { readAttachedImagePathsForRequestIds, readChatRecordGmtCreateMs } from './sqlite-token-reader.js';
+import {
+  readAttachedImagePathsForRequestIds,
+  type AttachedImageLookup,
+} from './sqlite-token-reader.js';
 
 const logger = createLogger('QoderIdeMultimodal');
 
@@ -37,14 +40,14 @@ const MARKDOWN_IMAGE_RE = new RegExp(
 );
 
 /**
- * request_id → attached paths. Process-local LRU.
- * Map values may be `[]` (confirmed empty or already attached). Ids absent from a lookup are not cached.
+ * request_id → attached lookup. Process-local LRU.
+ * `paths: []` means confirmed empty or already attached. Ids absent from a lookup are not cached.
  */
-const attachedPathsByRequestId = new LruMap<string[]>(MULTIMODAL_LRU_LIMIT);
+const attachedLookupByRequestId = new LruMap<AttachedImageLookup>(MULTIMODAL_LRU_LIMIT);
 
 /** Clear process-local attachedImagePaths cache. */
 export function clearAttachedImagePathsCache(): void {
-  attachedPathsByRequestId.clear();
+  attachedLookupByRequestId.clear();
 }
 
 interface EnrichStats {
@@ -136,12 +139,12 @@ async function enrichInputAttachedImages(
   const uniqueIds = [...new Set(requestIds)];
   if (uniqueIds.length === 0) return;
 
-  const byRequest = new Map<string, string[]>();
+  const byRequest = new Map<string, AttachedImageLookup>();
   const newIds: string[] = [];
   for (const id of uniqueIds) {
-    const cached = attachedPathsByRequestId.get(id);
+    const cached = attachedLookupByRequestId.get(id);
     if (cached !== undefined) {
-      if (cached.length > 0) byRequest.set(id, cached);
+      if (cached.paths.length > 0) byRequest.set(id, cached);
     } else {
       newIds.push(id);
     }
@@ -151,8 +154,8 @@ async function enrichInputAttachedImages(
     try {
       const fetched = await readAttachedImagePathsWithRetry(newIds);
       for (const [id, found] of fetched) {
-        attachedPathsByRequestId.set(id, found);
-        if (found.length > 0) byRequest.set(id, found);
+        attachedLookupByRequestId.set(id, found);
+        if (found.paths.length > 0) byRequest.set(id, found);
       }
     } catch (err) {
       logger.warn('qoder ide multimodal attachedImagePaths lookup failed', {
@@ -182,7 +185,7 @@ async function enrichInputAttachedImages(
   }
 
   // When request_id is only on llm.response, fall back to same-turn input carrier.
-  for (const [requestId, paths] of byRequest) {
+  for (const [requestId, lookup] of byRequest) {
     let carrier = carriersByRequest.get(requestId);
     let synthesized = false;
     let response: AgentActivityEntry | undefined;
@@ -202,11 +205,7 @@ async function enrichInputAttachedImages(
           && Array.isArray(e['gen_ai.input.messages_delta']),
         );
         if (!carrier) {
-          carrier = synthesizeUriOnlyRequest(
-            response,
-            requestId,
-            await readChatRecordGmtCreateMs(requestId),
-          );
+          carrier = synthesizeUriOnlyRequest(response, requestId, lookup.startMs);
           entries.push(carrier);
           synthesized = true;
         }
@@ -214,12 +213,12 @@ async function enrichInputAttachedImages(
     }
     if (!carrier) continue;
     const timeMs = entryTimeMs(carrier);
-    const n = await appendUriPartsToMessagesDelta(carrier, paths, pathToUri, timeMs, stats);
+    const n = await appendUriPartsToMessagesDelta(carrier, lookup.paths, pathToUri, timeMs, stats);
     if (n > 0) {
       stats.inputUri += n;
       touched.add(carrier);
       // Consume paths so this request_id is not attached again on later batches.
-      attachedPathsByRequestId.set(requestId, []);
+      attachedLookupByRequestId.set(requestId, { paths: [] });
     } else if (synthesized) {
       entries.pop();
       if (response && carrier['gen_ai.turn.start'] === true) {
@@ -235,8 +234,8 @@ async function enrichInputAttachedImages(
  */
 async function readAttachedImagePathsWithRetry(
   requestIds: string[],
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, AttachedImageLookup>> {
+  const result = new Map<string, AttachedImageLookup>();
   let pending = requestIds;
   let lastError: unknown;
 
@@ -249,8 +248,8 @@ async function readAttachedImagePathsWithRetry(
     try {
       const fetched = await readAttachedImagePathsForRequestIds(pending);
       for (const id of pending) {
-        const paths = fetched.get(id);
-        if (paths !== undefined) result.set(id, paths);
+        const lookup = fetched.get(id);
+        if (lookup !== undefined) result.set(id, lookup);
       }
       pending = pending.filter(id => !fetched.has(id));
     } catch (err) {
