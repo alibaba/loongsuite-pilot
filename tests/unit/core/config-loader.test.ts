@@ -662,7 +662,7 @@ describe('ConfigLoader', () => {
       });
     });
 
-    it('derives sls storageBasePath from project and default logstore', async () => {
+    it('disables sls storage when logstore is omitted', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
           storage: {
@@ -681,22 +681,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.multimodal).toEqual({
-        storage: {
-          type: 'sls',
-          target: {
-            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-            project: 'my-project',
-            logstore: 'logstore-multimodal',
-          },
-          auth: {
-            mode: 'ak',
-            accessKeyId: 'ak',
-            accessKeySecret: 'sk',
-          },
-        },
-        storageBasePath: 'sls://my-project/logstore-multimodal',
-      });
+      expect(config.multimodal).toBeUndefined();
     });
 
     it('loads sls apiKey auth without access keys', async () => {
@@ -798,6 +783,7 @@ describe('ConfigLoader', () => {
             target: {
               endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
               project: 'my-project',
+              logstore: 'mm-store',
             },
             auth: {
               accessKeyId: 'ak',
@@ -822,6 +808,7 @@ describe('ConfigLoader', () => {
             target: {
               endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
               project: 'my-project',
+              logstore: 'mm-store',
             },
             auth: {
               apiKey: 'sls-api-key',
@@ -866,6 +853,7 @@ describe('ConfigLoader', () => {
             target: {
               endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
               project: 'my-project',
+              logstore: 'mm-store',
               ossBucket: 'user-bucket',
             },
             auth: {
@@ -1099,6 +1087,23 @@ describe('ConfigLoader', () => {
       apiKey: 'sls-api-key',
     };
 
+    it('reuses a user apiKey when inner webtracking is also present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ sls: slsApiKey });
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toEqual({
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+        auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+      });
+    });
+
     it('reuses a unique apiKey sls destination', async () => {
       mockReadJsonFile.mockResolvedValueOnce({ sls: slsApiKey });
       const config = await loadConfig();
@@ -1114,7 +1119,7 @@ describe('ConfigLoader', () => {
     });
 
     it.each([
-      ['ak', {
+      ['ak only', {
         sls: {
           ...slsApiKey,
           mode: 'ak' as const,
@@ -1123,10 +1128,16 @@ describe('ConfigLoader', () => {
           apiKey: undefined,
         },
       }],
-      ['multiple destinations', {
+      ['two apiKey destinations', {
         sls: [
           { name: 'one', ...slsApiKey },
           { name: 'two', endpoint: 'https://cn-shanghai.log.aliyuncs.com', project: 'p2', logstore: 'l2', mode: 'apiKey' as const, apiKey: 'key-2' },
+        ],
+      }],
+      ['same apiKey on two projects', {
+        sls: [
+          { name: 'one', ...slsApiKey },
+          { name: 'two', endpoint: 'https://cn-shanghai.log.aliyuncs.com', project: 'p2', logstore: 'l2', mode: 'apiKey' as const, apiKey: slsApiKey.apiKey },
         ],
       }],
     ])('does not reuse sls when it is not a unique apiKey target (%s)', async (_label, file) => {
@@ -1135,7 +1146,59 @@ describe('ConfigLoader', () => {
       expect(config.multimodal).toBeUndefined();
     });
 
-    it('fills omitted multimodal fields from the unique apiKey sls', async () => {
+    it.each([
+      ['unrelated webtracking', {
+        sls: [
+          { name: 'one', ...slsApiKey },
+          {
+            name: 'two',
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'p2',
+            logstore: 'l2',
+            mode: 'webtracking' as const,
+          },
+        ],
+      }],
+      ['unrelated ak', {
+        sls: [
+          { name: 'one', ...slsApiKey },
+          {
+            name: 'two',
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'p2',
+            logstore: 'l2',
+            mode: 'ak' as const,
+            accessKeyId: 'sls-ak',
+            accessKeySecret: 'sls-sk',
+          },
+        ],
+      }],
+    ])('reuses the unique apiKey target when other endpoints are not apiKey candidates (%s)', async (_label, file) => {
+      mockReadJsonFile.mockResolvedValueOnce(file);
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toEqual({
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+        auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+      });
+    });
+
+    it('does not throw when sls credential fields are non-strings', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          ...slsApiKey,
+          apiKey: 12345,
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('reuses the unique apiKey sls with a logstore-only override', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: slsApiKey,
         multimodal: {
@@ -1160,7 +1223,24 @@ describe('ConfigLoader', () => {
       });
     });
 
-    it('lets explicit multimodal fields override the unique apiKey sls', async () => {
+    it('does not mix an explicit endpoint with the inferred apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+              logstore: 'multimodal',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('lets a complete multimodal block ignore the unique apiKey sls', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: slsApiKey,
         multimodal: {
@@ -1195,6 +1275,16 @@ describe('ConfigLoader', () => {
         sls: slsApiKey,
         multimodal: { storage: { type: 's3' } },
       });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it.each([
+      ['multimodal is not an object', { sls: slsApiKey, multimodal: false }],
+      ['storage is a string', { sls: slsApiKey, multimodal: { storage: 'sls' } }],
+      ['storage is an array', { sls: slsApiKey, multimodal: { storage: [] } }],
+    ])('does not infer sls when %s', async (_label, file) => {
+      mockReadJsonFile.mockResolvedValueOnce(file);
       const config = await loadConfig();
       expect(config.multimodal).toBeUndefined();
     });

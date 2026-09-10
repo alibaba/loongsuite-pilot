@@ -11,7 +11,7 @@ Multimodal conversion is separate from message content capture:
 - `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata`).
 - `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media becomes `uri` parts.
 
-Multimodal also requires global `config.multimodal` object-storage infrastructure; see [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
+Multimodal also needs object storage (a unique SLS `apiKey` flusher, or an explicit `config.multimodal.storage` block); see [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 
 ## Current Scope
 
@@ -25,7 +25,7 @@ Multimodal also requires global `config.multimodal` object-storage infrastructur
 
 Both must be ready:
 
-1. Global `config.multimodal.storage`. Reuse only when there is exactly one SLS destination and it uses `apiKey`; set fields override it. AK/SK is not reused.
+1. Global object storage. Omit `multimodal.storage` when there is exactly one complete SLS `apiKey` destination (other AK/WebTracking endpoints do not count) to reuse it as a whole, or set only `target.logstore` to override the Logstore. Any other storage block must be complete and is not filled from the flusher. AK/SK and WebTracking credentials are never copied. The target Logstore must support SLS object upload (`PutObject`).
 2. A non-`none` `uploadMode` on the target agent, and that agent must implement extraction.
 
 Example (Codex + Qoder IDE):

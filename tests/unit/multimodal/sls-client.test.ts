@@ -797,8 +797,10 @@ describe('sls-client (presign)', () => {
     if (!forbidden.ok) expect(forbidden.error).toMatch(/403/);
   });
 
-  it('keeps sls:// for type=sls without calling SLS', async () => {
-    const fetchMock = vi.fn();
+  it('keeps sls:// for type=sls after a successful capability probe', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
+    }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const result = await resolveMultimodalEventStorageBasePath({
       storage: {
@@ -813,7 +815,30 @@ describe('sls-client (presign)', () => {
       storageBasePath: 'sls://proj/logstore',
     });
     expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('disables type=sls when the Logstore has multimodal off', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      errorCode: 'ParameterInvalid',
+      errorMessage: 'LogStore multimodal is not enabled. Please enable multimodal configuration first.',
+    }), { status: 400 }));
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'multimodal_test_disable',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/multimodal_test_disable',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/LogStore multimodal is not enabled/);
+    }
   });
 
   it('resolves oss:// for delegatedOss via one presign', async () => {

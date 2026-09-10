@@ -338,23 +338,36 @@ const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
 type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>;
 type SlsApiKeyTarget = { endpoint: string; project: string; logstore: string; apiKey: string };
 
-/** Unique SLS apiKey target fills missing multimodal.storage fields. Invalid → undefined. */
+/** Unique SLS apiKey target is reused as a whole; only logstore may be overridden. Invalid → undefined. */
 function buildMultimodalConfig(
   file: ConfigFile | null,
   sls?: SlsFlusherConfig,
 ): MultimodalRuntimeConfig | undefined {
   const slsTarget = findUniqueSlsApiKeyTarget(sls);
   const block = file?.multimodal;
-  if (!block || typeof block !== 'object') {
+  if (block == null) {
     return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
+  }
+  if (typeof block !== 'object' || Array.isArray(block)) {
+    logger.error('multimodal config invalid; disabled for process', {
+      error: 'multimodal must be an object',
+    });
+    return undefined;
   }
 
   try {
-    if (!block.storage || typeof block.storage !== 'object') {
+    if (block.storage === undefined) {
       if (slsTarget) return multimodalFromSlsApiKey(slsTarget);
       throw new Error('multimodal.storage is required');
     }
-    const storageRaw = fillMultimodalFromSlsApiKey(block.storage, slsTarget);
+    if (typeof block.storage !== 'object' || Array.isArray(block.storage)) {
+      throw new Error('multimodal.storage must be an object');
+    }
+    const storageRaw = block.storage;
+    if (slsTarget && isLogstoreOnlyShorthand(storageRaw)) {
+      const logstore = (storageRaw.target?.logstore ?? '').trim();
+      return multimodalFromSlsApiKey({ ...slsTarget, logstore });
+    }
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
       const storage = buildMultimodalOssStorage(storageRaw);
@@ -374,26 +387,20 @@ function buildMultimodalConfig(
   }
 }
 
+/** Complete apiKey targets only; AK / WebTracking do not count. */
 function findUniqueSlsApiKeyTarget(sls: SlsFlusherConfig | undefined): SlsApiKeyTarget | undefined {
-  const endpoints = sls?.endpoints ?? [];
-  if (endpoints.length !== 1) return undefined;
-  const ep = endpoints[0];
-  if (
-    ep.mode !== 'apiKey'
-    || !ep.apiKey?.trim()
-    || !ep.endpoint?.trim()
-    || !ep.project?.trim()
-    || !ep.logstore?.trim()
-    || hasAmbiguousSlsCredentials(ep)
-  ) {
-    return undefined;
+  let unique: SlsApiKeyTarget | undefined;
+  for (const ep of sls?.endpoints ?? []) {
+    if (ep.mode !== 'apiKey' || hasAmbiguousSlsCredentials(ep)) continue;
+    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
+    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
+    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
+    if (!apiKey || !endpoint || !project || !logstore) continue;
+    if (unique) return undefined;
+    unique = { endpoint: endpoint.replace(/\/+$/, ''), project, logstore, apiKey };
   }
-  return {
-    endpoint: ep.endpoint.replace(/\/+$/, ''),
-    project: ep.project,
-    logstore: ep.logstore,
-    apiKey: ep.apiKey!.trim(),
-  };
+  return unique;
 }
 
 function multimodalFromSlsApiKey(target: SlsApiKeyTarget): MultimodalRuntimeConfig {
@@ -407,30 +414,20 @@ function multimodalFromSlsApiKey(target: SlsApiKeyTarget): MultimodalRuntimeConf
   };
 }
 
-function fillMultimodalFromSlsApiKey(
-  raw: MultimodalStorageRaw,
-  sls: SlsApiKeyTarget | undefined,
-): MultimodalStorageRaw {
-  if (!sls) return raw;
-  const type = (raw.type ?? '').trim();
-  if (type === 'oss') return raw;
-  const userHasCreds = !!(
-    raw.auth
-    && [raw.auth.accessKeyId, raw.auth.accessKeySecret, raw.auth.securityToken, raw.auth.apiKey]
-      .some(value => typeof value === 'string' && value.trim() !== '')
-  );
-  return {
-    ...raw,
-    type: type || 'sls',
-    target: {
-      endpoint: (raw.target?.endpoint ?? '').trim() || sls.endpoint,
-      project: (raw.target?.project ?? '').trim() || sls.project,
-      logstore: (raw.target?.logstore ?? '').trim() || sls.logstore,
-      ossBucket: raw.target?.ossBucket,
-      storageBasePath: raw.target?.storageBasePath,
-    },
-    auth: userHasCreds ? raw.auth : { mode: 'apiKey', apiKey: sls.apiKey },
-  };
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/** `{ type?: 'sls', target: { logstore } }` — anything else is an independent storage block. */
+function isLogstoreOnlyShorthand(raw: MultimodalStorageRaw): boolean {
+  const type = typeof raw.type === 'string' ? raw.type.trim() : '';
+  if (type && type !== 'sls') return false;
+  if (raw.auth != null) return false;
+  return isNonEmptyString(raw.target?.logstore)
+    && !isNonEmptyString(raw.target?.endpoint)
+    && !isNonEmptyString(raw.target?.project)
+    && !isNonEmptyString(raw.target?.ossBucket)
+    && !isNonEmptyString(raw.target?.storageBasePath);
 }
 
 function buildMultimodalOssStorage(
@@ -465,9 +462,9 @@ function buildMultimodalSlsBackedStorage(
 ): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
   const endpoint = (raw.target?.endpoint ?? '').trim();
   const project = (raw.target?.project ?? '').trim();
-  const logstore = (raw.target?.logstore ?? '').trim() || 'logstore-multimodal';
-  if (!endpoint || !project) {
-    throw new Error(`multimodal.storage.target requires endpoint and project when type=${type}`);
+  const logstore = (raw.target?.logstore ?? '').trim();
+  if (!endpoint || !project || !logstore) {
+    throw new Error(`multimodal.storage.target requires endpoint, project, and logstore when type=${type}`);
   }
   const auth = buildMultimodalStorageAuth(raw.auth);
   const target = {
