@@ -2,6 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parse as parseToml } from 'smol-toml';
 import {
   computeHookTrustHash,
   computeInstalledHookTrustHash,
@@ -10,6 +11,7 @@ import {
   type InstalledCodexHookLocation,
   writeTrustedHashes,
   removeTrustBlock,
+  removeTrustStateKeys,
   verifyTrustHashes,
 } from '../../../src/deployment/codex-trust-writer.js';
 
@@ -478,4 +480,149 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(repaired).toContain('enabled = false');
     expect(repaired).toContain(`trusted_hash = "${hash}"`);
   });
+});
+
+
+describe('Codex TOML reserialization compatibility', () => {
+  const hooksPath = '/abs/hooks.json';
+  const key = `${hooksPath}:session_start:0:0`;
+  const location: InstalledCodexHookLocation = {
+    eventName: 'SessionStart', eventKey: 'session_start', groupIndex: 0, handlerIndex: 0,
+    matcher: '*', handler: { type: 'command', command: 'pilot session-start' },
+  };
+  const hash = computeInstalledHookTrustHash(location);
+  const opts = () => ({
+    configPath, hooksJsonAbsPath: hooksPath,
+    locations: { SessionStart: location }, marker: 'otel-codex-hook',
+  });
+  const headers = [
+    `["hooks"."state"."${key}"]`,
+    `[hooks."state".'${key}']`,
+    `['hooks'.state."${key}"]`,
+    `[ 'hooks' . 'state' . '${key}' ] # preserved comment`,
+    String.raw`["\u0068ooks"."st\u0061te"."/abs/hooks.json:session_start:0:0"]`,
+  ];
+  const other = '["hooks"."state"."third-party:stop:0:0"]\nenabled = false\ntrusted_hash = "sha256:OTHER"\n';
+  const read = () => fs.readFileSync(configPath, 'utf8');
+
+  test.each(headers)('recognizes equivalent header %s without rewriting', header => {
+    const original = `${header}\n"trusted_hash" = '${hash}'\n"enabled" = false\n`;
+    fs.writeFileSync(configPath, original);
+    expect(() => parseToml(original)).not.toThrow();
+    expect(verifyTrustHashes(opts())).toEqual({ valid: true, mismatches: [] });
+    expect(writeTrustedHashes(opts())).toBe(false);
+    expect(read()).toBe(original);
+  });
+
+  test.each(headers)('repairs stale header %s and preserves third-party state', header => {
+    fs.writeFileSync(configPath, `${header}\ntrusted_hash = 'sha256:STALE'\n\n${other}`);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect(read()).toContain(other);
+    expect(read()).not.toContain('sha256:STALE');
+    expect(() => parseToml(read())).not.toThrow();
+    expect(verifyTrustHashes(opts()).valid).toBe(true);
+    expect(writeTrustedHashes(opts())).toBe(false);
+  });
+
+  test.each([false, true])('repairs duplicates even with valid hashes (reversed=%s)', reversed => {
+    const sections = [
+      `["hooks"."state"."${key}"]\nenabled = false\ntrusted_hash = "${hash}"\n`,
+      `[hooks.state."${key}"]\nenabled = true\ntrusted_hash = "${hash}"\n`,
+    ];
+    if (reversed) sections.reverse();
+    fs.writeFileSync(configPath, sections.join('\n') + other);
+    expect(() => parseToml(read())).toThrow();
+    expect(verifyTrustHashes(opts()).valid).toBe(false);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    const state = (parseToml(read()) as any).hooks.state;
+    expect(state[key]).toEqual({ enabled: false, trusted_hash: hash });
+    expect(Object.keys(state)).toHaveLength(2);
+    expect(read()).toContain(other);
+    expect(writeTrustedHashes(opts())).toBe(false);
+  });
+
+  test.each(headers)('preserves disabled state during repair of %s', header => {
+    fs.writeFileSync(configPath, `bypass_hook_trust = true\n${header}\n'enabled' = false # disabled by user\ntrusted_hash = '${hash}'\n`);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect((parseToml(read()) as any).hooks.state[key].enabled).toBe(false);
+  });
+
+  test.each(headers)('cleans up quoted tables through both removal paths: %s', header => {
+    for (const remove of [
+      () => removeTrustBlock(configPath, 'otel-codex-hook', [key]),
+      () => removeTrustStateKeys(configPath, [key]),
+    ]) {
+      fs.writeFileSync(configPath, `${header}\ntrusted_hash = '${hash}'\n\n${other}`);
+      expect(remove()).toBe(true);
+      expect(read()).not.toContain(key);
+      expect(read()).toContain(other);
+      expect(() => parseToml(read())).not.toThrow();
+      expect(remove()).toBe(false);
+    }
+  });
+
+  test('recognizes literal Windows paths without interpreting backslashes', () => {
+    const winPath = String.raw`C:\Users\测试 User\.codex\hooks.json`;
+    const winKey = `${winPath}:session_start:0:0`;
+    const original = `["hooks".'state'.'${winKey}']\ntrusted_hash = '${hash}'\n`;
+    fs.writeFileSync(configPath, original);
+    const winOpts = { ...opts(), hooksJsonAbsPath: winPath };
+    expect(verifyTrustHashes(winOpts).valid).toBe(true);
+    expect(writeTrustedHashes(winOpts)).toBe(false);
+    expect(read()).toBe(original);
+  });
+
+  test.each(['"""', "'".repeat(3)])('ignores fake trust tables and markers inside %s strings', quote => {
+    const instructions = `instructions = ${quote}\n[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n# BEGIN otel-codex-hook trust\nbypass_hook_trust = true\n\n\n# END otel-codex-hook trust\n${quote}\n`;
+    fs.writeFileSync(configPath, instructions + other);
+    expect(verifyTrustHashes(opts()).valid).toBe(false);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect(read()).toContain(instructions);
+    expect((parseToml(read()) as any).hooks.state[key].trusted_hash).toBe(hash);
+    expect(removeTrustBlock(configPath, 'otel-codex-hook', [key])).toBe(true);
+    expect(read()).toContain(instructions);
+    expect(read()).toContain(other);
+  });
+
+  test.each([
+    'model = "a"\nmodel = "b"\n',
+    '[broken\nvalue = 1\n',
+    'model = "unterminated\n',
+    '["hooks"."state"."third-party"]\na = 1\n[hooks.state."third-party"]\na = 1\n',
+  ])('does not overwrite unrelated malformed TOML: %s', malformed => {
+    const original = malformed + `[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n`;
+    fs.writeFileSync(configPath, original);
+    expect(verifyTrustHashes(opts()).valid).toBe(false);
+    expect(() => writeTrustedHashes(opts())).toThrow(/invalid Codex config.toml/);
+    expect(read()).toBe(original);
+    // Cleanup may decline to edit when a malformed value hides the table.
+    try { removeTrustBlock(configPath, 'otel-codex-hook', [key]); } catch {}
+    expect(read()).toBe(original);
+    // If a malformed open string hides the key, cleanup correctly makes no edit.
+    try { removeTrustStateKeys(configPath, [key]); } catch {}
+    expect(read()).toBe(original);
+  });
+
+  test('does not delete user tables hidden by an unterminated owned value', () => {
+    const original = `[hooks.state."${key}"]\ntrusted_hash = "unterminated\n\n[projects."/important"]\ntrust_level = "trusted"\n`;
+    fs.writeFileSync(configPath, original);
+    expect(() => writeTrustedHashes(opts())).toThrow(/invalid Codex config.toml/);
+    expect(read()).toBe(original);
+    expect(() => removeTrustStateKeys(configPath, [key])).toThrow();
+    expect(read()).toBe(original);
+  });
+
+  test('preserves multiline values, arrays, escaped keys and large integers', () => {
+    const prefix = 'large = 9223372036854775807\nitems = [\n[1, 2],\n{ text = "[hooks.state] # example" },\n]\n';
+    const escapedKey = key.replace('/abs', String.raw`\u002Fabs`);
+    const original = prefix + `["hooks"."state"."${escapedKey}"]\nenabled = false\ntrusted_hash = """\n${hash}"""\n`;
+    // Force a rewrite while retaining a same-handler disabled choice.
+    fs.writeFileSync(configPath, 'bypass_hook_trust = true\n' + original);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect(read()).toContain(prefix);
+    const parsed = parseToml(read(), { integersAsBigInt: true }) as any;
+    expect(parsed.hooks.state[key].enabled).toBe(false);
+    expect(parsed.large).toBe(9223372036854775807n);
+  });
+
 });
