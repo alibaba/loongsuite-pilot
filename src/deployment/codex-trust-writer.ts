@@ -177,6 +177,9 @@ function decodeTomlBasicString(value: string): string | null {
 }
 
 function tomlKeyCandidates(value: string): string[] {
+  if (value.startsWith("'") && value.endsWith("'")) {
+    return [value.slice(1, -1)];
+  }
   const decoded = decodeTomlBasicString(value);
   const raw = value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : null;
   return [...new Set([decoded, raw].filter((candidate): candidate is string => candidate !== null))];
@@ -188,18 +191,20 @@ interface ParsedTrustSection {
   enabledLine?: string;
 }
 
+const TOML_HOOK_STATE_CAPTURE = /^\s*\[hooks\.state\.(("(?:\\.|[^"\\])*")|('[^']*'))\]\s*$/;
+
 function parseTrustSections(content: string): ParsedTrustSection[] {
   const lines = content.split('\n');
   const sections: ParsedTrustSection[] = [];
-  const header = /^\s*\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*$/;
   for (let i = 0; i < lines.length; i++) {
-    const match = lines[i]!.match(header);
+    const match = lines[i]!.match(TOML_HOOK_STATE_CAPTURE);
     if (!match) continue;
-    const key = tomlKeyCandidates(match[1]!)[0];
+    const rawKeyToken = match[1]!;
+    const key = tomlKeyCandidates(rawKeyToken)[0];
     if (key === undefined) continue;
     const section: ParsedTrustSection = { key };
     for (let j = i + 1; j < lines.length && !/^\s*\[/.test(lines[j]!); j++) {
-      const hash = lines[j]!.match(/^\s*trusted_hash\s*=\s*"([^"]+)"/);
+      const hash = lines[j]!.match(/^\s*trusted_hash\s*=\s*["']([^"']+)["']/);
       if (hash) section.hash = hash[1];
       if (/^\s*enabled\s*=/.test(lines[j]!)) section.enabledLine = lines[j]!.trim();
     }
@@ -212,10 +217,9 @@ function removeExactTrustSections(content: string, keys: ReadonlySet<string>): s
   if (keys.size === 0) return content;
   const lines = content.split('\n');
   const out: string[] = [];
-  const header = /^\s*\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*$/;
   let skipping = false;
   for (const line of lines) {
-    const match = line.match(header);
+    const match = line.match(TOML_HOOK_STATE_CAPTURE);
     if (match) {
       skipping = tomlKeyCandidates(match[1]!).some(key => keys.has(key));
       if (!skipping) out.push(line);

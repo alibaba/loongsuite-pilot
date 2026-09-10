@@ -478,4 +478,66 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(repaired).toContain('enabled = false');
     expect(repaired).toContain(`trusted_hash = "${hash}"`);
   });
+
+  test('recognizes single-quoted TOML keys and trusted_hash without false missing-key repair', () => {
+    const windowsHooksPath = String.raw`C:\Users\navy\.codex\hooks.json`;
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SessionStart',
+      eventKey: 'session_start',
+      groupIndex: 0,
+      handlerIndex: 0,
+      matcher: '*',
+      handler: { type: 'command', command: 'powershell.exe -File hook.ps1 session-start' },
+    };
+    const key = installedHookStateKey(windowsHooksPath, location);
+    const hash = computeInstalledHookTrustHash(location);
+
+    // Codex native rust toml serializer writes literal strings with single quotes on Windows
+    fs.writeFileSync(configPath, [
+      `[hooks.state.'${key}']`,
+      `trusted_hash = '${hash}'`,
+      '',
+    ].join('\n'));
+
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: windowsHooksPath,
+      locations: { SessionStart: location },
+      marker: 'otel-codex-hook',
+    };
+
+    const verify = verifyTrustHashes(opts);
+    expect(verify.valid).toBe(true);
+    expect(verify.mismatches).toEqual([]);
+    expect(writeTrustedHashes(opts)).toBe(false);
+  });
+
+  test('removeTrustBlock removes single-quoted trust sections cleanly', () => {
+    const windowsHooksPath = String.raw`C:\Users\navy\.codex\hooks.json`;
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SessionStart',
+      eventKey: 'session_start',
+      groupIndex: 0,
+      handlerIndex: 0,
+      matcher: '*',
+      handler: { type: 'command', command: 'powershell.exe -File hook.ps1 session-start' },
+    };
+    const key = installedHookStateKey(windowsHooksPath, location);
+    const hash = computeInstalledHookTrustHash(location);
+
+    fs.writeFileSync(configPath, [
+      `[hooks.state.'${key}']`,
+      `trusted_hash = "${hash}"`,
+      '',
+      '[hooks.state."third-party@plugin:stop:0:0"]',
+      'trusted_hash = "sha256:KEEP"',
+      '',
+    ].join('\n'));
+
+    const removed = removeTrustBlock(configPath, 'otel-codex-hook', [key]);
+    expect(removed).toBe(true);
+    const content = fs.readFileSync(configPath, 'utf8');
+    expect(content).not.toContain(key);
+    expect(content).toContain('sha256:KEEP');
+  });
 });
