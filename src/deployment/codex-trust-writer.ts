@@ -302,12 +302,14 @@ function removeLegacyTrustMarkers(content: string, marker: string): string {
   )).map(line => line.text).join('\n');
 }
 
+class InvalidCodexConfigError extends Error {}
+
 function validateConfig(content: string): void {
   try {
     parseToml(content, { integersAsBigInt: true });
   } catch {
     // Parser error messages include source excerpts, potentially credentials.
-    throw new Error('Refusing to write invalid Codex config.toml; original file left unchanged');
+    throw new InvalidCodexConfigError('Refusing to write invalid Codex config.toml; original file left unchanged');
   }
 }
 
@@ -456,17 +458,27 @@ export function removeTrustBlock(
   return true;
 }
 
-/** Remove exact position-based trust entries without touching the active block markers. */
+/**
+ * Remove exact position-based trust entries without touching the active markers.
+ * Retired-key cleanup runs before current trust repair: leave invalid TOML
+ * unchanged and return false so that repair still gets a chance to run.
+ * Filesystem errors still propagate to the caller's deployment error handler.
+ */
 export function removeTrustStateKeys(
   configPath: string,
   ownedHookStateKeys: readonly string[],
 ): boolean {
   if (!fs.existsSync(configPath) || ownedHookStateKeys.length === 0) return false;
   const before = fs.readFileSync(configPath, 'utf-8');
-  const content = removeExactTrustSections(before, new Set(ownedHookStateKeys));
-  if (content === before) return false;
-  writeValidatedConfig(configPath, content);
-  return true;
+  try {
+    const content = removeExactTrustSections(before, new Set(ownedHookStateKeys));
+    if (content === before) return false;
+    writeValidatedConfig(configPath, content);
+    return true;
+  } catch (err) {
+    if (err instanceof InvalidCodexConfigError) return false;
+    throw err;
+  }
 }
 
 export interface VerifyResult {

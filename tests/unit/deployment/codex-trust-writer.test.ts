@@ -599,7 +599,7 @@ describe('Codex TOML reserialization compatibility', () => {
     try { removeTrustBlock(configPath, 'otel-codex-hook', [key]); } catch {}
     expect(read()).toBe(original);
     // If a malformed open string hides the key, cleanup correctly makes no edit.
-    try { removeTrustStateKeys(configPath, [key]); } catch {}
+    expect(removeTrustStateKeys(configPath, [key])).toBe(false);
     expect(read()).toBe(original);
   });
 
@@ -608,7 +608,7 @@ describe('Codex TOML reserialization compatibility', () => {
     fs.writeFileSync(configPath, original);
     expect(() => writeTrustedHashes(opts())).toThrow(/invalid Codex config.toml/);
     expect(read()).toBe(original);
-    expect(() => removeTrustStateKeys(configPath, [key])).toThrow();
+    expect(removeTrustStateKeys(configPath, [key])).toBe(false);
     expect(read()).toBe(original);
   });
 
@@ -623,6 +623,35 @@ describe('Codex TOML reserialization compatibility', () => {
     const parsed = parseToml(read(), { integersAsBigInt: true }) as any;
     expect(parsed.hooks.state[key].enabled).toBe(false);
     expect(parsed.large).toBe(9223372036854775807n);
+  });
+
+
+  test('declines retired-key cleanup so duplicate current trust can still be repaired', () => {
+    const retiredKey = `${hooksPath}:pre_tool_use:0:0`;
+    const retired = `[hooks.state."${retiredKey}"]\ntrusted_hash = "sha256:RETIRED"\n`;
+    const current = `[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n`;
+    const quoted = `["hooks"."state"."${key}"]\nenabled = false\ntrusted_hash = "${hash}"\n`;
+    const original = retired + current + quoted + other;
+    fs.writeFileSync(configPath, original);
+
+    // Deployment cleans up retired keys before calling writeTrustedHashes.
+    // Removing just the retired table leaves invalid current duplicates.
+    expect(removeTrustStateKeys(configPath, [retiredKey])).toBe(false);
+    expect(read()).toBe(original);
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect((parseToml(read()) as any).hooks.state[key]).toEqual({ enabled: false, trusted_hash: hash });
+    expect(read()).toContain(other);
+
+    // Once the duplicate configuration is repaired, cleanup can succeed.
+    expect(removeTrustStateKeys(configPath, [retiredKey])).toBe(true);
+    expect(read()).not.toContain(retiredKey);
+    expect(verifyTrustHashes(opts()).valid).toBe(true);
+  });
+
+  test('does not hide filesystem errors during retired-key cleanup', () => {
+    fs.mkdirSync(configPath);
+    expect(() => removeTrustStateKeys(configPath, [key])).toThrow();
+    expect(fs.statSync(configPath).isDirectory()).toBe(true);
   });
 
 });
