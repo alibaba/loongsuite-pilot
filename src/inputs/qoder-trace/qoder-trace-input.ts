@@ -236,10 +236,18 @@ export class QoderTraceInput extends BaseInput {
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;
         if (this.multimodalStopped) break;
+        const before = sessionEntries.length;
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,
         });
+        for (let i = before; i < sessionEntries.length; i++) {
+          const entry = sessionEntries[i];
+          insertBeforeMatchingResponse(rawEntries, entry);
+          const turnId = (entry['gen_ai.turn.id'] as string) || 'unknown';
+          const group = turnGroups.get(turnId);
+          if (group) insertBeforeMatchingResponse(group, entry);
+        }
       }
       for (const turnEntries of cliTurns) {
         if (this.multimodalStopped) break;
@@ -409,4 +417,16 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+function insertBeforeMatchingResponse(
+  target: AgentActivityEntry[],
+  request: AgentActivityEntry,
+): void {
+  const requestId = request['gen_ai.request.id'];
+  const idx = target.findIndex(e =>
+    e['event.name'] === 'llm.response' && e['gen_ai.request.id'] === requestId,
+  );
+  if (idx >= 0) target.splice(idx, 0, request);
+  else target.push(request);
 }
