@@ -64,6 +64,7 @@ LOG_LEVEL=""
 USER_ID=""
 COLLECT_LOG=""
 COLLECT_TRACE=""
+ENABLE_STATUS_BAR_APP=""
 CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
@@ -127,6 +128,20 @@ while [[ $# -gt 0 ]]; do
         --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
         --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
         --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
+        --enable-status-bar-app|--enable-status-bar-app=*)
+            if [[ "$1" == *=* ]]; then
+                ENABLE_STATUS_BAR_APP="${1#*=}"; shift
+            else
+                if [ "$#" -lt 2 ]; then
+                    echo "--enable-status-bar-app requires true or false" >&2
+                    exit 1
+                fi
+                ENABLE_STATUS_BAR_APP="$2"; shift 2
+            fi
+            case "$ENABLE_STATUS_BAR_APP" in
+                true|false) ;;
+                *) echo "--enable-status-bar-app requires true or false" >&2; exit 1 ;;
+            esac ;;
         --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
         --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
         --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
@@ -152,6 +167,11 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
+    echo "--enable-status-bar-app is only supported with install" >&2
+    exit 1
+fi
 
 if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
     if ! [[ "$DASHBOARD_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DASHBOARD_PORT < 1 || 10#$DASHBOARD_PORT > 65535 )); then
@@ -1006,6 +1026,7 @@ write_config() {
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
+        LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
         "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
@@ -1022,6 +1043,8 @@ if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(c
   config.dashboard = {};
 }
 const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
+const enableStatusBarApp = process.env.LP_ENABLE_STATUS_BAR_APP || '';
+if (enableStatusBarApp) config.enableStatusBarApp = enableStatusBarApp === 'true';
 if (dashboardPort) config.dashboard.port = Number(dashboardPort);
 if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;

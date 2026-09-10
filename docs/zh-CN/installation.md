@@ -72,6 +72,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
+| `--enable-status-bar-app <true\|false>` | 在 `install` 时设置是否自动启动 macOS 菜单栏。未传时保留已有配置，首次安装默认启用。Windows 对应 `-EnableStatusBarApp <true\|false>`（保存配置，菜单栏仅支持 macOS）。 |
 | `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
 | `--package-url <url>` | 从自定义 URL 或本地 `file://` 路径安装。 |
 | `--sls-endpoint <url>` | SLS endpoint。 |
@@ -176,6 +177,14 @@ http://127.0.0.1:8765/
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
 
 ### 手动启动和停止 macOS 菜单栏
+
+如果希望首次启动采集服务时就不显示菜单栏，在安装命令中添加：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
+```
+
+安装器会在启动采集服务前将 `"enableStatusBarApp": false` 写入 `config.json`。显式传 `true` 可恢复自动启动，不传则保留已有值。该参数用于 `install`，也适用于覆盖安装；`upgrade` 保留已保存的配置。采集服务和本地 Dashboard 不受影响。运行时环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 仍优先于此配置。
 
 菜单栏默认随采集服务启动。菜单栏里的“退出”只会关闭菜单栏，采集服务继续运行；此时再次执行 `loongsuite-pilot start` 不会重新打开菜单栏。请执行：
 
