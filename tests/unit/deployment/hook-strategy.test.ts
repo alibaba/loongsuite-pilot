@@ -39,6 +39,7 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
     SubagentStart: 'subagent_start',
     SubagentStop: 'subagent_stop',
     Stop: 'stop',
+    PreToolUse: 'pre_tool_use',
     PostToolUse: 'post_tool_use',
   },
   installedHookStateKey: vi.fn((hooksPath: string, location: { eventKey: string; groupIndex: number; handlerIndex: number }) =>
@@ -762,9 +763,11 @@ describe('HookStrategy', () => {
       vi.mocked(readJsonFile).mockResolvedValue({
         hooks: {
           Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          PreToolUse: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh pre-tool-use' }] }],
         },
       });
       mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(true);
       vi.mocked(writeTrustedHashes).mockImplementationOnce(() => {
         throw new Error('trust write failed');
       });
@@ -774,6 +777,7 @@ describe('HookStrategy', () => {
         hook: {
           settingsPath: '/home/.codex/hooks.json',
           events: ['Stop'],
+          retiredEvents: ['PreToolUse'],
           hookCommand: '/opt/pilot/hooks/codex-hook.sh',
           format: 'nested',
           eventSubcommand: 'kebab-case',
@@ -787,6 +791,44 @@ describe('HookStrategy', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('trust write failed');
+      expect(mockHookManager.uninstallHook).not.toHaveBeenCalled();
+    });
+
+    it('reconciles Codex trust before removing retired hooks and checks removal', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          PreToolUse: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh pre-tool-use' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(false);
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          retiredEvents: ['PreToolUse'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(writeTrustedHashes).toHaveBeenCalledWith(expect.objectContaining({
+        retiredKeys: ['/home/.codex/hooks.json:pre_tool_use:0:0'],
+      }));
+      expect(vi.mocked(writeTrustedHashes).mock.invocationCallOrder[0]).toBeLessThan(
+        mockHookManager.uninstallHook.mock.invocationCallOrder[0],
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('failed to remove retired hook event');
     });
 
     it('returns failure when Codex trust self-check fails', async () => {
