@@ -687,11 +687,7 @@ export async function sniffSlsHttpEventStorageBasePath(
   }
 }
 
-/**
- * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * sls and oss use that prefix as-is. delegatedOss sniffs one presign and pins origin.
- * if target.ossBucket is set, the sniffed bucket must match or multimodal stays off.
- */
+/** Event URI prefix for Processor. */
 export async function resolveMultimodalEventStorageBasePath(
   config: MultimodalRuntimeConfig,
 ): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
@@ -699,6 +695,20 @@ export async function resolveMultimodalEventStorageBasePath(
     const storageBasePath = (config.storageBasePath ?? '').trim();
     if (!storageBasePath) {
       return { ok: false, error: 'multimodal storageBasePath is required' };
+    }
+    if (config.storage.type === 'sls') {
+      const { target, auth } = config.storage;
+      const probe = await slsGeneratePresignedUrl({
+        endpoint: target.endpoint,
+        project: target.project,
+        logstore: target.logstore,
+        objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+        ...slsStorageAuthFields(auth),
+        timeoutMs: SLS_STARTUP_TIMEOUT_MS,
+      });
+      if (!probe.ok) {
+        return { ok: false, error: probe.error || 'sls multimodal probe failed' };
+      }
     }
     return { ok: true, storageBasePath };
   }
