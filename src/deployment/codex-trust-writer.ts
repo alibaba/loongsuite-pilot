@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { parse as parseToml } from 'smol-toml';
 
 export const CODEX_HOOK_EVENT_KEYS: Record<string, string> = {
   PreToolUse: 'pre_tool_use',
@@ -167,64 +168,154 @@ function encodeTomlBasicString(value: string): string {
   return JSON.stringify(value);
 }
 
-function decodeTomlBasicString(value: string): string | null {
-  try {
-    const decoded: unknown = JSON.parse(value);
-    return typeof decoded === 'string' ? decoded : null;
-  } catch {
-    return null;
-  }
+function asTable(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
-function tomlKeyCandidates(value: string): string[] {
-  const decoded = decodeTomlBasicString(value);
-  const raw = value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : null;
-  return [...new Set([decoded, raw].filter((candidate): candidate is string => candidate !== null))];
+/**
+ * Locate editable lines without mistaking text in multiline strings or arrays
+ * for config. This scanner only finds boundaries; smol-toml decodes keys and
+ * validates the complete document. Keep original lines so unrelated formatting
+ * and comments do not go through a TOML serialization round trip.
+ */
+function configLines(content: string): Array<{ text: string; editable: boolean }> {
+  let quote = '';
+  let multiline = false;
+  let depth = 0;
+  return content.split('\n').map(text => {
+    const editable = !quote && depth === 0;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) {
+        if (quote === '"' && ch === '\\') { i++; continue; }
+        if (ch !== quote) continue;
+        if (!multiline) { quote = ''; continue; }
+        if (text.slice(i, i + 3) !== quote.repeat(3)) continue;
+        // A multiline closing delimiter may have one or two literal quotes.
+        while (text[i + 1] === quote) i++;
+        quote = '';
+        multiline = false;
+      } else if (ch === '#') {
+        break;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        multiline = text.slice(i, i + 3) === ch.repeat(3);
+        if (multiline) i += 2;
+      } else if (ch === '[' || ch === '{') {
+        depth++;
+      } else if (ch === ']' || ch === '}') {
+        depth--;
+      }
+    }
+    return { text, editable };
+  });
+}
+
+function trustSectionKey(header: string): string | undefined {
+  // Only a table declaration, never an assignment or an array of tables.
+  if (!/^\s*\[(?!\[)/.test(header)) return undefined;
+  try {
+    const parsed = parseToml(header);
+    const hooks = asTable(parsed.hooks);
+    const state = asTable(hooks?.state);
+    if (!state || Object.keys(parsed).length !== 1 || Object.keys(hooks!).length !== 1) {
+      return undefined;
+    }
+    const keys = Object.keys(state);
+    const table = keys.length === 1 ? asTable(state[keys[0]!]) : undefined;
+    return table && Object.keys(table).length === 0 ? keys[0] : undefined;
+  } catch {
+    // Recover the exact malformed Windows path emitted by old Pilot versions.
+    // Never use the raw spelling as an alternative when TOML decoding succeeds:
+    // an escaped key can name a different, third-party handler.
+    const legacy = header.match(/^\s*\[hooks\.state\."([^"\r\n]+)"\]\s*$/);
+    return legacy?.[1];
+  }
 }
 
 interface ParsedTrustSection {
   key: string;
   hash?: string;
-  enabledLine?: string;
+  enabled?: boolean;
+}
+
+interface TrustSectionRange {
+  key: string;
+  start: number;
+  end: number;
+}
+
+function trustSectionRanges(content: string): TrustSectionRange[] {
+  const lines = configLines(content);
+  const sections: TrustSectionRange[] = [];
+  let current: TrustSectionRange | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    const { text, editable } = lines[i]!;
+    if (!editable || !/^\s*\[/.test(text)) continue;
+    if (current) current.end = i;
+    const key = trustSectionKey(text);
+    current = key === undefined ? undefined : { key, start: i, end: lines.length };
+    if (current) sections.push(current);
+  }
+  return sections;
 }
 
 function parseTrustSections(content: string): ParsedTrustSection[] {
   const lines = content.split('\n');
-  const sections: ParsedTrustSection[] = [];
-  const header = /^\s*\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*$/;
-  for (let i = 0; i < lines.length; i++) {
-    const match = lines[i]!.match(header);
-    if (!match) continue;
-    const key = tomlKeyCandidates(match[1]!)[0];
-    if (key === undefined) continue;
-    const section: ParsedTrustSection = { key };
-    for (let j = i + 1; j < lines.length && !/^\s*\[/.test(lines[j]!); j++) {
-      const hash = lines[j]!.match(/^\s*trusted_hash\s*=\s*"([^"]+)"/);
-      if (hash) section.hash = hash[1];
-      if (/^\s*enabled\s*=/.test(lines[j]!)) section.enabledLine = lines[j]!.trim();
+  return trustSectionRanges(content).map(({ key, start, end }) => {
+    try {
+      const fields = parseToml(lines.slice(start + 1, end).join('\n'), { integersAsBigInt: true });
+      return {
+        key,
+        hash: typeof fields.trusted_hash === 'string' ? fields.trusted_hash : undefined,
+        enabled: typeof fields.enabled === 'boolean' ? fields.enabled : undefined,
+      };
+    } catch {
+      return { key };
     }
-    sections.push(section);
-  }
-  return sections;
+  });
 }
 
 function removeExactTrustSections(content: string, keys: ReadonlySet<string>): string {
   if (keys.size === 0) return content;
   const lines = content.split('\n');
-  const out: string[] = [];
-  const header = /^\s*\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*$/;
-  let skipping = false;
-  for (const line of lines) {
-    const match = line.match(header);
-    if (match) {
-      skipping = tomlKeyCandidates(match[1]!).some(key => keys.has(key));
-      if (!skipping) out.push(line);
-      continue;
-    }
-    if (/^\s*\[/.test(line)) skipping = false;
-    if (!skipping) out.push(line);
+  const keep = lines.map(() => true);
+  for (const { key, start, end } of trustSectionRanges(content)) {
+    if (!keys.has(key)) continue;
+    // An unclosed value in an owned section can hide subsequent user tables.
+    // Refuse to delete an ambiguous range, even if its removal would produce
+    // syntactically valid output. Legacy malformed Windows *headers* remain
+    // repairable because only the body is checked here.
+    validateConfig(lines.slice(start + 1, end).join('\n'));
+    keep.fill(false, start, end);
   }
-  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+  return lines.filter((_, i) => keep[i]).join('\n');
+}
+
+function removeLegacyTrustMarkers(content: string, marker: string): string {
+  return configLines(content).filter(({ text, editable }) => !editable || (
+    text.trim() !== `# BEGIN ${marker} trust`
+    && text.trim() !== `# END ${marker} trust`
+    && !/^\s*bypass_hook_trust\s*=/.test(text)
+  )).map(line => line.text).join('\n');
+}
+
+class InvalidCodexConfigError extends Error {}
+
+function validateConfig(content: string): void {
+  try {
+    parseToml(content, { integersAsBigInt: true });
+  } catch {
+    // Parser error messages include source excerpts, potentially credentials.
+    throw new InvalidCodexConfigError('Refusing to write invalid Codex config.toml; original file left unchanged');
+  }
+}
+
+function writeValidatedConfig(configPath: string, content: string): void {
+  validateConfig(content);
+  fs.writeFileSync(configPath, content, 'utf-8');
 }
 
 export interface InstalledTrustOpts {
@@ -287,16 +378,22 @@ export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
     return { valid: false, mismatches: ['config.toml missing'] };
   }
   const content = fs.readFileSync(opts.configPath, 'utf-8');
-  const actual = new Map(parseTrustSections(content).map(section => [section.key, section.hash]));
+  let state: Record<string, unknown> | undefined;
+  try {
+    const parsed = parseToml(content, { integersAsBigInt: true });
+    state = asTable(asTable(parsed.hooks)?.state);
+  } catch {
+    return { valid: false, mismatches: ['invalid Codex config.toml'] };
+  }
   const mismatches: string[] = [];
   // Pilot briefly wrote this as an emergency bypass, but Codex only supports
   // bypassing trust via the per-invocation --dangerously-bypass-hook-trust flag.
   // Treat the unsupported legacy field as repairable state so deployment removes it.
-  if (/^\s*bypass_hook_trust\s*=/m.test(content)) {
+  if (configLines(content).some(line => line.editable && /^\s*bypass_hook_trust\s*=/.test(line.text))) {
     mismatches.push('unsupported config field bypass_hook_trust');
   }
   for (const [key, hash] of expectedTrustState(opts)) {
-    const current = actual.get(key);
+    const current = asTable(state?.[key])?.trusted_hash;
     if (current === undefined) mismatches.push(`missing key=${key}`);
     else if (current !== hash) mismatches.push(`hash mismatch key=${key} (expected=${hash}, got=${current})`);
   }
@@ -322,33 +419,28 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   // move the END comment past unrelated third-party sections. Until persisted
   // owned-key metadata is introduced, only touch the exact current Pilot keys.
   const exactKeys = new Set(expected.keys());
-  const enabledByKey = new Map(
-    parseTrustSections(existing)
-      .filter(section => (
-        section.enabledLine !== undefined
-        && expected.get(section.key) === section.hash
-      ))
-      .map(section => [section.key, section.enabledLine!]),
-  );
+  const enabledByKey = new Map<string, boolean>();
+  for (const section of parseTrustSections(existing)) {
+    if (section.enabled === undefined || expected.get(section.key) !== section.hash) continue;
+    // If old Pilot produced conflicting copies, an explicit disable wins.
+    enabledByKey.set(section.key, enabledByKey.get(section.key) === false ? false : section.enabled);
+  }
 
-  let content = existing.split('\n')
-    .filter(line => line.trim() !== begin && line.trim() !== end)
-    .filter(line => !/^\s*bypass_hook_trust\s*=/.test(line))
-    .join('\n');
+  let content = removeLegacyTrustMarkers(existing, opts.marker);
   content = removeExactTrustSections(content, exactKeys);
 
   const lines: string[] = [begin];
   for (const [key, hash] of expected) {
     lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
     const enabled = enabledByKey.get(key);
-    if (enabled) lines.push(enabled);
+    if (enabled !== undefined) lines.push(`enabled = ${enabled}`);
     lines.push(`trusted_hash = "${hash}"`, '');
   }
   lines.push(end);
   const separator = !content || content.endsWith('\n') ? '' : '\n';
-  const output = `${content}${separator}\n${lines.join('\n')}\n`.replace(/\n{3,}/g, '\n\n');
+  const output = `${content}${separator}\n${lines.join('\n')}\n`;
   if (output === existing) return false;
-  fs.writeFileSync(opts.configPath, output, 'utf-8');
+  writeValidatedConfig(opts.configPath, output);
   return true;
 }
 
@@ -359,31 +451,34 @@ export function removeTrustBlock(
 ): boolean {
   if (!fs.existsSync(configPath)) return false;
   const before = fs.readFileSync(configPath, 'utf-8');
-  const begin = `# BEGIN ${marker} trust`;
-  const end = `# END ${marker} trust`;
   const owned = new Set(ownedHookStateKeys);
-  let content = before.split('\n')
-    .filter(line => line.trim() !== begin && line.trim() !== end)
-    .filter(line => !/^\s*bypass_hook_trust\s*=/.test(line))
-    .join('\n');
-  content = removeExactTrustSections(content, owned).replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  const content = removeExactTrustSections(removeLegacyTrustMarkers(before, marker), owned);
   if (content === before) return false;
-  fs.writeFileSync(configPath, content, 'utf-8');
+  writeValidatedConfig(configPath, content);
   return true;
 }
 
-/** Remove exact position-based trust entries without touching the active block markers. */
+/**
+ * Remove exact position-based trust entries without touching the active markers.
+ * Retired-key cleanup runs before current trust repair: leave invalid TOML
+ * unchanged and return false so that repair still gets a chance to run.
+ * Filesystem errors still propagate to the caller's deployment error handler.
+ */
 export function removeTrustStateKeys(
   configPath: string,
   ownedHookStateKeys: readonly string[],
 ): boolean {
   if (!fs.existsSync(configPath) || ownedHookStateKeys.length === 0) return false;
   const before = fs.readFileSync(configPath, 'utf-8');
-  const content = removeExactTrustSections(before, new Set(ownedHookStateKeys))
-    .replace(/\n{3,}/g, '\n\n');
-  if (content === before) return false;
-  fs.writeFileSync(configPath, content, 'utf-8');
-  return true;
+  try {
+    const content = removeExactTrustSections(before, new Set(ownedHookStateKeys));
+    if (content === before) return false;
+    writeValidatedConfig(configPath, content);
+    return true;
+  } catch (err) {
+    if (err instanceof InvalidCodexConfigError) return false;
+    throw err;
+  }
 }
 
 export interface VerifyResult {
