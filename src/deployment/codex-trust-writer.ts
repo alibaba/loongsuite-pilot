@@ -322,6 +322,7 @@ export interface InstalledTrustOpts {
   configPath: string;
   hooksJsonAbsPath: string;
   locations: Record<string, InstalledCodexHookLocation>;
+  retiredKeys?: readonly string[];
   marker: string;
 }
 
@@ -331,6 +332,7 @@ interface LegacyTrustOpts {
   hookEvents: readonly string[];
   eventToCommand: Record<string, string>;
   eventToGroupIndex: Record<string, number>;
+  retiredKeys?: readonly string[];
   marker: string;
 }
 
@@ -356,6 +358,7 @@ function normalizeTrustOpts(opts: TrustOpts): InstalledTrustOpts {
     configPath: opts.configPath,
     hooksJsonAbsPath: opts.hooksJsonAbsPath,
     locations,
+    retiredKeys: opts.retiredKeys,
     marker: opts.marker,
   };
 }
@@ -371,13 +374,7 @@ function expectedTrustState(opts: InstalledTrustOpts): Map<string, string> {
   return expected;
 }
 
-/** Exact deterministic verification against the installed hooks.json locations. */
-export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
-  const opts = normalizeTrustOpts(rawOpts);
-  if (!fs.existsSync(opts.configPath)) {
-    return { valid: false, mismatches: ['config.toml missing'] };
-  }
-  const content = fs.readFileSync(opts.configPath, 'utf-8');
+function verifyTrustContent(content: string, opts: InstalledTrustOpts): VerifyResult {
   let state: Record<string, unknown> | undefined;
   try {
     const parsed = parseToml(content, { integersAsBigInt: true });
@@ -397,7 +394,19 @@ export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
     if (current === undefined) mismatches.push(`missing key=${key}`);
     else if (current !== hash) mismatches.push(`hash mismatch key=${key} (expected=${hash}, got=${current})`);
   }
+  for (const key of opts.retiredKeys ?? []) {
+    if (state?.[key] !== undefined) mismatches.push(`retired key still present=${key}`);
+  }
   return { valid: mismatches.length === 0, mismatches };
+}
+
+/** Exact deterministic verification against the installed hooks.json locations. */
+export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
+  const opts = normalizeTrustOpts(rawOpts);
+  if (!fs.existsSync(opts.configPath)) {
+    return { valid: false, mismatches: ['config.toml missing'] };
+  }
+  return verifyTrustContent(fs.readFileSync(opts.configPath, 'utf-8'), opts);
 }
 
 /**
@@ -410,15 +419,18 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   const existing = fs.existsSync(opts.configPath)
     ? fs.readFileSync(opts.configPath, 'utf-8')
     : '';
-  if (verifyTrustHashes(opts).valid) return false;
+  // The write-before idempotency check must inspect the same snapshot that will
+  // be reconciled. A parse failure (including duplicate Pilot tables) means the
+  // snapshot is not yet satisfied; owned duplicates remain repairable below.
+  if (verifyTrustContent(existing, opts).valid) return false;
 
   const begin = `# BEGIN ${opts.marker} trust`;
   const end = `# END ${opts.marker} trust`;
   const expected = expectedTrustState(opts);
   // Never infer ownership from marker position: Codex may reserialize TOML and
-  // move the END comment past unrelated third-party sections. Until persisted
-  // owned-key metadata is introduced, only touch the exact current Pilot keys.
-  const exactKeys = new Set(expected.keys());
+  // move the END comment past unrelated third-party sections. Only touch exact
+  // current keys plus retired keys proven from the still-installed Pilot hooks.
+  const exactKeys = new Set([...expected.keys(), ...(opts.retiredKeys ?? [])]);
   const enabledByKey = new Map<string, boolean>();
   for (const section of parseTrustSections(existing)) {
     if (section.enabled === undefined || expected.get(section.key) !== section.hash) continue;
