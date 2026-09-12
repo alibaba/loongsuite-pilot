@@ -244,8 +244,31 @@ for line in sys.stdin:
 tail -50 ~/.loongsuite-pilot/logs/qoderwork-wrapper-error.log 2>/dev/null
 ```
 
-若 error 日志提示 `real runtime not found`，说明 wrapper 已注入，但未找到 QoderWork 内置 worker runtime。常见原因是 QoderWork 安装路径或 SDK 版本结构变化，
-需升级 pilot 或补充 wrapper 的 runtime candidate。
+若 error 日志提示 `host app runtime not found`，说明 wrapper 已注入，但未找到宿主自己的 worker runtime。
+应根据日志中的 `execPath` / `resourcesPath` 核对安装路径和 SDK 目录，不要把其他应用的 runtime 填入作为替代。
+
+### 开发态 QwenWork / QoderWork 初始化失败
+
+macOS 全局 runtime 环境变量也会被开发实例继承。旧 wrapper 只查找安装包内的
+`app.asar.unpacked/node_modules/@qoder-ai/qoder-agent-sdk/dist/_worker`，开发实例可能因此没有启动原生 runtime，
+最终出现 `Control request "initialize" timed out after 120000ms`。
+
+更新后的 wrapper 支持从 `node_modules/electron/dist` 可执行文件定位开发项目，支持 npm 和项目内 pnpm 布局。
+workspace 可使用启动脚本提供的 `npm_package_json`，但必须声明 SDK 依赖，并解析到同一个 Electron 可执行文件。
+wrapper 只加载该项目解析出的 SDK，不搜索会话工作目录或其他已安装应用；同时恢复原生 runtime 的资源目录。
+开发态没有可靠的产品身份时只转发 runtime，不写入 QwenWork / QoderWork 专属 intercept 文件。
+
+找不到 runtime 或导入失败时，wrapper 会记录诊断、结束 stdout，再抛出 worker 错误，避免 SDK 输出读取挂起。
+是否回退 CLI 由宿主应用决定。macOS 安装器和 watchdog 在 wrapper 文件缺失时会清理当前 Pilot 所属的环境变量及 plist；
+已运行的应用、终端和 IDE 仍可能保留旧环境，需要重新启动相应进程。
+
+对于尚未升级 Pilot 或使用非标准开发目录的用户，可先完全退出开发实例，并在实际开发启动命令上排除两个变量：
+
+```bash
+env -u QW_QODER_WORKER_RUNTIME_PATH -u QODER_WORKER_RUNTIME_PATH npm run dev
+```
+
+将 `npm run dev` 换成项目实际启动命令；此方式只影响该命令及其子进程，不更改全局配置。
 
 ---
 

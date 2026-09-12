@@ -768,3 +768,45 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
       .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
   });
 });
+
+describe('macOS missing runtime override cleanup', () => {
+  it.each([true, false])('removes only owned stale configuration (owned=%s)', owned => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-mac-installer-'));
+    try {
+      const dataDir = join(root, 'custom-data');
+      const value = owned ? join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs') : '/custom/loongsuite-pilot/other.mjs';
+      const plistDir = join(root, 'Library', 'LaunchAgents');
+      mkdirSync(plistDir, { recursive: true });
+      const plists = ['qoderwork', 'qwenworkcn'].map(name => join(plistDir, `com.loongsuite-pilot.${name}-env.plist`));
+      for (const plist of plists) writeFileSync(plist, `<plist><string>${value}</string></plist>`);
+      const functions = ['inject_qoderwork_runtime_wrapper', 'remove_qoderwork_runtime_wrapper'].map(name => {
+        const match = sh.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'));
+        expect(match).not.toBeNull();
+        // Isolate path references without changing the test runner's home.
+        return match[0].replaceAll('$HOME', '$PILOT_TEST_HOME');
+      }).join('\n');
+      const result = spawnSync('bash', ['-s'], {
+        encoding: 'utf8', timeout: 5000,
+        env: { ...process.env, PILOT_TEST_HOME: root, DATA_DIR: dataDir, TEST_RUNTIME_VALUE: value, SELECTED_AGENTS: 'qoder-work,qwen-work-cn' },
+        input: `set -e
+uname() { echo Darwin; }
+msg() { :; }
+launchctl() {
+  if [ "$1" = getenv ]; then printf '%s' "$TEST_RUNTIME_VALUE";
+  else printf '%s\\n' "$*" >> "$PILOT_TEST_HOME/calls"; fi
+}
+${functions}
+inject_qoderwork_runtime_wrapper
+`,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      for (const plist of plists) expect(existsSync(plist)).toBe(!owned);
+      const calls = existsSync(join(root, 'calls')) ? readFileSync(join(root, 'calls'), 'utf8') : '';
+      if (owned) {
+        expect(calls).toContain('unsetenv QODER_WORKER_RUNTIME_PATH');
+        expect(calls).toContain('unsetenv QW_QODER_WORKER_RUNTIME_PATH');
+        for (const plist of plists) expect(calls).toContain(`unload ${plist}`);
+      } else expect(calls).toBe('');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
