@@ -28,6 +28,7 @@ export enum ClientType {
   QoderCli = 'qoder-cli',
   CursorCli = 'cursor-cli',
   PiCodingAgent = 'pi-coding-agent',
+  TraeAgent = 'trae-agent',
 
   // Hook-based tools
   ClaudeCliHook = 'claude-code',
@@ -72,4 +73,6 @@ export enum CollectionMethod {
   LsHttpApi = 'ls-http-api',
   /** Poll agent data via local CLI API (e.g. wukong) */
   CliApiPolling = 'cli-api-polling',
+  /** Re-read a single trajectory JSON file overwritten each cycle (e.g. trae-agent) */
+  LogWatchPolling = 'log-watch-polling',
 }

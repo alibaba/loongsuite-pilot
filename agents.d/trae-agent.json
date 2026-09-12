@@ -1,0 +1,13 @@
+{
+  "id": "trae-agent",
+  "displayName": "trae-agent",
+  "deployMode": "log-watch",
+  "detection": {
+    "paths": ["~/.trae-agent/trajectories"],
+    "commands": ["trae-cli"]
+  },
+  "input": {
+    "type": "log-watch-polling",
+    "trajectoryFile": "~/.trae-agent/trajectories/trajectory.json"
+  }
+}
