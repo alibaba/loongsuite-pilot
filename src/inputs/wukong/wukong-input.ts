@@ -59,6 +59,9 @@ interface WukongMessage {
   timestamp: number;
   turnIndex: number;
   userMsgId?: string;
+  // Explicit completeness flag from get_spark_agui_messages (1 when the message
+  // has fully settled). Older payloads may omit it; the gate falls back to events.
+  isComplete?: number;
 }
 
 interface AguiEvent {
@@ -80,12 +83,28 @@ interface StepContext {
   stepSpanId: string;
 }
 
+// A step accumulates one assistant utterance (reasoning + text) plus the tools it
+// triggered. A new step opens when a fresh utterance arrives after the current step
+// has already emitted tools — i.e. one step == one LLM decision (spec §2.3).
+interface StepAcc {
+  ctx: StepContext;
+  reasoning: string;
+  text: string;
+  toolCallParts: Array<{ type: string; id: string; name: string }>;
+  firstToolTs?: number;
+  lastToolTs?: number;
+  lastContentTs: number;
+  hasTools: boolean;
+  usage?: { input: number; output: number; cache: number; total: number };
+  // Per-utterance message id → used as gen_ai.response.id so each LLM call in a
+  // run has a UNIQUE response id (the run-level runId is shared and must not be reused).
+  responseId?: string;
+}
+
 const ACTIVITY_TYPE_TO_TOOL_NAME: Record<string, string> = {
   TERMINAL: 'terminal',
   FILE_WRITE: 'file_write',
-  FILE_READ: 'file_read',
   GREP_SEARCH: 'grep_search',
-  SEARCH: 'search',
   DIRECTORY_LIST: 'directory_list',
   SKILL: 'skill',
   ARTIFACT: 'artifact',
@@ -318,8 +337,10 @@ export class WukongInput extends BaseInput {
 
     const newMessages = messages.slice(prevCount);
 
-    // Only process completed messages to avoid the token race condition.
-    // An incomplete assistant message (still streaming) will be retried next poll.
+    // Only process fully-settled messages. An assistant message that is still
+    // streaming (missing RUN_FINISHED / USAGE / a closing TEXT_MESSAGE_END) is
+    // deferred to the next poll so we never emit a truncated answer or 0 tokens
+    // and never advance the cursor past a half-baked message.
     const lastCompleteIdx = findLastCompleteIndex(newMessages);
     if (lastCompleteIdx < 0) return null;
 
@@ -371,7 +392,12 @@ export class WukongInput extends BaseInput {
 
         const turnId = resolveTurnId(sessionId, msg);
         const userContent = pendingUserMessages.map(m => m.content).filter(Boolean).join('\n');
-        const turnEntries = this.transformAssistantMessage(task, msg, events, model, turnId, commonFields, userContent);
+        // Earliest user message time = the moment the user submitted the prompt.
+        // Used to timestamp the `other` event before the run starts.
+        const userPromptTs = pendingUserMessages.length > 0
+          ? minOf(pendingUserMessages.map(m => numOr(m.timestamp) ?? numOr(m.createdAt) ?? msg.createdAt))
+          : undefined;
+        const turnEntries = this.transformAssistantMessage(task, msg, events, model, turnId, commonFields, userContent, userPromptTs);
 
         // If this assistant produced no entries (e.g., RUN_ERROR with no content),
         // keep pending user messages for the next assistant. Don't emit orphans.
@@ -379,10 +405,6 @@ export class WukongInput extends BaseInput {
           continue;
         }
 
-        // User content is already merged into step 1's llm.request gen_ai.input.messages_delta.
-        // The OTLP converter falls back to that for ENTRY input.messages. So we don't
-        // emit a separate user-hook llm.request — this avoids events without step.id
-        // and keeps llm.request field-coverage at 100%.
         pendingUserMessages = [];
 
         entries.push(...turnEntries);
@@ -400,12 +422,19 @@ export class WukongInput extends BaseInput {
     // incomplete sessions (user wrote but assistant hasn't responded yet).
     // Don't emit them as orphan ENTRY/AGENT spans with 0 duration.
     // They'll be processed on the next poll when the assistant responds.
-    // Note: We still need to NOT advance seenCounts past them, but the slicing
-    // logic in doCollect already handles this via isMessageComplete checks.
 
     return entries;
   }
 
+  /**
+   * Convert one assistant AGUI message (one RUN cycle) into an ordered event-log
+   * stream: `other` (user prompt) → per-step `llm.request`/`llm.response` with the
+   * step's tools interleaved → final `llm.response`. See EVENT_LOG_TO_TRACE_SPEC.
+   *
+   * Segmentation: a step is one assistant utterance (reasoning + text) plus the
+   * tools it triggered. A new step opens when a fresh utterance arrives after the
+   * current step already emitted tools, so STEP count == LLM decision count.
+   */
   private transformAssistantMessage(
     task: ValidWukongTask,
     msg: WukongMessage,
@@ -414,255 +443,188 @@ export class WukongInput extends BaseInput {
     turnId: string,
     common: Record<string, unknown>,
     userContent: string,
+    userPromptTs?: number,
   ): AgentActivityEntry[] {
     const entries: AgentActivityEntry[] = [];
     const sessionId = task.session_id;
-
-    // Generate trace-level IDs for this turn
     const traceId = generateTraceId();
     const agentSpanId = generateSpanId();
 
-    // Step tracking
-    let stepIndex = 0;
-    let currentStep: StepContext | null = null;
-    const hasStepEvents = events.some(e => e.type === 'STEP_STARTED');
+    // Defensive: AGUI is external data. Sanitize timestamps once up front.
+    const evs: AguiEvent[] = events.map(e => {
+      const ts = numOr(e.timestamp) ?? msg.createdAt;
+      return ts === e.timestamp ? e : { ...e, timestamp: ts };
+    });
 
-    // Per-step accumulators (reset on each new step)
+    // Skip metadata-only messages (e.g. an invisible session_context_stats message
+    // carrying only CUSTOM/FIRST_TOKEN). They mark themselves complete but hold no
+    // run/text/tool content, so they must not emit a spurious empty LLM pair.
+    const MEANINGFUL_EVENTS = new Set([
+      'RUN_STARTED', 'RUN_FINISHED', 'RUN_ERROR', 'STEP_STARTED', 'STEP_FINISHED',
+      'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END',
+      'REASONING_START', 'REASONING_MESSAGE_CHUNK', 'REASONING_END',
+      'TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_END', 'TOOL_CALL_RESULT',
+      'ACTIVITY_SNAPSHOT', 'USAGE',
+    ]);
+    if (!evs.some(e => MEANINGFUL_EVENTS.has(e.type))) return [];
+
+    // Run-level scan: these apply to the whole turn, not a single step.
     let runId: string | undefined;
-    let textContent = '';
-    let usageEvent: AguiEvent | undefined;
-    let firstTokenEvent: AguiEvent | undefined;
     let runStartedTs: number | undefined;
     let runFinishedTs: number | undefined;
     let runError: { code: string; message: string } | undefined;
+    for (const e of evs) {
+      switch (e.type) {
+        case 'RUN_STARTED':
+          runId = e.runId as string | undefined;
+          runStartedTs = e.timestamp;
+          break;
+        case 'RUN_FINISHED':
+          runFinishedTs = e.timestamp;
+          break;
+        case 'RUN_ERROR':
+          runError = { code: String(e.code ?? 'UNKNOWN'), message: String(e.message ?? '') };
+          break;
+      }
+    }
+
+    // Step segmentation state.
+    // wukong sometimes emits explicit STEP_STARTED/STEP_FINISHED boundaries; when
+    // present they are authoritative. Otherwise segment heuristically.
+    const hasStepEvents = evs.some(e => e.type === 'STEP_STARTED');
+    const steps: StepAcc[] = [];
+    let stepIndex = 0;
+    let cur: StepAcc | null = null;
+    const openStep = (ts: number): StepAcc => {
+      stepIndex++;
+      const ctx: StepContext = {
+        stepIndex,
+        stepId: `${turnId}:s${stepIndex}`,
+        stepMessageId: `s${stepIndex}`,
+        hasToolCalls: false,
+        startTimestamp: ts,
+        stepSpanId: generateSpanId(),
+      };
+      const s: StepAcc = { ctx, reasoning: '', text: '', toolCallParts: [], lastContentTs: ts, hasTools: false };
+      steps.push(s);
+      cur = s;
+      return s;
+    };
+    // An assistant utterance (text/reasoning). With STEP_STARTED boundaries it just
+    // attaches to the current step. Without them, a new utterance after the current
+    // step already produced tools starts a fresh step (one LLM decision per step).
+    const stepForUtterance = (ts: number): StepAcc => {
+      if (!cur) return openStep(ts);
+      if (!hasStepEvents && cur.hasTools) return openStep(ts);
+      return cur;
+    };
+    // A tool/activity. With STEP_STARTED boundaries it attaches to the current step.
+    // Without them, a tool that starts at/after the current step's last tool finished
+    // is a sequential (post-observation) LLM round → new step; an overlapping tool is
+    // treated as parallel and stays in the same step (spec §2.3).
+    const stepForTool = (startTs: number): StepAcc => {
+      if (!cur) return openStep(startTs);
+      if (!hasStepEvents && cur.hasTools && startTs >= (cur.lastToolTs ?? startTs)) return openStep(startTs);
+      return cur;
+    };
+    const markTool = (s: StepAcc, startTs: number, endTs: number): void => {
+      s.firstToolTs = s.firstToolTs === undefined ? startTs : Math.min(s.firstToolTs, startTs);
+      s.lastToolTs = s.lastToolTs === undefined ? endTs : Math.max(s.lastToolTs, endTs);
+      s.hasTools = true;
+      s.ctx.hasToolCalls = true;
+    };
+
     let toolIdx = 0;
     let toolStartCount = 0;
     const toolStartTimestamps = new Map<string, number>();
-    const allToolStartTimes: number[] = [];
-    const allToolEndTimes: number[] = [];
     const toolArgsAccumulator = new Map<string, string>();
     const toolNames = new Map<string, string>();
-    const toolCallParts: Array<{ type: string; id: string; name: string }> = [];
+    // USAGE seen before any step opened (rare); attached to the final step later.
+    let pendingUsage: { input: number; output: number; cache: number; total: number } | undefined;
 
-    const startNewStep = (evt: AguiEvent): void => {
-      stepIndex++;
-      const stepSpanId = generateSpanId();
-      currentStep = {
-        stepIndex,
-        stepId: `${turnId}:s${stepIndex}`,
-        stepMessageId: (evt.messageId as string) ?? `step-${stepIndex}`,
-        hasToolCalls: false,
-        startTimestamp: evt.timestamp,
-        stepSpanId,
-      };
-      // Reset per-step accumulators
-      textContent = '';
-      usageEvent = undefined;
-      firstTokenEvent = undefined;
-      toolCallParts.length = 0;
-      // Tool timestamp arrays are per-step (not turn-level) so flushStepLlm
-      // computes the correct response timestamp for the CURRENT step's tools.
-      allToolStartTimes.length = 0;
-      allToolEndTimes.length = 0;
-    };
-
-    // Determine if we need to pre-create initial step s1.
-    // Required when: no STEP_STARTED events, OR meaningful events occur before
-    // the first STEP_STARTED (e.g., early ACTIVITY_SNAPSHOT).
-    const firstStepStartedIdx = events.findIndex(e => e.type === 'STEP_STARTED');
-    const eventsBeforeFirstStep = firstStepStartedIdx >= 0
-      ? events.slice(0, firstStepStartedIdx)
-      : events;
-    const hasContentBeforeStep = eventsBeforeFirstStep.some(e =>
-      e.type === 'TOOL_CALL_START' || e.type === 'ACTIVITY_SNAPSHOT' || e.type === 'TEXT_MESSAGE_CONTENT'
-    );
-    if (!hasStepEvents || hasContentBeforeStep) {
-      stepIndex = 1;
-      currentStep = {
-        stepIndex: 1,
-        stepId: `${turnId}:s1`,
-        stepMessageId: `synth-step-1`,
-        hasToolCalls: false,
-        startTimestamp: msg.createdAt,
-        stepSpanId: generateSpanId(),
-      };
-    }
-
-    // Track step.ids that have been flushed by flushStepLlm so the post-loop
-    // main emit block does not double-emit for those steps.
-    const flushedStepIds = new Set<string>();
-
-    // flushStepLlm: emit the paired llm.request + llm.response for the current step
-    // using the currently-accumulated step state, then clear per-step accumulators.
-    // Called from STEP_FINISHED so each step gets its own real token/text/error data
-    // (instead of only the last step capturing it). Returns true if it emitted.
-    const flushStepLlm = (): boolean => {
-      if (!currentStep) return false;
-      const hasContent = !!textContent || !!usageEvent || toolCallParts.length > 0 || !!runError;
-      if (!hasContent) return false;
-
-      const finishReasons = this.inferFinishReasons(currentStep.hasToolCalls, runError);
-      const llmSpanId = generateSpanId();
-
-      const inputTokens = numOr(usageEvent?.prompt_tokens) ?? 0;
-      const outputTokens = numOr(usageEvent?.completion_tokens) ?? 0;
-      const cachedTokens = numOr(usageEvent?.cached_tokens) ?? 0;
-      const totalTokens = numOr(usageEvent?.total_tokens) ?? (inputTokens + outputTokens);
-
-      const requestTimestamp = Math.max(currentStep.startTimestamp, runStartedTs ?? 0) || msg.createdAt;
-      // For tool-calling step: response just before first tool. Else: max of req+1, runFinishedTs.
-      let responseTimestamp: number;
-      if (currentStep.hasToolCalls && allToolStartTimes.length > 0) {
-        const firstToolTs = minOf(allToolStartTimes);
-        responseTimestamp = Math.max(requestTimestamp + 1, firstToolTs - 1);
-      } else if (currentStep.hasToolCalls) {
-        responseTimestamp = requestTimestamp + 1;
-      } else {
-        responseTimestamp = Math.max(requestTimestamp + 1, runFinishedTs ?? msg.createdAt);
-      }
-
-      // Only inject userContent on step 1 (it's a turn-level prompt, not per-step)
-      const includeUserContent = !!userContent && currentStep.stepIndex === 1;
-
-      entries.push(buildAgentActivityEntry({
-        timestamp: requestTimestamp,
-        'event.id': hashId([sessionId, msg.id, 'request', String(currentStep.stepIndex)]),
-        'event.name': 'llm.request',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.id': runId,
-        'trace_id': traceId,
-        ...(includeUserContent ? {
-          'gen_ai.input.messages_delta': [
-            { role: 'user', parts: [{ type: 'text', content: userContent }] },
-          ],
-        } : {}),
-        attributes: {
-          source: 'wukong',
-          message_id: msg.id,
-          conversation_id: msg.conversationId,
-        },
-      }));
-
-      const outputParts: Array<Record<string, string>> = [];
-      if (textContent) outputParts.push({ type: 'text', content: textContent });
-      for (const tc of toolCallParts) {
-        outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
-      }
-      // For RUN_ERROR-only turns (no text, no tools), still populate
-      // output.messages with the error info so the LLM span has both
-      // input and output (satisfies semantic.llm_has_input_output).
-      if (outputParts.length === 0 && runError) {
-        outputParts.push({ type: 'text', content: `[error] ${runError.code}: ${runError.message}` });
-      }
-
-      entries.push(buildAgentActivityEntry({
-        timestamp: responseTimestamp,
-        'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
-        'event.name': 'llm.response',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
-        'gen_ai.response.id': runId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.model': model,
-        'gen_ai.response.finish_reasons': finishReasons,
-        'trace_id': traceId,
-        'span_id': llmSpanId,
-        'parent_span_id': currentStep.stepSpanId,
-        ...(includeUserContent ? {
-          'gen_ai.input.messages': [
-            { role: 'user', parts: [{ type: 'text', content: userContent }] },
-          ],
-        } : {}),
-        ...(outputParts.length > 0 ? {
-          'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts }],
-        } : {}),
-        'gen_ai.usage.input_tokens': inputTokens,
-        'gen_ai.usage.output_tokens': outputTokens,
-        'gen_ai.usage.cache_read.input_tokens': cachedTokens,
-        'gen_ai.usage.total_tokens': totalTokens,
-        ...(runError ? { 'error.type': runError.code, 'error.message': runError.message } : {}),
-        attributes: {
-          source: 'wukong',
-          message_id: msg.id,
-          conversation_id: msg.conversationId,
-          ...(firstTokenEvent ? {
-            ttft_ms: firstTokenEvent.ttft_ms as number,
-            e2e_ttft_ms: firstTokenEvent.e2e_ttft_ms as number,
-          } : {}),
-          ...(runStartedTs && runFinishedTs ? {
-            run_duration_ms: runFinishedTs - runStartedTs,
-          } : {}),
-        },
-      }));
-
-      // Clear per-step accumulators so the next step starts fresh.
-      flushedStepIds.add(currentStep.stepId);
-      textContent = '';
-      usageEvent = undefined;
-      firstTokenEvent = undefined;
-      toolCallParts.length = 0;
-      // runError stays cleared too: it belongs to the step that just ended.
-      runError = undefined;
-      return true;
-    };
-
-    for (const rawEvt of events) {
-      // Defensive: AGUI is external data. Sanitize timestamp before any use.
-      const sanitizedTs = numOr(rawEvt.timestamp) ?? msg.createdAt;
-      const evt: AguiEvent = sanitizedTs === rawEvt.timestamp ? rawEvt : { ...rawEvt, timestamp: sanitizedTs };
+    for (const evt of evs) {
       switch (evt.type) {
-        case 'STEP_STARTED':
-          startNewStep(evt);
+        case 'STEP_STARTED': {
+          const s = openStep(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
           break;
+        }
 
         case 'STEP_FINISHED':
-          // Emit the paired llm.request + llm.response for this step before the
-          // next STEP_STARTED resets per-step accumulators. This ensures every
-          // step gets its own real tokens / text / error info instead of only
-          // the last step capturing them.
-          flushStepLlm();
+          // Authoritative boundary marker; the next STEP_STARTED opens the next step.
           break;
 
-        case 'RUN_STARTED':
-          runId = evt.runId as string | undefined;
-          runStartedTs = evt.timestamp;
+        case 'REASONING_START': {
+          const s = stepForUtterance(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
           break;
+        }
 
-        case 'RUN_FINISHED':
-          runFinishedTs = evt.timestamp;
+        case 'REASONING_MESSAGE_CHUNK': {
+          const s = stepForUtterance(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          if (typeof evt.delta === 'string') s.reasoning += evt.delta;
+          else if (typeof evt.content === 'string') s.reasoning += evt.content;
+          s.lastContentTs = evt.timestamp;
           break;
+        }
 
-        case 'RUN_ERROR':
-          runError = {
-            code: String(evt.code ?? 'UNKNOWN'),
-            message: String(evt.message ?? ''),
-          };
+        case 'REASONING_END': {
+          const last = steps[steps.length - 1];
+          if (last) last.lastContentTs = evt.timestamp;
           break;
+        }
 
-        case 'TEXT_MESSAGE_CONTENT':
-          if (typeof evt.delta === 'string') textContent += evt.delta;
+        case 'TEXT_MESSAGE_START': {
+          const s = stepForUtterance(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
           break;
+        }
 
-        case 'USAGE':
-          usageEvent = evt;
+        case 'TEXT_MESSAGE_CONTENT': {
+          const s = stepForUtterance(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          if (typeof evt.delta === 'string') s.text += evt.delta;
+          s.lastContentTs = evt.timestamp;
           break;
+        }
 
-        case 'FIRST_TOKEN':
-          firstTokenEvent = evt;
+        case 'TEXT_MESSAGE_END': {
+          const last = steps[steps.length - 1];
+          if (last) last.lastContentTs = evt.timestamp;
           break;
+        }
+
+        case 'USAGE': {
+          const input = numOr(evt.prompt_tokens) ?? 0;
+          const output = numOr(evt.completion_tokens) ?? 0;
+          const cache = numOr(evt.cached_tokens) ?? 0;
+          const total = numOr(evt.total_tokens) ?? (input + output);
+          const last = steps[steps.length - 1];
+          if (last) {
+            // Accumulate rather than overwrite: a step may receive more than one
+            // USAGE (multiple LLM calls billed within the same step boundary).
+            last.usage = last.usage
+              ? {
+                  input: last.usage.input + input,
+                  output: last.usage.output + output,
+                  cache: last.usage.cache + cache,
+                  total: last.usage.total + total,
+                }
+              : { input, output, cache, total };
+          } else {
+            pendingUsage = { input, output, cache, total };
+          }
+          break;
+        }
 
         case 'TOOL_CALL_START': {
-          if (currentStep) currentStep.hasToolCalls = true;
+          // Only record start time + name; the step decision and emission happen at
+          // TOOL_CALL_END so a sequential-tool boundary is evaluated exactly once.
           const tcId = (evt.toolCallId as string | undefined) ?? `idx-${toolStartCount}`;
           toolStartTimestamps.set(tcId, evt.timestamp);
-          allToolStartTimes.push(evt.timestamp);
           const toolName = (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
           toolNames.set(tcId, toolName);
-          toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
           toolStartCount++;
           break;
         }
@@ -683,412 +645,198 @@ export class WukongInput extends BaseInput {
           const duration = startTs ? adjustedEndTs - startTs : undefined;
           const toolName = toolNames.get(tcId) ?? (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
           const args = toolArgsAccumulator.get(tcId);
+          const s = stepForTool(startEvtTimestamp);
+          s.toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
 
-          // Emit tool.call (deferred from TOOL_CALL_START to capture accumulated args)
           const syntheticStartEvt = { ...evt, timestamp: startEvtTimestamp, toolCallId: evt.toolCallId, toolName };
           entries.push(this.buildToolCallEntry(
             task, msg, syntheticStartEvt, model, turnId, toolIdx, common,
-            currentStep, traceId, agentSpanId, args,
+            s.ctx, traceId, agentSpanId, args,
           ));
           toolIdx++;
 
-          // Emit tool.result with adjusted timestamp
           const syntheticEndEvt = { ...evt, timestamp: adjustedEndTs };
           entries.push(this.buildToolResultEntry(
             task, msg, syntheticEndEvt, model, turnId, toolIdx, common, duration,
-            currentStep, traceId, agentSpanId, toolName,
+            s.ctx, traceId, agentSpanId, toolName,
           ));
           toolIdx++;
-          allToolEndTimes.push(adjustedEndTs);
+          markTool(s, startEvtTimestamp, adjustedEndTs);
           break;
         }
 
         case 'TOOL_CALL_RESULT': {
-          // TOOL_CALL_RESULT provides richer content than TOOL_CALL_END.
-          // Match by toolCallId rather than "last tool.result" to avoid
-          // mis-attributing results when tools complete out of order.
+          // Richer content than TOOL_CALL_END; match by toolCallId.
           const tcId = evt.toolCallId as string | undefined;
           if (!tcId) break;
           const match = findEntryByToolCallId(entries, 'tool.result', tcId);
           if (match) {
-            const content = evt.content;
-            if (content !== undefined) {
-              match['gen_ai.tool.call.result'] = toJsonValue(content);
-            }
-            if (evt.is_error === true) {
-              // Use canonical field — `tool.result.status` is a legacy alias
-              // that the entry-builder already stripped during construction.
-              match['error.type'] = match['error.type'] ?? '_OTHER';
-            }
+            if (evt.content !== undefined) match['gen_ai.tool.call.result'] = toJsonValue(evt.content);
+            if (evt.is_error === true) match['error.type'] = match['error.type'] ?? '_OTHER';
           }
           break;
         }
 
         case 'ACTIVITY_SNAPSHOT': {
           const activityType = evt.activityType as string | undefined;
-          if (activityType && activityType !== 'TASK_LINE_PLAN') {
-            const actToolName = ACTIVITY_TYPE_TO_TOOL_NAME[activityType] ?? activityType.toLowerCase();
-            const actToolCallId = `activity-${msg.id}-${toolIdx}`;
-            toolCallParts.push({ type: 'tool_call', id: actToolCallId, name: actToolName });
-            const content = evt.content as Record<string, unknown> | undefined;
-            const actStartTs = numOr(content?.start_time) ?? evt.timestamp;
-            const actEndTs = numOr(content?.finish_time) ?? evt.timestamp;
-            allToolStartTimes.push(actStartTs);
-            allToolEndTimes.push(actEndTs);
-            const activityEntries = this.transformActivitySnapshot(
-              task, msg, evt, model, turnId, toolIdx, common,
-              currentStep, traceId, agentSpanId,
-            );
-            entries.push(...activityEntries);
-            toolIdx += 2; // tool.call + tool.result
-            if (currentStep) currentStep.hasToolCalls = true;
-          }
+          // TASK_LINE_PLAN is a planning note; PERMISSION is a HITL approval prompt.
+          // Neither is a tool execution, so skip both.
+          if (!activityType || activityType === 'TASK_LINE_PLAN' || activityType === 'PERMISSION') break;
+          const actToolName = ACTIVITY_TYPE_TO_TOOL_NAME[activityType] ?? activityType.toLowerCase();
+          const content = evt.content as Record<string, unknown> | undefined;
+          const actStartTs = numOr(content?.start_time) ?? evt.timestamp;
+          const actEndTs = numOr(content?.finish_time) ?? evt.timestamp;
+          const s = stepForTool(actStartTs);
+          const actToolCallId = `activity-${msg.id}-${toolIdx}`;
+          s.toolCallParts.push({ type: 'tool_call', id: actToolCallId, name: actToolName });
+          const activityEntries = this.transformActivitySnapshot(
+            task, msg, evt, model, turnId, toolIdx, common,
+            s.ctx, traceId, agentSpanId,
+          );
+          entries.push(...activityEntries);
+          toolIdx += 2; // tool.call + tool.result
+          markTool(s, actStartTs, actEndTs);
           break;
         }
       }
     }
 
-    // For synthetic-step messages with tools, split into:
-    //   step 1: LLM (declares tools, has tool_call parts, finish_reasons=tool_calls) → tools execute
-    //   step 2: LLM (final answer text only, no tool_call parts, finish_reasons=stop/end_turn)
-    // This satisfies both last_step_no_tool_call and tool_matches_llm_output rules.
-    if (!hasStepEvents && currentStep && currentStep.hasToolCalls && allToolStartTimes.length > 0) {
-      const midLlmSpanId = generateSpanId();
-      const midOutputParts: Array<Record<string, string>> = [];
-      for (const tc of toolCallParts) {
-        midOutputParts.push({ type: tc.type, id: tc.id, name: tc.name });
-      }
-      const midReqTs = runStartedTs ?? currentStep.startTimestamp;
-      const firstToolTs = minOf(allToolStartTimes);
-      const lastToolTs = maxOf(allToolStartTimes, allToolEndTimes);
-      const midRespTs = Math.max(midReqTs + 1, firstToolTs - 1);
-
-      // Emit step 1 llm.request + llm.response (tool-calling)
-      entries.push(buildAgentActivityEntry({
-        timestamp: midReqTs,
-        'event.id': hashId([sessionId, msg.id, 'request', String(currentStep.stepIndex)]),
-        'event.name': 'llm.request',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.id': runId,
-        'trace_id': traceId,
-        ...(userContent && currentStep.stepIndex === 1 ? {
-          'gen_ai.input.messages_delta': [
-            { role: 'user', parts: [{ type: 'text', content: userContent }] },
-          ],
-        } : {}),
-        attributes: { source: 'wukong', message_id: msg.id, conversation_id: msg.conversationId },
-      }));
-      entries.push(buildAgentActivityEntry({
-        timestamp: midRespTs,
-        'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
-        'event.name': 'llm.response',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
-        'gen_ai.response.id': runId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.model': model,
-        'gen_ai.response.finish_reasons': ['tool_calls'],
-        'trace_id': traceId,
-        'span_id': midLlmSpanId,
-        'parent_span_id': currentStep.stepSpanId,
-        ...(userContent && currentStep.stepIndex === 1 ? {
-          'gen_ai.input.messages': [
-            { role: 'user', parts: [{ type: 'text', content: userContent }] },
-          ],
-        } : {}),
-        ...(midOutputParts.length > 0 ? {
-          'gen_ai.output.messages': [{ role: 'assistant', parts: midOutputParts }],
-        } : {}),
-        'gen_ai.usage.input_tokens': 0,
-        'gen_ai.usage.output_tokens': 0,
-        'gen_ai.usage.cache_read.input_tokens': 0,
-        'gen_ai.usage.total_tokens': 0,
-        attributes: { source: 'wukong', message_id: msg.id, conversation_id: msg.conversationId },
-      }));
-
-      // Start step 2 (final answer) AFTER all tools complete
-      stepIndex++;
-      const finalStepStart = lastToolTs + 1;
-      currentStep = {
-        stepIndex,
-        stepId: `${turnId}:s${stepIndex}`,
-        stepMessageId: `synth-final-${stepIndex}`,
-        hasToolCalls: false,
-        startTimestamp: finalStepStart,
-        stepSpanId: generateSpanId(),
-      };
-      toolCallParts.length = 0;
-      // Override runFinishedTs to ensure final step's response timing
-      if (!runFinishedTs || runFinishedTs <= finalStepStart) {
-        runFinishedTs = finalStepStart + 1;
+    // Emit a step only when there was a real run or an error. A message with no
+    // run and no content (e.g. an auxiliary PERMISSION-only message once PERMISSION
+    // is skipped) emits nothing rather than a spurious empty LLM pair.
+    if (steps.length === 0) {
+      if (runError !== undefined || runStartedTs !== undefined) {
+        openStep(runStartedTs ?? msg.createdAt);
+      } else {
+        return [];
       }
     }
 
-    // Emit llm.response for the current (possibly only) step.
-    // Skip if STEP_FINISHED already flushed this step.
-    const alreadyFlushed = currentStep && flushedStepIds.has(currentStep.stepId);
-    const shouldEmitFinalLlm = !alreadyFlushed && currentStep && (
-      textContent || usageEvent || toolCallParts.length > 0
-      || runError
-      || (currentStep.stepIndex > 1 && !currentStep.hasToolCalls)
-    );
-    if (currentStep && shouldEmitFinalLlm) {
-      const finishReasons = this.inferFinishReasons(currentStep.hasToolCalls, runError);
-      const llmSpanId = generateSpanId();
+    const finalIdx = steps.length - 1;
+    // A USAGE seen before any step opened is attributed to the final step.
+    if (pendingUsage && !steps[finalIdx].usage) steps[finalIdx].usage = pendingUsage;
 
-      const inputTokens = numOr(usageEvent?.prompt_tokens) ?? 0;
-      const outputTokens = numOr(usageEvent?.completion_tokens) ?? 0;
-      const cachedTokens = numOr(usageEvent?.cached_tokens) ?? 0;
-      const totalTokens = numOr(usageEvent?.total_tokens) ?? (inputTokens + outputTokens);
-
-      // Timestamp logic:
-      //   - tool-calling step: request=runStartedTs, response=just before first tool starts
-      //     (so LLM span has non-zero duration AND starts before tool spans)
-      //   - text-only final step: request=runStartedTs, response=runFinishedTs
-      // Use max(currentStep.startTimestamp, runStartedTs) — for split step 2, currentStep.startTimestamp
-      // is set to lastToolTs+1 which is later than the original runStartedTs.
-      const requestTimestamp = Math.max(currentStep.startTimestamp, runStartedTs ?? 0) || msg.createdAt;
-      let responseTimestamp: number;
-      if (currentStep.hasToolCalls && allToolStartTimes.length > 0) {
-        // Find earliest tool timestamp (across TOOL_CALL_START and ACTIVITY_SNAPSHOT)
-        const firstToolTs = minOf(allToolStartTimes);
-        responseTimestamp = Math.max(requestTimestamp + 1, firstToolTs - 1);
-      } else if (currentStep.hasToolCalls) {
-        // Tool-calling step but no tool timestamps available; fallback
-        responseTimestamp = requestTimestamp + 1;
-      } else {
-        responseTimestamp = Math.max(requestTimestamp + 1, runFinishedTs ?? msg.createdAt);
-      }
+    // `other` — the user prompt begins the turn. Not a span; merged into ENTRY input.
+    if (userContent) {
+      const otherTs = userPromptTs ?? ((runStartedTs ?? msg.createdAt) - 1);
       entries.push(buildAgentActivityEntry({
-        timestamp: requestTimestamp,
-        'event.id': hashId([sessionId, msg.id, 'request', String(currentStep.stepIndex)]),
+        timestamp: otherTs,
+        'event.id': hashId([sessionId, msg.id, 'other']),
+        'event.name': 'other',
+        ...common,
+        'gen_ai.turn.id': turnId,
+        'trace_id': traceId,
+        'gen_ai.input.messages_delta': [
+          { role: 'user', parts: [{ type: 'text', content: userContent }] },
+        ],
+      }));
+    }
+
+    // Emit one llm.request + llm.response per step. Timing is computed sequentially
+    // so requests precede responses precede the step's tools, and steps ascend.
+    let cursorTs = runStartedTs ?? steps[0].ctx.startTimestamp;
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      const isFinal = i === finalIdx;
+
+      const reqTs = i === 0
+        ? (runStartedTs ?? s.ctx.startTimestamp)
+        : Math.max(s.ctx.startTimestamp, cursorTs + 1);
+      let respTs: number;
+      if (s.hasTools && s.firstToolTs !== undefined) {
+        respTs = Math.max(reqTs + 1, s.firstToolTs - 1);
+      } else if (isFinal) {
+        respTs = Math.max(reqTs + 1, runFinishedTs ?? s.lastContentTs);
+      } else {
+        respTs = Math.max(reqTs + 1, s.lastContentTs);
+      }
+      cursorTs = Math.max(respTs, s.lastToolTs ?? respTs);
+
+      const finishReasons = this.inferFinishReasons(s.hasTools, isFinal ? runError : undefined);
+      const llmSpanId = generateSpanId();
+      const includeUserContent = i === 0 && !!userContent;
+      // Unique per-LLM-call response id. runId is shared across the whole run, so
+      // reusing it would collapse distinct steps in the converter; prefer the
+      // utterance messageId, fall back to a deterministic per-step id.
+      const responseId = s.responseId ?? (runId ? `${runId}:s${s.ctx.stepIndex}` : `${s.ctx.stepId}:r`);
+
+      entries.push(buildAgentActivityEntry({
+        timestamp: reqTs,
+        'event.id': hashId([sessionId, msg.id, 'request', String(s.ctx.stepIndex)]),
         'event.name': 'llm.request',
         ...common,
         'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
+        'gen_ai.step.id': s.ctx.stepId,
         'gen_ai.request.model': model,
-        'gen_ai.response.id': runId,
+        'gen_ai.response.id': responseId,
         'trace_id': traceId,
-        ...(userContent && currentStep.stepIndex === 1 ? {
+        ...(includeUserContent ? {
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: userContent }] },
           ],
         } : {}),
-        attributes: {
-          source: 'wukong',
-          message_id: msg.id,
-          conversation_id: msg.conversationId,
-        },
       }));
 
-      // Build output message parts: text + tool_call declarations
+      // Output parts: reasoning + text merged into ONE message (spec §4.2),
+      // followed by tool_call declarations for the tools this step triggered.
       const outputParts: Array<Record<string, string>> = [];
-      if (textContent) {
-        outputParts.push({ type: 'text', content: textContent });
-      }
-      for (const tc of toolCallParts) {
-        outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
-      }
-      // For RUN_ERROR-only turns, populate output.messages with error info
-      // so the LLM span has both input and output (validator constraint).
-      if (outputParts.length === 0 && runError) {
+      if (s.reasoning) outputParts.push({ type: 'reasoning', content: s.reasoning });
+      if (s.text) outputParts.push({ type: 'text', content: s.text });
+      for (const tc of s.toolCallParts) outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
+      if (outputParts.length === 0 && runError && isFinal) {
         outputParts.push({ type: 'text', content: `[error] ${runError.code}: ${runError.message}` });
       }
 
-      const responseEntry = buildAgentActivityEntry({
-        timestamp: responseTimestamp,
-        'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
+      // Each step carries the tokens from the USAGE event that landed on it
+      // (0 if none). The run's aggregate USAGE naturally lands on the final step,
+      // so the AGENT-level sum equals the real reported usage (spec §3.4).
+      const u = s.usage ?? { input: 0, output: 0, cache: 0, total: 0 };
+      const tokIn = u.input;
+      const tokOut = u.output;
+      const tokCache = u.cache;
+      const tokTotal = u.total;
+
+      entries.push(buildAgentActivityEntry({
+        timestamp: respTs,
+        'event.id': hashId([sessionId, msg.id, 'response', String(s.ctx.stepIndex)]),
         'event.name': 'llm.response',
         ...common,
         'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': currentStep.stepId,
-        'gen_ai.response.id': runId,
+        'gen_ai.step.id': s.ctx.stepId,
+        'gen_ai.response.id': responseId,
         'gen_ai.request.model': model,
         'gen_ai.response.model': model,
         'gen_ai.response.finish_reasons': finishReasons,
         'trace_id': traceId,
         'span_id': llmSpanId,
-        'parent_span_id': currentStep.stepSpanId,
-        ...(userContent && currentStep.stepIndex === 1 ? {
+        'parent_span_id': s.ctx.stepSpanId,
+        ...(includeUserContent ? {
           'gen_ai.input.messages': [
             { role: 'user', parts: [{ type: 'text', content: userContent }] },
           ],
         } : {}),
         ...(outputParts.length > 0 ? {
-          'gen_ai.output.messages': [
-            { role: 'assistant', parts: outputParts },
-          ],
+          'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts }],
         } : {}),
-        'gen_ai.usage.input_tokens': inputTokens,
-        'gen_ai.usage.output_tokens': outputTokens,
-        'gen_ai.usage.cache_read.input_tokens': cachedTokens,
-        'gen_ai.usage.total_tokens': totalTokens,
-        ...(runError ? { 'error.type': runError.code, 'error.message': runError.message } : {}),
-        attributes: {
-          source: 'wukong',
-          message_id: msg.id,
-          conversation_id: msg.conversationId,
-          ...(firstTokenEvent ? {
-            ttft_ms: firstTokenEvent.ttft_ms as number,
-            e2e_ttft_ms: firstTokenEvent.e2e_ttft_ms as number,
-          } : {}),
-          ...(runStartedTs && runFinishedTs ? {
-            run_duration_ms: runFinishedTs - runStartedTs,
-          } : {}),
-        },
-      });
-      entries.push(responseEntry);
-    }
-
-    // Detect steps that have tool entries but no llm.request/response pair.
-    // For each such orphan step, emit a synthetic LLM pair declaring its tools.
-    // This satisfies structure.step_has_one_llm validation.
-    const stepsWithLlm = new Set<string>();
-    const stepsWithTools = new Map<string, AgentActivityEntry[]>();
-    for (const entry of entries) {
-      const sid = entry['gen_ai.step.id'];
-      if (typeof sid !== 'string' || !sid) continue;
-      const ename = entry['event.name'];
-      if (ename === 'llm.request' || ename === 'llm.response') {
-        stepsWithLlm.add(sid);
-      } else if (ename === 'tool.call' || ename === 'tool.result') {
-        const arr = stepsWithTools.get(sid) ?? [];
-        arr.push(entry);
-        stepsWithTools.set(sid, arr);
-      }
-    }
-    for (const [stepId, toolEntries] of stepsWithTools) {
-      if (stepsWithLlm.has(stepId)) continue;
-      // This step has tools but no LLM. Synthesize one.
-      const callEntries = toolEntries.filter(e => e['event.name'] === 'tool.call');
-      const synthOutputParts: Array<Record<string, string>> = [];
-      for (const ce of callEntries) {
-        synthOutputParts.push({
-          type: 'tool_call',
-          id: String(ce['gen_ai.tool.call.id'] ?? ''),
-          name: String(ce['gen_ai.tool.name'] ?? ''),
-        });
-      }
-      // Compute timing from tool entries
-      const toolTimes = toolEntries.map(e => Number(e['time_unix_nano'] ?? 0) / 1e6);
-      const synthReqTs = minOf(toolTimes) - 1;
-      const synthRespTs = maxOf(toolTimes) + 1;
-      const synthLlmSpanId = generateSpanId();
-      // Find the parent_span_id from one of the tool entries (they all share step's parent)
-      const stepParentSpanId = (toolEntries[0]['parent_span_id'] as string | undefined) ?? agentSpanId;
-
-      entries.push(buildAgentActivityEntry({
-        timestamp: synthReqTs,
-        'event.id': hashId([sessionId, msg.id, 'synth-request', stepId]),
-        'event.name': 'llm.request',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': stepId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.id': runId,
-        'trace_id': traceId,
-        'gen_ai.input.messages_delta': [
-          { role: 'user', parts: [{ type: 'text', content: userContent || '(continued)' }] },
-        ],
-        attributes: { source: 'wukong', message_id: msg.id, conversation_id: msg.conversationId },
-      }));
-      entries.push(buildAgentActivityEntry({
-        timestamp: synthRespTs,
-        'event.id': hashId([sessionId, msg.id, 'synth-response', stepId]),
-        'event.name': 'llm.response',
-        ...common,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': stepId,
-        'gen_ai.response.id': runId,
-        'gen_ai.request.model': model,
-        'gen_ai.response.model': model,
-        'gen_ai.response.finish_reasons': ['tool_calls'],
-        'trace_id': traceId,
-        'span_id': synthLlmSpanId,
-        'parent_span_id': stepParentSpanId,
-        'gen_ai.input.messages': [
-          { role: 'user', parts: [{ type: 'text', content: userContent || '(continued)' }] },
-        ],
-        ...(synthOutputParts.length > 0 ? {
-          'gen_ai.output.messages': [{ role: 'assistant', parts: synthOutputParts }],
-        } : {}),
-        'gen_ai.usage.input_tokens': 0,
-        'gen_ai.usage.output_tokens': 0,
-        'gen_ai.usage.cache_read.input_tokens': 0,
-        'gen_ai.usage.total_tokens': 0,
-        attributes: { source: 'wukong', message_id: msg.id, conversation_id: msg.conversationId },
+        'gen_ai.usage.input_tokens': tokIn,
+        'gen_ai.usage.output_tokens': tokOut,
+        'gen_ai.usage.cache_read.input_tokens': tokCache,
+        'gen_ai.usage.total_tokens': tokTotal,
+        ...(runError && isFinal ? { 'error.type': runError.code, 'error.message': runError.message } : {}),
       }));
     }
 
-    // Backfill trace_id on any entries that lack it.
-    // Also backfill step.id on tool entries that lack one — use the FIRST step.id
-    // (not currentStep which may be a later step).
-    let firstStepId: string | undefined;
-    for (const entry of entries) {
-      const sid = entry['gen_ai.step.id'];
-      if (typeof sid === 'string' && sid) { firstStepId = sid; break; }
-    }
-    for (const entry of entries) {
-      if (!entry['gen_ai.step.id'] && firstStepId) {
-        entry['gen_ai.step.id'] = firstStepId;
-      }
-      if (!entry['trace_id']) {
-        entry['trace_id'] = traceId;
-      }
-    }
+    // Make messages_delta incremental: for each step N>=2, prepend the tool_call
+    // responses produced by step N-1 to that step's llm.request.
+    injectPriorStepToolResults(entries);
 
-    // Enrich llm.request messages_delta with tool_call_response messages from prior step's tools.
-    // This makes messages_delta truly incremental: step 1 = user input, step 2+ = prior tool results.
-    const toolResultsByStep = new Map<string, Array<{ id: string; name: string; result: unknown }>>();
-    for (const entry of entries) {
-      if (entry['event.name'] !== 'tool.result') continue;
-      const sid = entry['gen_ai.step.id'];
-      if (typeof sid !== 'string' || !sid) continue;
-      const arr = toolResultsByStep.get(sid) ?? [];
-      arr.push({
-        id: String(entry['gen_ai.tool.call.id'] ?? ''),
-        name: String(entry['gen_ai.tool.name'] ?? ''),
-        result: entry['gen_ai.tool.call.result'],
-      });
-      toolResultsByStep.set(sid, arr);
-    }
-    // Get sorted step.ids by stepIndex (parsed from suffix :sN)
-    const stepIds = Array.from(new Set(entries
-      .map(e => e['gen_ai.step.id'])
-      .filter((s): s is string => typeof s === 'string' && !!s)
-    )).sort((a, b) => {
-      const na = parseInt(a.match(/:s(\d+)$/)?.[1] ?? '0', 10);
-      const nb = parseInt(b.match(/:s(\d+)$/)?.[1] ?? '0', 10);
-      return na - nb;
+    // Sort chronologically so the emitted stream reads other → llm.request →
+    // llm.response → tool.call → tool.result → … (spec §8), independent of push order.
+    entries.sort((a, b) => {
+      const ta = BigInt(String(a['time_unix_nano'] ?? '0'));
+      const tb = BigInt(String(b['time_unix_nano'] ?? '0'));
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
     });
-    // For each step N>=2, prepend tool_call_response from step N-1 to its llm.request messages_delta
-    for (let i = 1; i < stepIds.length; i++) {
-      const prevStepId = stepIds[i - 1];
-      const curStepId = stepIds[i];
-      const priorTools = toolResultsByStep.get(prevStepId) ?? [];
-      if (priorTools.length === 0) continue;
-      const toolResponseMessages = priorTools.map(t => ({
-        role: 'tool',
-        parts: [{
-          type: 'tool_call_response',
-          id: t.id,
-          response: typeof t.result === 'string' ? t.result : JSON.stringify(t.result ?? ''),
-        }],
-      }));
-      // Find the llm.request for this step
-      for (const entry of entries) {
-        if (entry['event.name'] !== 'llm.request') continue;
-        if (entry['gen_ai.step.id'] !== curStepId) continue;
-        const existing = entry['gen_ai.input.messages_delta'];
-        const existingArr = Array.isArray(existing) ? existing : [];
-        entry['gen_ai.input.messages_delta'] = toJsonValue([...toolResponseMessages, ...existingArr]);
-        break;
-      }
-    }
 
     return entries;
   }
@@ -1138,10 +886,6 @@ export class WukongInput extends BaseInput {
       'trace_id': traceId,
       'span_id': toolSpanId,
       'parent_span_id': step?.stepSpanId ?? agentSpanId,
-      attributes: {
-        source: 'wukong',
-        message_id: msg.id,
-      },
     });
   }
 
@@ -1182,10 +926,6 @@ export class WukongInput extends BaseInput {
       'trace_id': traceId,
       'span_id': toolSpanId,
       'parent_span_id': step?.stepSpanId ?? agentSpanId,
-      attributes: {
-        source: 'wukong',
-        message_id: msg.id,
-      },
     });
   }
 
@@ -1289,7 +1029,6 @@ export class WukongInput extends BaseInput {
       'trace_id': traceId,
       'span_id': callSpanId,
       'parent_span_id': parentSpanId,
-      attributes: { source: 'wukong', message_id: msg.id },
     });
 
     const toolResultStatus = resolveActivityResultStatus(content);
@@ -1313,7 +1052,6 @@ export class WukongInput extends BaseInput {
       'trace_id': traceId,
       'span_id': resultSpanId,
       'parent_span_id': parentSpanId,
-      attributes: { source: 'wukong', message_id: msg.id },
     });
 
     return [toolCallEntry, toolResultEntry];
@@ -1401,11 +1139,13 @@ function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+/** Drop undefined/null fields; return undefined if nothing remains. */
 function compactObject(fields: Record<string, unknown>): Record<string, unknown> | undefined {
   const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+/** Derive an activity's result status from exit_code / error_message / status. */
 function resolveActivityResultStatus(content: Record<string, unknown> | undefined): 'success' | 'failure' | 'cancelled' {
   if (!content) return 'success';
   if (content.exit_code !== undefined && content.exit_code !== 0) return 'failure';
@@ -1431,7 +1171,7 @@ function generateSpanId(): string {
   return crypto.randomBytes(8).toString('hex');
 }
 
-// Iterative min/max to avoid spread-arg call stack limits on large arrays.
+// Iterative min to avoid spread-arg call stack limits on large arrays.
 function minOf(arr: ReadonlyArray<number>): number {
   let m = Number.POSITIVE_INFINITY;
   for (let i = 0; i < arr.length; i++) {
@@ -1441,21 +1181,25 @@ function minOf(arr: ReadonlyArray<number>): number {
   return m;
 }
 
-function maxOf(...arrs: ReadonlyArray<ReadonlyArray<number>>): number {
-  let m = Number.NEGATIVE_INFINITY;
-  for (const arr of arrs) {
-    for (let i = 0; i < arr.length; i++) {
-      const v = arr[i];
-      if (v > m) m = v;
-    }
-  }
-  return m;
-}
-
+/**
+ * Whether a message has settled and is safe to emit (and to advance the cursor past).
+ *
+ * The API's `isComplete` flag is authoritative: when present it decides the answer,
+ * so a message the API marked complete is never withheld (which could otherwise
+ * permanently block the whole session from that message onward). Only when the flag
+ * is absent (older payloads) do we fall back to the run-terminal heuristic.
+ */
 function isMessageComplete(msg: WukongMessage): boolean {
   if (msg.role !== 'assistant') return true;
-  if (!msg.events || msg.events.length === 0) return true;
-  return msg.events.some(e => e.type === 'RUN_FINISHED' || e.type === 'RUN_ERROR');
+  const events = msg.events;
+  if (!events || events.length === 0) return true;
+
+  // Authoritative API flag wins when present.
+  if (msg.isComplete === 1) return true;
+  if (msg.isComplete === 0) return false;
+
+  // Older payloads without the flag: a terminal RUN event marks completion.
+  return events.some(e => e.type === 'RUN_FINISHED' || e.type === 'RUN_ERROR');
 }
 
 function findLastCompleteIndex(messages: WukongMessage[]): number {
@@ -1489,4 +1233,57 @@ function findEntryByToolCallId(
     }
   }
   return undefined;
+}
+
+/**
+ * Prepend, to each step N>=2's llm.request, the tool_call_response messages
+ * produced by step N-1. Keeps gen_ai.input.messages_delta truly incremental:
+ * step 1 = user input, step 2+ = prior tool results.
+ */
+function injectPriorStepToolResults(entries: AgentActivityEntry[]): void {
+  const toolResultsByStep = new Map<string, Array<{ id: string; name: string; result: unknown }>>();
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'tool.result') continue;
+    const sid = entry['gen_ai.step.id'];
+    if (typeof sid !== 'string' || !sid) continue;
+    const arr = toolResultsByStep.get(sid) ?? [];
+    arr.push({
+      id: String(entry['gen_ai.tool.call.id'] ?? ''),
+      name: String(entry['gen_ai.tool.name'] ?? ''),
+      result: entry['gen_ai.tool.call.result'],
+    });
+    toolResultsByStep.set(sid, arr);
+  }
+
+  const stepIds = Array.from(new Set(entries
+    .map(e => e['gen_ai.step.id'])
+    .filter((s): s is string => typeof s === 'string' && !!s)
+  )).sort((a, b) => {
+    const na = parseInt(a.match(/:s(\d+)$/)?.[1] ?? '0', 10);
+    const nb = parseInt(b.match(/:s(\d+)$/)?.[1] ?? '0', 10);
+    return na - nb;
+  });
+
+  for (let i = 1; i < stepIds.length; i++) {
+    const prevStepId = stepIds[i - 1];
+    const curStepId = stepIds[i];
+    const priorTools = toolResultsByStep.get(prevStepId) ?? [];
+    if (priorTools.length === 0) continue;
+    const toolResponseMessages = priorTools.map(t => ({
+      role: 'tool',
+      parts: [{
+        type: 'tool_call_response',
+        id: t.id,
+        response: typeof t.result === 'string' ? t.result : JSON.stringify(t.result ?? ''),
+      }],
+    }));
+    for (const entry of entries) {
+      if (entry['event.name'] !== 'llm.request') continue;
+      if (entry['gen_ai.step.id'] !== curStepId) continue;
+      const existing = entry['gen_ai.input.messages_delta'];
+      const existingArr = Array.isArray(existing) ? existing : [];
+      entry['gen_ai.input.messages_delta'] = toJsonValue([...toolResponseMessages, ...existingArr]);
+      break;
+    }
+  }
 }
