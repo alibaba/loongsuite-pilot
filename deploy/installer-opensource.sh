@@ -2276,6 +2276,7 @@ remove_hook_configs() {
         "$HOME/.codex/hooks.json"
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.trae-cn/hooks.json"
         "$HOME/.workbuddy/settings.json"
     )
 

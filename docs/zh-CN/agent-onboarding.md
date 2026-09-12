@@ -361,6 +361,66 @@ per-session spool：
   例如 WorkBuddy GUI 验收必须设置 `E2E_JSONL_AGENT_FILTER=workbuddy`。Strict
   是唯一自动质量门禁，不增加 Agent-specific 绕过模式。
 
+## TRAE-CN 接入
+
+TRAE-CN（[官网](https://www.trae.cn/)，[Hook 文档](https://docs.trae.ai/ide/hook-configuration-reference?_lang=zh)）的采集走 `assets/hooks/trae-cn-hook-processor.mjs` + `src/inputs/trae-cn-log/trae-cn-log-input.ts`。
+
+### Hook 配置路径
+
+| 作用域 | 路径 |
+|--------|------|
+| 全局 | `~/.trae-cn/hooks.json` |
+| 项目 | `<workspace>/.trae/hooks.json` |
+
+由 `agents.d/trae-cn.json` 的 `hook.settingsPath` 指向全局路径，pilot 的 `HookStrategy` 负责写入。配置 schema 与 Claude Code 高度同构但**不等同**（同名事件的输入输出可能有差异），以官方文档为准。
+
+### 事件类型与 subcommand 映射
+
+`agents.d/trae-cn.json` 注册的 6 个事件，由 `trae-cn-loongsuite-pilot-hook.sh|.ps1` 转为 kebab-case subcommand 后转发给处理器：
+
+| 事件 | subcommand | 携带的关键内容 |
+|------|------------|----------------|
+| `SessionStart` | `session-start` | 会话起点标记（`source`） |
+| `UserPromptSubmit` | `user-prompt-submit` | `prompt`（用户输入） |
+| `PreToolUse` | `pre-tool-use` | `tool_use_id` + `tool_name` + `tool_input` |
+| `PostToolUse` | `post-tool-use` | 同上 + `tool_response` |
+| `Stop` | `stop` | `last_assistant_message`（最终回答正文） |
+| `Notification` | `notification` | `notification_type`（`idle_prompt` = 真正收尾） |
+
+### `matcher` 语法
+
+TRAE-CN 的 HookGroup 使用 `matcher`（正则）字段，与 Claude Code 一致。`agents.d/trae-cn.json` 设 `matcher: "*"` 表示匹配全部工具。如需限定到特定工具（如 `Edit|Write`、`mcp__.*`），按官方文档的标准化工具名表写正则。
+
+### 已知限制（用户已确认接受）
+
+- `gen_ai.usage.*` 字段缺失：TRAE-CN Hook payload 不携带 token 计数，只有日志的 `token_count` 行能补，目前不采集。
+- 迭代中间步骤 `input.messages` 缺失：仅首轮（UserPromptSubmit）可见。
+- `output.messages` 中 reasoning 内容缺失：仅 final text（Stop 的 `last_assistant_message`）可见。
+- 一轮 = 一个 STEP = 一个 LLM：ReAct 多迭代边界只能从 TRAE 的 `ai-agent` 日志 `[commit_toolcall_result]` 行切分，hook 无权切，按 §8.2 / §8.5 已放弃启发式。
+
+### 跨 Agent 重复采集防护（P0）
+
+用户若在 TRAE-CN 设置面板打开「导入 CLAUDE 中的 Hooks 配置」开关，pilot 的 `claude-code-hook-processor.mjs` 会被 TRAE 拉起，产生 `gen_ai.agent.type=claude-code` 的重复记录。已在 `claude-code-hook-processor.mjs` 入口加：
+
+```js
+if (process.env.TRAE_PROJECT_DIR) {
+  process.stdout.write('{}\n');
+  process.exit(0);
+}
+```
+
+TRAE 的 hook 执行器会向子进程注入 `TRAE_PROJECT_DIR` 环境变量（值等于 `stdin.cwd`），处理器据此早返回，对用户透明。
+
+### 脱敏
+
+`src/mask/sensitive-rules.json` 新增两条规则：
+- `apiKey.traeCnCredentials`：匹配 `iCubeAuthInfo://` 前缀、`trae-jwt-token`、`sessionKey`、`access_token` 形态的 TRAE 专有凭证。
+- `apiKey.traeCnCommandOutput`：匹配 `RunCommand` 工具结果中的 `Bearer` token 与本地路径（`/home/<user>/...`、`/Users/<user>/...`）。
+
+### fixture 来源
+
+单测 fixture 必须基于 TRAE 官方文档声明的 stdin 字段结构构造（用户 spec v2 §2.7 实测字段）。禁止自行编造 payload 字段名。完整字段表见附件 `01a01054-7c4d-7892-9b56-8a7475c83009`。
+
 ## 用户文档清单
 
 新增公开 Agent 时，更新：

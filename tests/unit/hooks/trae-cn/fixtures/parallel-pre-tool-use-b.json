@@ -1,0 +1,8 @@
+{
+  "session_id": "trae-cn-parallel-session",
+  "cwd": "/home/dev/demo-project",
+  "timestamp": "2026-08-18T02:00:01.000Z",
+  "tool_use_id": "toolu_parallel_b",
+  "tool_name": "read_file",
+  "tool_input": { "path": "/home/dev/demo-project/b.txt" }
+}

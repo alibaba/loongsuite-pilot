@@ -76,7 +76,9 @@ describe('mask string masker', () => {
       'unsupported_github=ghx_1234567890abcdefghijklmnop',
       'generic_token=token=abc123',
       'generic_api_key=api_key=not-a-real-key-value',
-      'bearer=Bearer abcdefghijklmnopqrstuvwxyz123456',
+      // Bearer with <20 trailing chars falls under the traeCnCommandOutput
+      // rule's {20,} quantifier threshold and stays visible.
+      'bearer=Bearer shorttoken',
     ].join('\n');
 
     expect(maskString(input, allRules)).toBe(input);
