@@ -733,11 +733,31 @@ export class HookWatchdog {
           path.join(home, 'Applications', appName),
         ]);
 
+        const cleanup = async () => {
+          // Each product-specific target only removes its own env/plist.
+          try {
+            const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+            if (stdout.trim() === wrapperPath) {
+              await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
+            }
+          } catch {
+            // getenv fails when unset — nothing to drop.
+          }
+          const plist = await fs.readFile(plistPath, 'utf8').catch(() => '');
+          if (plist.includes(`<string>${wrapperPath}</string>`)) {
+            await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+            await fs.rm(plistPath, { force: true }).catch(() => {});
+          }
+        };
+
         targets.push({
           id: def.id,
           enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
           precondition: async () => {
-            if (!await fileExists(wrapperPath)) return false;
+            if (!await fileExists(wrapperPath)) {
+              await cleanup();
+              return false;
+            }
             for (const appPath of appPaths) {
               if (await directoryExists(appPath)) return true;
             }
@@ -784,21 +804,7 @@ export class HookWatchdog {
             await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
             await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
           },
-          cleanup: async () => {
-            // Each product-specific target only removes its own env/plist.
-            try {
-              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
-              if (stdout.trim() === wrapperPath) {
-                await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
-              }
-            } catch {
-              // getenv fails when unset — nothing to drop.
-            }
-            if (await fileExists(plistPath)) {
-              await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-              await fs.rm(plistPath, { force: true }).catch(() => {});
-            }
-          },
+          cleanup,
         });
       }
     }

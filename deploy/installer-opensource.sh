@@ -1409,7 +1409,10 @@ inject_qoderwork_runtime_wrapper() {
     fi
 
     local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
-    if [ ! -f "$wrapper_script" ]; then return 0; fi
+    if [ ! -f "$wrapper_script" ]; then
+        remove_qoderwork_runtime_wrapper
+        return 0
+    fi
 
     msg "==> 配置 QoderWork 系列 token 采集..." "==> Configuring QoderWork-family token intercept..."
 
@@ -1509,20 +1512,19 @@ remove_qoderwork_runtime_wrapper() {
     for plist_path in \
         "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist" \
         "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist"; do
-        if [ -f "$plist_path" ]; then
+        if [ -f "$plist_path" ] && grep -Fq "<string>$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs</string>" "$plist_path"; then
             launchctl unload "$plist_path" 2>/dev/null || true
             rm -f "$plist_path"
         fi
     done
 
-    # Drop the env from the current session too (conservative grep avoids
-    # touching env values the user set manually to a non-loongsuite path).
-    if launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+    # Drop only values owned by this Pilot installation.
+    if [ "$(launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null)" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ]; then
         launchctl unsetenv QODER_WORKER_RUNTIME_PATH
         msg "    已清理 QODER_WORKER_RUNTIME_PATH" \
             "    Cleaned up QODER_WORKER_RUNTIME_PATH"
     fi
-    if launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+    if [ "$(launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null)" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ]; then
         launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH
         msg "    已清理 QW_QODER_WORKER_RUNTIME_PATH" \
             "    Cleaned up QW_QODER_WORKER_RUNTIME_PATH"
