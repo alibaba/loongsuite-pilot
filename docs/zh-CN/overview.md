@@ -26,6 +26,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
@@ -43,7 +44,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 
-OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定。
 
 ### Windows Agent 明确支持情况
 
@@ -122,4 +123,5 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 - 在 [HTTP 输出](http-output.md) 配置自定义 HTTP 上报。
 - 在 [数据脱敏](masking.md) 配置密钥脱敏。
 - 在 [输出事件 Schema](output-event-schema.md) 查看字段。
+- 在 [Input 运行时指标](input-runtime-metrics.md) 了解读取、解析和标准事件产出的窗口统计。
 - 在 [新 Agent 接入](agent-onboarding.md) 增加新的 Agent 支持。

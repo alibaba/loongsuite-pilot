@@ -45,3 +45,66 @@ describe('hook record resource attribute passthrough', () => {
     });
   });
 });
+
+describe('canonical hook custom top-level field passthrough', () => {
+  const canonicalRecord = {
+    'event.id': 'event-custom-1',
+    'event.name': 'llm.response',
+    'gen_ai.session.id': 'session-custom-1',
+    'gen_ai.agent.type': 'qoder-cli',
+  };
+
+  it('keeps strict canonical behavior by default', () => {
+    const entry = buildCanonicalHookEntry({
+      ...canonicalRecord,
+      'multica.issue.id': 'AGE-992',
+    }, ClientType.QoderCli);
+
+    expect(entry).not.toHaveProperty('multica.issue.id');
+  });
+
+  it('preserves safe string fields when explicitly enabled', () => {
+    const entry = buildCanonicalHookEntry(
+      {
+        ...canonicalRecord,
+        'multica.issue.id': 'AGE-992',
+        'multica.user.id': ' staff-1 ',
+      },
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
+
+    expect(entry).toMatchObject({
+      'event.name': 'llm.response',
+      'multica.issue.id': 'AGE-992',
+      'multica.user.id': 'staff-1',
+    });
+  });
+
+  it('drops unsafe custom fields when passthrough is enabled', () => {
+    const entry = buildCanonicalHookEntry(
+      {
+        ...canonicalRecord,
+        'multica.api_token': 'secret',
+        'multica.count': 42,
+        'multica.empty': ' ',
+        'multica.comma': 'one,two',
+        'multica.too_long': 'x'.repeat(513),
+        cost_custom: 'reserved',
+        'event.custom': 'reserved',
+      },
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
+
+    expect(entry).not.toHaveProperty('multica.api_token');
+    expect(entry).not.toHaveProperty('multica.count');
+    expect(entry).not.toHaveProperty('multica.empty');
+    expect(entry).not.toHaveProperty('multica.comma');
+    expect(entry).not.toHaveProperty('multica.too_long');
+    expect(entry).not.toHaveProperty('cost_custom');
+    expect(entry).not.toHaveProperty('event.custom');
+  });
+});

@@ -1,7 +1,10 @@
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
+import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -10,12 +13,69 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import {
+  collectCliExpectedRequestIds,
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichIdeTurn,
+  injectTraceId,
+  needsCliSegmentFallback,
+} from './token-enricher.js';
+import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
+import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  /** Cached multimodal policy; IDE + CLI extraction when enabled. */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+    allowedRootPaths?: string[];
+  };
+}
+
+const QODER_ATTACHMENTS_FIELD = 'agent.qoder.attachments';
+
+function stripQoderAttachmentCarrier(entries: AgentActivityEntry[]): void {
+  for (const entry of entries) {
+    delete (entry as Record<string, unknown>)[QODER_ATTACHMENTS_FIELD];
+  }
+}
+
+function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const agentType = e['gen_ai.agent.type'] as string;
+    return agentType === ClientType.QoderIdea || agentType === 'qoder-idea';
+  });
+}
+
+const QODER_IDE_IMAGES_TAIL = path.join('SharedClientCache', 'cache', 'images');
+
+export function qoderDefaultAllowedRootPaths(): string[] {
+  const appRoot = resolveQoderAppRoot();
+  const roots = [
+    resolveHome('~/.qoder/tmp'),
+    resolveHome('~/.qoder/vibe_images'),
+    path.join(appRoot, QODER_IDE_IMAGES_TAIL),
+  ];
+  let names: string[];
+  try {
+    names = fsSync.readdirSync(appRoot);
+  } catch {
+    return roots;
+  }
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    roots.push(path.join(appRoot, name, QODER_IDE_IMAGES_TAIL));
+  }
+  return roots;
+}
+
+export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
+  return mergeAllowedRootPaths(qoderDefaultAllowedRootPaths(), userPaths);
 }
 
 /**
@@ -32,10 +92,26 @@ export class QoderTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder';
+  private readonly multimodalEnabled: boolean;
+  private readonly multimodalUploadMode: MultimodalUploadMode;
+  private readonly multimodalProcessor: MultimodalProcessor | null;
+  private readonly allowedRootPaths: string[];
+  private multimodalStopped = false;
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
+    this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
+    this.multimodalProcessor = opts.multimodal?.processor ?? null;
+    this.allowedRootPaths = this.multimodalEnabled
+      ? resolveQoderAllowedRootPaths(opts.multimodal?.allowedRootPaths)
+      : [];
+  }
+
+  override async stop(): Promise<void> {
+    this.multimodalStopped = true;
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -50,6 +126,7 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.multimodalStopped = false;
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -67,6 +144,21 @@ export class QoderTraceInput extends BaseInput {
     }
   }
 
+  protected override async onStop(): Promise<void> {
+    clearAttachedImagePathsCache();
+  }
+
+  protected readCliIntercept(): Promise<InterceptData> {
+    return readInterceptData();
+  }
+
+  protected readCliSegments(
+    sessionId: string,
+    expectedRequestIds: readonly string[],
+  ): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId, expectedRequestIds);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
@@ -80,23 +172,40 @@ export class QoderTraceInput extends BaseInput {
     // Intercept data is loaded lazily on first qoder-cli turn.
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const cliTurns: AgentActivityEntry[][] = [];
+    const cliFallbackGroups = new Map<string, AgentActivityEntry[][]>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
       if (variant === 'qoder-cli' && sessionId) {
-        interceptData ??= await readInterceptData();
-        const segments = await readSegmentTokensForSession(sessionId);
-        enrichCliTurn(
+        interceptData ??= await this.readCliIntercept();
+        enrichCliPrimary(
           turnEntries,
-          segments,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        if (needsCliSegmentFallback(turnEntries)) {
+          const fallbackTurns = cliFallbackGroups.get(sessionId) ?? [];
+          fallbackTurns.push(turnEntries);
+          cliFallbackGroups.set(sessionId, fallbackTurns);
+        }
+        cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
         ideSessionGroups.set(sessionId, sessionEntries);
+      }
+    }
+
+    // Read once per session after seeing the whole Hook batch. The expected-id
+    // list lets the reader spend one short retry only when this batch's exact
+    // segment records are not visible yet.
+    for (const [sessionId, fallbackTurns] of cliFallbackGroups) {
+      const expectedRequestIds = fallbackTurns.flatMap(collectCliExpectedRequestIds);
+      const segments = await this.readCliSegments(sessionId, expectedRequestIds);
+      for (const turnEntries of fallbackTurns) {
+        enrichCliFromSegments(turnEntries, segments);
       }
     }
 
@@ -116,6 +225,40 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    if (this.multimodalEnabled && this.multimodalProcessor) {
+      const pathToUri = async (filePath: string, timeUnixMs?: number) => {
+        if (this.multimodalStopped) return null;
+        return this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
+          allowedRootPaths: this.allowedRootPaths,
+        });
+      };
+      for (const sessionEntries of ideSessionGroups.values()) {
+        // JetBrains shares this input but has no multimodal extractor yet.
+        if (isQoderIdeaSession(sessionEntries)) continue;
+        if (this.multimodalStopped) break;
+        const before = sessionEntries.length;
+        await enrichIdeMultimodal(sessionEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+        for (let i = before; i < sessionEntries.length; i++) {
+          const entry = sessionEntries[i];
+          insertBeforeMatchingResponse(rawEntries, entry);
+          const turnId = (entry['gen_ai.turn.id'] as string) || 'unknown';
+          const group = turnGroups.get(turnId);
+          if (group) insertBeforeMatchingResponse(group, entry);
+        }
+      }
+      for (const turnEntries of cliTurns) {
+        if (this.multimodalStopped) break;
+        await enrichCliMultimodal(turnEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+      }
+    }
+    stripQoderAttachmentCarrier(rawEntries);
+
     // 4. Inject trace_id per turn
     for (const turnEntries of turnGroups.values()) {
       injectTraceId(turnEntries);
@@ -127,6 +270,7 @@ export class QoderTraceInput extends BaseInput {
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -146,6 +290,7 @@ export class QoderTraceInput extends BaseInput {
       offset = 0;
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
@@ -153,21 +298,68 @@ export class QoderTraceInput extends BaseInput {
       // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
       // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.setState({ lastFile: logFileName, lastOffset: stat.size });
+      const readStartedAt = runtime?.now();
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
+      const snapshot = buf.subarray(0, bytesRead);
+      const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (lastNewline < 0) return [];
 
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      const completeLength = lastNewline + 1;
+      const completeBytes = snapshot.subarray(0, completeLength);
+      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
 
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let record: Record<string, unknown>;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            parseFailedRecords++;
+            continue;
+          }
+          record = parsed as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid JSONL line', { error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeLength,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
     } finally {
       await handle.close();
     }
@@ -180,7 +372,12 @@ export class QoderTraceInput extends BaseInput {
   // ─── Record transformation (canonical passthrough) ──────────────────────────
 
   private async transformRecord(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
-    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
+    const canonicalEntry = buildCanonicalHookEntry(
+      record,
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
       return canonicalEntry;
@@ -220,4 +417,16 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+function insertBeforeMatchingResponse(
+  target: AgentActivityEntry[],
+  request: AgentActivityEntry,
+): void {
+  const requestId = request['gen_ai.request.id'];
+  const idx = target.findIndex(e =>
+    e['event.name'] === 'llm.response' && e['gen_ai.request.id'] === requestId,
+  );
+  if (idx >= 0) target.splice(idx, 0, request);
+  else target.push(request);
 }

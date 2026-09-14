@@ -248,8 +248,13 @@ describe('AgentDefLoader', () => {
   });
 
   it('falls back to the Hermes command on PATH when the bundled CLI is absent', async () => {
+    const previousUserHome = process.platform === 'win32'
+      ? process.env.USERPROFILE
+      : process.env.HOME;
     const previousHome = process.env.HERMES_HOME;
     const previousCli = process.env.HERMES_CLI;
+    if (process.platform === 'win32') process.env.USERPROFILE = path.join(tmpDir, 'home');
+    else process.env.HOME = path.join(tmpDir, 'home');
     process.env.HERMES_HOME = path.join(tmpDir, 'hermes-profile');
     delete process.env.HERMES_CLI;
     try {
@@ -277,6 +282,61 @@ describe('AgentDefLoader', () => {
     } finally {
       if (previousHome === undefined) delete process.env.HERMES_HOME;
       else process.env.HERMES_HOME = previousHome;
+      if (previousCli === undefined) delete process.env.HERMES_CLI;
+      else process.env.HERMES_CLI = previousCli;
+      if (process.platform === 'win32') {
+        if (previousUserHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = previousUserHome;
+      } else if (previousUserHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousUserHome;
+    }
+  });
+
+  it('resolves the default uv tool shim before falling back to PATH', async () => {
+    const previousHome = process.platform === 'win32'
+      ? process.env.USERPROFILE
+      : process.env.HOME;
+    const previousHermesHome = process.env.HERMES_HOME;
+    const previousCli = process.env.HERMES_CLI;
+    const homeDir = path.join(tmpDir, 'home');
+    const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+    const uvShim = path.join(homeDir, '.local', 'bin', executable);
+    if (process.platform === 'win32') process.env.USERPROFILE = homeDir;
+    else process.env.HOME = homeDir;
+    process.env.HERMES_HOME = path.join(homeDir, '.hermes');
+    delete process.env.HERMES_CLI;
+    try {
+      await fs.mkdir(path.dirname(uvShim), { recursive: true });
+      await fs.writeFile(uvShim, '');
+      const def = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: ['$HERMES_HOME'], commands: ['hermes'] },
+        directoryPlugin: {
+          sourceDir: '$PILOT_DIR/hermes-plugin',
+          targetDir: '$HERMES_HOME/plugins/loongsuite-pilot',
+          activation: {
+            command: '$HERMES_CLI',
+            enableArgs: ['plugins', 'enable', 'loongsuite-pilot'],
+          },
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'hermes-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.directoryPlugin?.activation?.command).toBe(
+        process.platform === 'win32' ? uvShim.replace(/\\/g, '/') : uvShim,
+      );
+    } finally {
+      if (process.platform === 'win32') {
+        if (previousHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = previousHome;
+      } else if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousHermesHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = previousHermesHome;
       if (previousCli === undefined) delete process.env.HERMES_CLI;
       else process.env.HERMES_CLI = previousCli;
     }

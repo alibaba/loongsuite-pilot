@@ -18,6 +18,7 @@ export type AgentEventName =
   | 'tool.result'
   | 'skill.use'
   | 'tool.approve'
+  | 'agent.input'
   | 'other';
 
 export type JsonValue =
@@ -57,6 +58,8 @@ export interface AgentActivityEntry {
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
   'gen_ai.agent.name'?: string;
+  'gen_ai.agent.description'?: string;
+  'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
   'gen_ai.request.model'?: string;
@@ -87,20 +90,22 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.duration'?: number;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
+  /** Grok execution evidence used to associate a tool declaration with its result. */
+  'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';
+  /** Grok clock selected for the event after transcript/updates/unified fusion. */
+  'loongsuite.grok.timing.source'?: 'unified' | 'updates' | 'hook';
   'gen_ai.skill.name'?: string;
   'gen_ai.skill.id'?: string;
   'gen_ai.skill.description'?: string;
   'gen_ai.skill.version'?: string;
   /**
-   * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
-   * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。
-   * 仅 Codex 端有值；Claude transcript 不含此数据。
+   * 模型的 system instructions（MessagePart[] 数组形式）。不同 Agent 从各自真实的
+   * transcript、Hook 或 provider 请求中采集；未暴露时不应根据普通会话消息推断。
    */
   'gen_ai.system_instructions'?: JsonValue;
   /**
-   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式），数据源为 codex transcript
-   * 的 `session_meta.payload.dynamic_tools[]`。仅 Codex 端有值；codex 的核心工具（shell/apply_patch
-   * 等）是嵌入 system prompt 的伪工具，不在此字段中，但在 `gen_ai.system_instructions` 中可见。
+   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式）。不同 Agent 从各自真实的
+   * 模型请求、Hook 或 transcript 工具快照中采集；未暴露完整定义时不应根据 tool.call 反推。
    */
   'gen_ai.tool.definitions'?: JsonValue;
   /** Canonical repository identity for source attribution, e.g. sls/loongsuite-pilot. */

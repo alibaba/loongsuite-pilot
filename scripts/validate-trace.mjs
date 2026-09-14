@@ -12,7 +12,12 @@ const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-d
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
 // TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
-const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens']);
+// Kept in sync with the Finish Reasons table in docs/output-event-schema.md.
+// `cancelled` is documented there and is terminal in otlp-trace-flusher's
+// TERMINAL_FINISH_REASONS; the Codex aborted-turn and WorkBuddy builders emit it
+// directly, so its absence here was rejecting valid output.
+// Exported so producers can assert against this set instead of hand-copying it.
+export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled']);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 export function isRuntimeSkillLoadSpan(tool) {

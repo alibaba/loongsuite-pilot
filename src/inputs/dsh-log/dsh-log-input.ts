@@ -71,7 +71,17 @@ export class DshLogInput extends BaseSessionInput {
     const files = await this.discoverSessionFiles();
     const entries: AgentActivityEntry[] = [];
     for (const filePath of files) {
-      entries.push(...await this.processDshFile(filePath));
+      try {
+        entries.push(...await this.processDshFile(filePath));
+      } catch (err) {
+        if (this.isUnreadableError(err)) {
+          // An unreadable file (ownership mismatch) must not abort the whole
+          // cycle — diagnose it once and keep collecting the remaining files.
+          await this.diagnoseUnreadablePath(filePath, 'event file');
+          continue;
+        }
+        throw err;
+      }
     }
 
     if (this.discoveryComplete) {
@@ -99,7 +109,11 @@ export class DshLogInput extends BaseSessionInput {
       // previously tracked files were deleted. Preserve checkpoints so a
       // remount/recreate does not replay their full history.
       this.discoveryComplete = false;
-      if (!missing) {
+      if (this.isUnreadableError(err)) {
+        // Ownership mismatch on the session dir — diagnose once, same contract
+        // as the per-file path, instead of a generic warn.
+        await this.diagnoseUnreadablePath(this.sessionDir, 'session directory');
+      } else if (!missing) {
         logger.warn('failed to discover dsh event logs', {
           sessionDir: this.sessionDir,
           error: String(err),

@@ -1,8 +1,22 @@
 # LoongSuite Pilot
 
-[English](README.md) | 简体中文
+![LoongSuite](docs/_assets/img/loongsuite-logo.png)
 
-[快速开始](#快速开始) | [文档](#文档) | [新 Agent 接入](docs/zh-CN/agent-onboarding.md) | [许可证](#许可证)
+**面向 AI Coding Agent 的本地遥测采集器**
+
+[![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
+[![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
+
+[English](README.md) | **简体中文**
+
+[概览](#概览) | [快速开始](#快速开始) | [文档](#文档) | [社区](#社区) | [参与贡献](#参与贡献)
+
+---
+
+## 概览
 
 LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采集器。它可以发现本机已安装的支持 Agent，部署所需的 Hook 或插件，将不同 Agent 的活动数据归一化为统一的 GenAI 事件 Schema，并输出到本地日志、SLS、HTTP 或 Trace 后端。
 
@@ -11,8 +25,6 @@ LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采�
   <br>
   <em>内置本地 Dashboard —— 一眼查看多 Agent Token、会话、请求、工具调用、模型、服务商和仓库活动。</em>
 </p>
-
-## 为什么需要 LoongSuite Pilot？
 
 团队里常常会同时使用多个 AI Coding Agent，而每个 Agent 的本地数据格式、Hook 机制和日志结构都不一样。Pilot 提供一个统一的本机采集器，负责发现 Agent、采集活动、统一字段，并把数据送到适合分析、审计和可观测性的目标端。
 
@@ -24,7 +36,7 @@ Pilot 主要帮助回答这些问题：
 - 数据应该输出到哪里：本地文件、SLS、HTTP，还是 Trace？
 - 敏感 Prompt、工具参数和密钥在上报前如何控制？
 
-## 核心能力
+## 核心亮点
 
 | 能力 | Pilot 做什么 |
 |------|-------------|
@@ -44,6 +56,7 @@ Pilot 主要帮助回答这些问题：
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
 | DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
@@ -61,7 +74,7 @@ Pilot 主要帮助回答这些问题：
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 
-OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定，详见[兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)。
 
 DeepSeek Harness（`dsh`）通过用户级 `cordis.patch.yml` 加载 Pilot
 可观测插件，采集原生 LLM、reasoning、工具、Token 和首 Token
@@ -124,7 +137,7 @@ loongsuite-pilot info
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |
-| 将上游 Trace 继续传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI Trace 传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
+| 将 Trace 上下文和资源属性传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI 上下文传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
 | POST 到 HTTP 接口 | [HTTP 输出](docs/zh-CN/http-output.md) |
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
 | 查看全局配置加载顺序和保留策略 | [配置总览](docs/zh-CN/configuration.md) |
@@ -136,7 +149,8 @@ loongsuite-pilot info
 | 配置项 | 取值 | 默认 |
 | ------ | ---- | ---- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将首轮上游上下文传给受支持的下游 CLI 工具调用 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将 Trace 上下文和可选资源属性传给受支持的下游 CLI 工具调用 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING`(环境变量)· `upstreamLink.generateTraceWhenMissing`(config.json) | 没有有效上游上下文时，为每个 turn 生成本地 Trace 上下文并继续传播 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
 
 开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
@@ -144,7 +158,7 @@ loongsuite-pilot info
 - **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
 - **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
 
-对于 Claude Code，同时开启上游串联和 `propagateToTools` 后，Pilot 还会把首轮上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。下游 CLI 需要自行读取这些环境变量并配置 trace exporter。首版全程 fail-open，暂不覆盖 subagent、PowerShell、MCP 工具、后续 turn，以及带新上下文恢复的会话。
+对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把三个 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
 
 ## 输出数据
 
@@ -175,15 +189,30 @@ loongsuite-pilot rollback
 `http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
 `logs/metrics-summary.json`。
 
+macOS 可按需执行 `loongsuite-pilot dashboard shortcut install`，创建带雷达图标的
+Dashboard 网页快捷方式（`.webloc`），并添加到程序坞的文件区。普通安装和升级不会自动添加。
+点击后用默认浏览器打开页面，不会启停 Pilot；修改端口后重新执行此命令即可更新网址。
+详见[Dashboard 快捷方式](docs/zh-CN/installation.md#macos-dashboard-快捷方式)。
+
 macOS 菜单栏 App：
 
 在 macOS 上，Pilot 安装完成后会自动常驻菜单栏，无需额外命令。它实时展示 Token、会话、请求、工具调用数量，以及按 Agent 和 Provider 的分布，让你不用打开 Dashboard 也能随时掌握活动情况。
+
+菜单栏中点击“退出”只会退出菜单栏，不会停止采集。需要重新打开时，执行：
+
+```bash
+loongsuite-pilot menubar start
+```
+
+请在 macOS 桌面用户的终端中执行，不要加 `sudo`。该命令不会重启采集服务；菜单栏已经运行时不会重复启动。采集服务需已启动。命令会向当前生效的 `config.json` 持久化 `"enableStatusBarApp": true`。
+
+只关闭菜单栏可执行 `loongsuite-pilot menubar stop`，采集服务继续运行；菜单栏已退出时也会正常返回。命令会持久化 `"enableStatusBarApp": false`，下次启动采集服务时不会再自动打开菜单栏。
 
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS 菜单栏 App" width="360">
 </p>
 
-如需关闭，设置环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false`，或在 `~/.loongsuite-pilot/config.json` 中加入 `"enableStatusBarApp": false`。
+环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 的优先级仍高于 `config.json`。如果它设置为禁用，需先取消或改为 `true` 才能执行 `menubar start`；如果它设置为启用，后续启动 Pilot 时仍可能覆盖 `menubar stop` 写入的配置。
 
 ## 文档
 
@@ -197,7 +226,7 @@ macOS 菜单栏 App：
 
 [开发者指南](docs/zh-CN/agent-onboarding.md) - 为新的 AI Coding Agent 增加采集支持
 
-## 从源码构建
+## 开发
 
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
@@ -219,6 +248,19 @@ npm test
 
 如需从本地构建包安装为后台服务，请参考 [安装指南](docs/zh-CN/installation.md)。
 
+## 参与贡献
+
+欢迎提交 Issue 和 Pull Request。提交变更前，请运行与 CI 一致的核心检查：
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+如需增加新的 AI Coding Agent 支持，请先阅读[新 Agent 接入指南](docs/zh-CN/agent-onboarding.md)。Bug 和功能建议可通过 [GitHub Issues](https://github.com/alibaba/loongsuite-pilot/issues) 提交。
+
 ## 社区
 
 欢迎反馈和建议，扫描下方二维码加入 LoongSuite Pilot 钉钉交流群。
@@ -227,13 +269,16 @@ npm test
 |----|
 | <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
 
-### 相关项目
+## LoongSuite 生态
 
-- [LoongCollector](https://github.com/alibaba/loongcollector) - 通用节点 Agent，提供日志采集、Prometheus 指标采集和基于 eBPF 的网络/安全采集
-- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - 面向 JS 系 AI Coding Agent 的 OpenTelemetry 可观测插件
-- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Python 应用进程 Agent
-- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Golang 编译期注入进程 Agent
-- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - Java GenAI 遥测工具库
+| 项目 | 定位 |
+| ---- | ---- |
+| [LoongCollector](https://github.com/alibaba/loongcollector) | 面向日志、指标、Trace、事件和 Profile 的高性能采集器。 |
+| [LoongSuite Java](https://github.com/alibaba/loongsuite-java) | 面向 Java instrumentation 的共享 GenAI 遥测工具库。 |
+| [LoongSuite Go](https://github.com/alibaba/loongsuite-go) | 面向 Go 应用的编译期自动埋点。 |
+| [LoongSuite Python](https://github.com/alibaba/loongsuite-python) | 面向 Python 和 GenAI 应用的 OpenTelemetry 自动埋点。 |
+| [LoongSuite JS](https://github.com/alibaba/loongsuite-js) | 面向 JavaScript AI Agent 的 OpenTelemetry 集成。 |
+| [LoongSuite Pilot](https://github.com/alibaba/loongsuite-pilot) | 面向 AI Coding Agent 的本地遥测采集器。 |
 
 ## 许可证
 

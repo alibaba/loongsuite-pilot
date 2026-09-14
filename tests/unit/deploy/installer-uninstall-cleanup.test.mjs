@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 
@@ -98,6 +98,62 @@ function extractOpenClawCleanupScripts() {
     ['sh', sh.slice(shStart + shMarker.length, sh.indexOf('\nNODE', shStart))],
     ['ps1', ps1.slice(psStart + psMarker.length, ps1.indexOf("\n'@", psStart))],
   ];
+}
+
+function extractGrokCleanupNodeScript(source, style) {
+  const functionMarker = style === 'sh'
+    ? 'remove_grok_build_hook_config()'
+    : 'function Remove-GrokBuildHookConfig';
+  const functionStart = source.indexOf(functionMarker);
+  const functionEnd = source.indexOf('# ====', functionStart);
+  const body = source.slice(functionStart, functionEnd);
+  const scriptStartMarker = style === 'sh' ? 'result="$(node -e \'\n' : "$result = & $script:NODE_BIN -e @'\n";
+  const scriptEndMarker = style === 'sh' ? '\n\' "$cfg"' : "\n'@ $cfg";
+  const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
+  const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
+  if (scriptStart < scriptStartMarker.length || scriptEnd < scriptStart) {
+    throw new Error(`failed to extract ${style} Grok cleanup script`);
+  }
+  return body.slice(scriptStart, scriptEnd);
+}
+
+function verifyGrokCleanupScript(script) {
+  const root = mkdtempSync(join(tmpdir(), 'pilot-grok-cleanup-script-'));
+  try {
+    const configPath = join(root, 'loongsuite-pilot.json');
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        stop: [
+          { command: '/custom/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop' },
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [
+              { command: 'powershell.exe -File "C:\\pilot data\\hooks\\grok-build-loongsuite-pilot-hook.ps1" stop' },
+              { command: '/opt/third-party/nested-hook.sh' },
+            ],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const run = spawnSync(process.execPath, ['-e', script, configPath], { encoding: 'utf8' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toBe('cleaned');
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+      hooks: {
+        stop: [
+          { command: '/opt/third-party/stop-hook.sh' },
+          {
+            matcher: '',
+            hooks: [{ command: '/opt/third-party/nested-hook.sh' }],
+          },
+        ],
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 // Derive lifecycle coverage from the deployment manifests. New hook agents
@@ -545,6 +601,85 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
     expect(runtimePs1.slice(runtimePs1.indexOf('function Cmd-Rollback')))
       .toContain('Remove-HermesPluginForRollback');
   });
+});
+
+describe('Grok Build uninstall smoke', () => {
+  it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall.match(/Remove-GrokBuildHookConfig/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ['POSIX', extractGrokCleanupNodeScript(sh, 'sh')],
+    ['PowerShell', extractGrokCleanupNodeScript(ps1, 'ps1')],
+  ])('%s cleanup removes direct/nested Pilot hooks and preserves third-party hooks', (_platform, script) => {
+    verifyGrokCleanupScript(script);
+  });
+
+  it('removes Pilot direct and nested hooks from an isolated HOME and preserves third-party hooks', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-grok-uninstall-'));
+    try {
+      const configDir = join(root, '.grok', 'hooks');
+      const configPath = join(configDir, 'loongsuite-pilot.json');
+      const dataDir = join(root, 'custom pilot data');
+      mkdirSync(configDir, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        hooks: {
+          stop: [
+            { command: `\"${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh')}\" stop` },
+            { command: '/opt/third-party/stop-hook.sh' },
+            {
+              matcher: '',
+              hooks: [
+                { command: `powershell.exe -File \"${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.ps1')}\" stop` },
+                { command: '/opt/third-party/nested-hook.sh' },
+              ],
+            },
+          ],
+          session_end: [
+            { command: `${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh')} session_end` },
+          ],
+        },
+      }, null, 2));
+
+      const run = spawnSync('/bin/bash', [
+        resolve('deploy', 'installer-opensource.sh'),
+        'uninstall',
+        '--data-dir',
+        dataDir,
+        '--lang',
+        'en',
+      ], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: root,
+          USERPROFILE: root,
+          // Exclude a developer-machine Pilot binary while retaining Node and
+          // standard system tools. The uninstall must stay inside this HOME.
+          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+        },
+      });
+
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+        hooks: {
+          stop: [
+            { command: '/opt/third-party/stop-hook.sh' },
+            {
+              matcher: '',
+              hooks: [{ command: '/opt/third-party/nested-hook.sh' }],
+            },
+          ],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('Windows QoderWork-family runtime override lifecycle', () => {

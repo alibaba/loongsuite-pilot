@@ -8,6 +8,10 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import {
+  areGrokBuildHookAssetsHealthy,
+  restoreGrokBuildHookAssets,
+} from '../deployment/grok-build-assets.js';
+import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
@@ -32,7 +36,6 @@ import { MultiFlusher } from '../flushers/multi-flusher.js';
 import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
-import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
 import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
@@ -44,11 +47,10 @@ import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace
 import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
-import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
-import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
@@ -72,6 +74,7 @@ import {
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
+  resolveMultimodalEventStorageBasePath,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -80,7 +83,8 @@ import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
-import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
+import type { DataflowSnapshot, FlusherEndpointStats, InputStats } from '../metrics/metrics-collector.js';
+import type { OtlpEndpointCounter } from '../flushers/otlp-trace-flusher.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
@@ -103,8 +107,17 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
+  /**
+   * Listener id → the agent it belongs to, which is also the key `config.agents`
+   * gates on. Both roles are why the values are what they are and not simply the
+   * input's own `agentType`: several agents deliberately roll several listeners up
+   * to one agent name, and renaming a value here would silently re-point a gate.
+   *
+   * A listener missing from this map is not an error — snapshot reporting falls
+   * back to the input's `agentType`. Entries exist for listeners whose agent name
+   * differs from that, plus the ones a gate looks up.
+   */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
-    'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
     'qoder-cn-trace': 'qoder-cn',
     'qoder-cn-sqlite': 'qoder-cn',
@@ -120,10 +133,9 @@ export class Orchestrator extends EventEmitter {
     'qwen-work-cn-trace': 'qwen-work-cn',
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
-    'qoder-cli-hook': 'qoder',
-    'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
@@ -199,7 +211,7 @@ export class Orchestrator extends EventEmitter {
       this.config.globalSpanAttributes ?? {},
       path.join(this.dataDir, 'span-attributes.json'),
     );
-    this.flusher = await this.buildFlusher();
+    this.flusher = await this.buildFlusher(this.readPackageVersion());
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
@@ -235,11 +247,21 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const uploader = createUploader(multimodalConfig);
-        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
-        this.inputManager.setMultimodalProcessor(processor);
-        this.multimodalProcessor = processor;
-        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
+        if (!eventBase.ok) {
+          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
+        } else {
+          const uploader = createUploader(multimodalConfig, {
+            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
+          });
+          const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
+          this.inputManager.setMultimodalProcessor(processor);
+          this.multimodalProcessor = processor;
+          logger.info('multimodal processor enabled', {
+            type: multimodalConfig.storage.type,
+            storageBasePath: eventBase.storageBasePath,
+          });
+        }
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }
@@ -294,6 +316,7 @@ export class Orchestrator extends EventEmitter {
     const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
@@ -334,6 +357,7 @@ export class Orchestrator extends EventEmitter {
       userId: this.config.userId,
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
+      getTraceRuntimeSnapshot: () => this.flusher?.getTraceRuntimeSnapshot() ?? [],
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
@@ -351,7 +375,13 @@ export class Orchestrator extends EventEmitter {
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
     const packageVersion = this.readPackageVersion();
-    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    const packageGitCommit = this.readPackageGitCommit();
+    this.runtimeWriter = new RuntimeWriter(
+      this.dataDir,
+      this.config.statusBar,
+      packageVersion,
+      packageGitCommit,
+    );
     this.runtimeWriter.start();
 
     // MetricsSummaryWriter is a collector-owned source shared by every local
@@ -427,8 +457,9 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.pipelineManager?.stop();
-    await this.metricsWriter?.stop();
-    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
+    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
+      logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
+    });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
     await this.metricsSummaryWriter?.stop();
@@ -444,6 +475,17 @@ export class Orchestrator extends EventEmitter {
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // The final dataflow window must observe the last serialized collect and
+    // entry queue drain, while the flusher counters are still available.
+    try {
+      await this.metricsWriter?.stop();
+    } catch (err) {
+      // Metrics are best-effort. A failed final snapshot must not prevent the
+      // data flusher from draining or the checkpoint store from being saved.
+      logger.warn('metrics writer stop failed during orchestrator shutdown', {
+        error: String(err),
+      });
+    }
     await this.flusher?.shutdown();
     await this.stateStore?.save();
 
@@ -494,7 +536,7 @@ export class Orchestrator extends EventEmitter {
         id: entryId,
         type: 'deploy-detection',
         watchPaths,
-        isAvailable: () => detectAgent(def.detection),
+        isAvailable: () => this.deploymentManager.isAgentDetected(def),
         enabled: () => this.isAgentGatedEnabled(def.id),
         start: async () => {
           logger.info('new agent discovered, deploying', { agentId: def.id });
@@ -514,6 +556,9 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      // Grok Build uses snake_case event keys and a multi-file hook runtime.
+      // Its exact config and asset checks run through a dedicated intercept target.
+      if (def.id === 'grok-build') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -531,6 +576,39 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /** Grok Build-specific config and hook-runtime integrity checks. */
+  private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
+    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
+    if (!def?.hook) return [];
+    const pilotDir = this.resolvePilotDir();
+
+    return [{
+      id: 'hook:grok-build',
+      enabled: () => this.isAgentGatedEnabled(def.id),
+      precondition: () => this.deploymentManager.isAgentDetected(def),
+      check: async () =>
+        !(await this.deploymentManager.needsRedeploy(def))
+        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
+      repair: async () => {
+        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
+        const result = await this.deploymentManager.deploySingle(def);
+        if (!result.success) {
+          throw new Error(result.error ?? 'failed to restore Grok Build hook');
+        }
+        if (
+          await this.deploymentManager.needsRedeploy(def)
+          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
+        ) {
+          throw new Error('Grok Build hook remains unhealthy after repair');
+        }
+      },
+      cleanup: async () => {
+        const removed = await this.deploymentManager.undeployAgent(def);
+        if (!removed) throw new Error('failed to remove Grok Build hook');
+      },
+    }];
   }
 
   /**
@@ -564,7 +642,7 @@ export class Orchestrator extends EventEmitter {
             && !(await fileExists(pluginPath))
             && !(await directoryExists(pluginPath))
           ) return false;
-          return detectAgent(def.detection);
+          return this.deploymentManager.isAgentDetected(def);
         },
         check: async () => {
           // Healthy == spec still present in the agent's config file.
@@ -572,6 +650,9 @@ export class Orchestrator extends EventEmitter {
         },
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }
@@ -663,12 +744,12 @@ export class Orchestrator extends EventEmitter {
     return path.isAbsolute(resolved) ? resolved : null;
   }
 
-  private async buildFlusher(): Promise<BaseFlusher> {
+  private async buildFlusher(pilotVersion: string): Promise<BaseFlusher> {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
-      const r = new SlsFlusher(cfg.sls, this.dataDir);
+      const r = new SlsFlusher(cfg.sls, this.dataDir, pilotVersion);
       await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
@@ -755,7 +836,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     // --- Qoder CLI hooks ---
-    const qoderCliAvailable = await QoderCliInput.checkAvailability();
+    // The hook writes the JSONL that qoder-trace merges, so availability is the
+    // same `~/.qoder` probe the trace input uses; keep them reading from one
+    // definition so the hook cannot be skipped for an agent we then collect.
+    const qoderCliAvailable = await QoderTraceInput.checkAvailability();
     if (qoderCliAvailable) {
       const defs = HookManager.buildQoderCliHooks(this.dataDir);
       for (const def of defs) {
@@ -768,7 +852,7 @@ export class Orchestrator extends EventEmitter {
           } else {
             this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
               `qoder-cli hook install failed: ${def.hookJsonPath.join('.')}`,
-              { input_name: 'qoder-cli-hook' });
+              { input_name: 'qoder-trace' });
           }
         }
       }
@@ -841,31 +925,6 @@ export class Orchestrator extends EventEmitter {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
-    // Qoder trace input mutual exclusion closure (used by sqlite/hook/session guards below)
-    const qoderTraceEnabled = () =>
-      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
-      this.agentControlManager.resolveEnabled(
-        'qoder-trace',
-        listenerCfg['qoder-trace']?.enabled ?? true,
-      );
-
-    // --- Qoder (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderSqliteInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderSqliteInput, {
-        watchPaths: QoderSqliteInput.getWatchPaths(),
-        isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-sqlite',
-            listenerCfg['qoder-sqlite']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-sqlite']?.pollInterval,
-      }),
-    );
-
     // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
     const qoderWorkTraceInput = new QoderWorkTraceInput({
       stateStore: this.stateStore,
@@ -933,6 +992,7 @@ export class Orchestrator extends EventEmitter {
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCnLogDir,
+      pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderCnTraceInput);
     entries.push(
@@ -1158,56 +1218,38 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
+    // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
+    // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
+    const qoderMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
+      multimodal: {
+        enabled: qoderMultimodalEnabled,
+        uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qoderAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qoderTraceInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderTraceInput, {
         watchPaths: QoderTraceInput.getWatchPaths(),
         isAvailable: QoderTraceInput.checkAvailability,
-        enabled: qoderTraceEnabled,
+        // No fallback listener behind this one any more: disabling qoder-trace
+        // disables Qoder collection outright, which is deliberate — the former
+        // hook/session/sqlite listeners produced a second, competing turn stream
+        // for the same session.
+        enabled: () =>
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-trace',
+            listenerCfg['qoder-trace']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Hook JSONL) — disabled when qoder-trace is enabled ---
-    const qoderCliInput = new QoderCliInput({
-      stateStore: this.stateStore,
-      logDir: qoderCliLogDir,
-    });
-    this.inputManager.registerInput(qoderCliInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliInput, {
-        watchPaths: QoderCliInput.getWatchPaths(),
-        isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-hook',
-            listenerCfg['qoder-cli-hook']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Native session segments) — disabled when qoder-trace is enabled ---
-    const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderCliSessionInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
-        watchPaths: QoderCliSessionInput.getWatchPaths(),
-        isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-session',
-            listenerCfg['qoder-cli-session']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-session']?.pollInterval,
       }),
     );
 
@@ -1248,6 +1290,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['claude-code-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- Grok Build Log (three-source transcript fusion via Hook JSONL) ---
+    const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
+    const grokBuildLogInput = new GrokBuildLogInput({
+      stateStore: this.stateStore,
+      logDir: grokBuildLogDir,
+    });
+    this.inputManager.registerInput(grokBuildLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(grokBuildLogInput, {
+        watchPaths: [grokBuildLogDir],
+        isAvailable: async () => directoryExists(grokBuildLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['grok-build-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'grok-build-log',
+            listenerCfg['grok-build-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
       }),
     );
 
@@ -1631,68 +1693,135 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
+  private readPackageGitCommit(): string {
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const versionFile = path.join(pilotDir, 'VERSION');
+      if (fsSync.existsSync(versionFile)) {
+        const content = fsSync.readFileSync(versionFile, 'utf8');
+        const match = content.match(/^git_commit=(.+)$/m);
+        if (match) return match[1].trim();
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
+
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {
-    const inputCounters = this.inputManager.getInputCounters();
+    const inputCounters = this.inputManager.takeInputCounterSnapshot();
     const activeIds = this.inputManager.getActiveInputIds();
 
-    let sendEntriesTotal = 0;
-    let receivedBytesTotal = 0;
+    // Ingress only. The instance's egress is measured where the writes actually
+    // happen — the flusher counters below — so it is not summed from the inputs.
+    let inEventsTotal = 0;
+    let inBytesTotal = 0;
     for (const counter of inputCounters.values()) {
-      sendEntriesTotal += counter.outEvents;
-      receivedBytesTotal += counter.inBytes;
+      inEventsTotal += counter.inEvents;
+      inBytesTotal += counter.inBytes;
     }
 
-    // Aggregate flusher runner stats
-    const flusherRunner = {
-      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
-      totalDelayMs: 0, lastFlushTime: '', startTime: '',
-    };
+    // One entry per write destination, keyed by family plus the configured
+    // destination name — unique per flusher, and only ever a map key: the name is
+    // process-local ('user-sls', 'internal-cms'), so what identifies a row to a
+    // consumer is project + logstore, never the alias.
+    const flushers = new Map<string, FlusherEndpointStats>();
 
-    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
-
-    // Get SLS flusher counters if available
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) {
-      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
-        flusherRunner.inEntries += counter.inEntries;
-        flusherRunner.inBytes += counter.inBytes;
-        flusherRunner.outEntries += counter.outEntries;
-        flusherRunner.outFailed += counter.outFailed;
-        flusherRunner.totalDelayMs += counter.totalDelayMs;
-        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
-          flusherRunner.lastFlushTime = counter.lastFlushTime;
-        }
-        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
-          flusherRunner.startTime = counter.startTime;
-        }
-        flushers.set(epName, {
-          ...counter,
-          flusherName: 'sls',
+      for (const [name, counter] of slsFlusher.getEndpointCounters()) {
+        flushers.set(`sls:${name}`, {
+          kind: 'sls',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: counter.mode,
+          // SLS serializes the payload here, so these are real bytes.
+          bytesBasis: 'measured',
+          inEntries: counter.inEntries,
+          inBytes: counter.inBytes,
+          outEntries: counter.outEntries,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
         });
       }
     }
 
-    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    // OTLP spans: ARMS/CMS backends are their own family, everything else is
+    // plain otlp. A CMS destination resolves to a project and ARMS's fixed trace
+    // logstore, so its bytes sit on the same billing axis as an SLS row; a plain
+    // OTLP backend has no project of ours, so its row carries the family alone.
+    const otlpCounters = this.getOtlpEndpointCounters();
+    if (otlpCounters) {
+      for (const [name, counter] of otlpCounters) {
+        flushers.set(`${counter.isCms ? 'cms' : 'otlp'}:${name}`, {
+          kind: counter.isCms ? 'cms' : 'otlp',
+          project: counter.project,
+          logstore: counter.logstore,
+          mode: '',
+          // The OTLP exporter owns the encoding and reports no wire size, so these
+          // bytes are a per-span estimate — flagged, not passed off as measured.
+          bytesBasis: 'estimated',
+          inEntries: counter.inSpans,
+          inBytes: counter.inBytes,
+          outEntries: counter.outSpans,
+          outBytes: counter.outBytes,
+          outFailed: counter.outFailed,
+          totalDelayMs: counter.totalDelayMs,
+          lastFlushTime: counter.lastFlushTime,
+          startTime: counter.startTime,
+        });
+      }
+    }
+
+    const inputs = new Map<string, InputStats & { type: string; agent: string; running: boolean }>();
     const inputIdleMinutes = new Map<string, number>();
+    const runningIds = new Set(activeIds);
     for (const [id, counter] of inputCounters) {
-      inputs.set(id, { ...counter });
+      // L2 rolls ingress up by owning agent; several inputs can share one agent.
+      // The map wins where it rolls several listeners into one agent; otherwise the
+      // input's own agentType is the answer. Never counter.type — that is the
+      // collection method, and reporting 'hook-jsonl' as an agent merges every
+      // unmapped hook input into one meaningless row.
+      const agent = Orchestrator.LISTENER_AGENT_MAP[id] ?? counter.agentType ?? id;
+      // `running` is what makes the owning agent count as installed: discovery only
+      // starts an input once it has detected the agent on this host.
+      inputs.set(id, { ...counter, agent, running: runningIds.has(id) });
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
     return {
-      sendEntriesTotal,
-      receivedBytesTotal,
-      inputCount: inputCounters.size,
-      activeInputCount: activeIds.length,
-      flusherRunner,
+      inEventsTotal,
+      inBytesTotal,
       inputs,
       flushers,
       inputIdleMinutes,
     };
+  }
+
+  /**
+   * Duck-typed on purpose: OtlpTraceFlusher is imported lazily so a missing
+   * OpenTelemetry dependency can't break startup, and a static `instanceof`
+   * import here would defeat that.
+   */
+  private getOtlpEndpointCounters(): Map<string, OtlpEndpointCounter> | null {
+    const candidates = this.flusher instanceof MultiFlusher
+      ? this.flusher.getFlushers()
+      : [this.flusher];
+    for (const f of candidates) {
+      if (f.name !== 'otlp-trace') continue;
+      const getter = (f as { getEndpointCounters?: unknown }).getEndpointCounters;
+      if (typeof getter === 'function') {
+        return (getter as () => Map<string, OtlpEndpointCounter>).call(f);
+      }
+    }
+    return null;
   }
 
   private getSlsFlusher(): SlsFlusher | null {

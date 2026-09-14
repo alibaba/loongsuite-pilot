@@ -89,7 +89,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 - **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
 - **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
 
-某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<后端名>.jsonl`。
+某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<服务>-<Agent>__<后端名>-YYYY-MM-DD.jsonl`。
 
 ### 托管后端(`configs/inner/data_config.json`)
 
@@ -327,8 +327,10 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
   ```
 
 - 它们会转换为 event log 中的标准身份字段（`gen_ai.session.id` 和 `user.id`），并成为所有类型 trace span 上的标准属性（`gen_ai.session.id` 和 `gen_ai.user.id`）。无需配置 `spanAttributePassthroughPrefixes`。
-- 按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
+- 显式按次调用身份的优先级高于已配置的 user id 和 agent 原生身份；原生 turn id 和 step id 不变。
 - 一期支持 OpenCode、Claude Code、Qoder/Qoder-CN 和 OpenClaw。Codex 和 Qwen Code CLI 仍会拒绝这两个保留 key。
+- Hermes 额外支持按次调用的 `gen_ai.user.id`。对于 OpenClaw 和 Hermes，最终 user id 的优先级为：`LOONGSUITE_PILOT_SPAN_ATTRIBUTES` 中显式配置的 `gen_ai.user.id` → `LOONGSUITE_PILOT_USER_ID` / `LOONGSUITE_USER_ID` → channel 原生 `senderId` / `sender_id`（通过 invocation transport field 传递，因此高于 collector 配置的 user id）→ collector 配置的 user id → producer 插件配置 / hostname fallback。标准安装中，collector 与插件 fallback 通常读取同一份 `config.json`。
+- 其他已支持 Agent 保持通用优先级，不会将 Agent 原生身份提升到 collector 配置的 user id 之前。
 - 除这两个精确 key 之外，其他 `gen_ai.*` 和 `user.*` 字段仍为保留字段并会被丢弃。
 
 **OpenCode 内置属性（`opencode.message.id`）。** OpenCode 插件会在其 `llm.request`、`llm.response`、`tool.call`、`tool.result` 记录上自动打上 `opencode.message.id`（opencode 的 assistant 消息 id）——无需启动器 env 变量。要让它出现在 span 上，只需列出 `opencode.` 前缀；随后它会出现在 ENTRY / AGENT / STEP / LLM / TOOL span 上（LLM、TOOL 取各自记录的值，ENTRY / AGENT / STEP 取 turn 级值）：
@@ -363,3 +365,9 @@ Trace 导出失败的数据可能会持久化到：
 ```text
 ~/.loongsuite-pilot/logs/otlp-failed/
 ```
+
+每条 JSONL 仍保留现有完整 span 和 `_error`。文件按本地日期每天写一个，不按
+大小分片，默认保留 7 天。后台清理时，如果受管文件超过 512 MiB 的软目标，
+Pilot 会从最旧文件开始删除，但始终保留当天和昨天，因此目录可能在两次清理
+之间暂时超过目标。新版本不再追加旧的无日期 JSONL；旧文件按修改日期参与
+相同的保留和容量清理。该变化不影响 OTLP 重试、导出和健康后端行为。

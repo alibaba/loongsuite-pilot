@@ -250,6 +250,10 @@ export function loadHookRuntimeConfig(dataDir) {
         'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
         upstreamLink.propagateToTools === true,
       ),
+      generateTraceWhenMissing: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
+        upstreamLink.generateTraceWhenMissing === true,
+      ),
     },
   };
 }

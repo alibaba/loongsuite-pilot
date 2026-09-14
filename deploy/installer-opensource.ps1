@@ -17,6 +17,9 @@
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
 #
+# Optional Dashboard port (default: 8765; preserve existing port on reinstall):
+#   .\installer-opensource.ps1 install -DashboardPort 9000
+#
 # Upgrade (preserve config, auto-rollback on failure):
 #   .\installer-opensource.ps1 upgrade
 #
@@ -38,6 +41,7 @@ param(
     [string]$SlsApiKey,
     [string]$PackageUrl,
     [string]$DataDir,
+    [string]$DashboardPort,
     [string]$LogLevel,
     [Alias("user.id")]
     [string]$UserId,
@@ -99,8 +103,14 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 }
 
 # ============================================================
-# Validate mask options
+# Validate install options
 # ============================================================
+if ($PSBoundParameters.Keys -contains 'DashboardPort') {
+    if ($DashboardPort -notmatch '\A[0-9]{1,5}\z' -or [int]$DashboardPort -lt 1 -or [int]$DashboardPort -gt 65535) {
+        Write-Error "-DashboardPort must be an integer between 1 and 65535"
+        exit 1
+    }
+}
 if ($MaskMode) {
     if ($MaskMode -notin @("all", "none", "custom")) {
         Write-Error "Unknown mask mode: $MaskMode (use 'all', 'custom', or 'none')"
@@ -270,6 +280,89 @@ function Get-ManagedNodePlatform {
     }
 }
 
+# >>> pilot-short-path >>>
+# 8.3 short paths: why every delete and move below goes through a helper.
+#
+# Windows hands out %TEMP% in 8.3 short form whenever the profile name does not fit 8.3,
+# which a dot in an account name is often enough to do: C:\Users\zhang.wang becomes
+# C:\Users\ZHANG~1.WAN, the four characters after the dot being one too many for an 8.3
+# extension. %USERPROFILE% stays long, so a single install sees both forms. Reading such a
+# path works everywhere (Test-Path, Get-Item, Get-ChildItem, Get-Content, Set-Content,
+# Add-Content, New-Item, Out-File and Copy-Item all resolve it, and so does a Move-Item
+# destination), but Remove-Item, Move-Item, Rename-Item, Set-Location and Push-Location
+# fail with
+#
+#     An object at the specified path C:\Users\ZHANG~1.WAN does not exist.
+#
+# naming the prefix their walk broke on rather than the path that was passed in.
+#
+# It is one guard in FileSystemProvider.NormalizeThePath, which is what the .NET stack
+# trace on the PSArgumentException names. That walk accumulates currentPath in the form you
+# typed it and, for each segment, compares the resolved item against it:
+#
+#     if (fsinfo.FullName.Length < currentPath.Length)
+#         throw NewArgumentException("path", ItemDoesNotExist, currentPath);
+#     if (fsinfo.Name.Length >= childName.Length)
+#         childName = fsinfo.Name;          // "Expand the short file name"
+#
+# The guard is aimed at a child name of two or more dots, which .NET resolves to the parent
+# and so hands back shorter. An 8.3 name longer than the name it stands for is the other way
+# to make resolved shorter than typed, and the guard cannot tell the two apart -- note that
+# the very next line expands a short name only when doing so would not shorten it.
+#
+# So the trigger is not "a segment is in 8.3 form". Measured on 5.1.26100 over 13 profile
+# names and 7 nesting cases, it is a length comparison on every prefix:
+#
+#     zhang.wang     -> ZHANG~1.WAN    11 > 10   throws
+#     abcd.wang      -> ABCD~1.WAN     10 >  9   throws
+#     ab.wang        -> ABxxxx~1.WAN   12 >  7   throws (<=2 chars of base get a hash)
+#     wang.zhang     -> WANG~1.ZHA     10 = 10   works
+#     zhangsan.wang  -> ZHANGS~1.WAN   12 < 13   works
+#     zhang.san      -> no short name at all     works
+#
+# It takes a short base with an over-long extension, which is why it looks rare in the
+# field. Depth is not irrelevant either: the first prefix whose typed length exceeds its
+# resolved length is the one that throws, so an earlier segment resolving much longer masks
+# a later offender (VERYLO~1\ZHANG~1.WAN is fine) while those same two segments in the other
+# order still throw (ZHANG~1.WAN\VERYLO~1 breaks on the first one). -LiteralPath behaves
+# identically to -Path, so quoting is not the fix, and neither is Convert-Path or
+# Resolve-Path -- both hand the short form straight back. Get-Item .FullName expands it.
+function Get-PilotLongPath {
+    param([string]$Path)
+    if (-not $Path) { return $Path }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.FullName) { return $item.FullName }
+    } catch {
+        # Not there, or not there yet -- a Move-Item destination is the common case. Only
+        # an existing directory can carry a short name, so expanding the parent is enough.
+        try {
+            $parent = Split-Path -Parent $Path
+            $leaf = Split-Path -Leaf $Path
+            if ($parent -and $leaf) {
+                $parentItem = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+                if ($parentItem.FullName) { return (Join-Path $parentItem.FullName $leaf) }
+            }
+        } catch {}
+    }
+    return $Path
+}
+
+# Best-effort delete, for cleanup only. Every caller is a catch or a finally, where an
+# exception is not merely unhelpful but destructive, so this has to be incapable of
+# raising one: -ErrorAction SilentlyContinue covers the ordinary non-terminating half (a
+# file a virus scanner still holds open) and the catch covers everything else, the
+# binding failure above included. Deliberately returns nothing -- a caller that needs to
+# know whether the path is gone asks Test-Path.
+function Remove-PilotPathQuietly {
+    param([string]$Path)
+    if (-not $Path) { return }
+    try {
+        Remove-Item -LiteralPath (Get-PilotLongPath $Path) -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+# <<< pilot-short-path <<<
+
 # >>> pilot-ascii-temp >>>
 # Temp root guaranteed to be ASCII, for the two tar.exe staging dirs only.
 #
@@ -301,9 +394,21 @@ function Get-PilotAsciiTempRoot {
     if ($env:TEMP) { $root = $env:TEMP }
     elseif ($env:TMP) { $root = $env:TMP }
     elseif ($env:SystemRoot) { $root = (Join-Path $env:SystemRoot "Temp") }
-    if ($root -notmatch '[^\x20-\x7E]') {
-        $script:PILOT_ASCII_TEMP_ROOT = $root
-        return $root
+    # 8.3 TEMP (ZHANG~1.WAN) is ASCII, so a charset check on $root used to
+    # return it as-is and skip the long-name expand that Remove-Item /
+    # Move-Item need. Expanding is still required -- but only keep the
+    # expanded form when it is still ASCII. A CJK profile (short base +
+    # over-long extension) hands out an ASCII 8.3 TEMP that Get-PilotLongPath
+    # turns back into the long CJK path; tar.exe then fails with
+    # "Failed to open 'C:\Users\??.HOST\...'". In that case keep $root as
+    # the 8.3 form, try the machine-wide ASCII candidates below, and if
+    # none of those are writable return the 8.3 so tar still has a path
+    # it can open. Remove-Item / Move-Item callers wrap Get-PilotLongPath
+    # themselves.
+    $expanded = Get-PilotLongPath $root
+    if ($expanded -notmatch '[^\x20-\x7E]') {
+        $script:PILOT_ASCII_TEMP_ROOT = $expanded
+        return $expanded
     }
     $candidates = @()
     if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot "Temp") }
@@ -324,9 +429,15 @@ function Get-PilotAsciiTempRoot {
             return $candidate
         } catch {}
     }
-    # Nothing writable: keep the old behaviour rather than failing outright.
-    $script:PILOT_ASCII_TEMP_ROOT = $root
-    return $root
+    # Nothing writable: prefer the original ASCII 8.3 over the expanded CJK
+    # long name. If $root itself is already CJK there is no ASCII option
+    # left; return $expanded (same as $root) rather than failing here.
+    if ($root -notmatch '[^\x20-\x7E]') {
+        $script:PILOT_ASCII_TEMP_ROOT = $root
+        return $root
+    }
+    $script:PILOT_ASCII_TEMP_ROOT = $expanded
+    return $expanded
 }
 
 # Re-inherit the destination's ACL on a tree that was Move-Item'd out of the ASCII root.
@@ -517,21 +628,21 @@ function Ensure-ManagedNode {
         if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $null }
         if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $null }
 
-        if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
+        if (Test-Path $nodeDir) { Remove-Item -LiteralPath (Get-PilotLongPath $nodeDir) -Recurse -Force }
         if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
         Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
         $nodeBin = Resolve-ManagedNodeBin $nodeDir
         if (-not $nodeBin) {
             Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
-            Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-PilotPathQuietly $nodeDir
             return $null
         }
         return $nodeBin
     } catch {
-        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $nodeDir
         return $null
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
 }
 
@@ -582,8 +693,11 @@ function Ensure-NodeModules {
         }
 
         Set-Content -Path (Join-Path $stagedModules ".pilot-modules-version") -Value $stamp
-        if (Test-Path $modulesDir) { Remove-Item $modulesDir -Recurse -Force }
-        Move-Item $stagedModules $modulesDir
+        if (Test-Path $modulesDir) { Remove-Item -LiteralPath (Get-PilotLongPath $modulesDir) -Recurse -Force }
+        # $stagedModules sits under the ASCII temp root, i.e. under whatever %TEMP%
+        # gave us, and Move-Item cannot see an 8.3 segment either -- without this the
+        # prebuilt tree silently lost every install on such a profile to npm install.
+        Move-Item (Get-PilotLongPath $stagedModules) $modulesDir
         # The move brought the ASCII root's ACL with it, which can leave the tree
         # unreadable to the non-elevated scheduled task -- see Reset-PilotInheritedAcl.
         # If that cannot be repaired, throw the prebuilt tree away rather than deploy
@@ -592,14 +706,14 @@ function Ensure-NodeModules {
         if (-not (Reset-PilotInheritedAcl $modulesDir)) {
             Msg "    ⚠️  预编译 node_modules 权限修复失败: $script:PILOT_LAST_ACL_ERR" `
                 "    ⚠️  Could not reset permissions on prebuilt node_modules: $script:PILOT_LAST_ACL_ERR"
-            Remove-Item $modulesDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-PilotPathQuietly $modulesDir
             return $false
         }
         return $true
     } catch {
         return $false
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
 }
 # <<< managed-node-runtime <<<
@@ -746,7 +860,7 @@ function Probe-Agents {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     if (Test-Path $probeScript) {
         try {
-            $raw = & $script:NODE_BIN $probeScript 2>$null
+            $raw = & $script:NODE_BIN $probeScript --installer --config-path (Join-Path $DataDir 'config.json') 2>$null
             if ($raw) {
                 $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
             }
@@ -766,6 +880,7 @@ function Probe-Agents {
 # Agent selection
 # ============================================================
 $script:SELECTED_AGENTS = $Agents
+$script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
     if ($script:SELECTED_AGENTS) {
@@ -804,8 +919,8 @@ const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
   const status = lang === 'zh'
-    ? (a.detected ? '已检测到: ' + a.reason : '未检测到')
-    : (a.detected ? 'detected: ' + a.reason : 'not detected');
+    ? (a.detected ? '已检测到: ' + a.reason : '未检测到' + (a.reason ? ': ' + a.reason : ''))
+    : (a.detected ? 'detected: ' + a.reason : 'not detected' + (a.reason ? ': ' + a.reason : ''));
   console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
   if (a.detected) defaults.push(i+1);
 }
@@ -823,6 +938,7 @@ if (lang === 'zh') {
     $rawSelection = Read-Host "    >"
     $selectInput = if ($null -eq $rawSelection) { "" } else { $rawSelection.Trim() }
     $selectInput = $selectInput -replace '[，、；]', ','
+    if ($selectInput) { $script:AGENT_SELECTION_EXPLICIT = '1' }
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
@@ -916,6 +1032,7 @@ function Confirm-ConfigOverwrite {
         cmsEndpoint = $CmsEndpoint
         cmsWorkspace = $CmsWorkspace
         serviceNamePrefix = $ServiceNamePrefix
+        dashboardPort = $DashboardPort
         maskMode = $MaskMode
         maskTypes = $MaskTypes
     } | ConvertTo-Json -Compress
@@ -943,6 +1060,7 @@ const checks = [
   { label: 'cms.endpoint',      oldVal: (old.cms||{}).endpoint||'',      newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
+  { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
 ];
@@ -1195,6 +1313,7 @@ function Write-Config {
     $cfgArgs = [ordered]@{
         configPath        = $configFile
         dataDir           = $DataDir
+        dashboardPort     = "$DashboardPort"
         slsEndpoint       = "$SlsEndpoint"
         slsProject        = "$SlsProject"
         slsLogstore       = "$SlsLogstore"
@@ -1210,6 +1329,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
         probeResult       = "$($script:PROBE_RESULT)"
@@ -1242,6 +1362,7 @@ const config = {
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }
+if (opts.dashboardPort) config.dashboard.port = Number(opts.dashboardPort);
 if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
@@ -1295,18 +1416,32 @@ if (opts.maskMode) {
 }
 if (opts.selectedAgents) {
   config.agents = config.agents || {};
+  const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
   const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
+    // A transient discovery miss is not consent to uninstall a live plugin.
+    if (agent.id === 'openclaw' && !agent.detected && opts.agentSelectionExplicit !== '1'
+        && previousOpenclaw !== undefined) {
+      console.log('OpenClaw: detection unavailable; preserving previous enabled state and entry');
+      continue;
+    }
     config.agents[agent.id].enabled = selected.includes(agent.id);
+    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
+      const previousEntry = config.agents[agent.id].cliPath;
+      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
+        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
+      }
+      config.agents[agent.id].cliPath = agent.openclawCliPath;
+    }
   }
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
     $ErrorActionPreference = $prevEAP
-    Remove-Item -LiteralPath $cfgTmp -Force -ErrorAction SilentlyContinue
+    Remove-PilotPathQuietly $cfgTmp
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -1740,6 +1875,76 @@ function Stop-PilotService {
     }
 }
 
+# >>> pilot-hold-tasks-during-deploy >>>
+# Stop-PilotService only ends the current task instance. The updater task has a
+# repeating trigger every 5 minutes plus RestartCount, so it comes back while
+# Deploy-Package is still filling a versions/ directory that neither current nor
+# previous names. gcOldVersions then deletes that directory. Disable-ScheduledTask
+# writes Enabled=false on the task definition and actually holds that relaunch;
+# Stop-ScheduledTask does not.
+#
+# Callers Disable BEFORE Stop-PilotService. Disable does not kill a running
+# instance, so Stop is still required, but Stop-Process -Force while the task
+# is still Enabled can arm RestartCount (collector interval is 1 minute).
+# Closing the definition first means a stop cannot be scheduled as a restart.
+#
+# Disable is a write, so it can fail with Access is denied: a -RunLevel Limited
+# task grants its own principal only Read, Synchronize, and an elevated first
+# install leaves the tasks owned by Administrators (same ACL that makes uninstall
+# fail to delete them). A failed disable must not abort the install. Track only
+# names we actually disabled so Enable cannot turn on a task we never held.
+#
+# Enable lives in finally and is idempotent. Start stays on the success path: a
+# failed postinstall must not launch a collector whose hooks were never written.
+# Keep this block byte-identical across every .ps1 installer that carries it.
+$script:PILOT_HELD_TASK_NAMES = @()
+
+function Get-PilotDeployTaskNames {
+    $tag = Get-PilotUserTag
+    @("LoongsuitePilot-$tag", "LoongsuitePilotUpdater-$tag")
+}
+
+function Disable-PilotScheduledTasksDuringDeploy {
+    $script:PILOT_HELD_TASK_NAMES = @()
+    $taskFolder = "\LoongsuitePilot\"
+    foreach ($taskName in (Get-PilotDeployTaskNames)) {
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+        if (-not $task) { continue }
+        $enabled = $true
+        try { $enabled = [bool]$task.Settings.Enabled } catch { $enabled = $true }
+        if (-not $enabled) { continue }
+        try {
+            Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+            $script:PILOT_HELD_TASK_NAMES += $taskName
+        } catch {
+            Msg "    ⚠️  无法禁用计划任务 ${taskName}: $($_.Exception.Message)" `
+                "    ⚠️  Could not disable scheduled task ${taskName}: $($_.Exception.Message)"
+        }
+    }
+    if (@($script:PILOT_HELD_TASK_NAMES).Count -gt 0) {
+        Msg "    已禁用计划任务（部署期间）: $($script:PILOT_HELD_TASK_NAMES -join ', ')" `
+            "    Disabled scheduled tasks for the deploy: $($script:PILOT_HELD_TASK_NAMES -join ', ')"
+    }
+}
+
+function Enable-PilotScheduledTasksAfterDeploy {
+    $taskFolder = "\LoongsuitePilot\"
+    $stillHeld = @()
+    foreach ($taskName in @($script:PILOT_HELD_TASK_NAMES)) {
+        try {
+            Enable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+        } catch {
+            Msg "    ⚠️  无法重新启用计划任务 ${taskName}: $($_.Exception.Message)" `
+                "    ⚠️  Could not re-enable scheduled task ${taskName}: $($_.Exception.Message)"
+            # Keep the name so finally can retry. Wiping the list here would
+            # make a failed success-path Enable a no-op on the way out.
+            $stillHeld += $taskName
+        }
+    }
+    $script:PILOT_HELD_TASK_NAMES = @($stillHeld)
+}
+# <<< pilot-hold-tasks-during-deploy <<<
+
 # ============================================================
 # GC old versions
 # ============================================================
@@ -1834,6 +2039,74 @@ try {
         } finally {
             $ErrorActionPreference = $prevEAP
         }
+    }
+}
+
+# Grok Build's hook file is Pilot-owned, but still preserve any third-party
+# entries that may have been added to it. Stable script-name matching also
+# works when Pilot was installed with a custom data directory.
+function Remove-GrokBuildHookConfig {
+    $cfg = Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json"
+    if (-not (Test-Path -LiteralPath $cfg)) { return }
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" `
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (Node.js unavailable; remove the Grok Build Pilot hook manually)"
+        return
+    }
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $result = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const cfg = process.argv[1];
+const owned = value => typeof value === "string"
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      if (owned(entry && entry.command)) { changed = true; continue; }
+      if (entry && Array.isArray(entry.hooks)) {
+        const nested = entry.hooks.filter(hook => !owned(hook && hook.command));
+        if (nested.length !== entry.hooks.length) changed = true;
+        if (entry.hooks.length > 0 && nested.length === 0) continue;
+        kept.push({ ...entry, hooks: nested });
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (Object.keys(hooks).length === 0) delete data.hooks;
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(cfg);
+  } else {
+    const tmp = `${cfg}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, cfg);
+  }
+  process.stdout.write("cleaned");
+} catch (error) {
+  process.stderr.write(error.message); process.exit(1);
+}
+'@ $cfg 2>$null
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    $result = ([string]($result -join "")).Trim()
+
+    if ($exitCode -eq 0 -and $result -in @("cleaned", "nochange")) {
+        Msg "    ✅ 已清理: ~/.grok/hooks/loongsuite-pilot.json" `
+            "    ✅ Cleaned: ~/.grok/hooks/loongsuite-pilot.json"
+    } else {
+        Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (需手动清理)" `
+            "    ⚠️  Skipped: ~/.grok/hooks/loongsuite-pilot.json (manual cleanup needed)"
     }
 }
 
@@ -2317,9 +2590,10 @@ function Cmd-Install {
         Write-Host ""
     }
 
-    Stop-PilotService
-
     try {
+        Disable-PilotScheduledTasksDuringDeploy
+        Stop-PilotService
+
         Download-AndExtract
         Probe-Agents
         Select-Agents
@@ -2339,6 +2613,7 @@ function Cmd-Install {
         Install-Command
         Inject-QoderworkRuntimeWrapper
 
+        Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $curVer
@@ -2357,9 +2632,8 @@ function Cmd-Install {
         Write-Host ""
         Print-Summary "install"
     } finally {
-        if ($script:TMP_DIR -and (Test-Path $script:TMP_DIR)) {
-            Remove-Item $script:TMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Enable-PilotScheduledTasksAfterDeploy
+        Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
 
@@ -2401,6 +2675,7 @@ function Cmd-Upgrade {
         Write-Host ""
 
         Msg "==> 停止服务..." "==> Stopping service..."
+        Disable-PilotScheduledTasksDuringDeploy
         Stop-PilotService
         Write-Host ""
 
@@ -2408,6 +2683,7 @@ function Cmd-Upgrade {
         Install-Command
         Inject-QoderworkRuntimeWrapper
 
+        Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         # A failed postinstall is a failed upgrade: no point starting the new version, and the
@@ -2440,9 +2716,8 @@ function Cmd-Upgrade {
             exit 1
         }
     } finally {
-        if ($script:TMP_DIR -and (Test-Path $script:TMP_DIR)) {
-            Remove-Item $script:TMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Enable-PilotScheduledTasksAfterDeploy
+        Remove-PilotPathQuietly $script:TMP_DIR
     }
 }
 
@@ -2479,7 +2754,7 @@ fs.writeFileSync(process.argv[2], content);
         $rewriteExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-PilotPathQuietly $tmp
     }
     if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
@@ -3076,6 +3351,12 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
     Remove-OpenClawPlugin
+    Write-Host ""
+
+    # This cleanup executes Node.js. Run it before installation assets or a
+    # pinned runtime can disappear, matching the POSIX uninstall ordering.
+    Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
+    Remove-GrokBuildHookConfig
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."

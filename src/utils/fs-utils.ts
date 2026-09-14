@@ -63,6 +63,8 @@ export interface AtomicTextWriteOptions {
    * Only applies when the expected target already exists.
    */
   backupPath?: string;
+  /** Optional permissions for the newly-created temporary file. */
+  mode?: number;
 }
 
 async function assertExpectedFileState(
@@ -111,7 +113,7 @@ export async function writeTextFileAtomic(
 
   const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -127,7 +129,7 @@ export async function writeTextFileAtomic(
       await ensureDir(dir);
       const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, 'utf8');
+        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }
@@ -229,12 +231,25 @@ export async function ensureDir(path: string): Promise<void> {
 /**
  * Expands a leading `~` to the user home directory.
  */
-export function resolveHome(filepath: string): string {
+export interface HomeResolutionOptions {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: () => string;
+}
+
+export function resolveHome(filepath: string, options: HomeResolutionOptions = {}): string {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const paths = platform === 'win32' ? nodePath.win32 : nodePath.posix;
+  const systemHome = options.homedir ?? os.homedir;
+  const home = () => env === process.env && platform === process.platform
+    ? systemHome()
+    : (platform === 'win32' ? env.USERPROFILE : env.HOME) || systemHome();
   if (filepath === '~') {
-    return os.homedir();
+    return home();
   }
-  if (filepath.startsWith('~/') || filepath.startsWith(`~${nodePath.sep}`)) {
-    return nodePath.join(os.homedir(), filepath.slice(2));
+  if (filepath.startsWith('~/') || filepath.startsWith(`~${paths.sep}`)) {
+    return paths.join(home(), filepath.slice(2));
   }
   return filepath;
 }

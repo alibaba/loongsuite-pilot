@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { AgentActivityEntrySchema } from './agent-activity-schema.js';
-import { buildAgentActivityEntry } from '../../src/normalization/entry-builder.js';
+import {
+  buildAgentActivityEntry,
+  normalizeEventName,
+} from '../../src/normalization/entry-builder.js';
 import { ClientType, ActionType } from '../../src/types/index.js';
 
 describe('AgentActivityEntry contract', () => {
@@ -82,6 +85,21 @@ describe('AgentActivityEntry contract', () => {
 
     const result = AgentActivityEntrySchema.safeParse(bad);
     expect(result.success).toBe(false);
+  });
+
+  it('should accept and preserve agent.input', () => {
+    const entry = {
+      time_unix_nano: '1700000000000000000',
+      'event.id': 'agent-input-event',
+      'event.name': 'agent.input',
+      'user.id': 'u',
+      'gen_ai.session.id': 'sess',
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.provider.name': 'qwen',
+    };
+
+    expect(AgentActivityEntrySchema.safeParse(entry).success).toBe(true);
+    expect(normalizeEventName(entry['event.name'])).toBe('agent.input');
   });
 
   it('should reject a non-numeric time_unix_nano', () => {

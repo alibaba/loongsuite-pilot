@@ -125,6 +125,15 @@ describe('SlsFlusher', () => {
       expect(content['agent.file_path']).toBe('/tmp/test/file.ts');
       expect(content['gen_ai.agent.type']).toBe('qoder');
     });
+
+    it('sets version to the Pilot version for every SLS entry', async () => {
+      const entry = buildTestEntry({ version: 'agent-runtime-version' });
+      await flusher.send(entry);
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.logs[0].content.version).toBe('0.0.0-test');
+    });
   });
 
   describe('redact logic (T013)', () => {
@@ -233,6 +242,35 @@ describe('SlsFlusher', () => {
       expect(metadata.batchBytes).toBeGreaterThan(0);
       expect(metadata).not.toHaveProperty('__logs__');
       vi.unstubAllGlobals();
+    });
+  });
+
+  describe('endpoint counters follow the flush outcome', () => {
+    it('counts a written batch as bytes out', async () => {
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(2);
+      expect(counter.outBytes).toBeGreaterThan(0);
+      expect(counter.outFailed).toBe(0);
+    });
+
+    it('bills a failed batch as failed, not as bytes out', async () => {
+      // The send path persists and returns normally, so only the outcome tells the
+      // counters this batch never landed. Non-retryable, so no backoff to advance.
+      mockPostLogStoreLogs.mockRejectedValue(new Error('invalid request'));
+
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(0);
+      expect(counter.outBytes).toBe(0);
+      expect(counter.outFailed).toBe(2);
+      expect(counter.lastFlushTime).toBe('');
     });
   });
 

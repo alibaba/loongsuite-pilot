@@ -1,8 +1,22 @@
 # LoongSuite Pilot
 
-English | [简体中文](README.zh-CN.md)
+![LoongSuite](docs/_assets/img/loongsuite-logo.png)
 
-[Quick Start](#quick-start) | [Documentation](#documentation) | [Agent Onboarding](docs/agent-onboarding.md) | [License](#license)
+**Local telemetry collector for AI coding agents**
+
+[![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
+[![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
+
+**English** | [简体中文](README.zh-CN.md)
+
+[Overview](#overview) | [Quick Start](#quick-start) | [Documentation](#documentation) | [Community](#community) | [Contributing](#contributing)
+
+---
+
+## Overview
 
 LoongSuite Pilot is a local telemetry collector for AI coding agents. It discovers supported agents on a developer machine, installs the required hooks or plugins, normalizes activity into a shared GenAI event schema, and exports logs or traces to your chosen backends.
 
@@ -11,8 +25,6 @@ LoongSuite Pilot is a local telemetry collector for AI coding agents. It discove
   <br>
   <em>Built-in local dashboard — multi-agent token usage, sessions, requests, tools, models, providers, and repository activity at a glance.</em>
 </p>
-
-## Why LoongSuite Pilot?
 
 Development teams often use more than one AI coding agent, and each agent records activity in a different local format. Pilot gives teams one local collector that can discover those agents, collect their activity, normalize the data, and send it to destinations that are useful for analysis, audit, and observability.
 
@@ -24,7 +36,7 @@ Pilot is designed to answer practical questions:
 - Where should the data be exported: local files, SLS, HTTP, or traces?
 - How should sensitive prompts, tool arguments, and secrets be controlled before export?
 
-## Core Capabilities
+## Highlights
 
 
 | Capability               | What Pilot Does                                                                    |
@@ -47,6 +59,7 @@ Pilot is designed to answer practical questions:
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
+| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
@@ -64,7 +77,7 @@ Pilot is designed to answer practical questions:
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 
-OpenClaw integration requires OpenClaw 2026.5.12 or later.
+OpenClaw integration supports 2026.3.8 or later with automatic version detection. Before 2026.5.12, model-call timing is inferred from legacy hooks; see [compatibility details](docs/agents.md#openclaw-compatibility-and-lifecycle).
 
 DeepSeek Harness (`dsh`) loads Pilot's observability plugin from its user-level
 `cordis.patch.yml`. The integration captures native LLM, reasoning, tool, token,
@@ -151,7 +164,8 @@ Link collected agent spans to an **upstream** trace so each turn's span tree rep
 | Setting | Values | Default |
 | ------- | ------ | ------- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate the first-turn upstream context to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
 
 When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
@@ -159,7 +173,7 @@ When enabled, the upstream `traceparent` reaches Pilot via one of two schemes an
 - **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
 - **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
 
-For Claude Code, enabling both upstream linking and `propagateToTools` also passes the first turn's context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. The downstream CLI must read these environment variables and configure its own trace exporter. This initial scope is fail-open and does not cover subagents, PowerShell, MCP tools, later turns, or resumed sessions with a newly supplied context.
+For Claude Code, enabling both `upstreamLink.enabled` and `propagateToTools` passes context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. Optionally enable `generateTraceWhenMissing` so turns without upstream context generate and propagate a local trace. Set `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` on the Claude Code process to have Pilot map it to standard `OTEL_RESOURCE_ATTRIBUTES` for the downstream CLI. Prefer `config.json` for the three `upstreamLink` switches: environment variables affect only processes that inherit them, and `loongsuite-pilot restart` alone does not change an already-running Claude Code hook environment. The downstream CLI must extract Trace Context and configure its own exporter. This capability is fail-open and currently does not cover ACP-only downstream trace propagation, subagents, PowerShell, MCP tools, or non-Bash tools.
 
 
 ## Output Data
@@ -193,15 +207,31 @@ The local dashboard starts and stops with the collector. Open
 `http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
 collector-owned `logs/metrics-summary.json` file directly.
 
+On macOS, optionally run `loongsuite-pilot dashboard shortcut install` to create a
+Dashboard `.webloc` shortcut with a radar icon and add it to the Dock's files area.
+Normal installation and upgrades do not add shortcuts. It opens the configured
+URL in your default browser without starting or stopping Pilot. After changing
+the port, run the shortcut install command again. See [Dashboard shortcut](docs/installation.md#macos-dashboard-shortcut).
+
 macOS menu bar app:
 
 On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+
+If you quit the menu bar app, reopen it without restarting collection:
+
+```bash
+loongsuite-pilot menubar start
+```
+
+Run this in your macOS desktop terminal without `sudo`. Pilot must already be running. The command persists `"enableStatusBarApp": true` in the active `config.json`; repeated calls reuse the running app.
+
+To close only the menu bar app, run `loongsuite-pilot menubar stop`. Collection keeps running, and stopping an already closed app succeeds. The command persists `"enableStatusBarApp": false`, so the next collector startup leaves it closed.
 
 <p align="center">
   <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
 </p>
 
-To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
+The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has higher priority than `config.json`. Unset a disabling value before `menubar start`; an enabling value can override the setting written by `menubar stop` on future Pilot starts.
 
 ## Documentation
 
@@ -215,7 +245,7 @@ To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enabl
 
 [Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
 
-## Build From Source
+## Development
 
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
@@ -237,6 +267,19 @@ npm test
 
 For packaging and service installation from a local build, see [Installation](docs/installation.md).
 
+## Contributing
+
+Issues and pull requests are welcome. Before submitting a change, run the same core checks used by CI:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+To add support for another AI coding agent, start with the [Agent Onboarding Guide](docs/agent-onboarding.md). Report bugs and propose features through [GitHub Issues](https://github.com/alibaba/loongsuite-pilot/issues).
+
 ## Community
 
 We are looking forward to your feedback and suggestions. Scan the QR code below to join the LoongSuite Pilot DingTalk group.
@@ -245,13 +288,16 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 |----|
 | <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
 
-### Related Projects
+## LoongSuite Ecosystem
 
-- [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
-- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
-- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Process agent for Python applications
-- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Process agent for Golang with compile-time instrumentation
-- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - GenAI telemetry utility library for Java applications
+| Project | Role |
+| ------- | ---- |
+| [LoongCollector](https://github.com/alibaba/loongcollector) | High-performance collector for logs, metrics, traces, events, and profiles. |
+| [LoongSuite Java](https://github.com/alibaba/loongsuite-java) | Shared GenAI telemetry utilities for Java instrumentation. |
+| [LoongSuite Go](https://github.com/alibaba/loongsuite-go) | Compile-time auto-instrumentation for Go applications. |
+| [LoongSuite Python](https://github.com/alibaba/loongsuite-python) | OpenTelemetry auto-instrumentation for Python and GenAI applications. |
+| [LoongSuite JS](https://github.com/alibaba/loongsuite-js) | OpenTelemetry integrations for JavaScript AI agents. |
+| [LoongSuite Pilot](https://github.com/alibaba/loongsuite-pilot) | Local telemetry collector for AI coding agents. |
 
 ## License
 

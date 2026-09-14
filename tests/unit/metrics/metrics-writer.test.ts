@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
+import type { TraceRuntimeSnapshot } from '../../../src/metrics/trace-runtime-types.js';
 
 const fsMockState = { blockAccessSync: false };
 
@@ -38,19 +39,23 @@ vi.mock('../../../src/internal/sender.js', () => ({
 
 function buildSnapshot(): DataflowSnapshot {
   return {
-    sendEntriesTotal: 10,
-    receivedBytesTotal: 2048,
-    inputCount: 2,
-    activeInputCount: 1,
-    flusherRunner: {
-      inEntries: 10, inBytes: 2048, outEntries: 9, outFailed: 1,
-      totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00',
-    },
+    inEventsTotal: 12,
+    inBytesTotal: 2048,
     inputs: new Map([
-      ['test-input', { inEvents: 5, inBytes: 1024, outEvents: 5, outFailed: 0, lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'polling' }],
+      ['test-input', {
+        sourceKind: 'primary' as const,
+        rawReadCalls: 2, rawReadBytes: 2048,
+        rawInRecords: 7, rawInBytes: 1536,
+        rawInMaxBatchBytes: 1024, rawInMaxRecordBytes: 512, rawBacklogBytesMax: 1024,
+        parseSuccessRecords: 6, parseFailedRecords: 1,
+        readDurationMs: 4, processDurationMs: 8,
+        inEvents: 5, inBytes: 1024, outFailed: 0,
+        lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00',
+        type: 'polling', agent: 'test-agent', running: true,
+      }],
     ]),
     flushers: new Map([
-      ['test-ep', { inEntries: 10, inBytes: 2048, outEntries: 9, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', flusherName: 'sls', mode: 'webtracking', endpoint: 'https://cn-heyuan.log.aliyuncs.com', project: 'test-project', logstore: 'test-logstore' }],
+      ['sls:main', { kind: 'sls' as const, project: 'proj-a', logstore: 'store-a', mode: 'sls', bytesBasis: 'measured' as const, inEntries: 10, inBytes: 2048, outEntries: 9, outBytes: 1900, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00' }],
     ]),
     inputIdleMinutes: new Map(),
   };
@@ -76,6 +81,20 @@ function checkThresholdsForTest(writer: MetricsWriter, metrics: { cpu: string; m
 
 function cpuAboveProcessThreshold(): string {
   return '81';
+}
+
+function managedLogFile(metricDir: string, prefix: string): string {
+  const file = fs.readdirSync(metricDir).find(name => (
+    name.startsWith(`${prefix}-`) && /-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)
+  ));
+  if (!file) throw new Error(`managed log file not found for ${prefix}`);
+  return path.join(metricDir, file);
+}
+
+function hasManagedLogFile(metricDir: string, prefix: string): boolean {
+  return fs.existsSync(metricDir) && fs.readdirSync(metricDir).some(name => (
+    name.startsWith(`${prefix}-`) && name.endsWith('.jsonl')
+  ));
 }
 
 describe('MetricsWriter', () => {
@@ -108,7 +127,7 @@ describe('MetricsWriter', () => {
     vi.useRealTimers();
     await writer.start();
 
-    const filePath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl');
+    const filePath = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
     expect(fs.existsSync(filePath)).toBe(true);
 
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
@@ -117,7 +136,10 @@ describe('MetricsWriter', () => {
     const entry = JSON.parse(lines[0]);
     expect(entry.version).toBe('2.0.0');
     expect(entry.user_id).toBe('u1');
-    expect(entry.metric_json.input_count).toBe('2');
+    expect(entry.metric_json.agent_count).toBe('1');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_records');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_bytes');
+    expect(entry.metric_json).not.toHaveProperty('raw_in_max_batch_bytes');
   });
 
   it('calls sendStatus with pilot_status topic on L1 write', async () => {
@@ -139,9 +161,123 @@ describe('MetricsWriter', () => {
     expect(call).toBeDefined();
     expect(call![1]).toHaveProperty('version', '2.0.0');
     expect(call![1]).not.toHaveProperty('__topic__');
+
+    // Old L2 topics must no longer be emitted (merged into pilot_pipeline)
+    const legacy = mockSendStatus.mock.calls.filter((c: unknown[]) =>
+      ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
+    );
+    expect(legacy).toHaveLength(0);
   });
 
-  it('writes L2 input/flusher metrics on stop (final flush)', async () => {
+  it('reports scalar snapshots in the existing L1 cycle using its exact process identity', async () => {
+    const row: TraceRuntimeSnapshot = {
+      agent_type: 'codex', pending_buffers: 1, pending_records: 2, pending_logical_bytes: 100,
+      pending_unmeasured_records: 0, largest_buffer_logical_bytes: 100, largest_buffer_records: 2,
+      largest_buffer_age_ms: 60_000, largest_buffer_turn_id: 'turn', largest_buffer_session_id: 'session',
+      oldest_buffer_age_ms: 60_000, removed_buffers_total: 3, removed_logical_bytes_total: 400,
+      removed_unmeasured_records_total: 0, converter_calls_total: 3, converter_duration_ms_total: 12,
+      converter_failed_total: 0,
+    };
+    const snapshot = vi.fn(() => [row]);
+    writer = new MetricsWriter({ dataDir: tmpDir, version: 'test', userId: 'u1',
+      getSnapshot: buildSnapshot, getTraceRuntimeSnapshot: snapshot });
+    vi.useRealTimers();
+    await writer.start();
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    const status = mockSendStatus.mock.calls.find(call => call[0] === 'pilot_status')![1];
+    const trace = mockSendStatus.mock.calls.find(call => call[0] === 'pilot_trace_runtime')![1];
+    expect(trace).toMatchObject({ schema_version: '2', record_type: 'snapshot', buffer_scope: 'pending_conversion',
+      agent_type: 'codex', removed_buffers_total: '3', run_id: status.run_id, instance_id: status.instance_id,
+      user_id: status.user_id, version: status.version, __time__: status.__time__ });
+    expect(trace).not.toHaveProperty('window_ms');
+    expect(trace).not.toHaveProperty('rss_before_convert_bytes');
+  });
+
+  it.each(['snapshot', 'send'])('isolates runtime %s failures from existing status output and shutdown', async failure => {
+    writer = new MetricsWriter({ dataDir: tmpDir, version: 'test', userId: 'u1', getSnapshot: buildSnapshot,
+      getTraceRuntimeSnapshot: () => {
+        if (failure === 'snapshot') throw new Error('snapshot unavailable');
+        return [{ agent_type: 'codex' } as TraceRuntimeSnapshot];
+      } });
+    mockSendStatus.mockImplementation((topic: string) => {
+      if (failure === 'send' && topic === 'pilot_trace_runtime') throw new Error('send unavailable');
+    });
+    vi.useRealTimers();
+    await expect(writer.start()).resolves.toBeUndefined();
+    await expect(writer.stop()).resolves.toBeUndefined();
+    expect(fs.existsSync(managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics'))).toBe(true);
+    mockSendStatus.mockReset();
+  });
+
+  it('sends one row per agent and per destination on L2 flush', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    // Flush explicitly rather than leaning on start()'s priming flush: an
+    // overlapping prime coalesces into the same in-flight write, which would
+    // make a call count assertion race.
+    await (writer as any).writeL2();
+
+    // All row types share pilot_pipeline and are distinguished by `type`.
+    const rows = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
+      .map((c: unknown[]) => c[1] as Record<string, string>);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher']);
+
+    const [agent, input, flusher] = rows;
+    // Host identity ships with every flow row, so grouping by machine needs no
+    // join back to pilot_status.
+    expect(agent.hostname).toBe(os.hostname());
+    expect(agent.ip).toBeDefined();
+    expect(flusher.hostname).toBe(os.hostname());
+
+    // Flat string fields throughout: nothing needs json_extract to be queried.
+    expect(agent.agent).toBe('test-agent');
+    expect(agent).not.toHaveProperty('raw_in_records');
+    expect(agent).not.toHaveProperty('raw_in_bytes');
+    expect(agent).not.toHaveProperty('raw_in_max_batch_bytes');
+    expect(agent.in_events).toBe('5');
+    expect(input.input_name).toBe('test-input');
+    expect(input.source_kind).toBe('primary');
+    expect(input.raw_read_bytes).toBe('2048');
+    expect(input.parse_failed_records).toBe('1');
+    expect(flusher.flusher).toBe('sls');
+    expect(flusher.project).toBe('proj-a');
+    expect(flusher.logstore).toBe('store-a');
+    expect(flusher.out_entries).toBe('9');
+  });
+
+  it('drains the rows, so an unchanged snapshot reports zeros', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await (writer as any).writeL2();
+    mockSendStatus.mockClear();
+    await (writer as any).writeL2();
+
+    const rows = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
+      .map((c: unknown[]) => c[1] as Record<string, string>);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher']);
+    expect(rows[0].in_events).toBe('0');
+    expect(rows[0].in_bytes).toBe('0');
+    expect(rows[1].raw_read_bytes).toBe('0');
+    expect(rows[1].parse_failed_records).toBe('0');
+    expect(rows[2].out_entries).toBe('0');
+    expect(rows[2].out_bytes).toBe('0');
+  });
+
+  it('mirrors each L2 row type to its own file on stop (final flush)', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -153,27 +289,86 @@ describe('MetricsWriter', () => {
     await writer.start();
     await writer.stop();
 
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
+    const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+    const firstLine = (prefix: string): any => JSON.parse(
+      fs.readFileSync(managedLogFile(metricDir, prefix), 'utf-8').trim().split('\n')[0],
+    );
 
-    expect(fs.existsSync(inputPath)).toBe(true);
-    expect(fs.existsSync(flusherPath)).toBe(true);
+    const agent = firstLine('pilot-agent-metrics');
+    expect(agent.type).toBe('agent');
+    expect(agent.user_id).toBe('u1');
+    expect(agent.agent).toBe('test-agent');
+    expect(agent.in_events).toBe('5');
 
-    const inputLine = JSON.parse(fs.readFileSync(inputPath, 'utf-8').trim().split('\n')[0]);
-    expect(inputLine.category).toBe('input');
-    expect(inputLine.label.input_name).toBe('test-input');
-    expect(inputLine.in_events_total).toBe('5');
+    const input = firstLine('pilot-input-metrics');
+    expect(input.type).toBe('input');
+    expect(input.input_name).toBe('test-input');
+    expect(input.raw_read_calls).toBe('2');
 
-    const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
-    expect(flusherLine.category).toBe('flusher');
-    expect(flusherLine.label.endpoint_name).toBe('https://cn-heyuan.log.aliyuncs.com');
-    expect(flusherLine.out_entries_total).toBe('9');
+    const flusher = firstLine('pilot-flusher-metrics');
+    expect(flusher.type).toBe('flusher');
+    expect(flusher.flusher).toBe('sls');
+    expect(flusher.logstore).toBe('store-a');
+    expect(flusher.out_entries).toBe('9');
   });
 
-  it('does not write L2 files when snapshot has no inputs/flushers', async () => {
+  it('takes a fresh final snapshot after an in-flight dataflow cycle', async () => {
+    const getSnapshot = vi.fn(buildSnapshot);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot,
+    });
+    vi.useRealTimers();
+
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const original = (writer as any).collectAndWriteDataflow.bind(writer);
+    let cycleCount = 0;
+    vi.spyOn(writer as any, 'collectAndWriteDataflow').mockImplementation(async () => {
+      cycleCount++;
+      if (cycleCount === 1) await firstBlocked;
+      await original();
+    });
+
+    const inFlight = (writer as any).writeDataflow() as Promise<void>;
+    const stopping = writer.stop();
+    await Promise.resolve();
+    expect(cycleCount).toBe(1);
+
+    releaseFirst();
+    await inFlight;
+    await stopping;
+
+    expect(cycleCount).toBe(2);
+    expect(getSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reject stop when the final dataflow snapshot fails', async () => {
+    let failSnapshot = false;
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: () => {
+        if (failSnapshot) throw new Error('snapshot exploded');
+        return buildSnapshot();
+      },
+    });
+    vi.useRealTimers();
+
+    await writer.start();
+    failSnapshot = true;
+
+    await expect(writer.stop()).resolves.toBeUndefined();
+  });
+
+  it('does not write the L2 file when snapshot has no inputs/flushers', async () => {
     const emptySnapshot: DataflowSnapshot = {
-      sendEntriesTotal: 0, receivedBytesTotal: 0, inputCount: 0, activeInputCount: 0,
-      flusherRunner: { inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0, totalDelayMs: 0, lastFlushTime: '', startTime: '' },
+      inEventsTotal: 0, inBytesTotal: 0,
       inputs: new Map(),
       flushers: new Map(),
       inputIdleMinutes: new Map(),
@@ -190,11 +385,10 @@ describe('MetricsWriter', () => {
     await writer.start();
     await writer.stop();
 
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
-
-    expect(fs.existsSync(inputPath)).toBe(false);
-    expect(fs.existsSync(flusherPath)).toBe(false);
+    const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+    expect(hasManagedLogFile(metricDir, 'pilot-agent-metrics')).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-input-metrics')).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-flusher-metrics')).toBe(false);
   });
 
   it('includes capture_message_disabled_agents in L1 metrics', async () => {
@@ -212,32 +406,11 @@ describe('MetricsWriter', () => {
     vi.useRealTimers();
     await writer.start();
 
-    const filePath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl');
+    const filePath = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
     expect(entry.capture_message_disabled_agents).toBe('qoder');
-  });
-
-  it('includes user_id in L2 input and flusher metrics', async () => {
-    writer = new MetricsWriter({
-      dataDir: tmpDir,
-      version: '2.0.0',
-      userId: 'u1',
-      getSnapshot: buildSnapshot,
-    });
-
-    vi.useRealTimers();
-    await writer.start();
-    await writer.stop();
-
-    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
-    const inputLine = JSON.parse(fs.readFileSync(inputPath, 'utf-8').trim().split('\n')[0]);
-    expect(inputLine.user_id).toBe('u1');
-
-    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
-    const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
-    expect(flusherLine.user_id).toBe('u1');
   });
 
   describe('process resource thresholds', () => {

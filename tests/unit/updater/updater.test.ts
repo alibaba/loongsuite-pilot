@@ -47,11 +47,18 @@ vi.mock('node:fs/promises', () => ({
   mkdtemp: (...args: [string]) => mockFsMkdtemp(...args),
 }));
 
+const mockWriteFileSync = vi.fn();
+const mockRenameSync = vi.fn();
+
 // --- Mock node:fs (createWriteStream) ---
 vi.mock('node:fs', () => ({
   createWriteStream: vi.fn(() => ({ fake: true })),
   createReadStream: vi.fn(),
   readdirSync: vi.fn(() => []),
+  mkdirSync: vi.fn(),
+  writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  renameSync: (...args: unknown[]) => mockRenameSync(...args),
+  rmSync: vi.fn(),
 }));
 
 // --- Mock stream pipeline ---
@@ -132,6 +139,21 @@ function makeResponseStream(status = 200): Response {
   } as unknown as Response;
 }
 
+function pilotCommandArgs(call: [string, string[]]): string[] {
+  const [cmd, args] = call;
+  if (String(cmd).toLowerCase().includes('powershell')) {
+    const fileIndex = args.indexOf('-File');
+    return fileIndex >= 0 ? args.slice(fileIndex + 2) : [];
+  }
+  return args;
+}
+
+function pilotCommands(): string[] {
+  return mockExecFile.mock.calls
+    .map((call: [string, string[]]) => pilotCommandArgs(call)[0])
+    .filter(Boolean);
+}
+
 describe('Updater', () => {
   let tmpDir: string;
 
@@ -158,8 +180,21 @@ describe('Updater', () => {
     mockFsAccess.mockRejectedValue(new Error('ENOENT'));
     // Default: execFile succeeds
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
-    // Default: readJsonFile / writeJsonFile
-    mockReadJsonFile.mockResolvedValue({});
+    // Default: config reads return an empty object; collector health reads see
+    // the freshly started target version so existing successful-upgrade tests
+    // exercise the health gate without waiting for a timer.
+    mockReadJsonFile.mockImplementation((filePath: string) => {
+      if (String(filePath).endsWith('/logs/runtime.json')) {
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'bbb',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return Promise.resolve({});
+    });
     mockWriteJsonFile.mockResolvedValue(undefined);
   });
 
@@ -273,12 +308,134 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined); // versions dir exists
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
       // fetch called once for manifest, not for download
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs an unhealthy collector even when the target is already current', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve(runtimeReads === 1 ? null : {
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'aaa',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      expect(pilotCommands()).toEqual(['start-collector', 'schedule-updater-restart']);
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('keeps failure state when already-current collector recovery never becomes healthy', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve(null)
+          : Promise.resolve({})
+      ));
+      const updater = new Updater(makeConfig(), tmpDir);
+      const gc = vi.spyOn(updater as any, 'gcOldVersions');
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      expect(pilotCommands()).toContain('start-collector');
+      expect(pilotCommands()).not.toContain('schedule-updater-restart');
+      expect(gc).not.toHaveBeenCalled();
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
+    it.each([
+      ['an old version', '1.0.1', 'old'],
+      ['an old build of the same version', '1.0.2', 'old'],
+    ])('restarts a live collector running %s', async (_case, packageVersion, gitCommit) => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve(runtimeReads <= 2 ? {
+          status: 'active',
+          packageVersion,
+          gitCommit,
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        } : {
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'aaa',
+          pid: process.ppid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+
+      await updater.check();
+
+      expect(pilotCommands()).toEqual(['restart-collector', 'schedule-updater-restart']);
+      expect((updater as any).consecutiveFailures).toBe(0);
     });
   });
 
@@ -721,7 +878,7 @@ describe('Updater', () => {
         ([p]: [string]) => p.includes('/versions/1.0.0_old'),
       );
       const restartCallIndex = mockExecFile.mock.calls.findIndex(
-        ([cmd, args]: [string, string[]]) => String(cmd).includes('loongsuite-pilot') && args[0] === 'restart-collector',
+        (call: [string, string[]]) => pilotCommandArgs(call)[0] === 'restart-collector',
       );
       expect(mockFsRm.mock.invocationCallOrder[staleRmIndex]).toBeGreaterThan(
         mockExecFile.mock.invocationCallOrder[restartCallIndex],
@@ -820,11 +977,381 @@ describe('Updater', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongsuitePilotCalls = mockExecFile.mock.calls.filter(
-        ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
+      const commandArgs = mockExecFile.mock.calls
+        .map((call: [string, string[]]) => pilotCommandArgs(call))
+        .filter(([command]: string[]) => [
+          'restart-collector', 'start-collector', 'schedule-updater-restart',
+        ].includes(command));
+      expect(commandArgs).toContainEqual([
+        'restart-collector', '--defer-updater-restart',
+      ]);
+      expect(commandArgs).toContainEqual([
+        'schedule-updater-restart',
+      ]);
+      expect(commandArgs.flat()).not.toContain('monitor');
+    });
+
+    it('recovers a timed-out restart with the start-only command before reporting success', async () => {
+      setupForDownload();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          const error = new Error('Command timed out');
+          (error as any).killed = true;
+          return Promise.reject(error);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      const commands = pilotCommands();
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('allows a full health window after timed-out restart recovery', async () => {
+      setupForDownload();
+      const recoveryStartedAt = Date.now();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        if (Date.now() - recoveryStartedAt < 29_500) return Promise.resolve(null);
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'bbb',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('does not report success when Windows start-only returns Unknown command', async () => {
+      setupForDownload();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        if (args.includes('start-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            stdout: 'Unknown command: start-collector',
+            stderr: '',
+            code: 1,
+            killed: false,
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
       );
-      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls.map(([, args]) => args).flat()).not.toContain('monitor');
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure',
+        expect.objectContaining({
+          error: expect.stringContaining('stdout="Unknown command: start-collector"'),
+        }),
+      );
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
+    it('does not report restart success or run GC when collector health never appears', async () => {
+      setupForDownload();
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+      const gc = vi.spyOn(updater as any, 'gcOldVersions');
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      const commands = pilotCommands();
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
+      );
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure', expect.objectContaining({ consecutive_failures: 1 }),
+      );
+      expect(gc).not.toHaveBeenCalled();
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+  });
+
+  describe('collector health validation', () => {
+    it('requires the target version, a fresh heartbeat, and a new PID for rebuilds', () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const now = Date.now();
+      const runtime = {
+        status: 'active',
+        packageVersion: '1.0.2',
+        gitCommit: 'bbb',
+        pid: process.pid,
+        updatedAt: new Date(now).toISOString(),
+      };
+
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, packageVersion: '1.0.1' }, '1.0.2', now, null,
+      )).toContain('expected 1.0.2');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, gitCommit: 'aaa' }, '1.0.2', now, null, 'bbb',
+      )).toContain('expected bbb');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, updatedAt: new Date(now - 1).toISOString() }, '1.0.2', now, null,
+      )).toBe('runtime record predates restart');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, process.pid,
+      )).toBe('collector PID did not change');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, null,
+      )).toBe('');
+    });
+  });
+
+  describe('collector command invocation', () => {
+    it('passes Windows commands after -File and defers the updater handoff', async () => {
+      const realPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const updater = new Updater(makeConfig(), tmpDir);
+        await (updater as any).runCollectorCommand('restart-collector');
+        await (updater as any).runCollectorCommand('start-collector');
+        await (updater as any).runCollectorCommand('schedule-updater-restart');
+
+        expect(mockExecFile.mock.calls).toHaveLength(3);
+        expect(mockExecFile.mock.calls.map((call: [string, string[]]) => call[0]))
+          .toEqual(['powershell.exe', 'powershell.exe', 'powershell.exe']);
+        expect(mockExecFile.mock.calls.map((call: [string, string[]]) => pilotCommandArgs(call)))
+          .toEqual([
+            ['restart-collector', '--defer-updater-restart'],
+            ['start-collector'],
+            ['schedule-updater-restart'],
+          ]);
+      } finally {
+        Object.defineProperty(process, 'platform', { value: realPlatform });
+      }
+    });
+
+    it('preserves child-process diagnostics when start-only recovery fails', async () => {
+      const restartError = Object.assign(new Error('restart timed out'), {
+        stdout: 'restart output',
+        killed: true,
+        signal: 'SIGTERM',
+      });
+      const recoveryError = Object.assign(new Error('start failed'), {
+        stdout: 'start output',
+        stderr: 'permission denied',
+        code: 1,
+        killed: false,
+      });
+      mockExecFile.mockRejectedValueOnce(recoveryError);
+      const updater = new Updater(makeConfig(), tmpDir);
+
+      await expect((updater as any).startCollectorForRecovery(restartError)).rejects.toThrow(
+        /stdout="restart output".*killed=true.*signal=SIGTERM.*stdout="start output".*stderr="permission denied".*code=1.*killed=false/,
+      );
+    });
+  });
+
+  describe('restartCollector failure reporting', () => {
+    function attachMetrics(updater: Updater): unknown[][] {
+      const calls: unknown[][] = [];
+      updater.setMetrics({
+        writeAlarm: (...args: unknown[]) => { calls.push(args); return Promise.resolve(); },
+        writeEvent: () => Promise.resolve(),
+      } as never);
+      return calls;
+    }
+
+    function failRestartWith(err: unknown): void {
+      mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+        if (String(cmd).includes('loongsuite-pilot') || (args ?? []).includes('restart-collector') || (args ?? []).includes('start-collector')) {
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+    }
+
+    it('alarms with the stage the service script recorded when recovery also fails', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'register-denied',
+            init_type: 'taskscheduler',
+            detail: 'self-heal failed: Access is denied.',
+            diag: { definition_owner: 'BUILTIN\\Administrators' },
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) {
+          return Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(Object.assign(new Error('Command failed'), {
+        code: 1,
+        stdout: '[restart-failure] target=collector stage=register-denied\n',
+        stderr: 'Service manager failed to restart collector\n',
+      }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=register-denied');
+      expect(message).toContain('reason="self-heal failed: Access is denied."');
+      expect(message).toContain('definition_owner="BUILTIN\\Administrators"');
+      expect(message).toContain('stdout="[restart-failure] target=collector stage=register-denied"');
+    });
+
+    it('does not attribute an older breadcrumb to this attempt', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000) - 900,
+            target: 'collector',
+            stage: 'register-denied',
+            detail: 'stale evidence from fifteen minutes ago',
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(new Error('spawn ENOENT'));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=unknown');
+      expect(message).not.toContain('register-denied');
+      expect(message).not.toContain('stale evidence');
+    });
+
+    it('writes a timeout breadcrumb when restart-collector is killed', async () => {
+      failRestartWith(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const payload = mockWriteFileSync.mock.calls
+        .map((call) => String(call[1] ?? ''))
+        .find((text) => text.includes('"stage"'));
+      expect(payload).toBeTruthy();
+      expect(JSON.parse(payload as string).stage).toBe('timeout');
+      expect(JSON.parse(payload as string).target).toBe('collector');
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=timeout');
+    });
+
+    it('stays silent when the restart succeeds', async () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await (updater as any).restartCollector('1.0.2', false);
+      expect(alarms).toEqual([]);
+    });
+
+    it('alarms with the first restart stage when start-collector succeeds but health never appears', async () => {
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if ((args ?? []).includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            code: 1,
+            stdout: '[restart-failure] target=collector stage=task-missing\n',
+            stderr: 'Service manager failed to restart collector\n',
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'task-missing',
+            init_type: 'taskscheduler',
+            detail: 'scheduled task is not registered',
+            diag: {},
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      const pending = (updater as any).restartCollector('1.0.2', false);
+      const assertion = expect(pending).rejects.toThrow(/did not become healthy/);
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=task-missing');
+      expect(message).toContain('health check failed after start-collector recovery');
+      expect(message).toContain('runtime record not found');
     });
   });
 
@@ -880,6 +1407,17 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined);
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
 

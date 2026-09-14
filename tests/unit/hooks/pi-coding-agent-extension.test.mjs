@@ -216,6 +216,7 @@ describe('Pi Coding Agent extension', () => {
     expect(request.resourceAttributes).toBeUndefined();
     expect(request['agent.pi-coding-agent.cwd']).toBe('/workspace/example');
     expect(request['gen_ai.input.messages'][0].parts[0].content).toBe('Inspect the repository');
+    expect(request['gen_ai.input.messages_delta']).toEqual(request['gen_ai.input.messages']);
     expect(request['gen_ai.tool.definitions'].map(tool => tool.name)).toEqual(['read', 'bash']);
 
     const response = records.find(record => record['event.name'] === 'llm.response');
@@ -444,6 +445,88 @@ describe('Pi Coding Agent extension', () => {
     expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('second turn');
   });
 
+  it('emits only newly appended assistant and tool messages on later requests', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    const firstContext = [{ role: 'user', content: 'Inspect the repository' }];
+    await runtime.emit('context', { messages: firstContext });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', {
+      messages: [
+        ...firstContext,
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'README.md' } }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read',
+          isError: false,
+          content: [{ type: 'text', text: '# README' }],
+        },
+      ],
+    });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(requests[0]['gen_ai.input.messages_delta']).toEqual(requests[0]['gen_ai.input.messages']);
+    expect(requests[1]['gen_ai.input.messages_delta'].map(message => message.role)).toEqual([
+      'assistant',
+      'tool',
+    ]);
+    expect([
+      ...requests[0]['gen_ai.input.messages_delta'],
+      ...requests[1]['gen_ai.input.messages_delta'],
+    ]).toEqual(requests[1]['gen_ai.input.messages']);
+  });
+
+  it('derives request deltas across the rolling 40-message capture window', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    const firstContext = Array.from({ length: 40 }, (_, index) => ({
+      role: 'user',
+      content: `message-${index}`,
+    }));
+    await runtime.emit('context', { messages: firstContext });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', {
+      messages: [
+        ...firstContext.slice(2),
+        { role: 'assistant', content: 'new assistant message' },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read',
+          isError: false,
+          content: 'new tool result',
+        },
+      ],
+    });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests[1]['gen_ai.input.messages']).toHaveLength(40);
+    expect(requests[1]['gen_ai.input.messages_delta'].map(message => message.role)).toEqual([
+      'assistant',
+      'tool',
+    ]);
+    expect(JSON.stringify(requests[1]['gen_ai.input.messages_delta'])).toContain('new tool result');
+  });
+
+  it('keeps the full snapshot but omits a fabricated delta after context replacement', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [{ role: 'user', content: 'before compaction' }] });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', { messages: [{ role: 'user', content: 'replacement context' }] });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('replacement context');
+    expect(requests[1]).not.toHaveProperty('gen_ai.input.messages_delta');
+  });
+
   it('keeps an LLM response strictly later than a request in the same millisecond', async () => {
     const runtime = await createRuntime();
     await startTurn(runtime);
@@ -533,6 +616,9 @@ describe('Pi Coding Agent extension', () => {
     ]);
     const request = records.find(record => record['event.name'] === 'llm.request');
     const response = records.find(record => record['event.name'] === 'llm.response');
+    expect(request['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Inspect the repository' }] },
+    ]);
     expect(
       BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano) >= 1_000_000n,
     ).toBe(true);
@@ -812,6 +898,7 @@ describe('Pi Coding Agent extension', () => {
     const records = readRecords();
     expect(records.some(record => record['event.name'] === 'other')).toBe(false);
     expect(records[0]).not.toHaveProperty('gen_ai.input.messages');
+    expect(records[0]).not.toHaveProperty('gen_ai.input.messages_delta');
     expect(records[0]).not.toHaveProperty('gen_ai.system_instructions');
     expect(records[0]).not.toHaveProperty('gen_ai.tool.definitions');
     expect(records[1]).not.toHaveProperty('gen_ai.output.messages');

@@ -84,6 +84,21 @@ describe('QwenWorkCNTraceInput', () => {
     })).toEqual([historyDir, segmentsRoot, interceptFile]);
   });
 
+  it('strips a legacy bare runtime version while preserving the agent-scoped version', async () => {
+    await writeHistory([
+      entry({
+        version: '0.1.5',
+        'agent.qwenworkcn.version': '0.1.5',
+      }),
+    ]);
+
+    const entries = await collectOnce(makeInput());
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].version).toBeUndefined();
+    expect(entries[0]['agent.qwenworkcn.version']).toBe('0.1.5');
+  });
+
   it('enriches zero-token Qwen segments from qwenworkcn-intercept by response id', async () => {
     await writeHistory([
       entry({

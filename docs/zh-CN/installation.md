@@ -72,6 +72,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
+| `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
 | `--package-url <url>` | 从自定义 URL 或本地 `file://` 路径安装。 |
 | `--sls-endpoint <url>` | SLS endpoint。 |
 | `--sls-project <name>` | SLS project。 |
@@ -90,6 +91,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
 | `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统没有可用 node 时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
+
+例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
 
 ## 托管 Node.js 运行时
 
@@ -164,13 +167,76 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，直接打开：
+本地 Dashboard 会随采集服务一起启动和停止，默认地址如下；指定了其他端口时，请替换地址中的端口：
 
 ```text
 http://127.0.0.1:8765/
 ```
 
 页面直接读取 `logs/metrics-summary.json`，不会另起一套聚合计算。
+
+### 手动启动和停止 macOS 菜单栏
+
+菜单栏默认随采集服务启动。菜单栏里的“退出”只会关闭菜单栏，采集服务继续运行；此时再次执行 `loongsuite-pilot start` 不会重新打开菜单栏。请执行：
+
+```bash
+loongsuite-pilot menubar start
+```
+
+该命令会向当前生效的 `config.json` 持久化 `"enableStatusBarApp": true`，然后只启动菜单栏，不会重启采集服务；菜单栏已运行时会提示现有进程，不重复启动。请在 macOS 桌面用户的终端执行，不要使用 `sudo`。
+
+如果提示采集服务未运行，请先执行 `loongsuite-pilot start`，等服务启动完成后重试。如果设置了 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false`，需先取消或改为 `true`。启动失败时查看数据目录下的 `logs/app-status-bar/` 日志。
+
+只关闭菜单栏、保留采集服务：
+
+```bash
+loongsuite-pilot menubar stop
+```
+
+采集服务未运行或菜单栏已被配置禁用时，也可用此命令清理残留的菜单栏进程；菜单栏已退出时会正常返回。命令会持久化 `"enableStatusBarApp": false`，下次启动采集服务时不会再自动打开菜单栏。
+
+环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 的优先级仍高于配置文件。如果它设置为启用，后续启动 Pilot 时仍可覆盖持久化的 `false`；命令检测到冲突时会给出警告。
+
+源码构建后也可执行 `node dist/index.js menubar start` 或 `node dist/index.js menubar stop`，无需安装新的系统命令。
+
+### macOS Dashboard 快捷方式
+
+快捷方式**按需安装**：普通安装、升级和启动 Pilot 都不会创建快捷方式或修改程序坞。
+它与菜单栏 App 相互独立。
+
+```bash
+loongsuite-pilot dashboard shortcut install
+loongsuite-pilot dashboard shortcut status
+loongsuite-pilot dashboard shortcut uninstall
+```
+
+`install` 会创建带雷达图标的网页快捷方式：
+`~/Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc`，
+并添加到程序坞的文件区（下载、废纸篓这一侧，不能放在应用区）。点击后使用默认浏览器打开。
+不生成或编译 `.app`，不需要额外安装软件，不增加后台进程，也不会重启 Pilot。
+安装命令只使用 Pilot 已有的 Node 和 macOS 自带工具。
+
+网址在**执行快捷方式安装命令时**读取配置中的 `dashboard.port`，支持
+`AGENT_DATA_COLLECTION_CONFIG` 和安装时的自定义数据目录；端口缺失或不合法时，
+与采集服务一样使用 `8765`。例如配置端口 `9000`，生成的网址就是
+`http://127.0.0.1:9000/`。
+`.webloc` 保存的是网址，不会执行读取配置的代码。因此修改端口并重启 Pilot 后，
+需要再执行一次 `dashboard shortcut install` 更新网址；重复安装会保留原来的程序坞位置，
+不会重复添加。用户移除的入口也不会在升级或启动时被自动加回来。
+
+`status` 只在终端显示快捷文件位置、**文件里保存的目标网址**和是否已添加到程序坞，
+不是服务健康检查。`uninstall` 只移除对应程序坞入口，并把受管理的快捷文件移到废纸篓，
+不会卸载 Pilot。建议卸载 Pilot 本体前先执行此命令；之后也可以手动删除快捷文件和入口。
+自行移动或复制的文件不受命令管理。
+
+仅更新或移除带 Pilot 管理标记、且属于同一配置路径的快捷方式；不覆盖同名用户文件、
+符号链接或另一套配置的快捷方式，不修改被管理策略锁定的程序坞。若快捷文件已经丢失，
+会提示手动移除残留入口。修改程序坞前会把布局备份到快捷目录的 `Backups` 子目录，
+卸载快捷方式时保留备份。程序坞配置格式不是 Apple 公开接口，因此会在写入前后检查布局，
+遇到不支持的格式直接报错，不覆盖原布局。入口或图标变化时程序坞会短暂刷新。
+
+网页快捷方式只保存网址，不会判断 Pilot 是否正在运行，也不会识别端口是否被其他程序占用。
+浏览器无法打开预期页面时，可用 `loongsuite-pilot status` 检查 Pilot 状态。
 
 ## 卸载
 

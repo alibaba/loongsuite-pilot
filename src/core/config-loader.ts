@@ -13,11 +13,11 @@ import type {
   MaskConfig,
   MaskType,
   AgentMultimodalConfig,
-  MultimodalOssConfig,
   MultimodalRuntimeConfig,
-  MultimodalSlsConfig,
+  MultimodalSlsAuthMode,
+  MultimodalStorage,
+  MultimodalStorageAuth,
   MultimodalUploadMode,
-  MultimodalUploaderKind,
   OtlpEndpoint,
   OtlpEndpointEntry,
   CmsEndpointEntry,
@@ -29,17 +29,16 @@ import type {
   UpstreamLinkConfig,
 } from '../types/index.js';
 import {
+  MULTIMODAL_SLS_AUTH_MODES,
   MULTIMODAL_UPLOAD_MODES,
-  MULTIMODAL_UPLOADER_KINDS,
   SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 
 const logger = createLogger('ConfigLoader');
-
-const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 export interface SlsEndpointEntry {
   name?: string;
@@ -118,6 +117,8 @@ export interface ConfigFile {
     hookDebugDays?: number;
     outputDays?: number;
     slsFailedDays?: number;
+    otlpFailedDays?: number;
+    metricAlarmDays?: number;
   };
 
   hookWatchdog?: {
@@ -134,25 +135,27 @@ export interface ConfigFile {
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
+    generateTraceWhenMissing?: boolean;
     ttlMs?: number;
   };
 
   multimodal?: {
-    uploader?: string;
-    storageBasePath?: string;
-    oss?: {
-      endpoint?: string;
-      accessKeyId?: string;
-      accessKeySecret?: string;
-      securityToken?: string;
-    };
-    sls?: {
-      endpoint?: string;
-      project?: string;
-      logstore?: string;
-      accessKeyId?: string;
-      accessKeySecret?: string;
-      securityToken?: string;
+    storage?: {
+      type?: string;
+      target?: {
+        endpoint?: string;
+        project?: string;
+        logstore?: string;
+        ossBucket?: string;
+        storageBasePath?: string;
+      };
+      auth?: {
+        mode?: string;
+        accessKeyId?: string;
+        accessKeySecret?: string;
+        securityToken?: string;
+        apiKey?: string;
+      };
     };
   };
 
@@ -185,6 +188,7 @@ export interface ConfigFile {
     captureMessageContent?: boolean | string;
     multimodal?: {
       uploadMode?: string;
+      allowedRootPaths?: string[];
     };
   }>;
 
@@ -253,7 +257,7 @@ function envInt(key: string, fallback: number): number {
  * Env vars override config file values. Config file overrides defaults.
  */
 export async function loadConfig(): Promise<AnalyticsConfig> {
-  const configPath = resolveHome(env('AGENT_DATA_COLLECTION_CONFIG') ?? DEFAULT_CONFIG_PATH);
+  const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {
@@ -262,7 +266,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
+  const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 
   const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
@@ -316,6 +320,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,
     ),
+    generateTraceWhenMissing: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
+      file?.upstreamLink?.generateTraceWhenMissing ?? false,
+    ),
     // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
     // deleting all freshly-written correlation files and silently breaking linking.
     ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
@@ -323,7 +331,6 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 }
 
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
-const MULTIMODAL_UPLOADER_KIND_SET = new Set<string>(MULTIMODAL_UPLOADER_KINDS);
 
 /** Parse global multimodal storage config; invalid → undefined. */
 function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
@@ -331,81 +338,127 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
   if (!block || typeof block !== 'object') return undefined;
 
   try {
-    const uploaderRaw = block.uploader ?? 'oss';
-    if (!MULTIMODAL_UPLOADER_KIND_SET.has(uploaderRaw)) {
-      throw new Error(`invalid multimodal.uploader: ${uploaderRaw}`);
+    const storageRaw = block.storage;
+    if (!storageRaw || typeof storageRaw !== 'object') {
+      throw new Error('multimodal.storage is required');
     }
-    const uploader = uploaderRaw as MultimodalUploaderKind;
-
-    if (uploader === 'oss') {
-      const storageBasePathRaw = (block.storageBasePath ?? '').trim();
-      if (!storageBasePathRaw) {
-        throw new Error('multimodal.storageBasePath is required when uploader=oss');
-      }
-      if (!storageBasePathRaw.startsWith('oss://')) {
-        throw new Error('multimodal.storageBasePath must start with oss:// when uploader=oss');
-      }
+    const type = (storageRaw.type ?? '').trim();
+    if (type === 'oss') {
+      const storage = buildMultimodalOssStorage(storageRaw);
+      return { storage, storageBasePath: storage.target.storageBasePath };
+    }
+    if (type === 'sls' || type === 'delegatedOss') {
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw);
       return {
-        uploader,
-        storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
-        oss: buildMultimodalOssConfig(block),
+        storage,
+        storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
       };
     }
-
-    if (uploader === 'sls') {
-      const sls = buildMultimodalSlsConfig(block);
-      return {
-        uploader,
-        storageBasePath: `sls://${sls.project}/${sls.logstore}`,
-        sls,
-      };
-    }
-
-    throw new Error(`unsupported multimodal.uploader: ${uploaderRaw}`);
+    throw new Error(`invalid multimodal.storage.type: ${type || '(missing)'}`);
   } catch (err) {
     logger.error('multimodal config invalid; disabled for process', { error: String(err) });
     return undefined;
   }
 }
 
-function buildMultimodalOssConfig(
-  block: ConfigFile['multimodal'] | undefined,
-): MultimodalOssConfig {
-  const endpoint = block?.oss?.endpoint ?? '';
-  const accessKeyId = block?.oss?.accessKeyId ?? '';
-  const accessKeySecret = block?.oss?.accessKeySecret ?? '';
-  const securityToken = block?.oss?.securityToken ?? '';
-  if (!endpoint || !accessKeyId || !accessKeySecret) {
-    throw new Error('multimodal.oss requires endpoint, accessKeyId, accessKeySecret');
+function buildMultimodalOssStorage(
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+): Extract<MultimodalStorage, { type: 'oss' }> {
+  const endpoint = (raw.target?.endpoint ?? '').trim();
+  const storageBasePathRaw = (raw.target?.storageBasePath ?? '').trim();
+  if (!endpoint) throw new Error('multimodal.storage.target.endpoint is required when type=oss');
+  if (!storageBasePathRaw) {
+    throw new Error('multimodal.storage.target.storageBasePath is required when type=oss');
+  }
+  if (!storageBasePathRaw.startsWith('oss://')) {
+    throw new Error('multimodal.storage.target.storageBasePath must start with oss:// when type=oss');
+  }
+  const auth = buildMultimodalStorageAuth(raw.auth);
+  if (auth.mode !== 'ak') {
+    throw new Error('multimodal.storage.type=oss requires auth.mode=ak');
   }
   return {
+    type: 'oss',
+    target: {
+      endpoint: endpoint.replace(/\/+$/, ''),
+      storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
+    },
+    auth,
+  };
+}
+
+function buildMultimodalSlsBackedStorage(
+  type: 'sls' | 'delegatedOss',
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
+  const endpoint = (raw.target?.endpoint ?? '').trim();
+  const project = (raw.target?.project ?? '').trim();
+  const logstore = (raw.target?.logstore ?? '').trim() || 'logstore-multimodal';
+  if (!endpoint || !project) {
+    throw new Error(`multimodal.storage.target requires endpoint and project when type=${type}`);
+  }
+  const auth = buildMultimodalStorageAuth(raw.auth);
+  const target = {
     endpoint: endpoint.replace(/\/+$/, ''),
+    project,
+    logstore,
+  };
+  if (type === 'delegatedOss') {
+    const ossBucket = (raw.target?.ossBucket ?? '').trim();
+    return {
+      type,
+      target: {
+        ...target,
+        ...(ossBucket ? { ossBucket } : {}),
+      },
+      auth,
+    };
+  }
+  return { type, target, auth };
+}
+
+function buildMultimodalStorageAuth(
+  raw: { mode?: string; accessKeyId?: string; accessKeySecret?: string; securityToken?: string; apiKey?: string } | undefined,
+): MultimodalStorageAuth {
+  const accessKeyId = (raw?.accessKeyId ?? '').trim();
+  const accessKeySecret = (raw?.accessKeySecret ?? '').trim();
+  const securityToken = (raw?.securityToken ?? '').trim();
+  const apiKey = (raw?.apiKey ?? '').trim();
+  const hasAk = !!(accessKeyId && accessKeySecret);
+  const hasApiKey = !!apiKey;
+  if (hasApiKey && (accessKeyId || accessKeySecret || securityToken)) {
+    throw new Error('multimodal.storage.auth cannot include both apiKey and access keys');
+  }
+
+  const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
+  if (mode === 'apiKey') {
+    if (!apiKey) throw new Error('multimodal.storage.auth requires apiKey when mode=apiKey');
+    return { mode: 'apiKey', apiKey };
+  }
+  if (!hasAk) {
+    throw new Error('multimodal.storage.auth requires accessKeyId and accessKeySecret when mode=ak');
+  }
+  return {
+    mode: 'ak',
     accessKeyId,
     accessKeySecret,
     ...(securityToken ? { securityToken } : {}),
   };
 }
 
-function buildMultimodalSlsConfig(
-  block: ConfigFile['multimodal'] | undefined,
-): MultimodalSlsConfig {
-  const endpoint = block?.sls?.endpoint ?? '';
-  const project = block?.sls?.project ?? '';
-  const logstore = block?.sls?.logstore ?? 'logstore-multimodal';
-  const accessKeyId = block?.sls?.accessKeyId ?? '';
-  const accessKeySecret = block?.sls?.accessKeySecret ?? '';
-  const securityToken = block?.sls?.securityToken ?? '';
-  if (!endpoint || !project || !accessKeyId || !accessKeySecret) {
-    throw new Error('multimodal.sls requires endpoint, project, accessKeyId, accessKeySecret');
+function resolveMultimodalStorageAuthMode(
+  raw: string | undefined,
+  creds: { hasAk: boolean; hasApiKey: boolean },
+): MultimodalSlsAuthMode {
+  const mode = (raw ?? '').trim();
+  if ((MULTIMODAL_SLS_AUTH_MODES as readonly string[]).includes(mode)) {
+    return mode as MultimodalSlsAuthMode;
   }
-  return {
-    endpoint: endpoint.replace(/\/+$/, ''),
-    project,
-    logstore,
-    accessKeyId,
-    accessKeySecret,
-    ...(securityToken ? { securityToken } : {}),
-  };
+  if (mode) throw new Error(`unsupported multimodal.storage.auth.mode: ${mode}`);
+  if (creds.hasApiKey === creds.hasAk) {
+    throw new Error('multimodal.storage.auth requires exactly one complete credential set when mode is omitted');
+  }
+  return creds.hasApiKey ? 'apiKey' : 'ak';
 }
 
 /**
@@ -467,7 +520,7 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 }
 
 function buildAgentMultimodalConfig(
-  block: { uploadMode?: string } | undefined,
+  block: { uploadMode?: string; allowedRootPaths?: string[] } | undefined,
 ): AgentMultimodalConfig | undefined {
   if (!block || typeof block !== 'object') return undefined;
 
@@ -476,7 +529,19 @@ function buildAgentMultimodalConfig(
     ? (uploadModeRaw as MultimodalUploadMode)
     : 'none';
 
-  return { uploadMode };
+  const allowedRootPaths = Array.isArray(block.allowedRootPaths)
+    ? [...new Set(
+      block.allowedRootPaths
+        .filter((p): p is string => typeof p === 'string')
+        .map(p => resolveHome(p.trim()))
+        .filter(Boolean),
+    )]
+    : undefined;
+
+  return {
+    uploadMode,
+    ...(allowedRootPaths && allowedRootPaths.length > 0 ? { allowedRootPaths } : {}),
+  };
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
@@ -512,7 +577,7 @@ function buildListenersConfig(
 ): Record<string, { enabled: boolean; pollInterval: number }> {
   const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
     qoder: { enabled: true, pollInterval: 30_000 },
-    'qoder-sqlite': { enabled: true, pollInterval: 30_000 },
+    'qoder-trace': { enabled: true, pollInterval: 30_000 },
     'qoder-work': { enabled: true, pollInterval: 30_000 },
     'qoder-work-log': { enabled: true, pollInterval: 30_000 },
     'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
@@ -523,10 +588,9 @@ function buildListenersConfig(
     'qwen-work-cn-trace': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-hook': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
+    'grok-build-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
     'opencode-log': { enabled: true, pollInterval: 30_000 },
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
@@ -561,8 +625,7 @@ function buildListenersConfig(
   // Env overrides for specific poll intervals
   const envPoll = envInt('QODER_ANALYTICS_POLL_INTERVAL', 0);
   if (envPoll > 0) result.qoder.pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-sqlite'].pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-cli-session'].pollInterval = envPoll;
+  if (envPoll > 0) result['qoder-trace'].pollInterval = envPoll;
 
   return result;
 }
@@ -587,6 +650,8 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
     hookDebugDays: resolve(file?.retention?.hookDebugDays, 7),
     outputDays: resolve(file?.retention?.outputDays, 7),
     slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
+    otlpFailedDays: resolve(file?.retention?.otlpFailedDays, 7),
+    metricAlarmDays: resolve(file?.retention?.metricAlarmDays, 7),
   };
 }
 

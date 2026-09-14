@@ -21,6 +21,14 @@ describe('MultiFlusher', () => {
   });
 
   describe('sendBatch — parallel dispatch and fault isolation (T022)', () => {
+    it('forwards existing byte measurements unchanged and reads optional snapshots', async () => {
+      const send = vi.spyOn(f1, 'sendBatch');
+      const entries = [buildTestEntry()];
+      const sizes = [123];
+      await multi.sendBatch(entries, sizes);
+      expect(send).toHaveBeenCalledWith(entries, sizes);
+      expect(multi.getTraceRuntimeSnapshot()).toEqual([]);
+    });
     it('dispatches to all child flushers in parallel', async () => {
       const entries = [buildTestEntry(), buildTestEntry()];
       await multi.sendBatch(entries);

@@ -25,14 +25,18 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
-      userId: 'fixture-user',
+      userId: 'plugin-config-user',
       agents: { openclaw: { captureMessageContent: true } },
     }));
 
     const previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
     const previousUserId = process.env.LOONGSUITE_USER_ID;
+    const previousPilotUserId = process.env.LOONGSUITE_PILOT_USER_ID;
+    const previousSpanAttributes = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     process.env.LOONGSUITE_PILOT_DATA_DIR = root;
-    process.env.LOONGSUITE_USER_ID = 'fixture-user';
+    delete process.env.LOONGSUITE_USER_ID;
+    delete process.env.LOONGSUITE_PILOT_USER_ID;
+    delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     try {
       const plugin = (await import(`${PLUGIN_PATH}?integration=${Date.now()}`)).default;
       const fixture = await fs.readFile(FIXTURE_PATH, 'utf8');
@@ -52,6 +56,14 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       for (const envelope of envelopes) {
         const handler = handlers[envelope.hook];
         if (!handler) continue;
+        const event = envelope.hook === 'before_agent_run'
+          ? {
+              ...envelope.event,
+              senderId: 'channel-sender',
+              accountId: 'channel-account',
+              channelId: 'channel-conversation',
+            }
+          : envelope.event;
         const ctx = syncHooks.has(envelope.hook)
           ? { agentId: 'main', sessionKey: envelope.event?.sessionKey || knownSessionKey }
           : {
@@ -59,14 +71,19 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
               runId: envelope.event?.runId || knownRun,
               sessionId: envelope.event?.sessionId || knownSession,
               sessionKey: envelope.event?.sessionKey || knownSessionKey,
+              channel: 'telegram',
             };
-        await Promise.resolve(handler(envelope.event, ctx));
+        await Promise.resolve(handler(event, ctx));
       }
     } finally {
       if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
       else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
       if (previousUserId === undefined) delete process.env.LOONGSUITE_USER_ID;
       else process.env.LOONGSUITE_USER_ID = previousUserId;
+      if (previousPilotUserId === undefined) delete process.env.LOONGSUITE_PILOT_USER_ID;
+      else process.env.LOONGSUITE_PILOT_USER_ID = previousPilotUserId;
+      if (previousSpanAttributes === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+      else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previousSpanAttributes;
     }
 
     const input = new OpenClawPluginInput({
@@ -77,6 +94,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const flusher = new MockFlusher();
     const manager = new InputManager();
     manager.setAgentsConfig({ [ClientType.OpenClaw]: { captureMessageContent: true } });
+    manager.setConfiguredUserId('collector-config-user');
+    manager.setUserId('collector-fallback-user');
     manager.setFlusher(flusher);
     manager.registerInput(input);
 
@@ -87,6 +106,14 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const records = flusher.batchCalls[0];
     expect(records.length).toBeGreaterThan(10);
     expect(records.every(record => record['gen_ai.agent.type'] === ClientType.OpenClaw)).toBe(true);
+    expect(records.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(records.every(record => typeof record['agent.openclaw.session_key'] === 'string')).toBe(true);
+    expect(new Set(records.map(record => record['agent.openclaw.session_key'])).size).toBe(1);
+    expect(records.every(record =>
+      !('agent.pilot.invocation.user.id' in record))).toBe(true);
+    const agentRun = records.find(record =>
+      record['agent.openclaw.hook'] === 'before_agent_run');
+    expect(agentRun?.['gen_ai.input.messages_delta']).toHaveLength(1);
     const terminal = records.find(record => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminal).toMatchObject({
       'event.name': 'other',
@@ -96,7 +123,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       'agent.openclaw.per_call_usage.count': 2,
       'gen_ai.turn.end': true,
     });
-    expect(records.filter(record => record['gen_ai.turn.start'] === true)).toHaveLength(1);
+    const turnStarts = records.filter(record => record['gen_ai.turn.start'] === true);
+    expect(turnStarts).toHaveLength(1);
+    expect(turnStarts[0]['event.name']).toBe('other');
     expect(records.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal?.['gen_ai.output.messages']).toBeUndefined();
@@ -117,7 +146,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
     try {
-      const converted = await convertEventLogToReadableSpans(records as EventLogRecord[], { strict: false });
+      const traceRecords = records.filter(record => record['event.name'] !== 'agent.input');
+      const converted = await convertEventLogToReadableSpans(traceRecords as EventLogRecord[], { strict: false });
       expect(converted.warnings).toEqual([]);
       const kindCounts = converted.spans.reduce<Record<string, number>>((counts, span) => {
         const kind = String(span.attributes['gen_ai.span.kind']);
@@ -126,6 +156,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       }, {});
       expect(kindCounts).toEqual({ ENTRY: 1, AGENT: 1, STEP: 2, LLM: 2, TOOL: 2 });
       expect(new Set(converted.spans.map(span => span.spanContext().traceId)).size).toBe(1);
+      expect(converted.spans.every(span =>
+        span.attributes['gen_ai.user.id'] === 'channel-sender')).toBe(true);
 
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
       expect(llmSpans.map(span => [
@@ -153,6 +185,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
         'gen_ai.usage.output_tokens': 326,
         'gen_ai.usage.total_tokens': 27778,
       });
+      const agentInput = JSON.parse(String(agentSpan?.attributes['gen_ai.input.messages']));
+      expect(agentInput).toHaveLength(1);
+      expect(agentInput[0]).toMatchObject({ role: 'user' });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

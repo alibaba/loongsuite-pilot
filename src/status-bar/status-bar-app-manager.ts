@@ -1,20 +1,26 @@
-import { existsSync, closeSync, openSync, readFileSync } from 'node:fs';
+import { existsSync, closeSync, openSync, readFileSync, readdirSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFileCb);
 import { createHash } from 'node:crypto';
-import { writeJsonFile, readJsonFile, ensureDir } from '../utils/fs-utils.js';
+import { writeJsonFile, readJsonFile, ensureDir, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { acquireSingleInstanceLock, type SingleInstanceLock } from '../utils/single-instance-lock.js';
 
 const logger = createLogger('StatusBarAppManager');
 
 const BINARY_NAME = 'LoongSuitePilotMenuBarApp';
 const STOP_TIMEOUT_MS = 3000;
 const FORCE_STOP_TIMEOUT_MS = 1500;
+const STOP_LOCK_WAIT_MS = 5000;
+const LOCK_RETRY_INTERVAL_MS = 100;
 const DEFAULT_XCODE_DEVELOPER_DIR = '/Applications/Xcode.app/Contents/Developer';
+
+type ProcessCommandReader = (pid: number) => Promise<string | null>;
 
 interface StatusBarAppRuntime {
   executablePath: string;
@@ -24,44 +30,129 @@ interface StatusBarAppRuntime {
   updatedAt: string;
 }
 
+export interface StatusBarAppStartResult {
+  status: 'started' | 'already-running';
+  pid: number;
+}
+
+export interface StatusBarAppStopResult {
+  status: 'stopped' | 'already-stopped';
+  pids: number[];
+}
+
 export class StatusBarAppManager {
   private readonly dataDir: string;
+  private readonly cacheDir: string;
   private readonly packageVersion: string;
+  private readonly processCommandReader: ProcessCommandReader;
 
-  constructor(options: { dataDir: string; packageVersion: string }) {
+  constructor(options: {
+    dataDir: string;
+    packageVersion: string;
+    processCommandReader?: ProcessCommandReader;
+  }) {
     this.dataDir = options.dataDir;
+    this.cacheDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR || options.dataDir);
     this.packageVersion = options.packageVersion;
+    this.processCommandReader = options.processCommandReader ?? (async pid => {
+      try {
+        const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'command='], { timeout: 5000 });
+        return stdout.trim() || null;
+      } catch {
+        return null;
+      }
+    });
   }
 
   async syncDesiredState(enabled: boolean): Promise<void> {
     if (process.platform !== 'darwin') return;
 
     if (enabled) {
-      await this.ensureStarted();
+      await this.start();
     } else {
       await this.stop('config-disabled');
     }
   }
 
-  async stop(reason: string): Promise<void> {
-    if (process.platform !== 'darwin') return;
+  async start(): Promise<StatusBarAppStartResult | null> {
+    if (process.platform !== 'darwin') return null;
+    // Swift compilation can take minutes on a source checkout. Keep it outside
+    // the lifecycle lock so a collector shutdown can still stop an existing app.
+    const executablePath = await this.prepareExecutable();
+    return this.withLifecycleLock(() => this.ensureStarted(executablePath));
+  }
 
+  async stop(reason: string): Promise<StatusBarAppStopResult> {
+    if (process.platform !== 'darwin') return { status: 'already-stopped', pids: [] };
+    return this.withLifecycleLock(() => this.stopProcesses(reason), STOP_LOCK_WAIT_MS);
+  }
+
+  private async withLifecycleLock<T>(action: () => Promise<T>, waitMs = 0): Promise<T> {
+    // Shared by collector and CLI start/stop. Keep the existing lock filename
+    // so a stop cannot race an older launcher and remove its new runtime record.
+    const lockPath = path.join(this.dataDir, 'status-bar-app-start.lock');
+    const deadline = Date.now() + waitMs;
+    let holderPid: number | undefined;
+    let lock: SingleInstanceLock | null = null;
+    do {
+      const acquired = acquireSingleInstanceLock(lockPath);
+      lock = acquired.lock;
+      holderPid = acquired.holderPid;
+      if (lock || Date.now() >= deadline) break;
+      await sleep(Math.min(LOCK_RETRY_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    } while (!lock);
+
+    if (!lock) {
+      const holder = holderPid ? ` (holder PID ${holderPid})` : '';
+      throw new Error(`Cannot acquire menu bar control lock${holder}; another start or stop may be in progress. Retry shortly.`);
+    }
+    try {
+      return await action();
+    } finally {
+      lock.release();
+    }
+  }
+
+  private async prepareExecutable(): Promise<string | null> {
+    const executablePath = this.resolveExecutable();
+    if (executablePath) return executablePath;
+
+    // Avoid an unnecessary build if a current recorded process is still alive.
+    const runtime = await this.readRuntimeRecord();
+    if (
+      runtime?.pid
+      && runtime.packageVersion === this.packageVersion
+      && await this.isProcessRunning(runtime.pid, runtime.executablePath)
+    ) {
+      return null;
+    }
+
+    logger.info('status bar app binary not available, attempting build');
+    const builtPath = await this.buildExecutable();
+    if (!builtPath) {
+      logger.warn('status bar app not available (no binary, build failed or not possible)');
+    }
+    return builtPath;
+  }
+
+  private async stopProcesses(reason: string): Promise<StatusBarAppStopResult> {
     const runtime = await this.readRuntimeRecord();
     const stoppedPids = new Set<number>();
 
-    if (runtime?.pid) {
-      if (await this.isProcessRunning(runtime.pid, runtime.executablePath)) {
-        this.sendSignal(runtime.pid, 'SIGTERM');
-        stoppedPids.add(runtime.pid);
-      }
-    }
-
-    // Also clean up any orphan processes
-    const orphans = await this.findRunningPids();
-    for (const pid of orphans) {
-      if (!stoppedPids.has(pid)) {
-        this.sendSignal(pid, 'SIGTERM');
-        stoppedPids.add(pid);
+    // Start and stop share the same managed path set: the recorded executable,
+    // every bundled architecture across retained installed versions, and the
+    // local fallback build. This lets us clean up an old process after a version
+    // switch or a lost runtime record without touching another installation.
+    const executablePaths = this.resolveManagedExecutablePaths(runtime?.executablePath);
+    const candidatePids = new Set(await this.findRunningPids());
+    if (runtime?.pid) candidatePids.add(runtime.pid);
+    for (const pid of candidatePids) {
+      for (const executablePath of executablePaths) {
+        if (await this.isProcessRunning(pid, executablePath)) {
+          this.sendSignal(pid, 'SIGTERM');
+          stoppedPids.add(pid);
+          break;
+        }
       }
     }
 
@@ -70,7 +161,9 @@ export class StatusBarAppManager {
       const exited = await this.waitForExit(pid, STOP_TIMEOUT_MS);
       if (!exited) {
         this.sendSignal(pid, 'SIGKILL');
-        await this.waitForExit(pid, FORCE_STOP_TIMEOUT_MS);
+        if (!await this.waitForExit(pid, FORCE_STOP_TIMEOUT_MS)) {
+          throw new Error(`Menu bar app did not stop (PID ${pid}); keeping its runtime record for retry.`);
+        }
       }
     }
 
@@ -79,40 +172,94 @@ export class StatusBarAppManager {
     if (stoppedPids.size > 0) {
       logger.info(`status bar app stopped (${reason})`, { pids: Array.from(stoppedPids) });
     }
+    return {
+      status: stoppedPids.size > 0 ? 'stopped' : 'already-stopped',
+      pids: Array.from(stoppedPids),
+    };
   }
 
-  private async ensureStarted(): Promise<void> {
+  private async ensureStarted(preparedExecutablePath: string | null): Promise<StatusBarAppStartResult | null> {
     const runtime = await this.readRuntimeRecord();
+    const executablePath = preparedExecutablePath ?? this.resolveExecutable();
 
-    // Already running with correct version?
+    // Already running with the current version and preferred executable?
     if (runtime?.pid && await this.isProcessRunning(runtime.pid, runtime.executablePath)) {
-      if (runtime.packageVersion === this.packageVersion) {
+      if (
+        runtime.packageVersion === this.packageVersion
+        && (!executablePath || runtime.executablePath === executablePath)
+      ) {
         logger.debug('status bar app already running', { pid: runtime.pid });
-        return;
+        return { status: 'already-running', pid: runtime.pid };
+      }
+      if (!executablePath) {
+        logger.warn('cannot replace stale status bar app because no current executable is available', {
+          pid: runtime.pid,
+          executablePath: runtime.executablePath,
+        });
+        return null;
       }
       logger.info('replacing stale status bar app', {
         oldVersion: runtime.packageVersion,
         newVersion: this.packageVersion,
       });
-      await this.stop('version-upgrade');
+      // start() already holds the lifecycle lock.
+      await this.stopProcesses('version-upgrade');
     }
 
-    // Check if binary is available
-    const executablePath = this.resolveExecutable();
     if (!executablePath) {
-      logger.info('status bar app binary not available, attempting build');
-      const built = await this.buildExecutable();
-      if (!built) {
-        logger.warn('status bar app not available (no binary, build failed or not possible)');
-        return;
+      return null;
+    }
+
+    // Recover a directly launched app or a lost runtime record without adding a
+    // second icon. A process from a retained older version is managed too, but
+    // must be replaced by the current preferred binary rather than mislabeled as
+    // the current package version.
+    const managedPaths = this.resolveManagedExecutablePaths(runtime?.executablePath);
+    const runningPids = await this.findRunningPids();
+    const managedProcesses: Array<{ pid: number; executablePath: string }> = [];
+    const unmanagedPids: number[] = [];
+    for (const pid of runningPids) {
+      let matchedPath: string | null = null;
+      for (const candidate of managedPaths) {
+        if (await this.isProcessRunning(pid, candidate)) {
+          matchedPath = candidate;
+          break;
+        }
       }
-      return this.spawnProcess(built);
+      if (matchedPath) {
+        managedProcesses.push({ pid, executablePath: matchedPath });
+      } else {
+        const command = await this.processCommandReader(pid);
+        if (command) unmanagedPids.push(pid);
+      }
+    }
+
+    if (
+      managedProcesses.length === 1
+      && managedProcesses[0].executablePath === executablePath
+    ) {
+      const [{ pid }] = managedProcesses;
+      await this.recordProcess(executablePath, pid);
+      return { status: 'already-running', pid };
+    }
+
+    if (unmanagedPids.length > 0) {
+      throw new Error(
+        `Found same-named menu bar process outside this Pilot installation (PID ${unmanagedPids.join(', ')}); refusing to start a duplicate.`,
+      );
+    }
+
+    if (managedProcesses.length > 0) {
+      logger.info('replacing old or duplicate status bar app processes', {
+        pids: managedProcesses.map(process => process.pid),
+      });
+      await this.stopProcesses('replace-old-or-duplicate');
     }
 
     return this.spawnProcess(executablePath);
   }
 
-  private async spawnProcess(executablePath: string): Promise<void> {
+  private async spawnProcess(executablePath: string): Promise<StatusBarAppStartResult | null> {
     const logPath = await this.prepareLogPath();
     let child;
     const logFd = openSync(logPath, 'a');
@@ -130,46 +277,60 @@ export class StatusBarAppManager {
       closeSync(logFd);
     }
 
-    if (!child.pid) {
-      logger.warn('spawn returned no pid, status bar app may not have started');
-      return;
-    }
-
-    child.unref();
-
-    await this.writeRuntimeRecord({
-      executablePath,
-      packageVersion: this.packageVersion,
-      pid: child.pid,
-      executableFingerprint: await this.fingerprint(executablePath),
-      updatedAt: new Date().toISOString(),
+    // spawn errors are asynchronous (e.g. EACCES/ENOENT); handle them before
+    // reporting success or writing a runtime record.
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('spawn', resolve);
     });
 
-    logger.info('status bar app started', { pid: child.pid, executablePath });
-  }
+    if (!child.pid) return null;
+    child.unref();
 
-  private resolveExecutable(): string | null {
-    const sourceDir = this.resolveSourceDir();
-    if (!sourceDir || !existsSync(path.join(sourceDir, 'Package.swift'))) {
+    await sleep(250);
+    if (!await this.isProcessRunning(child.pid, executablePath)) {
+      logger.warn('status bar app exited during startup', { executablePath, logPath });
       return null;
     }
 
-    // Check bundled binaries
-    const arch = process.arch;
-    const candidates = ['darwin-universal'];
-    if (arch === 'arm64') candidates.push('darwin-arm64');
-    else if (arch === 'x64') candidates.push('darwin-x64');
+    await this.recordProcess(executablePath, child.pid);
+    logger.info('status bar app started', { pid: child.pid, executablePath });
+    return { status: 'started', pid: child.pid };
+  }
 
-    for (const bundle of candidates) {
-      const candidate = path.join(sourceDir, 'bin', bundle, BINARY_NAME);
-      if (existsSync(candidate)) return candidate;
-    }
+  private async recordProcess(executablePath: string, pid: number): Promise<void> {
+    await this.writeRuntimeRecord({
+      executablePath,
+      packageVersion: this.packageVersion,
+      pid,
+      executableFingerprint: await this.fingerprint(executablePath),
+      updatedAt: new Date().toISOString(),
+    });
+  }
 
-    // Check previously built binary
-    const builtPath = path.join(this.dataDir, 'apps', 'macos-status-bar', 'build', BINARY_NAME);
-    if (existsSync(builtPath)) return builtPath;
+  private resolveExecutable(): string | null {
+    return this.resolveExecutableCandidates(false).find(candidate => existsSync(candidate)) ?? null;
+  }
 
-    return null;
+  private resolveManagedExecutablePaths(recordedPath?: string): string[] {
+    const currentPath = this.resolveExecutable();
+    return uniquePaths([
+      ...(recordedPath ? [recordedPath] : []),
+      ...(currentPath ? [currentPath] : []),
+      ...this.resolveExecutableCandidates(true),
+    ]);
+  }
+
+  private resolveExecutableCandidates(includeHistoricalVersions: boolean): string[] {
+    const currentArchBundle = process.arch === 'x64' ? 'darwin-x64' : 'darwin-arm64';
+    const bundles = includeHistoricalVersions
+      ? ['darwin-universal', 'darwin-arm64', 'darwin-x64']
+      : ['darwin-universal', currentArchBundle];
+    const candidates = this.resolveSourceDirs(includeHistoricalVersions).flatMap(sourceDir => (
+      bundles.map(bundle => path.join(sourceDir, 'bin', bundle, BINARY_NAME))
+    ));
+    candidates.push(path.join(this.dataDir, 'apps', 'macos-status-bar', 'build', BINARY_NAME));
+    return uniquePaths(candidates);
   }
 
   private async buildExecutable(): Promise<string | null> {
@@ -256,37 +417,60 @@ export class StatusBarAppManager {
   }
 
   private resolveSourceDir(): string | null {
+    return this.resolveSourceDirs(false)[0] ?? null;
+  }
+
+  private resolveSourceDirs(includeHistoricalVersions: boolean): string[] {
+    const candidates: string[] = [];
+
     // Look relative to the installed version directory
-    const currentFile = path.join(this.dataDir, 'current');
+    const currentFile = path.join(this.cacheDir, 'current');
     try {
       const current = readFileSync(currentFile, 'utf8').trim();
       if (current) {
-        const candidate = path.join(this.dataDir, 'versions', current, 'app', 'macos-status-bar');
-        if (existsSync(path.join(candidate, 'Package.swift'))) return candidate;
+        candidates.push(path.join(this.cacheDir, 'versions', current, 'app', 'macos-status-bar'));
       }
     } catch {
       // ignore
     }
 
-    // Fallback: relative to CWD (dev mode)
-    const cwdCandidate = path.resolve(process.cwd(), 'app', 'macos-status-bar');
-    if (existsSync(path.join(cwdCandidate, 'Package.swift'))) return cwdCandidate;
+    // Legacy installs and source/bundled CLI entrypoints must also work when
+    // launched from a terminal whose working directory is outside the package.
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const roots = [
+      path.join(this.cacheDir, 'package'),
+      path.resolve(moduleDir, '..'),
+      path.resolve(moduleDir, '../..'),
+      process.cwd(),
+    ];
+    for (const root of roots) {
+      candidates.push(path.join(root, 'app', 'macos-status-bar'));
+    }
 
-    return null;
+    if (includeHistoricalVersions) {
+      try {
+        const versionsDir = path.join(this.cacheDir, 'versions');
+        for (const entry of readdirSync(versionsDir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            candidates.push(path.join(versionsDir, entry.name, 'app', 'macos-status-bar'));
+          }
+        }
+      } catch {
+        // No retained versions directory.
+      }
+    }
+
+    return uniquePaths(candidates).filter(candidate => existsSync(path.join(candidate, 'Package.swift')));
   }
 
   private async isProcessRunning(pid: number, executablePath: string): Promise<boolean> {
-    try {
-      const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'command='], { timeout: 5000 });
-      return stdout.includes(executablePath) || stdout.includes(BINARY_NAME);
-    } catch {
-      return false;
-    }
+    const command = await this.processCommandReader(pid);
+    return commandMatchesExecutable(command, executablePath);
   }
 
   private async findRunningPids(): Promise<number[]> {
     try {
-      const { stdout } = await execFileAsync('pgrep', ['-x', BINARY_NAME], { timeout: 5000 });
+      const { stdout } = await execFileAsync('pgrep', ['-u', String(process.getuid!()), '-x', BINARY_NAME], { timeout: 5000 });
       return stdout
         .split('\n')
         .map(l => Number(l.trim()))
@@ -358,6 +542,16 @@ export class StatusBarAppManager {
       // ignore
     }
   }
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.map(candidate => path.resolve(candidate))));
+}
+
+function commandMatchesExecutable(command: string | null, executablePath: string): boolean {
+  if (!command) return false;
+  const normalized = command.trim();
+  return normalized === executablePath || normalized.startsWith(`${executablePath} `);
 }
 
 function sleep(ms: number): Promise<void> {

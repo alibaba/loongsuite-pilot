@@ -23,8 +23,6 @@ const SKILL_NAME = 'e2e-build-push';
 const BASE_DIR = `/abs/workdir/.claude/skills/${SKILL_NAME}`;
 const ROOT_SKILL = `${BASE_DIR}/SKILL.md`;
 const META_BODY = `Base directory for this skill: ${BASE_DIR}\n\n# Title\n\nskill body secret`;
-const SYNTH_PREFIX = 'toolu_skillload_';
-
 let DATA_DIR;
 let TRANSCRIPT_DIR;
 
@@ -170,14 +168,6 @@ function events(records, eventName, toolName) {
   return records.filter((record) =>
     record['event.name'] === eventName &&
     (!toolName || record['gen_ai.tool.name'] === toolName));
-}
-
-function outputToolCalls(records) {
-  return records
-    .filter((record) => record['event.name'] === 'llm.response')
-    .flatMap((record) => record['gen_ai.output.messages'] || [])
-    .flatMap((message) => message.parts || [])
-    .filter((part) => part.type === 'tool_call');
 }
 
 function collectStrings(value) {
@@ -346,7 +336,7 @@ describe('Claude Code Skill TOOL events', () => {
     expect(collectStrings(events(records, 'llm.request')[1])).toContain(META_BODY);
   });
 
-  test('direct slash creates one deterministic load_skill extension TOOL without fake LLM output', () => {
+  test('direct slash adds one deterministic load_skill to s1 output and s2 input history', () => {
     const sourceRecords = [
       slashPrompt('p1', SKILL_NAME, 'run it', '2026-07-29T02:00:00.000Z'),
       skillMeta({ promptId: 'p1', timestamp: '2026-07-29T02:00:00.100Z' }),
@@ -380,10 +370,49 @@ describe('Claude Code Skill TOOL events', () => {
         }));
         expect(loadResults[0]['gen_ai.tool.call.id']).toBe(loadCalls[0]['gen_ai.tool.call.id']);
         expect(BigInt(loadResults[0].time_unix_nano)).toBeGreaterThan(BigInt(loadCalls[0].time_unix_nano));
+        const llmResponses = events(records, 'llm.response');
+        expect(loadCalls[0].time_unix_nano).toBe(llmResponses[0].time_unix_nano);
         expect(events(records, 'tool.call', 'Read').map((record) =>
           record['gen_ai.tool.call.id'])).toEqual(['toolu_reference']);
-        expect(outputToolCalls(records).some((part) =>
-          part.name === 'load_skill' || part.id?.startsWith(SYNTH_PREFIX))).toBe(false);
+        const s1Parts = llmResponses[0]['gen_ai.output.messages'][0].parts;
+        expect(s1Parts.filter((part) => part.type === 'tool_call').map((part) => part.name))
+          .toEqual(['Read', 'load_skill']);
+        const s2Delta = events(records, 'llm.request')[1]['gen_ai.input.messages_delta'];
+        expect(s2Delta).toEqual([
+          {
+            role: 'assistant',
+            parts: [
+              {
+                type: 'tool_call',
+                id: 'toolu_reference',
+                name: 'Read',
+                arguments: { file_path: `${BASE_DIR}/references/guide.md` },
+              },
+              {
+                type: 'tool_call',
+                id: loadCalls[0]['gen_ai.tool.call.id'],
+                name: 'load_skill',
+                arguments: { skill: SKILL_NAME },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            parts: [{
+              type: 'tool_call_response',
+              id: 'toolu_reference',
+              response: 'reference body',
+            }],
+          },
+          {
+            role: 'tool',
+            parts: [{
+              type: 'tool_call_response',
+              id: loadCalls[0]['gen_ai.tool.call.id'],
+              response: { success: true },
+            }],
+          },
+        ]);
         return loadCalls[0]['gen_ai.tool.call.id'];
       } finally {
         try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}

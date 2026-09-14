@@ -40,8 +40,11 @@ function readJsonl(name) {
 let tmpDir;
 let pilotDataDir;
 let pluginLoadSequence = 0;
+let previousWorkerName;
 
 beforeEach(async () => {
+  previousWorkerName = process.env.AGENTTEAMS_WORKER_NAME;
+  delete process.env.AGENTTEAMS_WORKER_NAME;
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
   pilotDataDir = path.join(tmpDir, 'pilot-data');
   fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
@@ -54,6 +57,8 @@ afterEach(async () => {
   delete process.env.LOONGSUITE_USER_ID;
   delete process.env.LOONGSUITE_PILOT_DEBUG;
   delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
+  else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
   vi.restoreAllMocks();
   await fs.promises.rm(tmpDir, { recursive: true, force: true });
 });
@@ -83,7 +88,7 @@ function readOutputRecords() {
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
 
-async function replay(plugin, envelopes, { pluginConfig = {} } = {}) {
+async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {}) {
   const handlers = registerPlugin(plugin, pluginConfig);
 
   // Agent/model/tool hooks receive PluginHookAgentContext with the run/session
@@ -108,6 +113,7 @@ async function replay(plugin, envelopes, { pluginConfig = {} } = {}) {
       runId: env.event?.runId || knownRun,
       sessionKey: env.event?.sessionKey || knownSessionKey,
     };
+    if (contextPatch) Object.assign(ctx, contextPatch(env) || {});
     await h(env.event, ctx);
   }
   return readOutputRecords();
@@ -119,11 +125,47 @@ function todayStamp() {
 }
 
 describe('OpenClaw plugin stateful pipeline', () => {
+  it('caches the native routing key per run, never from a parent or a session UUID', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    for (const [runId, sessionId, sessionKey] of [
+      ['a', 'uuid-a', 'agent:main:shared'], ['b', 'uuid-b', 'agent:main:other'],
+      ['reset', 'uuid-reset', 'agent:main:shared'], ['child', 'uuid-child', undefined],
+    ]) {
+      await handlers.llm_input({ runId, prompt: 'test' }, { runId, sessionId, sessionKey });
+    }
+    for (const runId of ['a', 'b', 'reset', 'child']) {
+      await handlers.model_call_started({ runId, callId: runId, model: 'test' }, { runId });
+    }
+    const result = readOutputRecords().filter(r => r['event.name'] === 'llm.request');
+    expect(result).toHaveLength(4);
+    expect(result.map(r => r['agent.openclaw.session_key'])).toEqual([
+      'agent:main:shared', 'agent:main:other', 'agent:main:shared', undefined,
+    ]);
+    expect(result.map(r => r['gen_ai.session.id'])).toEqual(['uuid-a', 'uuid-b', 'uuid-reset', 'uuid-child']);
+  });
+
+  it.each(['x'.repeat(1025), 'bad\nkey', {}, ' '])('does not export malformed native keys %#', async sessionKey => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', prompt: 'test', sessionKey }, { runId: 'a', sessionId: 'uuid-a' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    expect(readOutputRecords().every(r => r['agent.openclaw.session_key'] === undefined)).toBe(true);
+  });
+
+  it('marks conflicting native sources instead of choosing the first key', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', sessionKey: 'agent:main:a' }, { runId: 'a', sessionKey: 'agent:main:b' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    for (const record of readOutputRecords()) {
+      expect(record['agent.openclaw.session_key']).toBeUndefined();
+      expect(record['agent.openclaw.session_key.ambiguous']).toBe(true);
+    }
+  });
+
   it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
     const packageJson = JSON.parse(fs.readFileSync(PLUGIN_PACKAGE_PATH, 'utf-8'));
     const agentDefinition = JSON.parse(fs.readFileSync(OPENCLAW_AGENT_DEF_PATH, 'utf-8'));
 
-    expect(packageJson.openclaw.install.minHostVersion).toBe('>=2026.5.12');
+    expect(packageJson.openclaw.install.minHostVersion).toBe('>=2026.3.8');
     expect(agentDefinition.pluginInject).not.toHaveProperty('versionCheck');
     expect(agentDefinition.pluginInject.pluginSpec).toBe(
       'file://$PILOT_DATA/plugins/openclaw',
@@ -193,14 +235,34 @@ describe('OpenClaw plugin stateful pipeline', () => {
 
     expect(on).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledOnce();
-    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
+  });
+
+  it('registers legacy hooks for the packaged 3.8 unknown-runtime regression', async () => {
+    const packageRoot = path.join(tmpDir, 'host', 'node_modules', 'openclaw');
+    fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    const entry = path.join(packageRoot, 'dist', 'entry.js');
+    fs.writeFileSync(entry, '');
+    const previous = process.argv;
+    process.argv = [previous[0], entry];
+    try {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+      const logger = { error: vi.fn() };
+      plugin.register({ runtime: { version: 'unknown' }, logger, on: name => registered.add(name) });
+      expect(registered.size).toBe(9);
+      expect(registered.has('before_message_write')).toBe(true);
+      expect(registered.has('model_call_started')).toBe(false);
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally { process.argv = previous; }
   });
 
   it.each([
     ['missing', undefined],
     ['unparseable', 'not-a-version'],
     ['too old', '2026.3.2'],
-    ['prerelease below the stable floor', '2026.5.12-beta.1'],
+    ['prerelease below the stable floor', '2026.3.8-beta.1'],
   ])('does not register hooks when the host version is %s', async (_label, version) => {
     const plugin = await loadPlugin();
     const registered = new Set();
@@ -215,7 +277,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(() => plugin.register(api)).not.toThrow();
     expect(registered.size).toBe(0);
     expect(logger.error).toHaveBeenCalledOnce();
-    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
   });
 
   it.each(['2026.5.12', '2026.5.12-1', 'v2026.6.10'])(
@@ -239,7 +301,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
 
     expect(() => plugin.register({ logger })).not.toThrow();
     expect(logger.error).toHaveBeenCalledOnce();
-    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
   });
 
   it('reports an unwritable plugin log directory once when scoped debug is enabled', async () => {
@@ -287,6 +349,113 @@ describe('OpenClaw plugin stateful pipeline', () => {
     }
   });
 
+  it('uses before_agent_run senderId as the invocation user identity', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? {
+            ...envelope,
+            event: {
+              ...envelope.event,
+              senderId: 'telegram-user-42',
+              accountId: 'telegram-account',
+              channelId: 'telegram-chat',
+            },
+          }
+        : envelope);
+
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes, {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? { channel: 'telegram' }
+        : {},
+    });
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every(record => record['user.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(records[0]).toMatchObject({
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'telegram-account',
+      'agent.openclaw.channel.id': 'telegram-chat',
+    });
+  });
+
+  it.each([
+    ['ctx.senderId', { senderId: 'context-sender' }, 'context-sender'],
+    ['ctx.channelContext.sender.id', { channelContext: { sender: { id: 'channel-context-sender' } } }, 'channel-context-sender'],
+  ])('falls back to %s on newer OpenClaw contexts', async (_label, contextIdentity, expected) => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? contextIdentity
+        : {},
+    });
+
+    expect(records.every(record => record['user.id'] === expected)).toBe(true);
+    expect(records.every(record => record[INVOCATION_USER_ID_FIELD] === expected)).toBe(true);
+  });
+
+  it('keeps an explicit Pilot user ID above the native sender', async () => {
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? { ...envelope, event: { ...envelope.event, senderId: 'native-sender' } }
+        : envelope);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes);
+
+    expect(records.every(record => record['user.id'] === 'test-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'native-sender')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'environment')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'test-user')).toBe(true);
+  });
+
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', async () => {
+    process.env.AGENTTEAMS_WORKER_NAME = ' planner ';
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('planner');
+      expect(record.resourceAttributes).toEqual({
+        'agentteams.worker.name': 'planner',
+      });
+    }
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['too long', 'x'.repeat(513)],
+  ])('retains the default agent name for a %s worker name', async (_label, workerName) => {
+    process.env.AGENTTEAMS_WORKER_NAME = workerName;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('openclaw');
+      expect(record.resourceAttributes).toBeUndefined();
+    }
+    stderr.mockRestore();
+  });
+
   it('attaches the user prompt to the first request and tool results to the next request', async () => {
     const plugin = await loadPlugin();
     const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
@@ -294,7 +463,11 @@ describe('OpenClaw plugin stateful pipeline', () => {
     const requests = records.filter((r) => r['event.name'] === 'llm.request');
     expect(requests.length).toBe(2);
     // First request: full input data (system instructions + tools + user prompt delta)
-    expect(requests[0]['gen_ai.system_instructions']).toBeTruthy();
+    expect(requests[0]['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: expect.any(String) },
+    ]);
+    expect(records.find(r => r['agent.openclaw.hook'] === 'before_agent_run')['gen_ai.system_instructions'])
+      .toEqual(requests[0]['gen_ai.system_instructions']);
     expect(Array.isArray(requests[0]['gen_ai.tool.definitions'])).toBe(true);
     expect(requests[0]['gen_ai.input.messages_delta'][0].role).toBe('user');
     // Second request: the two prior parallel tool results are incremental input.

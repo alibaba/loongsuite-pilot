@@ -8,6 +8,18 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 ## Event Names
 
+OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段
+`agent.openclaw.session_key`。已取得 key 的运行事件（`other`、`agent.input`、
+`llm.request`、`llm.response`、`tool.call`、`tool.result`）会保留该字段，
+同一轮上下文明确时也会填入 ENTRY、AGENT、STEP、LLM、TOOL Span 属性，
+不会放入 Resource。`session_start` / `session_end` 仍不进入规范化输出。
+
+该字段不替代 `gen_ai.session.id`：reset 后 UUID 可以变化而 key 不变。
+缺失、非法、超过 1024 字符或冲突时不猜测；混合父子 Agent 上下文也不继承父级 key。
+key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则；关闭消息内容采集
+不会移除这项元数据。JSONL/SLS 仅新增该精确字段的例外，不放开其他内部字段。
+不会自动创建 SLS 索引或 ARMS 专用展示列。
+
 | `event.name` | 说明 |
 |--------------|------|
 | `llm.request` | 一次 LLM 请求，包含用户输入、上下文增量和请求模型。消息角色在消息 payload 中表示。 |
@@ -16,7 +28,16 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `tool.result` | 工具执行返回的结果。 |
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
+| `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
 | `other` | 无法归类到上述类型的其他事件。 |
+
+兼容期内，携带 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta` 的
+`other` 会被原样保留，并紧邻追加一条 `agent.input`。兼容副本保留输入内容
+和上下文字段，使用从原 ID 确定性派生的新 `event.id`，但不复制
+`gen_ai.turn.start` 和 `gen_ai.turn.end`；旧 `other` 仍是唯一的 Turn 边界事件。
+双写发生在内容策略之后，因此两个规范输入字段都被策略删除时不会生成
+`agent.input`。生成副本时，SLS、JSONL 和 HTTP 保留两条事件；OTLP Trace
+转换继续消费旧 `other`，并在转换前排除兼容副本，因此不会增加空 STEP。
 
 四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
 
@@ -77,6 +98,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
 | `gen_ai.input.multimodal_metadata` | json array | Opt-In | 本条事件消息中 `uri` 媒体的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且消息含媒体时写入；`captureMessageContent: false` 时剥离。 |
 | `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
+| `gen_ai.system_instructions` | json array | Opt-In | `llm.request` 上发送给模型的 system prompt，以 `text` parts 数组表示，可能包含敏感内容。 |
 | `gen_ai.tool.name` | string | `tool.call` 和 `tool.result` Required | 工具名称。 |
 | `gen_ai.tool.call.id` | string | 可获取时 Recommended | 用于关联 `tool.call` 和 `tool.result` 的工具调用 ID。 |
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
@@ -99,7 +121,17 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
 
+## System Instructions（系统提示词）
+
+`gen_ai.system_instructions` 在 `llm.request` 事件上以 `text` parts 数组承载 system prompt。它复用消息内容的既有管控（Opt-In 要求级别 + 各 agent 的 `captureMessageContent` + 脱敏管道），关闭内容采集时该字段整体缺失。
+
+`hermes` 的 system prompt 取自 `pre_api_request` 观测到的 provider 请求 body，因为 `conversation_history` 从不回放 system 消息。各 provider 形态归一化为同一组 parts：OpenAI 兼容的 `messages[]` 中 role 为 `system` / `developer` 的消息、Responses API 顶层 `instructions`、Anthropic 与 Bedrock 的顶层 `system`（字符串或 block 列表）、Gemini 的 `systemInstruction.parts[].text`。prompt 为空或不存在时不产出该字段。
+
+对 `hermes`，system instructions 仅保留在 `gen_ai.system_instructions` 中，不会合成到 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta`。这样 LLM、AGENT 与 ENTRY span 的业务 turn 输入及 `gen_ai.input.messages_hash` 语义保持不变。
+
 ## 多模态消息 Parts
+
+> **实验性。** 多模态 `uri` parts 与 `gen_ai.*.multimodal_metadata` 字段可能调整。
 
 当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：
 
@@ -119,7 +151,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`、`resourceAttributes["agentteams.worker.name"]` | 逻辑 Worker 名称；主 Agent 上优先于 Agent 原生名称。 |
 | `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | 当前 Worker 运行实例；不会覆盖 `gen_ai.agent.id`。 |
 
-当前支持 Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code CLI 和 Cursor CLI。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
+Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code CLI 和 Cursor CLI 支持上述两个变量。OpenClaw 和 Hermes Agent 仅支持 `AGENTTEAMS_WORKER_NAME`，暂不读取 `AGENTTEAMS_INSTANCE_ID`。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
 
 ## Provider Names
 

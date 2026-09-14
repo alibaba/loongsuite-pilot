@@ -273,7 +273,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder).toBeDefined();
       expect(config.listeners.qoder.enabled).toBe(true);
-      expect(config.listeners['qoder-sqlite'].enabled).toBe(true);
+      expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
       expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -282,8 +282,8 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
@@ -314,14 +314,16 @@ describe('ConfigLoader', () => {
       expect(config.listeners['codex-transcript']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
-    it('applies Qoder poll interval env override to SQLite listener', async () => {
+    it('applies Qoder poll interval env override to the trace listener', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
 
       const config = await loadConfig();
       expect(config.listeners.qoder.pollInterval).toBe(45000);
-      expect(config.listeners['qoder-sqlite'].pollInterval).toBe(45000);
-      expect(config.listeners['qoder-cli-session'].pollInterval).toBe(45000);
+      // qoder-trace is the only Qoder CLI collector left, so the knob has to point
+      // at it; leaving it on the removed sqlite/session listeners would make the
+      // env var silently inert.
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(45000);
     });
   });
 
@@ -337,6 +339,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(7);
       expect(config.retention.outputDays).toBe(7);
       expect(config.retention.slsFailedDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(7);
+      expect(config.retention.metricAlarmDays).toBe(7);
     });
 
     it('uses config file values over defaults', async () => {
@@ -344,6 +348,8 @@ describe('ConfigLoader', () => {
         retention: {
           hookHistoryDays: 60,
           hookDebugDays: 14,
+          otlpFailedDays: 3,
+          metricAlarmDays: 14,
         },
       });
 
@@ -351,6 +357,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookHistoryDays).toBe(60);
       expect(config.retention.hookDebugDays).toBe(14);
       expect(config.retention.hookErrorDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(3);
+      expect(config.retention.metricAlarmDays).toBe(14);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_DAYS overrides all defaults', async () => {
@@ -363,6 +371,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(10);
       expect(config.retention.outputDays).toBe(10);
       expect(config.retention.slsFailedDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('config file values take precedence over unified env var', async () => {
@@ -374,6 +384,8 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.retention.hookHistoryDays).toBe(90);
       expect(config.retention.hookErrorDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED disables retention', async () => {
@@ -546,6 +558,27 @@ describe('ConfigLoader', () => {
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
 
+    it('parses agent multimodal allowedRootPaths and expands ~', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          qoder: {
+            captureMessageContent: true,
+            multimodal: {
+              uploadMode: 'both',
+              allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('both');
+      expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
+        '/home/test/workspace/loongsuite-pilot',
+        '/tmp/extra',
+      ]);
+    });
+
     it('defaults agent multimodal uploadMode to none', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
@@ -593,61 +626,306 @@ describe('ConfigLoader', () => {
       expect(config.multimodal).toBeUndefined();
     });
 
-    it('loads oss infra without uploadMode', async () => {
+    it('loads oss storage without uploadMode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'oss',
-          storageBasePath: 'oss://bucket/mm',
-          oss: {
-            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-            accessKeyId: 'ak',
-            accessKeySecret: 'sk',
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
           },
         },
       });
 
       const config = await loadConfig();
       expect(config.multimodal).toEqual({
-        uploader: 'oss',
-        storageBasePath: 'oss://bucket/mm',
-        oss: {
-          endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-          accessKeyId: 'ak',
-          accessKeySecret: 'sk',
+        storage: {
+          type: 'oss',
+          target: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            storageBasePath: 'oss://bucket/mm',
+          },
+          auth: {
+            mode: 'ak',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
         },
+        storageBasePath: 'oss://bucket/mm',
       });
     });
 
-    it('derives sls storageBasePath from project/logstore', async () => {
+    it('derives sls storageBasePath from project and default logstore', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'sls',
-          sls: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
             endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
             project: 'my-project',
+            logstore: 'logstore-multimodal',
+          },
+          auth: {
+            mode: 'ak',
             accessKeyId: 'ak',
             accessKeySecret: 'sk',
+          },
+        },
+        storageBasePath: 'sls://my-project/logstore-multimodal',
+      });
+    });
+
+    it('loads sls apiKey auth without access keys', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: {
+              mode: 'apiKey',
+              apiKey: 'sls-api-key',
+            },
           },
         },
       });
 
       const config = await loadConfig();
       expect(config.multimodal).toEqual({
-        uploader: 'sls',
-        storageBasePath: 'sls://my-project/logstore-multimodal',
-        sls: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'my-project',
-          logstore: 'logstore-multimodal',
-          accessKeyId: 'ak',
-          accessKeySecret: 'sk',
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: {
+            mode: 'apiKey',
+            apiKey: 'sls-api-key',
+          },
         },
+        storageBasePath: 'sls://my-project/mm-store',
       });
     });
 
-    it('disables multimodal when uploader is invalid', async () => {
+    it('loads delegatedOss with apiKey auth', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        multimodal: { uploader: 's3' },
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'delegatedOss',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('loads delegatedOss with optional target.ossBucket', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+              ossBucket: 'user-bucket',
+            },
+            auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toMatchObject({
+        storage: {
+          type: 'delegatedOss',
+          target: { ossBucket: 'user-bucket' },
+          auth: { mode: 'ak' },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('infers auth.mode=ak when mode is omitted and both access keys exist', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage.auth).toEqual({
+        mode: 'ak',
+        accessKeyId: 'ak',
+        accessKeySecret: 'sk',
+      });
+    });
+
+    it('infers auth.mode=apiKey when mode is omitted and only apiKey exists', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              apiKey: 'sls-api-key',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage.auth).toEqual({
+        mode: 'apiKey',
+        apiKey: 'sls-api-key',
+      });
+    });
+
+    it('disables multimodal when apiKey and access keys coexist', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+              apiKey: 'sls-api-key',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('ignores target.ossBucket when type=sls', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              ossBucket: 'user-bucket',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage.type).toBe('sls');
+      if (config.multimodal?.storage.type === 'sls') {
+        expect(config.multimodal.storage.target).not.toHaveProperty('ossBucket');
+      }
+    });
+
+    it('disables multimodal when auth.mode cannot be inferred', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              accessKeyId: 'ak',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when auth.mode is unsupported', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'webtracking',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when storage.type is invalid', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: { storage: { type: 's3' } },
       });
       const config = await loadConfig();
       expect(config.multimodal).toBeUndefined();
@@ -656,11 +934,16 @@ describe('ConfigLoader', () => {
     it('disables multimodal when oss storageBasePath is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'oss',
-          oss: {
-            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-            accessKeyId: 'ak',
-            accessKeySecret: 'sk',
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
           },
         },
       });
@@ -671,12 +954,17 @@ describe('ConfigLoader', () => {
     it('disables multimodal when oss storageBasePath is not oss://', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'oss',
-          storageBasePath: 's3://bucket/mm',
-          oss: {
-            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-            accessKeyId: 'ak',
-            accessKeySecret: 'sk',
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 's3://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
           },
         },
       });
@@ -687,11 +975,36 @@ describe('ConfigLoader', () => {
     it('disables multimodal when oss credentials are incomplete', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'oss',
-          storageBasePath: 'oss://bucket/mm',
-          oss: {
-            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-            accessKeyId: 'ak',
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when type=oss uses apiKey auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'apiKey',
+              apiKey: 'edge-key',
+            },
           },
         },
       });
@@ -702,11 +1015,16 @@ describe('ConfigLoader', () => {
     it('disables multimodal when sls credentials are incomplete', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'sls',
-          sls: {
-            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-            project: 'my-project',
-            accessKeyId: 'ak',
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+            },
           },
         },
       });
@@ -717,11 +1035,16 @@ describe('ConfigLoader', () => {
     it('disables multimodal when sls project is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
-          uploader: 'sls',
-          sls: {
-            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-            accessKeyId: 'ak',
-            accessKeySecret: 'sk',
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
           },
         },
       });
@@ -1422,9 +1745,13 @@ describe('ConfigLoader', () => {
   describe('upstreamLink config', () => {
     it('is disabled by default', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
       expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
 
@@ -1447,6 +1774,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
       config = await loadConfig();
       expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables local trace generation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, generateTraceWhenMissing: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
     });
 
     it('treats an empty-string enable env as unset (not "true")', async () => {

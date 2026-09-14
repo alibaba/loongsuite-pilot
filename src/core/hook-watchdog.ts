@@ -79,19 +79,75 @@ export interface WinRuntimeInterceptDefinition {
 }
 
 /**
+ * Prefix shared by every block this file writes into an rc file. It marks where
+ * a block whose END marker went missing has to stop: at the next block's BEGIN.
+ */
+const MARKER_BEGIN_PREFIX = 'loongsuite-pilot BEGIN ';
+
+/** True when `line` opens some block other than the one `begin` delimits. */
+function startsAnotherBlock(line: string, begin: string): boolean {
+  return line.includes(MARKER_BEGIN_PREFIX) && !line.includes(begin);
+}
+
+/**
  * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
  * from rc-file content. Any line containing `begin` starts the cut and any
  * line containing `end` ends it; non-block lines are preserved verbatim.
+ *
+ * A block whose END marker is missing stops at the next block's BEGIN line
+ * instead of running to EOF. Running to EOF would drop every block written
+ * after it along with whatever the user keeps below them -- PATH edits, nvm
+ * init, aliases -- because repair() writes the stripped result back over the
+ * file. A repeated BEGIN for this same block keeps the cut open, so a file that
+ * accumulated duplicates collapses to a single removal.
  */
 export function stripMarkerBlock(content: string, begin: string, end: string): string {
   const out: string[] = [];
   let inBlock = false;
   for (const line of content.split('\n')) {
-    if (!inBlock && line.includes(begin)) { inBlock = true; continue; }
-    if (inBlock && line.includes(end)) { inBlock = false; continue; }
-    if (!inBlock) out.push(line);
+    if (!inBlock) {
+      if (line.includes(begin)) inBlock = true;
+      else out.push(line);
+      continue;
+    }
+    if (line.includes(end)) { inBlock = false; continue; }
+    if (startsAnotherBlock(line, begin)) { inBlock = false; out.push(line); continue; }
+    // Still inside the block: dropped.
   }
   return out.join('\n');
+}
+
+/**
+ * Return the marker-delimited block, or null when the BEGIN marker is absent.
+ * `text` is inclusive of the marker lines and `terminated` reports whether the
+ * END marker was found; an unterminated block stops before the next block's
+ * BEGIN line rather than running to EOF.
+ *
+ * Callers use this instead of scanning whole-file content when they need to
+ * answer a question ABOUT one block: two blocks in the same rc file can share
+ * substrings, and a file-wide `includes` would let one satisfy the other's
+ * check. Bounding an unterminated block at the next BEGIN keeps that scoping
+ * intact even when the END marker was lost, and `terminated` lets callers treat
+ * the damaged block as something to rewrite rather than as already current.
+ */
+export function extractMarkerBlock(
+  content: string,
+  begin: string,
+  end: string,
+): { text: string; terminated: boolean } | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex(line => line.includes(begin));
+  if (start === -1) return null;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.includes(end)) {
+      return { text: lines.slice(start, i + 1).join('\n'), terminated: true };
+    }
+    if (startsAnotherBlock(line, begin)) {
+      return { text: lines.slice(start, i).join('\n'), terminated: false };
+    }
+  }
+  return { text: lines.slice(start).join('\n'), terminated: false };
 }
 
 export function parseWindowsUserEnv(output: string, envName: string): string {
@@ -566,7 +622,7 @@ export class HookWatchdog {
 
 
   /**
-   * Shell-rc intercept block definitions (qodercli + claude-code).
+   * Shell-rc intercept block definitions (qodercli + qoderclicn + claude-code).
    *
    * blockFn must stay byte-identical to the block written by the installer
    * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
@@ -582,7 +638,9 @@ export class HookWatchdog {
    * `signature` is a substring unique to the CURRENT block shape. check()/
    * repair() use it — not just `marker` — to detect and migrate
    * an older block that shares the same marker (e.g. the released bare
-   * `<cli>() {...}` form). Keep it byte-identical to the installer's grep.
+   * `<cli>() {...}` form). It is matched WITHIN the block's own marker region,
+   * not across the whole rc file, so a neighbouring block cannot vouch for a
+   * stale one. Keep it byte-identical to the installer's grep.
    * `endMarker` bounds the block for removal/migration.
    */
   static interceptRcBlockDefs(): Array<{
@@ -596,11 +654,15 @@ export class HookWatchdog {
   }> {
     return [
       {
+        // `signature` is this block's own function definition, not the wrapper
+        // script name: one wrapper serves both product lines, so the script name
+        // also occurs inside the qoderclicn block and could not tell a stale
+        // block of this shape apart from a current CN one.
         id: 'qodercli-rc',
         agentId: 'qoder',
         marker: 'loongsuite-pilot BEGIN qodercli-intercept',
         endMarker: 'loongsuite-pilot END qodercli-intercept',
-        signature: 'qodercli-runtime-wrapper.sh',
+        signature: "eval 'qodercli() {",
         scriptName: 'qodercli-runtime-wrapper.sh',
         blockFn: (p) => [
           '',
@@ -609,6 +671,26 @@ export class HookWatchdog {
           `  eval 'qodercli() { "${p}" "$@"; }'`,
           'fi',
           '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        // Same wrapper script as qodercli, told apart by the flavor variable the
+        // block exports. `signature` is that assignment rather than the script
+        // name, for the same reason as above: the shared script name cannot
+        // distinguish this block from the qodercli one.
+        id: 'qoderclicn-rc',
+        agentId: 'qoder-cn',
+        marker: 'loongsuite-pilot BEGIN qoderclicn-intercept',
+        endMarker: 'loongsuite-pilot END qoderclicn-intercept',
+        signature: 'LOONGSUITE_QODERCLI_FLAVOR=qoderclicn',
+        scriptName: 'qodercli-runtime-wrapper.sh',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qoderclicn-intercept',
+          'if ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then',
+          `  eval 'qoderclicn() { LOONGSUITE_QODERCLI_FLAVOR=qoderclicn "${p}" "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qoderclicn-intercept',
         ].join('\n'),
       },
       {
@@ -813,8 +895,12 @@ export class HookWatchdog {
             if (!await fileExists(rcPath)) continue;
             anyRcExists = true;
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) anyCurrent = true;
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // A block that lost its END marker is damaged whatever it holds:
+              // the blocks written after it sit inside its unclosed region.
+              if (!block.terminated) return false;
+              if (block.text.includes(rc.signature)) anyCurrent = true;
               else return false; // marker present but old shape → migrate
             }
           }
@@ -827,8 +913,11 @@ export class HookWatchdog {
           for (const rcPath of rcPaths) {
             if (!await fileExists(rcPath)) continue; // never create rc files
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) continue; // already current
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // Unterminated blocks fall through to the rewrite below, which
+              // re-emits both markers.
+              if (block.terminated && block.text.includes(rc.signature)) continue; // already current
               // Stale block: strip the old marker region, then append fresh.
               const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n+$/, '\n');
               await fs.writeFile(rcPath, stripped + rc.blockFn(scriptPath) + '\n');

@@ -52,6 +52,7 @@ import {
   buildBashUpdatedInput,
   consumeToolContext,
   markToolPropagationConsumed,
+  readTurnContext,
   reserveToolContext,
 } from './claude-code/tool-context.mjs';
 import {
@@ -312,11 +313,16 @@ function cmdPreToolUse() {
   const context = reserveToolContext({
     dataDir: pilotDataDir(),
     sessionId,
+    promptId: typeof event.prompt_id === 'string' ? event.prompt_id : '',
     toolUseId,
     traceparent: process.env.TRACEPARENT,
     tracestate: process.env.TRACESTATE,
+    generateTraceWhenMissing: runtimeConfig.upstreamLink.generateTraceWhenMissing === true,
   });
-  const updatedInput = buildBashUpdatedInput(event.tool_input, context);
+  const updatedInput = buildBashUpdatedInput(event.tool_input, {
+    ...(context || {}),
+    resourceAttributes: process.env.LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES,
+  });
   if (!updatedInput) return;
 
   emittedHookResponse = true;
@@ -338,20 +344,92 @@ function skillAttributes(skillLoad, fallbackName) {
   };
 }
 
-function positiveSkillLoadTimes(skillLoad, fallbackTimestamp) {
+function skillLoadTimesAtLlmEnd(llmEndTimestamp) {
   const minDurationNanos = 1_000_000n; // converter uses millisecond start/end times
-  let call = BigInt(isoToUnixNanos(
-    skillLoad?.commandTimestamp || skillLoad?.metaTimestamp || fallbackTimestamp,
-  ));
-  let result = BigInt(isoToUnixNanos(
-    skillLoad?.metaTimestamp || fallbackTimestamp || skillLoad?.commandTimestamp,
-  ));
-
-  if (call === 0n && result > minDurationNanos) call = result - minDurationNanos;
+  let call = BigInt(isoToUnixNanos(llmEndTimestamp));
   if (call === 0n) call = BigInt(Date.now()) * 1_000_000n;
-  if (result <= call) result = call + minDurationNanos;
+  const result = call + minDurationNanos;
 
   return { call: String(call), result: String(result) };
+}
+
+function syntheticSkillCallPart(skill) {
+  return {
+    type: 'tool_call',
+    id: skill.callId,
+    name: 'load_skill',
+    arguments: { skill: skill.name },
+  };
+}
+
+function syntheticSkillResultMessage(skill) {
+  return {
+    role: 'tool',
+    parts: [{
+      type: 'tool_call_response',
+      id: skill.callId,
+      response: { success: true },
+    }],
+  };
+}
+
+function appendSyntheticSkillCalls(outputMessages, syntheticSkills) {
+  const assistant = outputMessages.find((message) => message.role === 'assistant');
+  if (!assistant) return outputMessages;
+  assistant.parts = Array.isArray(assistant.parts) ? assistant.parts : [];
+  const existingIds = new Set(assistant.parts
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id));
+  for (const skill of syntheticSkills) {
+    if (!existingIds.has(skill.callId)) assistant.parts.push(syntheticSkillCallPart(skill));
+  }
+  return outputMessages;
+}
+
+function injectSyntheticSkillHistory(inputMessages, firstOutputMessages, syntheticSkills) {
+  if (syntheticSkills.length === 0) return inputMessages;
+  const firstAssistant = firstOutputMessages.find((message) => message.role === 'assistant');
+  if (!firstAssistant) return inputMessages;
+
+  const nativeCallIds = new Set((firstAssistant.parts || [])
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id)
+    .filter(Boolean));
+  let assistantIndex = inputMessages.findIndex((message) => {
+    if (message.role !== 'assistant') return false;
+    const ids = new Set((message.parts || [])
+      .filter((part) => part.type === 'tool_call')
+      .map((part) => part.id)
+      .filter(Boolean));
+    return nativeCallIds.size > 0 && [...nativeCallIds].every((id) => ids.has(id));
+  });
+  if (assistantIndex < 0) {
+    const expectedParts = JSON.stringify(firstAssistant.parts || []);
+    assistantIndex = inputMessages.findIndex((message) =>
+      message.role === 'assistant' && JSON.stringify(message.parts || []) === expectedParts);
+  }
+  if (assistantIndex < 0) return inputMessages;
+
+  const assistant = inputMessages[assistantIndex];
+  assistant.parts = Array.isArray(assistant.parts) ? assistant.parts : [];
+  const existingCallIds = new Set(assistant.parts
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id));
+  for (const skill of syntheticSkills) {
+    if (!existingCallIds.has(skill.callId)) assistant.parts.push(syntheticSkillCallPart(skill));
+  }
+
+  const existingResultIds = new Set(inputMessages
+    .flatMap((message) => message.parts || [])
+    .filter((part) => part.type === 'tool_call_response')
+    .map((part) => part.id));
+  const resultMessages = syntheticSkills
+    .filter((skill) => !existingResultIds.has(skill.callId))
+    .map(syntheticSkillResultMessage);
+  let insertAt = assistantIndex + 1;
+  while (insertAt < inputMessages.length && inputMessages[insertAt]?.role === 'tool') insertAt++;
+  inputMessages.splice(insertAt, 0, ...resultMessages);
+  return inputMessages;
 }
 
 // ─── cmd handlers ───
@@ -460,7 +538,11 @@ async function cmdStop() {
     saveState(sessionId, state);
 
     try {
-      await exportSession(state, event.stop_reason || 'end_turn');
+      await exportSession(
+        state,
+        event.stop_reason || 'end_turn',
+        typeof event.prompt_id === 'string' ? event.prompt_id : '',
+      );
       if (typeof state._next_transcript_offset === 'number') {
         state.transcript_offset = state._next_transcript_offset;
         delete state._next_transcript_offset;
@@ -684,7 +766,7 @@ async function finalizePendingSubagentTurns(state) {
 
 // ─── Stop 主导出流程 ───
 
-async function exportSession(state, stopReason) {
+async function exportSession(state, stopReason, stopPromptId = '') {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const sessionId = state.session_id || 'unknown';
 
@@ -741,6 +823,15 @@ async function exportSession(state, stopReason) {
     turnsToExport = parseResult.turns.slice(-1);
   }
 
+  // Some Claude transcript versions omit promptId even though Stop carries it.
+  // Use the hook value only for an unambiguous single-turn parse; applying one
+  // Stop prompt id across multiple recovered turns could link the wrong turn.
+  const promptIdFallback = parseResult.turns.length === 1
+    && turnsToExport.length === 1
+    && !turnsToExport[0].promptId
+    ? stopPromptId
+    : '';
+
   const cwd = state.cwd || undefined;
 
   // Load per-session intercept data once; buildTurnRecords looks up by
@@ -762,6 +853,7 @@ async function exportSession(state, stopReason) {
       turnStopReason,
       cwd,
       intercept,
+      promptIdFallback,
     );
     logHash = hash;
     if (turnMerged) {
@@ -828,7 +920,17 @@ async function exportSession(state, stopReason) {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd, intercept) {
+function buildTurnRecords(
+  turn,
+  turnIndex,
+  sessionId,
+  prevHash,
+  userId,
+  turnStopReason,
+  cwd,
+  intercept,
+  promptIdFallback = '',
+) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
@@ -839,7 +941,12 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // intercept files after JSONL is flushed.
   const mergedResponseIds = new Set();
 
-  const traceId = generateTraceId();
+  const turnContext = readTurnContext(
+    pilotDataDir(),
+    sessionId,
+    turn.promptId || promptIdFallback,
+  );
+  const traceId = turnContext?.traceId || generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
 
@@ -875,9 +982,40 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
+  const realSkillToolIds = new Set();
+  for (const ev of llmCalls) {
+    for (const block of (ev.output_content || [])) {
+      if (block?.type === 'tool_use' && block.name === 'Skill'
+          && block.id && ev.toolDetails?.has(block.id)) {
+        realSkillToolIds.add(block.id);
+      }
+    }
+  }
+  const synthesizedCallIds = new Set();
+  const syntheticSkills = [];
+  for (const skillLoad of skillLoads) {
+    if (skillLoad.sourceToolUseId && realSkillToolIds.has(skillLoad.sourceToolUseId)) continue;
+    const callId = deterministicSkillLoadId(
+      sessionId,
+      skillLoad.promptId || turn.promptId,
+      skillLoad.metaUuid || skillLoad.metaTimestamp,
+      skillLoad.rootPath,
+    );
+    if (synthesizedCallIds.has(callId)) continue;
+    synthesizedCallIds.add(callId);
+    syntheticSkills.push({
+      callId,
+      load: skillLoad,
+      name: skillLoad.name || skillLoad.id || 'unknown',
+    });
+  }
+  const firstOutputMessages = llmCalls[0]
+    ? convertOutputMessages(llmCalls[0].output_content, llmCalls[0].stop_reason)
+    : [];
   let firstStepOwner = null;
 
-  for (const ev of llmCalls) {
+  for (const [llmIndex, ev] of llmCalls.entries()) {
     stepRound++;
     const currentStepId = `${turnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
@@ -894,6 +1032,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
 
     // input messages delta/full hash
     const inputMsgs = convertInputMessages(ev.input_messages, ev.protocol || 'anthropic');
+    if (llmIndex > 0) {
+      injectSyntheticSkillHistory(inputMsgs, firstOutputMessages, syntheticSkills);
+    }
     let currentFullHash;
     let delta;
     let logFull;
@@ -965,7 +1106,12 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       'gen_ai.usage.cache_read.input_tokens': cacheRead,
       'gen_ai.usage.cache_creation.input_tokens': cacheCreation,
       'gen_ai.usage.total_tokens': totalTokens,
-      'gen_ai.output.messages': convertOutputMessages(ev.output_content, ev.stop_reason),
+      'gen_ai.output.messages': llmIndex === 0
+        ? appendSyntheticSkillCalls(
+          convertOutputMessages(ev.output_content, ev.stop_reason),
+          syntheticSkills,
+        )
+        : convertOutputMessages(ev.output_content, ev.stop_reason),
     };
     if (interceptData && typeof interceptData.ttft_ns === 'number'
         && Number.isFinite(interceptData.ttft_ns) && interceptData.ttft_ns >= 0) {
@@ -977,7 +1123,6 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
   }
 
-  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
   const skillLoadsByToolId = new Map(
     skillLoads
       .filter((load) => load.sourceToolUseId)
@@ -1054,26 +1199,14 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   }
 
   // /skill 和其他 runtime meta 注入没有 LLM tool_use。将加载事实建模成
-  // extension TOOL span,但不篡改 LLM output.messages。
+  // extension TOOL span，并补入首轮 LLM output 与后续请求历史。
   if (firstStepOwner) {
-    const synthesizedCallIds = new Set();
-    for (const skillLoad of skillLoads) {
+    for (const skill of syntheticSkills) {
+      const { callId, load: skillLoad } = skill;
       if (consumedSkillLoads.has(skillLoad)) continue;
-      const callId = deterministicSkillLoadId(
-        sessionId,
-        skillLoad.promptId || turn.promptId,
-        skillLoad.metaUuid || skillLoad.metaTimestamp,
-        skillLoad.rootPath,
-      );
-      if (synthesizedCallIds.has(callId)) continue;
-      synthesizedCallIds.add(callId);
-
       const toolSpanId = generateSpanId();
       const skillFields = skillAttributes(skillLoad);
-      const times = positiveSkillLoadTimes(
-        skillLoad,
-        llmCalls[0]?.request_start_time || llmCalls[0]?.timestamp,
-      );
+      const times = skillLoadTimesAtLlmEnd(llmCalls[0]?.timestamp);
       records.push({
         time_unix_nano: times.call,
         'event.id': crypto.randomUUID(),
