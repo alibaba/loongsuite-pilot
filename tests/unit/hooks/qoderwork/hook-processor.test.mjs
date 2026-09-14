@@ -368,9 +368,6 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
 describe('qoderwork-hook-processor response.id', () => {
   test('uses message.id as gen_ai.response.id when present', () => {
-    // QoderWork 0.6.2 transcript assistant rows carry message.id = chatcmpl-xxx,
-    // which matches the id captured by qoderwork-runtime-wrapper. Preferring it
-    // enables direct token matching in qoder-work-trace-input.
     const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
       r.type === 'assistant' ? { ...r, message: { ...r.message, id: 'chatcmpl-resp-1' } } : r,
     );

@@ -11,7 +11,7 @@
 
 ## 采集链路概览（Qoder Work 四链路，trace 默认接管）
 
-Qoder Work 默认由 `qoder-work-trace` 聚合 Hook JSONL、session segments、SDK log 和 runtime wrapper intercept 数据；
+Qoder Work 默认由 `qoder-work-trace` 聚合原生 Hook JSONL、session segments 和 SDK log 数据；
 `qoder-work-hook` / `qoder-work-log` / `qoder-work-sqlite` 是 **显式关闭 `qoder-work-trace` 后的 fallback**，默认不会启动。
 
 ```
@@ -56,7 +56,7 @@ Qoder Work 数据未出现时，**按以下顺序逐步排查，勿跳步**—�
 ```
 第 1 步 → ~/.qoderwork/ 目录是否存在 + hook 是否注入
 第 2 步 → 原始 history JSONL 是否生成（hook 是否被触发）
-第 3 步 → 依赖注入校验（QODER_WORKER_RUNTIME_PATH token wrapper）
+第 3 步 → 原生 token 数据校验（session segments / SDK log）
 第 4 步 → pilot 是否成功消费（input-state 推进 + output 产出）
 第 5 步 → 配置文件 / Node runtime 对照检查
 ```
@@ -184,68 +184,30 @@ cat ~/.loongsuite-pilot/node-bin                           # pin 文件
 
 ---
 
-## 第 3 步：依赖注入校验（QODER_WORKER_RUNTIME_PATH token wrapper）
+## 第 3 步：原生 token 数据校验
 
-Qoder Work 的 token fallback 采集依赖 `qoderwork-runtime-wrapper.mjs`。它通过 macOS `launchctl setenv QODER_WORKER_RUNTIME_PATH=...`
-注入到 GUI 启动的 QoderWork 进程中，再在 worker runtime 内拦截 `JSON.parse` 写出 token / system prompt。
-缺失时常见表现是 **history / output 都有 Chat / Tool call，但 token 全 0、cache_read 缺失或 system prompt 缺失**。
+Qoder Work 的 token 优先来自 session segments；segment 无有效 usage 时回退到原生 SDK log。
+不再读取 `qoderwork-intercept.jsonl`，也不再通过 wrapper 补充 `cache_read` 或 `gen_ai.system_instructions`。
 
-> 该注入目前仅适用于 macOS QoderWork App。Linux / Windows 环境下跳过本步骤。
+在 `~/.qoderwork/logs/sessions/<workspace>/<session>/segments/*.jsonl` 中定位目标会话，
+检查同一 `request_id` 的 `model.request.started` 和 `model.response.completed` 是否成对。
+只投影 `ts`、`turn_id`、`request_id` 和以下 usage 字段，不输出 prompt 或工具正文：
 
-```bash
-# 1) wrapper 文件必须存在
-ls -l ~/.loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs
+| completed 记录的 `data` 字段 | 规范化输出字段 |
+|---|---|
+| `input_tokens` | `gen_ai.usage.input_tokens` |
+| `output_tokens` | `gen_ai.usage.output_tokens` |
+| `cache_read_input_tokens` | `gen_ai.usage.cache_read.input_tokens` |
+| `cache_creation_input_tokens` | `gen_ai.usage.cache_creation.input_tokens` |
 
-# 2) 当前 launchd 会话中的环境变量必须指向 wrapper
-launchctl getenv QODER_WORKER_RUNTIME_PATH
+若原生 token 存在但 output 缺失，核对会话、轮次和时间匹配，并检查第 4 步的消费状态。
+若 segment 和 SDK log 都无有效 usage，检查 Qoder Work 版本及原生日志是否完整；不要重新注入 wrapper。
+`cache_read` 为零或缺失不一定是故障，可能该请求没有缓存命中或原生记录未提供该字段。
 
-# 3) 重启后自动恢复的 LaunchAgent 必须存在并包含相同路径
-ls -l ~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist
-grep -n 'QODER_WORKER_RUNTIME_PATH\|qoderwork-runtime-wrapper.mjs' \
-  ~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist
-```
-
-预期：`launchctl getenv QODER_WORKER_RUNTIME_PATH` 输出
-`/Users/<you>/.loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs`，plist 中也包含同一路径。
-
-若不一致或为空：
-
-```bash
-~/.local/bin/loongsuite-pilot restart
-launchctl getenv QODER_WORKER_RUNTIME_PATH
-```
-
-修复后必须**完全退出并重新打开 QoderWork**，否则旧 GUI 进程不会继承新的 launchd 环境。
-
-完成一次 Qoder Work 对话后验证 wrapper 输出：
-
-```bash
-ls -l ~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl
-tail -20 ~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl | python3 -c '
-import json, sys
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    r = json.loads(line)
-    print({
-        "type": r.get("type"),
-        "id": r.get("id"),
-        "model": r.get("model"),
-        "prompt_tokens": r.get("prompt_tokens"),
-        "completion_tokens": r.get("completion_tokens"),
-        "has_content": bool(r.get("content")),
-    })
-'
-```
-
-预期能看到 `type: "token"` 或 `type: "system_prompt"` 记录。若文件不存在但 QoderWork 正常运行：
-
-```bash
-tail -50 ~/.loongsuite-pilot/logs/qoderwork-wrapper-error.log 2>/dev/null
-```
-
-若 error 日志提示 `real runtime not found`，说明 wrapper 已注入，但未找到 QoderWork 内置 worker runtime。常见原因是 QoderWork 安装路径或 SDK 版本结构变化，
-需升级 pilot 或补充 wrapper 的 runtime candidate。
+共享的 `qoderwork-runtime-wrapper.mjs` 现在只服务 Qwen Work CN，不应删除。
+Qoder Work 与 Qoder Work CN 都不再注入该 wrapper；旧版本留下的 `QODER_WORKER_RUNTIME_PATH`
+会由 installer 与 watchdog 主动清退。若某个 Qoder Work 家族进程仍通过共享入口启动，
+它会被透明转发到自身 runtime，但不再旁录 token / system prompt。
 
 ---
 
@@ -368,10 +330,7 @@ env | grep LOONGSUITE_PILOT
 | `~/.loongsuite-pilot/logs/output/qoder-work-YYYY-MM-DD.jsonl` | 规范化输出 |
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `qoder-work-trace` 及 fallback Input 的游标 |
 | `~/.loongsuite-pilot/node-bin` | Node runtime pin 文件（与 Qoder CLI / Cursor 共用） |
-| `~/.loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs` | Qoder Work token fallback 运行时 wrapper（macOS 通过 `QODER_WORKER_RUNTIME_PATH` 注入） |
-| `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` | 重启后自动恢复 `QODER_WORKER_RUNTIME_PATH` 的 LaunchAgent |
-| `~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl` | wrapper 捕获的 token / system prompt fallback 数据 |
-| `~/.loongsuite-pilot/logs/qoderwork-wrapper-error.log` | wrapper 找不到真实 runtime 或 import 失败时的诊断日志 |
+| `~/.qoderwork/logs/sessions/<workspace>/<session>/segments/*.jsonl` | 原生模型/工具时序及 token 数据 |
 
 ---
 
@@ -387,8 +346,8 @@ env | grep LOONGSUITE_PILOT
 | debug 日志里反复 `Transcript file not found` | Qoder Work 写 transcript 的实际路径与 stdin 提供的 `transcript_path` 不一致；通常是 Qoder Work 自身的 bug，让用户升级 Qoder Work |
 | history 有数据但 output 没有 | 默认先看 `input-state.json` 里 `qoder-work-trace` 的 `lastFile` / `lastOffset` 是否前进；不前进则查 `loongsuite-pilot-service.log` 中 `qoder-work-trace` 关键字 |
 | `[loongsuite-pilot] node >= 18 not found` | 系统找不到合适的 Node。装一个 Node ≥ 18 并写入 `~/.loongsuite-pilot/node-bin` |
-| Qoder Work token 全 0 / cache_read 缺失，但 Chat / Tool call 正常 | macOS 上优先检查第 3 步 `QODER_WORKER_RUNTIME_PATH` 是否注入，修复后必须完全退出并重新打开 QoderWork |
-| `~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl` 不存在 | wrapper 未注入、QoderWork 未重启继承 env，或真实 runtime 未找到；查看 `qoderwork-wrapper-error.log` |
-| `qoderwork-wrapper-error.log` 提示 `real runtime not found` | QoderWork 安装路径或 SDK 版本结构变化，wrapper 已加载但找不到真实 worker runtime，需要升级 pilot 或补充 runtime candidate |
+| Qoder Work token 全 0 / cache_read 缺失，但 Chat / Tool call 正常 | 按第 3 步核对原生 segment usage、SDK log 和会话/时间匹配，不再恢复 runtime wrapper |
+| `~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl` 不存在 | 正常；Qoder Work 已不再生产或消费该文件 |
+| `gen_ai.system_instructions` 缺失 | 已移除 wrapper 系统指令补充；不应通过恢复共享注入来补齐 |
 | hook 脚本无执行权限 | `chmod +x ~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh`，或 `loongsuite-pilot restart` 重装 |
 | 同时使用 Qoder CLI 和 Qoder Work，数据混在一起 | 不会混。两边走完全独立的 settings.json（`~/.qoder/` vs `~/.qoderwork/`）、独立的 hook 脚本、独立的 history 目录和独立的 Input；最终在 output 中通过 `gen_ai.agent.type` 区分（`qoder` vs `qoder-work`） |

@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { HookWatchdog, stripMarkerBlock } from '../../../src/core/hook-watchdog.js';
 
 // Real-shell regression guard for the rc intercept block.
@@ -151,5 +154,143 @@ describe('rc intercept block sources safely in real shells', () => {
       expect(out).toContain('SRC_OK');                 // no syntax error
       expect(out).toContain('dangerously-skip-permissions'); // user alias preserved
     });
+  });
+});
+
+describe.skipIf(!HAS_BASH)('installer CN runtime selection (temporary HOME, mocked launchctl)', () => {
+  const installer = readFileSync(new URL('../../../deploy/installer-opensource.sh', import.meta.url), 'utf8');
+  // Isolate function execution and app probes from the real installer and host applications.
+  const functions = ['inject_qoderwork_runtime_wrapper', 'remove_qoderwork_runtime_wrapper']
+    .map(name => {
+      const match = installer.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'));
+      if (!match) throw new Error(`Missing installer function: ${name}`);
+      return match[0].replaceAll('"/Applications/', '"$HOME/system-apps/');
+    }).join('\n');
+  let home: string;
+  let dataDir: string;
+  let wrapper: string;
+
+  function plist(id: string): string {
+    return join(home, 'Library', 'LaunchAgents', `com.loongsuite-pilot.${id}.plist`);
+  }
+
+  function app(name: string) {
+    mkdirSync(join(home, 'Applications', name), { recursive: true });
+  }
+
+  function runInstaller(selection: string, qoder = '', qwen = '') {
+    execFileSync('bash', ['--noprofile', '--norc', '-c', `
+set -euo pipefail
+uname() { printf '%s\\n' Darwin; }
+msg() { :; }
+launchctl() {
+  printf '%s|%s|%s\\n' "$1" "$2" "\${3-}" >> "$HOME/launchctl.calls"
+  case "$1" in
+    getenv) local key="$2"; printf '%s\\n' "\${!key}" ;;
+    setenv) printf -v "$2" '%s' "$3" ;;
+    unsetenv) printf -v "$2" '%s' '' ;;
+    load|unload) [[ "$2" == "$HOME/Library/LaunchAgents/"* ]] ;;
+    *) return 99 ;;
+  esac
+}
+${functions}
+inject_qoderwork_runtime_wrapper
+printf '%s' "$QODER_WORKER_RUNTIME_PATH" > "$HOME/qoder.env"
+printf '%s' "$QW_QODER_WORKER_RUNTIME_PATH" > "$HOME/qwen.env"
+`], {
+      encoding: 'utf8',
+      env: {
+        ...process.env, HOME: home, BASH_ENV: '', DATA_DIR: dataDir,
+        SELECTED_AGENTS: selection,
+        QODER_WORKER_RUNTIME_PATH: qoder,
+        QW_QODER_WORKER_RUNTIME_PATH: qwen,
+      },
+    });
+    return {
+      qoder: readFileSync(join(home, 'qoder.env'), 'utf8'),
+      qwen: readFileSync(join(home, 'qwen.env'), 'utf8'),
+      calls: readFileSync(join(home, 'launchctl.calls'), 'utf8'),
+    };
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'installer-runtime-'));
+    dataDir = join(home, 'custom data');
+    wrapper = join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+    mkdirSync(join(dataDir, 'hooks'), { recursive: true });
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(wrapper, '// shared runtime wrapper\n');
+  });
+
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it.each(['qoder-work', 'qoder-work-cn', 'not-qwen-work-cn'])('does not inject for non-Qwen selection %s', selection => {
+    app('QoderWork.app');
+    app('QoderWorkCN.app'); // An installed CN app must not resurrect the retired env.
+    const result = runInstaller(selection);
+    expect(result.qoder).toBe('');
+    expect(result.calls).not.toContain('setenv|');
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+  });
+
+  it.each([
+    ['qoder-work-cn', 'QoderWork CN.app'],
+    ['qoder-work-cn', 'QoderWorkCN.app'],
+    ['qoder-work,qoder-work-cn', 'QoderWorkCN.app'],
+  ])('retires the legacy env for %s with %s installed', (selection, appName) => {
+    app(appName);
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    const result = runInstaller(selection, wrapper);
+    expect(result.qoder).toBe('');
+    expect(result.calls).toContain('unsetenv|QODER_WORKER_RUNTIME_PATH|');
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it.each(['current-custom', 'legacy-default'])('cleans %s Pilot env/plist for non-CN-only upgrades', kind => {
+    app('QoderWork.app');
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    const oldPath = kind === 'current-custom' ? wrapper
+      : join(home, '.loongsuite-pilot', 'hooks', 'qoderwork-runtime-wrapper.mjs');
+    const result = runInstaller('qoder-work', oldPath);
+    expect(result.qoder).toBe('');
+    expect(result.calls).toContain('unsetenv|QODER_WORKER_RUNTIME_PATH|');
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it('cleans shared Qoder env without removing active Qwen env/plist or wrapper', () => {
+    app('QwenWorkCN.app');
+    app('QoderWork.app');
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    writeFileSync(plist('qwenworkcn-env'), 'active Pilot plist');
+    const result = runInstaller('qoder-work,qwen-work-cn', wrapper, wrapper);
+    expect(result.qoder).toBe('');
+    expect(result.qwen).toBe(wrapper);
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toContain(wrapper);
+    expect(existsSync(wrapper)).toBe(true);
+    expect(result.calls).not.toContain('unsetenv|QW_QODER_WORKER_RUNTIME_PATH|');
+  });
+
+  it('keeps only the Qwen runtime target when all three desktop products are selected', () => {
+    app('QoderWorkCN.app');
+    app('QwenWorkCN.app');
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    const result = runInstaller('qoder-work,qoder-work-cn,qwen-work-cn', wrapper, wrapper);
+    expect(result.qoder).toBe('');
+    expect(result.qwen).toBe(wrapper);
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toContain(wrapper);
+    expect(result.calls).not.toContain('unsetenv|QW_QODER_WORKER_RUNTIME_PATH|');
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it.each(['qoder-work', 'qoder-work,qwen-work-cn'])('preserves third-party env during cleanup for %s', selection => {
+    app('QwenWorkCN.app');
+    const result = runInstaller(selection, '/third-party/runtime.mjs', '/third-party/qwen.mjs');
+    expect(result.qoder).toBe('/third-party/runtime.mjs');
+    if (selection === 'qoder-work') expect(result.qwen).toBe('/third-party/qwen.mjs');
+    expect(result.calls).not.toContain('unsetenv|');
   });
 });

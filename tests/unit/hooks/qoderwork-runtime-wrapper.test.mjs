@@ -32,35 +32,49 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('transparently loads an unknown host own runtime without interception', async () => {
-    const marker = path.join(root, 'unknown-runtime-loaded');
-    const resources = await createHostRuntime('FutureAgent.app', marker);
+  it.each(['FutureAgent.app', 'QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'])('loads %s own runtime without interception', async appName => {
+    const marker = path.join(root, 'runtime-loaded');
+    const resources = await createHostRuntime(appName, marker);
 
     runWrapper(resources, marker);
 
-    expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
+    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
+      loaded: true,
+      parseUnchanged: true,
+      stringifyUnchanged: true,
+    });
     expect(existsSync(path.join(dataDir, 'logs', 'qoderwork-intercept.jsonl'))).toBe(false);
     expect(existsSync(path.join(dataDir, 'logs', 'qoderworkcn-intercept.jsonl'))).toBe(false);
     expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
   });
 
-  it('keeps token interception enabled for a recognized host', async () => {
-    const marker = path.join(root, 'qwen-runtime-loaded');
+  it('keeps token and system prompt interception for QwenWorkCN.app', async () => {
+    const marker = path.join(root, 'runtime-loaded');
     const resources = await createHostRuntime('QwenWorkCN.app', marker);
 
     runWrapper(resources, marker);
 
-    expect(await fs.readFile(marker, 'utf-8')).toBe('loaded');
-    const intercept = await fs.readFile(
-      path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'),
-      'utf-8',
-    );
-    expect(JSON.parse(intercept.trim())).toMatchObject({
-      type: 'token',
-      id: 'chatcmpl-wrapper-test',
-      model: 'qwen-test',
-      total_tokens: 3,
+    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
+      loaded: true,
+      parseUnchanged: false,
+      stringifyUnchanged: false,
     });
+    const intercept = await fs.readFile(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'), 'utf-8');
+    const records = intercept.trim().split('\n').map(line => JSON.parse(line));
+    expect(records).toEqual([
+      expect.objectContaining({
+        type: 'token',
+        id: 'chatcmpl-wrapper-test',
+        model: 'qwen-test',
+        total_tokens: 3,
+      }),
+      expect.objectContaining({
+        type: 'system_prompt',
+        content: 'Synthetic system instruction. '.repeat(5),
+      }),
+    ]);
+    expect(existsSync(path.join(dataDir, 'logs', 'qoderwork-intercept.jsonl'))).toBe(false);
+    expect(existsSync(path.join(dataDir, 'logs', 'qoderworkcn-intercept.jsonl'))).toBe(false);
   });
 
   async function createHostRuntime(appName, marker) {
@@ -70,13 +84,18 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     await fs.writeFile(
       path.join(runtimeDir, 'qoder-worker-runtime.mjs'),
       `import fs from 'node:fs';
-fs.writeFileSync(process.env.PILOT_WRAPPER_MARKER, 'loaded');
+fs.writeFileSync(process.env.PILOT_WRAPPER_MARKER, JSON.stringify({
+  loaded: true,
+  parseUnchanged: JSON.parse === globalThis.originalParse,
+  stringifyUnchanged: JSON.stringify === globalThis.originalStringify,
+}));
 JSON.parse(JSON.stringify({
   id: 'chatcmpl-wrapper-test',
   model: 'qwen-test',
   choices: [],
   usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
 }));
+JSON.stringify({ messages: [{ role: 'system', content: 'Synthetic system instruction. '.repeat(5) }] });
 `,
     );
     return resources;
@@ -84,6 +103,8 @@ JSON.parse(JSON.stringify({
 
   function runWrapper(resources, marker) {
     const launcher = `
+globalThis.originalParse = JSON.parse;
+globalThis.originalStringify = JSON.stringify;
 process.resourcesPath = process.env.PILOT_TEST_RESOURCES;
 import(process.env.PILOT_TEST_WRAPPER).catch(error => {
   console.error(error);

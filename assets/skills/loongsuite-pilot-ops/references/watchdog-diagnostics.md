@@ -26,17 +26,23 @@ targets 来源：
 
 检测 installer 注入的 intercept 配置是否仍然存在。与 hook targets 不同，intercept targets 检测的不是 settings.json，而是系统级配置（launchctl env、LaunchAgent plist、shell rc 文件）。
 
-当前 3 个 intercept target：
+当前 4 个 intercept target（其中 1 个已退役，只做清理）：
 
 | target id | 平台 | 检测什么 | 修复方式 |
 |---|---|---|---|
-| `qoderwork-env` | macOS | `launchctl getenv QODER_WORKER_RUNTIME_PATH` 是否等于 wrapper 路径 | `launchctl setenv` + 写/重载 `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` |
+| `qoderwork-env`（已退役） | macOS | 不再检测，每轮巡检直接走禁用清理路径 | 不再注入；仅在精确等于 pilot wrapper 路径时 `launchctl unsetenv QODER_WORKER_RUNTIME_PATH`，并卸载删除 `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` |
+| `qwenworkcn-env` | macOS | `launchctl getenv QW_QODER_WORKER_RUNTIME_PATH` 是否等于 wrapper 路径 | `launchctl setenv` + 写/重载 `~/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist` |
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
 前置条件（precondition）：对应的 hook 脚本文件必须存在（`qodercli-rc` 对应
-`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。对 `qoderwork-env` 还要求
-macOS 平台且 QoderWork.app 已安装。前置条件不满足时静默 skip，不算修复失败。
+`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。`qwenworkcn-env` 还要求 macOS
+平台且 QwenWorkCN.app 已安装。前置条件不满足时静默 skip，不算修复失败。
+
+普通 Qoder Work 与 Qoder Work CN 都用原生数据，不再触发 runtime 注入。`qoderwork-env`
+以 `enabled()` 恒为 false 的退役目标形式保留，作用只是清掉旧版本写下的
+`QODER_WORKER_RUNTIME_PATH` 注入，与用户当前启用了哪些 agent 无关；第三方设置的同名
+变量因精确匹配而不会被误删。wrapper 文件本身仍由 Qwen Work CN 使用，不应删除。
 
 ## 安全护栏
 
@@ -53,7 +59,7 @@ macOS 平台且 QoderWork.app 已安装。前置条件不满足时静默 skip，
 
 ### Step 1：确定注入类型
 
-- **macOS GUI app**（如 QoderWork）→ `launchctl setenv` + LaunchAgent plist（参考 `qoderwork-env`）
+- **macOS GUI app**（如 Qwen Work CN）→ `launchctl setenv` + LaunchAgent plist（参考 `qwenworkcn-env`）
 - **CLI 工具**（如 qodercli / claude）→ shell rc wrapper function（参考 `qodercli-rc`）
 
 ### Step 2：在 `hook-watchdog.ts` 的 `defaultInterceptTargets()` 加 target
@@ -126,7 +132,8 @@ grep 'intercept-watchdog.repairing\|intercept-watchdog.repaired' ~/.loongsuite-p
 | 现象 | 原因 | 解决 |
 |---|---|---|
 | intercept target 一直 skip | hook 脚本未部署（`~/.loongsuite-pilot/hooks/<script>.mjs` 不存在） | 跑 `node scripts/postinstall.js` 或 `bash scripts/local-reinstall.sh` |
-| `qoderwork-env` skip | 非 macOS 平台，或 QoderWork.app 未安装 | 仅 macOS + QoderWork.app 已安装时生效 |
+| `qoderwork-env` skip | 该目标已退役，`enabled()` 恒为 false | 正常现象；它每轮只清理旧的 `QODER_WORKER_RUNTIME_PATH` 注入，不再注入任何东西 |
+| `qwenworkcn-env` skip | 非 macOS 平台、Qwen Work CN 未启用或 QwenWorkCN.app 未安装 | 仅对已启用且已安装的 Qwen Work CN 生效 |
 | rc block 反复被修复又丢失 | dotfile 管理工具覆盖 `.zshrc` | 将 pilot block 加入 dotfile 源文件；watchdog 每日最多修复 3 次后自动停止 |
 | `intercept-watchdog.daily-limit` | 同上，已达当日上限 | 次日自动重置计数 |
 | `intercept-watchdog.repair-failed` | 文件权限、磁盘满、launchctl 异常 | 检查 warn 日志中的 error 详情 |

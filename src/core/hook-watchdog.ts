@@ -71,6 +71,13 @@ export interface MacRuntimeInterceptDefinition {
   appNames: string[];
 }
 
+/** A macOS runtime override that is only ever removed, never injected. */
+export interface RetiredRuntimeInterceptDefinition {
+  id: string;
+  envName: string;
+  plistLabel: string;
+}
+
 /**
  * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
  * from rc-file content. Any line containing `begin` starts the cut and any
@@ -575,9 +582,8 @@ export class HookWatchdog {
           id: def.id,
           enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
           precondition: async () => {
-            if (!await fileExists(wrapperPath)) return false;
             for (const appPath of appPaths) {
-              if (await directoryExists(appPath)) return true;
+              if (await directoryExists(appPath)) return fileExists(wrapperPath);
             }
             return false;
           },
@@ -626,6 +632,35 @@ export class HookWatchdog {
             // Each product-specific target only removes its own env/plist.
             try {
               const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              if (stdout.trim() === wrapperPath) {
+                await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
+              }
+            } catch {
+              // getenv fails when unset — nothing to drop.
+            }
+            if (await fileExists(plistPath)) {
+              await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+              await fs.rm(plistPath, { force: true }).catch(() => {});
+            }
+          },
+        });
+      }
+
+      // Retired overrides: `enabled: false` routes every cycle into the
+      // watchdog's disabled-cleanup path, so a leftover injection is removed
+      // without depending on which agents the user currently has enabled.
+      for (const def of HookWatchdog.macRetiredRuntimeInterceptDefs()) {
+        const plistPath = path.join(home, 'Library', 'LaunchAgents', `${def.plistLabel}.plist`);
+        targets.push({
+          id: def.id,
+          enabled: () => false,
+          precondition: async () => false,
+          check: async () => true,
+          repair: async () => {},
+          cleanup: async () => {
+            try {
+              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              // Exact match only: a third-party override must survive untouched.
               if (stdout.trim() === wrapperPath) {
                 await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
               }
@@ -720,18 +755,26 @@ export class HookWatchdog {
   static macRuntimeInterceptDefs(): MacRuntimeInterceptDefinition[] {
     return [
       {
-        id: 'qoderwork-env',
-        envName: 'QODER_WORKER_RUNTIME_PATH',
-        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
-      },
-      {
         id: 'qwenworkcn-env',
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
         agentIds: ['qwen-work-cn'],
         appNames: ['QwenWorkCN.app'],
+      },
+    ];
+  }
+
+  /**
+   * Runtime overrides that no longer have a collection consumer. They are never
+   * (re)injected; the watchdog only retires Pilot-owned leftovers from earlier
+   * releases so an unused JSON monkey patch stops loading into the host app.
+   */
+  static macRetiredRuntimeInterceptDefs(): RetiredRuntimeInterceptDefinition[] {
+    return [
+      {
+        id: 'qoderwork-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
       },
     ];
   }

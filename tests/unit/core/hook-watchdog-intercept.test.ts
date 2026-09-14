@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import * as os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as fsUtils from '../../../src/utils/fs-utils.js';
 import {
   HookWatchdog,
   stripMarkerBlock,
@@ -16,8 +20,15 @@ vi.mock('../../../src/utils/logger.js', () => ({
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
-  execFile: vi.fn(),
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: vi.fn(),
+  }),
 }));
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: vi.fn(actual.homedir) };
+});
 
 const defaultConfig: HookWatchdogConfig = {
   enabled: true,
@@ -272,21 +283,14 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     expect(ids).toContain('qodercli-rc');
     expect(ids).toContain('claude-code-rc');
     if (process.platform === 'darwin') {
-      expect(ids).toContain('qoderwork-env');
       expect(ids).toContain('qwenworkcn-env');
+      expect(ids).toContain('qoderwork-env'); // retired: present for cleanup only
     }
   });
 
   it('keeps macOS runtime targets aligned with installer product families', () => {
     const defs = HookWatchdog.macRuntimeInterceptDefs();
     expect(defs).toEqual([
-      {
-        id: 'qoderwork-env',
-        envName: 'QODER_WORKER_RUNTIME_PATH',
-        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
-      },
       {
         id: 'qwenworkcn-env',
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
@@ -304,11 +308,33 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     }
   });
 
-  it('defaults every target to enabled when no gate is passed', () => {
+  it('keeps retired runtime overrides cleaned up by the installer too', () => {
+    const retired = HookWatchdog.macRetiredRuntimeInterceptDefs();
+    expect(retired).toEqual([
+      {
+        id: 'qoderwork-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
+      },
+    ]);
+
+    // A retired id must not also be injected by an active definition.
+    const activeIds = new Set(HookWatchdog.macRuntimeInterceptDefs().map(d => d.id));
+    const installer = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
+    for (const def of retired) {
+      expect(activeIds.has(def.id)).toBe(false);
+      expect(installer).toContain(`launchctl unsetenv ${def.envName}`);
+      expect(installer).toContain(def.plistLabel);
+    }
+  });
+
+  it('defaults every non-retired target to enabled when no gate is passed', () => {
+    const retired = new Set(HookWatchdog.macRetiredRuntimeInterceptDefs().map(d => d.id));
     const targets = HookWatchdog.defaultInterceptTargets('/tmp/test-pilot');
     for (const t of targets) {
-      // enabled is optional; when present it must report true under the default gate
-      expect(t.enabled?.() ?? true).toBe(true);
+      // enabled is optional; when present it must report true under the default
+      // gate — except retired targets, which stay disabled so they only clean up.
+      expect(t.enabled?.() ?? true).toBe(!retired.has(t.id));
     }
   });
 
@@ -329,27 +355,178 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     expect(byId['claude-code-rc'].enabled?.()).toBe(false); // → claude-code
     expect(byId['qodercli-rc'].enabled?.()).toBe(false);    // → qoder
     if (process.platform === 'darwin') {
-      expect(byId['qoderwork-env'].enabled?.()).toBe(false); // → qoder-work family
       expect(byId['qwenworkcn-env'].enabled?.()).toBe(false); // → qwen-work-cn
     }
   });
 
-  it.runIf(process.platform === 'darwin')('keeps QoderWorkCN and QwenWorkCN gates independent', () => {
-    const qoderCnOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
-      '/tmp/test-pilot',
-      id => id === 'qoder-work-cn',
-    ).map(t => [t.id, t]));
+  it.runIf(process.platform === 'darwin')('never enables the retired QoderWork override, whichever agent is on', () => {
+    for (const agentId of ['qoder-work', 'qoder-work-cn', 'qwen-work-cn']) {
+      const byId = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
+        '/tmp/test-pilot',
+        id => id === agentId,
+      ).map(t => [t.id, t]));
 
-    expect(qoderCnOnly['qoderwork-env'].enabled?.()).toBe(true);
-    expect(qoderCnOnly['qwenworkcn-env'].enabled?.()).toBe(false);
+      expect(byId['qoderwork-env'].enabled?.()).toBe(false);
+      expect(byId['qwenworkcn-env'].enabled?.()).toBe(agentId === 'qwen-work-cn');
+    }
+  });
+});
 
-    const qwenOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
-      '/tmp/test-pilot',
-      id => id === 'qwen-work-cn',
-    ).map(t => [t.id, t]));
+describe('macOS runtime intercept lifecycle (mock launchctl and temporary HOME)', () => {
+  const exec = vi.mocked(promisify(execFile));
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const qoderEnv = 'QODER_WORKER_RUNTIME_PATH';
+  const qwenEnv = 'QW_QODER_WORKER_RUNTIME_PATH';
+  let tmp: string;
+  let dataDir: string;
+  let wrapper: string;
+  let env: Map<string, string>;
 
-    expect(qwenOnly['qoderwork-env'].enabled?.()).toBe(false);
-    expect(qwenOnly['qwenworkcn-env'].enabled?.()).toBe(true);
+  function plist(id: string): string {
+    return join(tmp, 'Library', 'LaunchAgents', `com.loongsuite-pilot.${id}.plist`);
+  }
+
+  function targets(enabled: string[]) {
+    return HookWatchdog.defaultInterceptTargets(dataDir, id => enabled.includes(id), [])
+      .filter(t => t.id.endsWith('-env'));
+  }
+
+  function installWrapper(app: string) {
+    mkdirSync(join(dataDir, 'hooks'), { recursive: true });
+    writeFileSync(wrapper, '// shared wrapper\n');
+    mkdirSync(join(tmp, 'Applications', app), { recursive: true });
+  }
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(os.tmpdir(), 'runtime-intercept-'));
+    dataDir = join(tmp, 'custom data'); // No loongsuite-pilot substring.
+    wrapper = join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+    env = new Map();
+    mkdirSync(join(tmp, 'Library', 'LaunchAgents'), { recursive: true });
+    vi.mocked(os.homedir).mockReturnValue(tmp);
+    // Never consult the host's /Applications; all app fixtures live in tmp.
+    vi.spyOn(fsUtils, 'directoryExists').mockImplementation(async p =>
+      p.startsWith(`${tmp}/`) && existsSync(p));
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+    exec.mockReset();
+    exec.mockImplementation(async (command, args) => {
+      expect(command).toBe('launchctl');
+      const [op, key, value] = args as string[];
+      if (op === 'getenv') return { stdout: `${env.get(key) ?? ''}\n`, stderr: '' };
+      if (op === 'setenv') env.set(key, value);
+      else if (op === 'unsetenv') env.delete(key);
+      else {
+        expect(['load', 'unload']).toContain(op);
+        expect(key.startsWith(`${tmp}/`)).toBe(true);
+      }
+      return { stdout: '', stderr: '' };
+    });
+  });
+
+  afterEach(async () => {
+    Object.defineProperty(process, 'platform', platform);
+    vi.restoreAllMocks();
+    const actualOs = await vi.importActual<typeof import('node:os')>('node:os');
+    vi.mocked(os.homedir).mockImplementation(actualOs.homedir);
+    exec.mockReset();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['default-enabled agents', undefined],
+    ['qoder-work only', ['qoder-work']],
+    ['qoder-work-cn enabled', ['qoder-work-cn']],
+  ] as [string, string[] | undefined][])('retires the QoderWork override every cycle with %s', async (_label, enabled) => {
+    installWrapper('QoderWorkCN.app'); // An installed CN app must not resurrect it.
+    env.set(qoderEnv, wrapper);
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    const target = HookWatchdog.defaultInterceptTargets(
+      dataDir,
+      enabled && (id => enabled.includes(id)),
+      [],
+    ).find(t => t.id === 'qoderwork-env')!;
+    expect(target.enabled!()).toBe(false);
+    const precondition = vi.spyOn(target, 'precondition');
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+    expect(precondition).not.toHaveBeenCalled();
+    expect(env.has(qoderEnv)).toBe(false);
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(exec.mock.calls.some(([, args]) => args?.[0] === 'setenv')).toBe(false);
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it('preserves Qwen under default-enabled agents while retiring the QoderWork override', async () => {
+    installWrapper('QwenWorkCN.app');
+    env.set(qoderEnv, wrapper);
+    env.set(qwenEnv, wrapper);
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    writeFileSync(plist('qwenworkcn-env'), 'active Pilot plist');
+    const envTargets = HookWatchdog.defaultInterceptTargets(dataDir, undefined, [])
+      .filter(t => t.id.endsWith('-env'));
+
+    expect(await new HookWatchdog(defaultConfig, [], envTargets).runCheck())
+      .toEqual({ checked: 1, repaired: 0, skipped: 1 });
+    expect(env.has(qoderEnv)).toBe(false);
+    expect(env.get(qwenEnv)).toBe(wrapper);
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toBe('active Pilot plist');
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it('preserves a third-party override while retiring the QoderWork injection', async () => {
+    env.set(qoderEnv, '/third-party/runtime.mjs');
+    const target = HookWatchdog.defaultInterceptTargets(dataDir, undefined, [])
+      .find(t => t.id === 'qoderwork-env')!;
+    await new HookWatchdog(defaultConfig, [], [target]).runCheck();
+    expect(env.get(qoderEnv)).toBe('/third-party/runtime.mjs');
+    expect(exec.mock.calls.some(([, args]) => args?.[0] === 'unsetenv')).toBe(false);
+  });
+
+  it('repairs enabled QwenWorkCN and stays healthy', async () => {
+    installWrapper('QwenWorkCN.app');
+    const wd = new HookWatchdog(defaultConfig, [], targets(['qwen-work-cn']));
+    expect((await wd.runCheck()).repaired).toBe(1);
+    expect(env.get(qwenEnv)).toBe(wrapper);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toContain(wrapper);
+    expect((await wd.runCheck()).checked).toBe(1);
+    expect(env.has(qoderEnv)).toBe(false);
+  });
+
+  it.each(['QoderWork.app', 'QoderWorkCN.app'])('does not use %s to satisfy the Qwen precondition', async app => {
+    installWrapper(app);
+    const result = await new HookWatchdog(defaultConfig, [], targets(['qwen-work-cn'])).runCheck();
+    expect(result.repaired).toBe(0);
+    expect(env.has(qwenEnv)).toBe(false);
+  });
+
+  it('preserves the active Qwen injection while cleaning the retired product', async () => {
+    installWrapper('QwenWorkCN.app');
+    env.set(qwenEnv, wrapper);
+    env.set(qoderEnv, wrapper);
+    writeFileSync(plist('qwenworkcn-env'), 'active Pilot plist');
+    writeFileSync(plist('qoderwork-env'), 'stale Pilot plist');
+    const wd = new HookWatchdog(defaultConfig, [], targets(['qoder-work', 'qwen-work-cn']));
+    expect(await wd.runCheck()).toEqual({ checked: 1, repaired: 0, skipped: 1 });
+    expect(env.get(qwenEnv)).toBe(wrapper);
+    expect(env.has(qoderEnv)).toBe(false);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toBe('active Pilot plist');
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(existsSync(wrapper)).toBe(true);
+
+    // Missing active env must still be repaired independently.
+    env.delete(qwenEnv);
+    expect((await wd.runCheck()).repaired).toBe(1);
+    expect(env.get(qwenEnv)).toBe(wrapper);
+  });
+
+  it('does not unset third-party runtime paths when cleaning disabled products', async () => {
+    for (const key of [qoderEnv, qwenEnv]) env.set(key, '/third-party/runtime.mjs');
+    await new HookWatchdog(defaultConfig, [], targets(['qoder-work'])).runCheck();
+    expect([...env.values()]).toEqual(['/third-party/runtime.mjs', '/third-party/runtime.mjs']);
+    expect(exec.mock.calls.some(([, args]) => args?.[0] === 'unsetenv')).toBe(false);
   });
 });
 

@@ -1,13 +1,6 @@
 // QoderWork-family worker runtime wrapper — transparent, app-agnostic shim.
 //
-// Loaded via the SHARED env var QODER_WORKER_RUNTIME_PATH. The ENTIRE
-// @qoder-ai/qoder-agent-sdk family honours this variable (QoderWork,
-// QwenWorkCN, QoderWork CN, ...), and on macOS we set it with `launchctl
-// setenv`, which is GLOBAL to the launchd user domain. Consequences:
-//   • Every GUI app inherits the variable, but only apps that actually run the
-//     @qoder-ai SDK ever load this file as their worker entry.
-//   • Therefore this wrapper CAN be the worker entry of ANY sibling app, not
-//     just QoderWork. It MUST NOT assume which app loaded it.
+// Shared launchd overrides can reach sibling apps; resolve the runtime from the host, not the intercept target.
 //
 // Design priority (do NOT weaken): NEVER break the host app. We only ever hand
 // control to the *host app's OWN* bundled runtime, located dynamically from the
@@ -18,8 +11,9 @@
 // sacrificed, the app is never handed a wrong runtime.
 //
 // On the success path only, token/system-prompt records are appended to the
-// host-specific intercept file. Keeping these files separate is required even
-// when sibling apps share the same SDK protocol: response-id namespaces and
+// host-specific intercept file. Only hosts whose intercept data has a consumer
+// are listed in HOSTS — every other QoderWork-family app is forwarded to its own
+// runtime untouched. Files stay per-host because response-id namespaces and
 // process lifecycles belong to different products.
 
 import { createRequire } from 'module';
@@ -42,16 +36,6 @@ const HOSTS = [
     id: 'qwen-work-cn',
     appNames: ['QwenWorkCN.app'],
     interceptFile: 'qwenworkcn-intercept.jsonl',
-  },
-  {
-    id: 'qoder-work-cn',
-    appNames: ['QoderWork CN.app', 'QoderWorkCN.app'],
-    interceptFile: 'qoderworkcn-intercept.jsonl',
-  },
-  {
-    id: 'qoder-work',
-    appNames: ['QoderWork.app'],
-    interceptFile: 'qoderwork-intercept.jsonl',
   },
 ];
 
