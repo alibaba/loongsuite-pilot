@@ -1408,6 +1408,34 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('extracts project from a project-qualified multimodal endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+              logstore: 'mm-store',
+            },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+            project: 'mm-proj',
+            logstore: 'mm-store',
+          },
+          auth: mmAuth,
+        },
+        storageBasePath: 'sls://mm-proj/mm-store',
+      });
+    });
+
     it('extracts project from a webtracking project-qualified host when project is empty', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: [{
@@ -1488,6 +1516,19 @@ describe('ConfigLoader', () => {
           storage: {
             type: 'sls',
             target: { endpoint: slsApiKey.endpoint, project: '  ', logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      }],
+      ['explicit project conflicts with qualified host', {
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+              project: 'other-proj',
+              logstore: 'mm-store',
+            },
             auth: mmAuth,
           },
         },

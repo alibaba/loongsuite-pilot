@@ -548,17 +548,24 @@ function buildMultimodalSlsBackedStorage(
 
 const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
 
-/** Explicit project, else unique matching flusher project (WebTracking host may supply it). */
+/** Explicit project, then project-qualified multimodal host, then matching flusher project. */
 function resolveMultimodalProject(
   target: NonNullable<MultimodalStorageRaw['target']>,
   sls?: SlsFlusherConfig,
 ): string {
+  let explicit: string | undefined;
   if ('project' in target) {
     if (!isNonEmptyString(target.project)) {
       throw new Error('multimodal.storage.target.project is invalid');
     }
-    return target.project.trim();
+    explicit = target.project.trim();
   }
+  const fromHost = projectFromQualifiedSlsHost(target.endpoint);
+  if (explicit && fromHost && explicit !== fromHost) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  if (explicit) return explicit;
+  if (fromHost) return fromHost;
   const fromFlusher = uniqueProjectAmongMatchingFlushers(target.endpoint, sls);
   if (fromFlusher) return fromFlusher;
   throw new Error('multimodal.storage.target.project is required');

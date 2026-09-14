@@ -82,7 +82,7 @@ Two storage shapes. **Explicit configuration takes precedence**: user-supplied f
 1. **Use as written.** A complete `multimodal.storage` block (`sls` / `delegatedOss` / `oss`). Incomplete or invalid storage disables upload; it does not fall back.
 2. **Reuse the SLS flusher.** Missing fields are filled only in these two cases:
    - **Reuse all.** Exactly one unconflicted SLS `apiKey` target. Omit `storage` to reuse it as a whole, or set only `target.logstore` (`type` may be `sls` / `delegatedOss`; the latter may set `ossBucket`) to change Logstore.
-   - **Reuse project only.** Independent storage already has auth / endpoint / logstore and omits `project`, and the same-region flusher has exactly one project (typical: WebTracking). Auth remains the user-supplied value. AK/SK and WebTracking credentials are never copied into multimodal.
+   - **Reuse project only.** Independent storage already has auth / endpoint / logstore and omits `project`. Fill it from a project-qualified multimodal endpoint, or from the unique same-region flusher project (typical: WebTracking). Auth remains the user-supplied value. AK/SK and WebTracking credentials are never copied into multimodal.
 
 `type` is one of `sls`, `delegatedOss`, or `oss`. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
 

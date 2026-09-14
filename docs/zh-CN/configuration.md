@@ -82,7 +82,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 1. **直接用。** 完整填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。缺字段或类型无效则关闭上传，不回退。
 2. **复用 SLS flusher。** 仅在以下两种情况补齐缺省字段：
    - **全部复用**：恰好一条无冲突的 SLS `apiKey` 目标。省略 `storage` 即整段复用；也可以只写 `target.logstore`（`type` 可为 `sls` / `delegatedOss`，后者可带 `ossBucket`）以更换 Logstore。
-   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`，且同 region 的 flusher 中 project 唯一（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
+   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`。可从 project-qualified 的 multimodal endpoint 提取，或复用同 region flusher 中唯一的 project（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
