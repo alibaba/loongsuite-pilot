@@ -1447,12 +1447,7 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
     Write-Host ""
 }
 
-# ============================================================
-# QoderWork-family runtime wrapper: persist QwenWorkCN's dedicated User-level
-# override in HKCU\Environment, and retire the legacy QoderWork one. reg.exe is
-# the CLM-safe source of truth; the guarded .NET call broadcasts
-# WM_SETTINGCHANGE so Explorer-spawned apps see updates.
-# ============================================================
+# reg.exe removes overrides under CLM; the guarded .NET call notifies Explorer.
 function Get-PilotRuntimeOverride {
     param([string]$Name)
     $prevEAP = $ErrorActionPreference
@@ -1472,37 +1467,6 @@ function Get-PilotRuntimeOverride {
     return ""
 }
 
-function Test-AgentCollectionEnabled {
-    param([string]$AgentId)
-    $configFile = Join-Path $DataDir "config.json"
-    if (-not (Test-Path $configFile)) { return $false }
-
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $enabled = & $script:NODE_BIN -e @'
-try {
-  const config = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
-  const agentId = process.argv[2];
-  process.stdout.write(config?.agents?.[agentId]?.enabled === false ? 'false' : 'true');
-} catch {
-  process.stdout.write('false');
-}
-'@ $configFile $AgentId 2>$null
-    $ErrorActionPreference = $prevEAP
-    return "$enabled".Trim() -eq "true"
-}
-
-function Set-PilotRuntimeOverride {
-    param([string]$Name, [string]$Value)
-    reg.exe add "HKCU\Environment" /v $Name /t REG_SZ /d "$Value" /f | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to set $Name" }
-    try {
-        [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
-        return $true
-    } catch {
-        return $false
-    }
-}
-
 function Remove-PilotRuntimeOverride {
     param([string]$Name)
     reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
@@ -1512,39 +1476,6 @@ function Remove-PilotRuntimeOverride {
         return $true
     } catch {
         return $false
-    }
-}
-
-function Sync-PilotRuntimeOverride {
-    param(
-        [string]$Name,
-        [bool]$ShouldEnable,
-        [string]$WrapperPath,
-        [string]$ProductName
-    )
-    $current = Get-PilotRuntimeOverride -Name $Name
-    if (-not (Test-Path $WrapperPath)) {
-        $script:RUNTIME_WRAPPER_MISSING = $true
-        if ($current -and $current -ieq $WrapperPath) {
-            $broadcasted = Remove-PilotRuntimeOverride -Name $Name
-            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-            Msg "    ⚠️  wrapper 缺失，已清理 $Name" "    ⚠️  Wrapper missing; cleaned $Name"
-        } else {
-            Msg "    ⚠️  wrapper 缺失，未设置 $Name" "    ⚠️  Wrapper missing; did not set $Name"
-        }
-        return
-    }
-
-    if ($ShouldEnable) {
-        if ($current -ine $WrapperPath) {
-            $broadcasted = Set-PilotRuntimeOverride -Name $Name -Value $WrapperPath
-            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-            Msg "    ✅ $Name ($ProductName)" "    ✅ $Name ($ProductName)"
-        }
-    } elseif ($current -and $current -ieq $WrapperPath) {
-        $broadcasted = Remove-PilotRuntimeOverride -Name $Name
-        if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-        Msg "    ✅ 已清理 $Name" "    ✅ Cleaned $Name"
     }
 }
 
@@ -1560,31 +1491,18 @@ function Retire-PilotRuntimeOverride {
     }
 }
 
-function Inject-QoderworkRuntimeWrapper {
+function Retire-QoderworkRuntimeOverrides {
     $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $localAppData = $env:LOCALAPPDATA
-    if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
-
-    $qwenInstalled = Test-Path (Join-Path $localAppData "Programs\QwenWorkCN")
-    $qwenShouldEnable = $qwenInstalled -and (Test-AgentCollectionEnabled -AgentId 'qwen-work-cn')
-
     $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    $script:RUNTIME_WRAPPER_MISSING = $false
-    Sync-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' `
-        -ShouldEnable $qwenShouldEnable -WrapperPath $wrapperPath -ProductName 'QwenWorkCN'
-    # QODER_WORKER_RUNTIME_PATH has no collection consumer left; retire any
-    # injection an earlier release wrote instead of refreshing it.
+    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
     Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
 
-    if ($script:RUNTIME_WRAPPER_MISSING) {
-        Msg "    ⚠️  runtime wrapper 未完整部署，已跳过 token 拦截以避免影响应用" `
-            "    ⚠️  Runtime wrapper is missing; token interception was skipped to protect the apps"
-    } elseif ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    ⚠️  环境变量已持久化，但无法通知 Explorer；请注销并重新登录 Windows" `
-            "    ⚠️  Environment persisted but Explorer could not be notified; sign out and back in"
+    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    环境变量已清理，但无法通知 Explorer；请注销并重新登录 Windows" `
+            "    Environment overrides removed but Explorer could not be notified; sign out and back in"
     } else {
-        Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
-            "    ⚠️  Fully quit and restart the corresponding apps for changes to take effect"
+        Msg "    请完全退出并重新打开对应应用以生效" `
+            "    Fully quit and restart the corresponding apps for changes to take effect"
     }
     Write-Host ""
 }
@@ -2620,7 +2538,7 @@ function Cmd-Install {
         }
         Write-Config
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
@@ -2690,7 +2608,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."

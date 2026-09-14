@@ -204,11 +204,14 @@ Qoder Work 的 token 优先来自 session segments；segment 无有效 usage 时
 若 segment 和 SDK log 都无有效 usage，检查 Qoder Work 版本及原生日志是否完整；不要重新注入 wrapper。
 `cache_read` 为零或缺失不一定是故障，可能该请求没有缓存命中或原生记录未提供该字段。
 
-共享的 `qoderwork-runtime-wrapper.mjs` 现在只服务 Qwen Work CN，不应删除。
-Qoder Work 与 Qoder Work CN 都不再注入该 wrapper；旧版本留下的 `QODER_WORKER_RUNTIME_PATH`
+Qoder Work、Qoder Work CN 与 Qwen Work CN 都不再注入 runtime wrapper。
+旧版本留下的 `QODER_WORKER_RUNTIME_PATH` 与 `QW_QODER_WORKER_RUNTIME_PATH`
 （macOS 的 launchctl 环境变量与 LaunchAgent plist、Windows 的 `HKCU\Environment` 值）
-会由 installer 与 watchdog 主动清退。若某个 Qoder Work 家族进程仍通过共享入口启动，
-它会被透明转发到自身 runtime，但不再旁录 token / system prompt。
+会由 installer 与 watchdog 清退 Pilot 自己写入的覆盖，恢复应用默认入口；第三方覆盖保留。
+`qoderwork-runtime-wrapper.mjs` 仅保留透明转发，防止已启动进程继承的旧覆盖指向不存在的入口；
+它不再修改 JSON 全局方法，也不再旁录 token / system prompt。应用完全退出并重开后才会丢弃已继承的环境。
+Qwen Work CN 改用 Hook/transcript 与原生 segments，明确接受不再补充 `gen_ai.system_instructions`
+和 `gen_ai.usage.reasoning_tokens`；原生 usage 缺失时也不再从旧 intercept 文件回退。
 
 ---
 

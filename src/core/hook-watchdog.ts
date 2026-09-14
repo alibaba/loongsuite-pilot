@@ -63,14 +63,6 @@ export interface InterceptCheckTarget {
   cleanup?: () => Promise<void>;
 }
 
-export interface MacRuntimeInterceptDefinition {
-  id: string;
-  envName: string;
-  plistLabel: string;
-  agentIds: string[];
-  appNames: string[];
-}
-
 /** A runtime override that is only ever removed, never injected. */
 export interface RetiredRuntimeInterceptDefinition {
   id: string;
@@ -80,13 +72,6 @@ export interface RetiredRuntimeInterceptDefinition {
 /** Retired override that also left a LaunchAgent plist behind. */
 export interface MacRetiredRuntimeInterceptDefinition extends RetiredRuntimeInterceptDefinition {
   plistLabel: string;
-}
-
-export interface WinRuntimeInterceptDefinition {
-  id: string;
-  envName: string;
-  agentIds: string[];
-  appInstallPaths: string[];
 }
 
 /**
@@ -184,11 +169,10 @@ async function readWindowsUserEnv(envName: string): Promise<string> {
   }
 }
 
-async function broadcastWindowsUserEnv(envName: string, value: string | null): Promise<boolean> {
-  const valueExpr = value === null ? '$null' : '$env:LOONGSUITE_PILOT_RUNTIME_ENV_VALUE';
+async function broadcastWindowsUserEnv(envName: string): Promise<void> {
   const command = [
     "$ErrorActionPreference = 'Stop'",
-    `try { [Environment]::SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, ${valueExpr}, 'User'); exit 0 } catch { exit 1 }`,
+    "try { [Environment]::SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, $null, 'User'); exit 0 } catch { exit 1 }",
   ].join('; ');
   try {
     await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
@@ -197,32 +181,21 @@ async function broadcastWindowsUserEnv(envName: string, value: string | null): P
       env: {
         ...process.env,
         LOONGSUITE_PILOT_RUNTIME_ENV_NAME: envName,
-        ...(value === null ? {} : { LOONGSUITE_PILOT_RUNTIME_ENV_VALUE: value }),
       },
     });
-    return true;
   } catch {
     logger.warn('windows runtime environment persisted but broadcast failed', {
       envName,
       action: 'sign out and back in to refresh Explorer',
     });
-    return false;
   }
-}
-
-async function setWindowsUserEnv(envName: string, value: string): Promise<void> {
-  await execFileAsync('reg.exe', [
-    'add', 'HKCU\\Environment', '/v', envName,
-    '/t', 'REG_SZ', '/d', value, '/f',
-  ], { timeout: 10_000, windowsHide: true });
-  await broadcastWindowsUserEnv(envName, value);
 }
 
 async function removeWindowsUserEnv(envName: string): Promise<void> {
   await execFileAsync('reg.exe', [
     'delete', 'HKCU\\Environment', '/v', envName, '/f',
   ], { timeout: 10_000, windowsHide: true });
-  await broadcastWindowsUserEnv(envName, null);
+  await broadcastWindowsUserEnv(envName);
 }
 
 async function cleanupOwnedWindowsUserEnv(envName: string, wrapperPath: string): Promise<boolean> {
@@ -737,82 +710,6 @@ export class HookWatchdog {
     // ── QoderWork-family launchctl env + LaunchAgent plists (macOS only) ──
     if (process.platform === 'darwin') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
-      for (const def of HookWatchdog.macRuntimeInterceptDefs()) {
-        const plistPath = path.join(home, 'Library', 'LaunchAgents', `${def.plistLabel}.plist`);
-        const appPaths = def.appNames.flatMap(appName => [
-          path.join('/Applications', appName),
-          path.join(home, 'Applications', appName),
-        ]);
-
-        targets.push({
-          id: def.id,
-          enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
-          precondition: async () => {
-            if (!await fileExists(wrapperPath)) return false;
-            for (const appPath of appPaths) {
-              if (await directoryExists(appPath)) return true;
-            }
-            return false;
-          },
-          check: async () => {
-            try {
-              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
-              if (stdout.trim() !== wrapperPath) return false;
-              // Also verify plist exists — without it, env is lost on reboot.
-              return fileExists(plistPath);
-            } catch {
-              return false;
-            }
-          },
-          repair: async () => {
-            await execFileAsync('launchctl', ['setenv', def.envName, wrapperPath]);
-            const plistContent = [
-              '<?xml version="1.0" encoding="UTF-8"?>',
-              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-              '<plist version="1.0">',
-              '<dict>',
-              '    <key>Label</key>',
-              `    <string>${def.plistLabel}</string>`,
-              '    <key>ProgramArguments</key>',
-              '    <array>',
-              '        <string>/bin/launchctl</string>',
-              '        <string>setenv</string>',
-              `        <string>${def.envName}</string>`,
-              `        <string>${wrapperPath}</string>`,
-              '    </array>',
-              '    <key>RunAtLoad</key>',
-              '    <true/>',
-              '</dict>',
-              '</plist>',
-              '',
-            ].join('\n');
-            await fs.mkdir(path.dirname(plistPath), { recursive: true });
-            await fs.writeFile(plistPath, plistContent);
-            // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
-            // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
-            // load/unload for now because it still works reliably across all
-            // supported macOS versions and avoids the uid lookup complexity.
-            await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-            await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
-          },
-          cleanup: async () => {
-            // Each product-specific target only removes its own env/plist.
-            try {
-              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
-              if (stdout.trim() === wrapperPath) {
-                await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
-              }
-            } catch {
-              // getenv fails when unset — nothing to drop.
-            }
-            if (await fileExists(plistPath)) {
-              await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-              await fs.rm(plistPath, { force: true }).catch(() => {});
-            }
-          },
-        });
-      }
-
       // Retired overrides: `enabled: false` routes every cycle into the
       // watchdog's disabled-cleanup path, so a leftover injection is removed
       // without depending on which agents the user currently has enabled.
@@ -848,57 +745,6 @@ export class HookWatchdog {
     // GUI process. Native reg.exe keeps this path compatible with CLM/WDAC.
     if (process.platform === 'win32') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
-      for (const def of HookWatchdog.winRuntimeInterceptDefs()) {
-        targets.push({
-          id: def.id,
-          enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
-          precondition: async () => {
-            if (!await fileExists(wrapperPath)) {
-              let removed = false;
-              try {
-                removed = await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
-              } catch (err) {
-                logger.debug('windows runtime override cleanup failed', {
-                  envName: def.envName,
-                  reason: 'wrapper-missing',
-                  error: String(err),
-                });
-              }
-              if (removed) {
-                logger.warn('windows runtime wrapper missing; removed owned override', {
-                  envName: def.envName,
-                  wrapperPath,
-                });
-              }
-              return false;
-            }
-            for (const appPath of def.appInstallPaths) {
-              if (await directoryExists(appPath)) return true;
-            }
-            try {
-              await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
-            } catch (err) {
-              logger.debug('windows runtime override cleanup failed', {
-                envName: def.envName,
-                reason: 'app-missing',
-                error: String(err),
-              });
-            }
-            return false;
-          },
-          check: async () => {
-            const current = await readWindowsUserEnv(def.envName);
-            return windowsPathsEqual(current, wrapperPath);
-          },
-          repair: async () => {
-            await setWindowsUserEnv(def.envName, wrapperPath);
-          },
-          cleanup: async () => {
-            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
-          },
-        });
-      }
-
       // Retired overrides: see the macOS loop above. `enabled: false` sends
       // every cycle into the disabled-cleanup path, and the helper only deletes
       // a value that is exactly our wrapper, so a third-party override stays.
@@ -998,19 +844,6 @@ export class HookWatchdog {
     return targets;
   }
 
-  /** Keep the watchdog's product/env/app mapping aligned with the installer. */
-  static macRuntimeInterceptDefs(): MacRuntimeInterceptDefinition[] {
-    return [
-      {
-        id: 'qwenworkcn-env',
-        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
-        plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
-        agentIds: ['qwen-work-cn'],
-        appNames: ['QwenWorkCN.app'],
-      },
-    ];
-  }
-
   /**
    * Runtime overrides that no longer have a collection consumer. They are never
    * (re)injected; the watchdog only retires Pilot-owned leftovers from earlier
@@ -1023,18 +856,10 @@ export class HookWatchdog {
         envName: 'QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qoderwork-env',
       },
-    ];
-  }
-
-  /** Windows product-specific User-level runtime overrides. */
-  static winRuntimeInterceptDefs(): WinRuntimeInterceptDefinition[] {
-    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    return [
       {
-        id: 'qwenworkcn-win-env',
+        id: 'qwenworkcn-env',
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
-        agentIds: ['qwen-work-cn'],
-        appInstallPaths: [path.join(localAppData, 'Programs', 'QwenWorkCN')],
+        plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
       },
     ];
   }
@@ -1045,6 +870,10 @@ export class HookWatchdog {
       {
         id: 'qoderwork-win-env',
         envName: 'QODER_WORKER_RUNTIME_PATH',
+      },
+      {
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
       },
     ];
   }

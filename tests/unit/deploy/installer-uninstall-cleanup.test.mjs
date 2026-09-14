@@ -689,41 +689,60 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
   );
   const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
 
-  it('gates injection on the final qwen config and only retires the legacy override', () => {
-    expect(runtimeSection).toContain('config?.agents?.[agentId]?.enabled === false');
-    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qwen-work-cn'");
-    expect(runtimeSection).toContain("Sync-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH'");
-    expect(runtimeSection).not.toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work'");
-    expect(runtimeSection).not.toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'");
-    expect(runtimeSection).toContain("Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH'");
-    expect(runtimeSection).not.toContain("Sync-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH'");
-    expect(ps1.match(/Inject-QoderworkRuntimeWrapper/g)).toHaveLength(3);
-  });
+  function psFunction(name) {
+    const body = ps1.match(new RegExp(`^function ${name} \\{[\\s\\S]*?^\\}`, 'm'))?.[0];
+    expect(body, `missing function ${name}`).toBeDefined();
+    return body;
+  }
 
-  it('retires only a Pilot-owned legacy override', () => {
-    const retire = runtimeSection.slice(
-      runtimeSection.indexOf('function Retire-PilotRuntimeOverride'),
-      runtimeSection.indexOf('function Inject-QoderworkRuntimeWrapper'),
+  it('unconditionally retires both overrides without any injection helpers', () => {
+    const retire = psFunction('Retire-QoderworkRuntimeOverrides');
+    expect(retire).toContain('Join-Path $DataDir "hooks\\qoderwork-runtime-wrapper.mjs"');
+    expect(retire).toContain(
+      "    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath\n" +
+      "    Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath",
     );
-    expect(retire).toContain('$current -ieq $WrapperPath');
-    expect(retire).toContain("$current -like '*loongsuite-pilot*'");
-    expect(retire).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(retire.indexOf('Retire-PilotRuntimeOverride')).toBeLessThan(retire.indexOf('    if ('));
+    expect(ps1).not.toMatch(/Inject-QoderworkRuntimeWrapper|Sync-PilotRuntimeOverride|Set-PilotRuntimeOverride|Test-AgentCollectionEnabled|RUNTIME_WRAPPER_MISSING/);
+    expect(ps1.match(/Retire-QoderworkRuntimeOverrides/g)).toHaveLength(3);
   });
 
-  it('uses CLM-safe registry persistence with a guarded Explorer broadcast', () => {
+  it.each(['Install', 'Upgrade'])('Cmd-%s retires overrides after stopping the old collector and before starting the new one', command => {
+    const body = psFunction(`Cmd-${command}`);
+    expect(body.match(/^        Retire-QoderworkRuntimeOverrides$/gm)).toHaveLength(1);
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeGreaterThan(body.indexOf('Stop-PilotService'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeGreaterThan(body.indexOf('Deploy-Package'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeLessThan(body.indexOf('Enable-PilotScheduledTasksAfterDeploy'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeLessThan(body.indexOf('Start-PilotAndWait'));
+    expect(body).toContain('        Install-Command\n        Retire-QoderworkRuntimeOverrides\n');
+  });
+
+  it('retires only exact custom-dataDir or legacy Pilot overrides and is a no-op when absent', () => {
+    const retire = psFunction('Retire-PilotRuntimeOverride');
+    expect(retire).toContain('$current = Get-PilotRuntimeOverride -Name $Name');
+    expect(retire).toContain('if (-not $current) { return }');
+    expect(retire).toContain("if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {");
+    expect(retire).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(retire).toContain('if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }');
+  });
+
+  it('uses CLM-safe registry deletion and a guarded null Explorer broadcast, never setting a runtime path', () => {
+    const remove = psFunction('Remove-PilotRuntimeOverride');
     expect(runtimeSection).toContain('reg.exe query "HKCU\\Environment"');
-    expect(runtimeSection).toContain('reg.exe add "HKCU\\Environment"');
-    expect(runtimeSection).toContain('reg.exe delete "HKCU\\Environment"');
-    expect(runtimeSection).toContain('[Environment]::SetEnvironmentVariable');
-    expect(runtimeSection).toContain('catch {');
+    expect(runtimeSection).not.toMatch(/reg\.exe\s+add/);
+    expect(remove).toContain('reg.exe delete "HKCU\\Environment" /v $Name /f');
+    expect(remove).toContain('if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }');
+    expect(remove).toContain("[Environment]::SetEnvironmentVariable($Name, $null, 'User')");
+    expect(remove.indexOf('reg.exe delete')).toBeLessThan(remove.indexOf('[Environment]::SetEnvironmentVariable'));
+    expect(remove).toMatch(/try\s*\{[\s\S]*SetEnvironmentVariable[\s\S]*catch\s*\{\s*return \$false/);
+    expect(runtimeSection.match(/SetEnvironmentVariable\([^\n]+/g))
+      .toEqual(["SetEnvironmentVariable($Name, $null, 'User')"]);
+    expect(runtimeSection).toContain('if ($script:RUNTIME_ENV_BROADCAST_FAILED)');
     expect(runtimeSection).toContain('sign out and back in');
   });
 
   it('treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop', () => {
-    const getter = runtimeSection.slice(
-      runtimeSection.indexOf('function Get-PilotRuntimeOverride'),
-      runtimeSection.indexOf('function Test-AgentCollectionEnabled'),
-    );
+    const getter = psFunction('Get-PilotRuntimeOverride');
     expect(getter).toContain('$prevEAP = $ErrorActionPreference');
     expect(getter).toContain('$ErrorActionPreference = "Continue"');
     expect(getter).toContain('$regExitCode = $LASTEXITCODE');
@@ -732,19 +751,9 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
       .toBeLessThan(getter.indexOf('if ($regExitCode -ne 0)'));
   });
 
-  it('detects app roots without assuming executables are outside version directories', () => {
-    expect(runtimeSection).toContain('Programs\\QwenWorkCN');
-    expect(runtimeSection).not.toContain('Programs\\QoderWork');
-    expect(runtimeSection).not.toContain('QwenWorkCN\\QwenWorkCN.exe');
-  });
-
-  it('cleans an owned override before returning when the wrapper is missing', () => {
-    const sync = runtimeSection.slice(runtimeSection.indexOf('function Sync-PilotRuntimeOverride'));
-    expect(sync.indexOf('Get-PilotRuntimeOverride')).toBeLessThan(sync.indexOf('Test-Path $WrapperPath'));
-    expect(sync).toContain('Remove-PilotRuntimeOverride -Name $Name');
-    expect(sync).toContain('Wrapper missing; cleaned $Name');
-    expect(sync).toContain('Wrapper missing; did not set $Name');
-    expect(sync).toContain('$script:RUNTIME_WRAPPER_MISSING = $true');
+  it('has no app, config, selection or wrapper-existence gates and leaves wrapper files untouched', () => {
+    expect(runtimeSection).not.toMatch(/Test-Path|config\.json|SELECTED_AGENTS|SelectedAgents|LOCALAPPDATA|Programs\\|NODE_BIN/);
+    expect(runtimeSection).not.toMatch(/Remove-Item|Remove-PilotPath/);
   });
 
   it('uninstalls both overrides only when owned by the current dataDir', () => {

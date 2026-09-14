@@ -26,27 +26,26 @@ targets 来源：
 
 检测 installer 注入的 intercept 配置是否仍然存在。与 hook targets 不同，intercept targets 检测的不是 settings.json，而是系统级配置（launchctl env、LaunchAgent plist、shell rc 文件）。
 
-当前 6 个 intercept target（其中 2 个已退役，只做清理）：
+以下 runtime 环境变量目标全部已退役，只做清理；shell intercept 仍按原机制维护：
 
 | target id | 平台 | 检测什么 | 修复方式 |
 |---|---|---|---|
 | `qoderwork-env`（已退役） | macOS | 不再检测，每轮巡检直接走禁用清理路径 | 不再注入；仅在精确等于 pilot wrapper 路径时 `launchctl unsetenv QODER_WORKER_RUNTIME_PATH`，并卸载删除 `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` |
-| `qwenworkcn-env` | macOS | `launchctl getenv QW_QODER_WORKER_RUNTIME_PATH` 是否等于 wrapper 路径 | `launchctl setenv` + 写/重载 `~/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist` |
+| `qwenworkcn-env`（已退役） | macOS | 每轮巡检直接走禁用清理路径 | 仅在精确等于 pilot wrapper 路径时 `launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH`，并卸载删除 `~/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist` |
 | `qoderwork-win-env`（已退役） | Windows | 不再检测，每轮巡检直接走禁用清理路径 | 不再注入；仅在 `HKCU\Environment` 中的值精确等于 pilot wrapper 路径时删除 `QODER_WORKER_RUNTIME_PATH` |
-| `qwenworkcn-win-env` | Windows | `HKCU\Environment` 中 `QW_QODER_WORKER_RUNTIME_PATH` 是否等于 wrapper 路径 | `reg.exe add` 写入并广播 `WM_SETTINGCHANGE` |
+| `qwenworkcn-win-env`（已退役） | Windows | 每轮巡检直接走禁用清理路径 | 仅在 `HKCU\Environment` 中的值精确等于 pilot wrapper 路径时删除 `QW_QODER_WORKER_RUNTIME_PATH`，并广播变更 |
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
-前置条件（precondition）：对应的 hook 脚本文件必须存在（`qodercli-rc` 对应
-`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。`qwenworkcn-env` /
-`qwenworkcn-win-env` 还要求对应平台且 QwenWorkCN 已安装。前置条件不满足时静默 skip，
-不算修复失败。
+shell 目标的前置条件（precondition）要求对应 hook 脚本存在（`qodercli-rc` 对应
+`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。不满足时静默 skip，不算修复失败。
 
-普通 Qoder Work 与 Qoder Work CN 都用原生数据，不再触发 runtime 注入。macOS 的
-`qoderwork-env` 与 Windows 的 `qoderwork-win-env` 以 `enabled()` 恒为 false 的退役目标形式
-保留，作用只是清掉旧版本写下的 `QODER_WORKER_RUNTIME_PATH` 注入，与用户当前启用了哪些
-agent 无关；第三方设置的同名变量因精确匹配而不会被误删。wrapper 文件本身仍由
-Qwen Work CN 使用，不应删除。
+Qoder Work、Qoder Work CN、Qwen Work CN 全部使用原生数据，不再触发 runtime 注入。
+四个 runtime 目标的 `enabled()` 恒为 false，直接清理两个旧覆盖，不依赖 agent 开关、
+应用或 wrapper 是否存在；第三方设置的同名变量因精确匹配而保留。
+wrapper 文件只为仍持有旧环境的进程透明转发到宿主自身 runtime，不再执行截获。
+安装器在停止旧服务并部署新版后、启动新服务前清理覆盖；macOS 同时移除两个 Pilot plist，
+Windows 删除对应 User 环境变量并尝试通知 Explorer。已启动应用需完全退出再打开，广播失败时需重新登录。
 
 ## 安全护栏
 
@@ -63,7 +62,7 @@ Qwen Work CN 使用，不应删除。
 
 ### Step 1：确定注入类型
 
-- **macOS GUI app**（如 Qwen Work CN）→ `launchctl setenv` + LaunchAgent plist（参考 `qwenworkcn-env`）
+- **macOS GUI app** → 优先使用原生数据源；不要把已退役的 `qwenworkcn-env` 当作注入模板
 - **CLI 工具**（如 qodercli / claude）→ shell rc wrapper function（参考 `qodercli-rc`）
 
 ### Step 2：在 `hook-watchdog.ts` 的 `defaultInterceptTargets()` 加 target

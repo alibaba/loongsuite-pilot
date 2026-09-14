@@ -32,7 +32,7 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it.each(['FutureAgent.app', 'QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'])('loads %s own runtime without interception', async appName => {
+  it.each(['FutureAgent.app', 'QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app', 'QwenWorkCN.app'])('loads %s own runtime without interception', async appName => {
     const marker = path.join(root, 'runtime-loaded');
     const resources = await createHostRuntime(appName, marker);
 
@@ -48,35 +48,6 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
   });
 
-  it('keeps token and system prompt interception for QwenWorkCN.app', async () => {
-    const marker = path.join(root, 'runtime-loaded');
-    const resources = await createHostRuntime('QwenWorkCN.app', marker);
-
-    runWrapper(resources, marker);
-
-    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
-      loaded: true,
-      parseUnchanged: false,
-      stringifyUnchanged: false,
-    });
-    const intercept = await fs.readFile(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'), 'utf-8');
-    const records = intercept.trim().split('\n').map(line => JSON.parse(line));
-    expect(records).toEqual([
-      expect.objectContaining({
-        type: 'token',
-        id: 'chatcmpl-wrapper-test',
-        model: 'qwen-test',
-        total_tokens: 3,
-      }),
-      expect.objectContaining({
-        type: 'system_prompt',
-        content: 'Synthetic system instruction. '.repeat(5),
-      }),
-    ]);
-    expect(existsSync(path.join(dataDir, 'logs', 'qoderwork-intercept.jsonl'))).toBe(false);
-    expect(existsSync(path.join(dataDir, 'logs', 'qoderworkcn-intercept.jsonl'))).toBe(false);
-  });
-
   it('recognizes QwenWorkCN from a direct Windows resources path', async () => {
     const marker = path.join(root, 'windows-qwen-runtime-loaded');
     const resources = await createWindowsHostRuntime('QwenWorkCN', marker);
@@ -85,28 +56,14 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
 
     expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
       loaded: true,
-      parseUnchanged: false,
-      stringifyUnchanged: false,
+      parseUnchanged: true,
+      stringifyUnchanged: true,
     });
-    const intercept = await fs.readFile(
-      path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'),
-      'utf-8',
-    );
-    expect(JSON.parse(intercept.trim().split('\n')[0])).toMatchObject({
-      id: 'chatcmpl-wrapper-test',
-      total_tokens: 3,
-    });
+    expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
   });
 
-  it.each([
-    ['QwenWorkCN', 'qwenworkcn-intercept.jsonl'],
-    ['QoderWork', null],
-    ['QoderWorkCN', null],
-    ['QoderWork CN', null],
-  ])('classifies versioned Windows %s resources without cross-agent writes', async (
-    appName,
-    expectedIntercept,
-  ) => {
+  it.each(['QwenWorkCN', 'QoderWork', 'QoderWorkCN', 'QoderWork CN'])(
+    'forwards versioned Windows %s resources without interception', async appName => {
     const marker = path.join(root, `windows-${appName}-runtime-loaded`);
     const resources = await createWindowsHostRuntime(appName, marker, '0.1.8-26081406');
 
@@ -117,15 +74,15 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
 
     expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
       loaded: true,
-      parseUnchanged: expectedIntercept === null,
-      stringifyUnchanged: expectedIntercept === null,
+      parseUnchanged: true,
+      stringifyUnchanged: true,
     });
     for (const intercept of [
       'qwenworkcn-intercept.jsonl',
       'qoderwork-intercept.jsonl',
       'qoderworkcn-intercept.jsonl',
     ]) {
-      expect(existsSync(path.join(dataDir, 'logs', intercept))).toBe(intercept === expectedIntercept);
+      expect(existsSync(path.join(dataDir, 'logs', intercept))).toBe(false);
     }
   });
 
