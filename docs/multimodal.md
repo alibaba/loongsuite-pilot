@@ -25,7 +25,7 @@ Multimodal also needs object storage (a unique SLS `apiKey` flusher, or an expli
 
 Both must be ready:
 
-1. Global object storage. Omit `multimodal.storage` when there is exactly one complete SLS `apiKey` destination (other AK/WebTracking endpoints do not count) to reuse it as a whole, or set only `target.logstore` (optional `type: "sls"` or `"delegatedOss"`, and `ossBucket` only with `delegatedOss`) to override the Logstore. Any other storage block must be complete and is not filled from the flusher. AK/SK and WebTracking credentials are never copied. The target Logstore must support SLS object upload (`PutObject`).
+1. Global object storage: set `multimodal.storage` explicitly, or reuse the SLS flusher under the conditions in [Configuration](configuration.md#multimodal-object-storage).
 2. A non-`none` `uploadMode` on the target agent, and that agent must implement extraction.
 
 Example (Codex + Qoder IDE):

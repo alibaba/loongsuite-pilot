@@ -77,10 +77,12 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。需要对象存储，以及目标 Agent 的 `agents.<id>.multimodal.uploadMode` 不为 `none`。本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-存储有两种写法：
+存储有两种写法。**显式配置优先**：已填写的字段以用户配置为准，不会被 flusher 覆盖。
 
-1. **复用唯一的 SLS `apiKey` 目标。** 解析后的 SLS 端点里，完整 `apiKey` 目标必须恰好一条（endpoint / project / logstore / apiKey，且该目标未混写 AK）。旁边的 AK/SK 或 WebTracking 不参与计数，不阻止复用。两条 `apiKey` 目标不推断。省略 `multimodal.storage` 即整段复用；也可以只写 `target.logstore`（`type` 可省略、`"sls"` 或 `"delegatedOss"`），在同一套凭证下换 Logstore。`type: "delegatedOss"` 还可以写 `target.ossBucket`。AK/SK、WebTracking 凭证不会拷进 multimodal。目标 Logstore 需要支持 SLS 对象上传（`PutObject`）。
-2. **独立的 `multimodal.storage`。** 其余形态（换 endpoint/project、`oss`、AK 等）都是完整独立配置，不会从 flusher 补字段。`multimodal` 或 `storage` 写了但类型无效时，直接关闭上传，不会回退到 flusher。
+1. **直接用。** 完整填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。缺字段或类型无效则关闭上传，不回退。
+2. **复用 SLS flusher。** 仅在以下两种情况补齐缺省字段：
+   - **全部复用**：恰好一条无冲突的 SLS `apiKey` 目标。省略 `storage` 即整段复用；也可以只写 `target.logstore`（`type` 可为 `sls` / `delegatedOss`，后者可带 `ossBucket`）以更换 Logstore。
+   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`，且同 region 的 flusher 中 project 唯一（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
@@ -216,7 +218,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 |--------|------|
 | `multimodal.storage.type` | `sls`、`delegatedOss` 或 `oss`。 |
 | `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
-| `multimodal.storage.target.project` | SLS Project。`sls` / `delegatedOss` 必填。 |
+| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。可省略：同 region 的 flusher SLS 目标里恰好一个 project 时复用。显式空值则关闭上传。 |
 | `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore。独立 `sls` / `delegatedOss` 必填。复用唯一 `apiKey` 时：省略 storage 即用 flusher 的 Logstore，或只写此字段覆盖。 |
 | `multimodal.storage.target.ossBucket` | 可选，仅 `delegatedOss`。用来核对落地 Bucket；不一致则不开启图片上传。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |

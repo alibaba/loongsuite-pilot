@@ -382,7 +382,7 @@ function buildMultimodalConfig(
       return { storage, storageBasePath: storage.target.storageBasePath };
     }
     if (type === 'sls' || type === 'delegatedOss') {
-      const storage = buildMultimodalSlsBackedStorage(type, storageRaw);
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw, sls);
       return {
         storage,
         storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
@@ -518,16 +518,17 @@ function buildMultimodalOssStorage(
 function buildMultimodalSlsBackedStorage(
   type: 'sls' | 'delegatedOss',
   raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+  sls?: SlsFlusherConfig,
 ): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
-  const endpoint = (raw.target?.endpoint ?? '').trim();
-  const project = (raw.target?.project ?? '').trim();
+  const endpoint = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
   const logstore = (raw.target?.logstore ?? '').trim();
-  if (!endpoint || !project || !logstore) {
-    throw new Error(`multimodal.storage.target requires endpoint, project, and logstore when type=${type}`);
+  if (!endpoint || !logstore) {
+    throw new Error(`multimodal.storage.target requires endpoint and logstore when type=${type}`);
   }
+  const project = resolveMultimodalProject(raw.target!, sls);
   const auth = buildMultimodalStorageAuth(raw.auth);
   const target = {
-    endpoint: endpoint.replace(/\/+$/, ''),
+    endpoint,
     project,
     logstore,
   };
@@ -543,6 +544,70 @@ function buildMultimodalSlsBackedStorage(
     };
   }
   return { type, target, auth };
+}
+
+const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
+
+/** Explicit project, else unique matching flusher project (WebTracking host may supply it). */
+function resolveMultimodalProject(
+  target: NonNullable<MultimodalStorageRaw['target']>,
+  sls?: SlsFlusherConfig,
+): string {
+  if ('project' in target) {
+    if (!isNonEmptyString(target.project)) {
+      throw new Error('multimodal.storage.target.project is invalid');
+    }
+    return target.project.trim();
+  }
+  const fromFlusher = uniqueProjectAmongMatchingFlushers(target.endpoint, sls);
+  if (fromFlusher) return fromFlusher;
+  throw new Error('multimodal.storage.target.project is required');
+}
+
+/** `{project}.{region}.log.aliyuncs.com` — regional `{region}.log.aliyuncs.com` has no project. */
+function projectFromQualifiedSlsHost(endpoint: string | undefined): string | undefined {
+  if (!isNonEmptyString(endpoint)) return undefined;
+  try {
+    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
+    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return undefined;
+    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    return parts.length >= 2 ? parts[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function slsEndpointRegionKey(endpoint: string | undefined): string | undefined {
+  if (!isNonEmptyString(endpoint)) return undefined;
+  try {
+    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
+    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return host;
+    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    const region = parts.length >= 2 ? parts.slice(1).join('.') : rest;
+    return region ? `${region}${SLS_PUBLIC_HOST_SUFFIX}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueProjectAmongMatchingFlushers(
+  endpoint: string | undefined,
+  sls?: SlsFlusherConfig,
+): string | undefined {
+  const region = slsEndpointRegionKey(endpoint);
+  if (!region) return undefined;
+  const projects = new Set<string>();
+  for (const ep of sls?.endpoints ?? []) {
+    if (slsEndpointRegionKey(ep.endpoint) !== region) continue;
+    const project = isNonEmptyString(ep.project)
+      ? ep.project.trim()
+      : projectFromQualifiedSlsHost(ep.endpoint);
+    if (project) projects.add(project);
+  }
+  if (projects.size !== 1) return undefined;
+  return [...projects][0];
 }
 
 function buildMultimodalStorageAuth(

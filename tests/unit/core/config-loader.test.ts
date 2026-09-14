@@ -1086,6 +1086,14 @@ describe('ConfigLoader', () => {
       mode: 'apiKey' as const,
       apiKey: 'sls-api-key',
     };
+    const mmAuth = { mode: 'apiKey' as const, apiKey: 'mm-key' };
+    const slsWebTracking = {
+      name: 'wt',
+      endpoint: slsApiKey.endpoint,
+      project: 'wt-proj',
+      logstore: 'wt-store',
+      mode: 'webtracking' as const,
+    };
 
     it('reuses a user apiKey when inner webtracking is also present', async () => {
       mockReadJsonFile.mockResolvedValueOnce({ sls: slsApiKey });
@@ -1128,6 +1136,7 @@ describe('ConfigLoader', () => {
           apiKey: undefined,
         },
       }],
+      ['webtracking only', { sls: [slsWebTracking] }],
       ['two apiKey destinations', {
         sls: [
           { name: 'one', ...slsApiKey },
@@ -1372,6 +1381,118 @@ describe('ConfigLoader', () => {
       ['sls shorthand includes ossBucket', { sls: slsApiKey, multimodal: { storage: { type: 'sls', target: { logstore: 'mm', ossBucket: 'user-bucket' } } } }],
       ['delegatedOss ossBucket is empty', { sls: slsApiKey, multimodal: { storage: { type: 'delegatedOss', target: { logstore: 'mm', ossBucket: '  ' } } } }],
     ])('does not infer sls when %s', async (_label, file) => {
+      mockReadJsonFile.mockResolvedValueOnce(file);
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('fills project from a matching webtracking flusher and keeps explicit auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [slsWebTracking],
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: { endpoint: slsApiKey.endpoint, project: 'wt-proj', logstore: 'mm-store' },
+          auth: mmAuth,
+        },
+        storageBasePath: 'sls://wt-proj/mm-store',
+      });
+    });
+
+    it('extracts project from a webtracking project-qualified host when project is empty', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [{
+          name: 'wt',
+          endpoint: 'https://wt-proj.cn-hangzhou.log.aliyuncs.com',
+          logstore: 'wt-store',
+          mode: 'webtracking',
+        }],
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toMatchObject({
+        type: 'sls',
+        target: { endpoint: slsApiKey.endpoint, project: 'wt-proj', logstore: 'mm-store' },
+        auth: mmAuth,
+      });
+    });
+
+    it('fills project from a unique apiKey flusher without copying its apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: { endpoint: slsApiKey.endpoint, project: 'user-proj', logstore: 'mm-store' },
+          auth: mmAuth,
+        },
+        storageBasePath: 'sls://user-proj/mm-store',
+      });
+    });
+
+    it.each([
+      ['webtracking and logstore-only shorthand', {
+        sls: [slsWebTracking],
+        multimodal: { storage: { type: 'sls', target: { logstore: 'mm-store' } } },
+      }],
+      ['webtracking endpoint does not match', {
+        sls: [slsWebTracking],
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: 'https://cn-shanghai.log.aliyuncs.com', logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      }],
+      ['two projects in the same region', {
+        sls: [
+          slsWebTracking,
+          { ...slsWebTracking, name: 'wt-2', project: 'other-proj', logstore: 'other-store' },
+        ],
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      }],
+      ['explicit empty project', {
+        sls: [slsWebTracking],
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, project: '  ', logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      }],
+    ])('does not fill project when %s', async (_label, file) => {
       mockReadJsonFile.mockResolvedValueOnce(file);
       const config = await loadConfig();
       expect(config.multimodal).toBeUndefined();
