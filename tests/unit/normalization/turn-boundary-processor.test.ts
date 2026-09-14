@@ -227,6 +227,34 @@ describe('TurnBoundaryProcessor', () => {
     expect(terminal[0]['gen_ai.turn.end']).toBe(true);
   });
 
+  it('does not derive the trae-agent end from a mid-run stop finish_reason', () => {
+    // trae-agent trajectories are polled incrementally; an intermediate step can
+    // carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run) while trae-agent keeps going to a later task_done step. Only the
+    // converter-stamped gen_ai.turn.end on the finalized last step is the
+    // boundary; deriving it from finish_reason would close the turn early and
+    // split one ReAct run into duplicate traces.
+    const processor = new TurnBoundaryProcessor();
+    const midRunStop = [entry('s2-response', 'llm.response', {
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.response.finish_reasons': ['stop'],
+    })];
+    const finalizedTail = [entry('s5-response', 'llm.response', {
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.turn.end': true,
+    })];
+
+    processor.enrich(midRunStop);
+    processor.enrich(finalizedTail);
+
+    // the intermediate natural stop must NOT be marked as the turn end
+    expect(midRunStop[0]['gen_ai.turn.start']).toBe(true);
+    expect(midRunStop[0]['gen_ai.turn.end']).toBeUndefined();
+    // the converter-stamped tail keeps its authoritative boundary
+    expect(finalizedTail[0]['gen_ai.turn.end']).toBe(true);
+  });
+
   it('does not let a fused subagent create parent turn boundaries', () => {
     const processor = new TurnBoundaryProcessor();
     const child = [entry('child-response', 'llm.response', {
@@ -304,6 +332,20 @@ describe('isTerminalTurnEntry', () => {
     expect(isTerminalTurnEntry(entry('openclaw', 'other', {
       'gen_ai.agent.type': 'openclaw',
       'agent.openclaw.hook': 'llm_output',
+    }))).toBe(true);
+  });
+
+  it('treats trae-agent terminality as the explicit turn.end only, never a mid-run stop', () => {
+    // An intermediate step with a natural 'stop' is NOT terminal for trae-agent.
+    expect(isTerminalTurnEntry(entry('trae-agent-midstop', 'llm.response', {
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }))).toBe(false);
+    // The converter-stamped turn.end on the finalized last step IS terminal.
+    expect(isTerminalTurnEntry(entry('trae-agent-tail', 'llm.response', {
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.turn.end': true,
     }))).toBe(true);
   });
 });

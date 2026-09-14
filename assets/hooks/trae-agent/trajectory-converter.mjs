@@ -77,12 +77,26 @@ export function convertTrajectory(json, opts = {}) {
 
   const stepCount = parsed.steps.length;
   const lastStepIndex = stepCount - 1;
+  // A trajectory is only "complete" once trae-agent finalizes it (writes
+  // end_time via finalize_recording). While the run is still in progress the
+  // recorder rewrites the whole file after EVERY llm interaction / agent step
+  // (record_llm_interaction / record_agent_step both call save_trajectory), so
+  // the poller routinely observes partial trajectories whose current tail step
+  // is NOT the real last step.
+  const runComplete = Boolean(parsed.endTime);
   let firstEmittedLlmRequest = true;
   for (let i = 0; i < stepCount; i++) {
     const step = parsed.steps[i];
     if (!step.stepNumber || seen.has(step.stepNumber)) continue;
     const interaction = parsed.interactions[i] ?? null;
-    const isLastStep = i === lastStepIndex;
+    // Only treat the tail step as "last" (stamp 'stop', strip task_done, end
+    // spans at trajectory.end_time) once the run is finalized. During
+    // incremental polling the tail is provisional: marking it terminal makes
+    // the OTLP flusher's Signal A close the turn immediately and drop the
+    // later steps that share the same turn.id (they then arrive as "late
+    // entries" for an already-flushed turn and are discarded), so ARMS would
+    // only ever receive the first step of a multi-step ReAct run.
+    const isLastStep = runComplete && i === lastStepIndex;
     // The "end" timestamp for LLM/TOOL spans of this step is the next
     // interaction's timestamp (start of the next LLM call). This is strictly
     // <= the next STEP's start time (because trae-agent stamps step[i+1]
@@ -160,6 +174,15 @@ export function convertTrajectory(json, opts = {}) {
         'gen_ai.response.model': interaction.response.model || interaction.model || parsed.model,
         'gen_ai.response.id': `${sessionId}:r${step.stepNumber}`,
         'gen_ai.response.finish_reasons': finishReasons,
+        // Explicit turn-end marker, stamped ONLY on the finalized last step.
+        // The OTLP flusher (isTerminalEvent) and turn-boundary enrichment
+        // (isTerminalTurnEntry) both key off this marker for trae-agent instead
+        // of finish_reason: an intermediate step can carry a natural 'stop'
+        // (the model returned plain text mid-run) while trae-agent keeps going
+        // to a later task_done step. Deriving the boundary from finish_reason
+        // would flush the turn early at that intermediate step and then again at
+        // the real last step, splitting one ReAct run into duplicate traces.
+        ...(isLastStep ? { 'gen_ai.turn.end': true } : {}),
         ...(outputMessages.length > 0 ? { 'gen_ai.output.messages': outputMessages } : {}),
         ...(usage
           ? {
@@ -304,12 +327,18 @@ function buildOutputMessages(interaction, isLastStep = false) {
 }
 
 /**
- * Build finish_reasons array. On the last step, append 'stop' to the actual
- * finish reason so the OTLP flusher's terminal-event check (Signal A) fires
- * and the turn closes at the boundary. trae-agent trajectories always end
- * with `finish_reason='tool_use'` (the final LLM call still produced a tool
- * call before `success=true` was reached), so without this marker the turn
- * only flushes at shutdown.
+ * Build finish_reasons array. On the last step OF A FINALIZED RUN, append
+ * 'stop' to the actual finish reason so the OTLP flusher's terminal-event
+ * check (Signal A) fires and the turn closes at the boundary. trae-agent
+ * trajectories always end with `finish_reason='tool_use'` (the final LLM call
+ * still produced a tool call before `success=true` was reached), so without
+ * this marker the turn only flushes at shutdown.
+ *
+ * `isLastStep` must already be gated on run-completion by the caller (see
+ * convertTrajectory: `isLastStep = runComplete && i === lastStepIndex`). During
+ * incremental polling the provisional tail must NOT be stamped 'stop', or
+ * Signal A would close the turn early and the remaining steps of the same
+ * turn.id would be dropped as late entries.
  */
 function buildFinishReasons(actualFinishReason, isLastStep) {
   const reasons = [];

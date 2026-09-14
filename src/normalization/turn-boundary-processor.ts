@@ -100,6 +100,16 @@ export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
   if (agentType === 'openclaw') {
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
+  if (agentType === 'trae-agent') {
+    // trae-agent trajectories are polled incrementally while the run is still
+    // in progress, and an intermediate step can carry a natural
+    // finish_reason='stop' (the model returned plain text mid-run) before a
+    // later task_done step. The converter stamps gen_ai.turn.end only on the
+    // finalized last step (handled by the explicit check above), so never
+    // derive the boundary from finish_reason here — doing so would mark an
+    // intermediate step as the turn end during partial polling.
+    return false;
+  }
 
   const reasons = entry['gen_ai.response.finish_reasons'];
   return Array.isArray(reasons)

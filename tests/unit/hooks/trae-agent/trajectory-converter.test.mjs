@@ -218,6 +218,124 @@ describe('convertTrajectory - terminal marker on last step (P1-6)', () => {
       expect(resp['gen_ai.response.finish_reasons']).not.toContain('stop');
     }
   });
+
+  test('last LLM response carries explicit gen_ai.turn.end=true (authoritative boundary)', () => {
+    // The OTLP flusher and turn-boundary enrichment key off gen_ai.turn.end for
+    // trae-agent (NOT finish_reason), so the finalized last step must stamp it.
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
+    expect(lastResp['gen_ai.turn.end']).toBe(true);
+  });
+
+  test('non-last LLM responses do NOT carry gen_ai.turn.end (only the finalized tail closes the turn)', () => {
+    // An intermediate step may carry a natural finish_reason='stop'; it must NOT
+    // be marked as the turn end, or the flusher would split the run in two.
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    for (let sn = 1; sn <= 14; sn++) {
+      const resp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      expect(resp['gen_ai.turn.end']).toBeUndefined();
+    }
+    // exactly one turn.end across the whole finalized run
+    const turnEnds = entries.filter(e => e['gen_ai.turn.end'] === true);
+    expect(turnEnds.length).toBe(1);
+  });
+});
+
+describe('convertTrajectory - incremental polling terminal gating (run-in-progress)', () => {
+  // trae-agent's TrajectoryRecorder rewrites trajectory.json after EVERY
+  // record_llm_interaction / record_agent_step and only writes end_time in
+  // finalize_recording. The poller therefore observes partial trajectories
+  // whose current tail step is NOT the real last step. Stamping 'stop' on that
+  // provisional tail makes the OTLP flusher's Signal A close the turn early and
+  // drop the remaining steps (same turn.id) as late entries — so ARMS would
+  // only ever receive the first step of a multi-step ReAct run.
+  function partialTrajectory(stepCount) {
+    const partial = JSON.parse(JSON.stringify(RAW));
+    partial.agent_steps = partial.agent_steps.slice(0, stepCount);
+    partial.llm_interactions = partial.llm_interactions.slice(0, stepCount);
+    partial.end_time = '';
+    partial.success = false;
+    partial.execution_time = 0;
+    return partial;
+  }
+  function stopResponses(entries) {
+    return entries.filter(
+      e => e['event.name'] === 'llm.response'
+        && Array.isArray(e['gen_ai.response.finish_reasons'])
+        && e['gen_ai.response.finish_reasons'].includes('stop'),
+    );
+  }
+  function turnEndResponses(entries) {
+    return entries.filter(e => e['gen_ai.turn.end'] === true);
+  }
+
+  test('partial trajectory (end_time empty) emits steps but stamps NO stop', () => {
+    const { entries, emittedStepNumbers } = convertTrajectory(partialTrajectory(3), { seenStepNumbers: new Set() });
+    expect(emittedStepNumbers).toEqual([1, 2, 3]);
+    expect(stopResponses(entries).length).toBe(0);
+    // no explicit turn boundary either — the run is still in progress
+    expect(turnEndResponses(entries).length).toBe(0);
+  });
+
+  test('single-step partial trajectory does NOT stamp stop on the provisional tail', () => {
+    const { entries, emittedStepNumbers } = convertTrajectory(partialTrajectory(1), { seenStepNumbers: new Set() });
+    expect(emittedStepNumbers).toEqual([1]);
+    expect(stopResponses(entries).length).toBe(0);
+  });
+
+  test('incremental sequence: stop appears only once the run is finalized', () => {
+    // Poll 1 — run in progress, only step 1 recorded so far.
+    const r1 = convertTrajectory(partialTrajectory(1), { seenStepNumbers: new Set() });
+    expect(r1.emittedStepNumbers).toEqual([1]);
+    expect(stopResponses(r1.entries).length).toBe(0); // no premature terminal
+
+    // Poll 2 — run finalized (all 15 steps + end_time); step 1 already seen.
+    const seen = new Set(r1.emittedStepNumbers);
+    const r2 = convertTrajectory(RAW, { seenStepNumbers: seen });
+    expect(r2.emittedStepNumbers).toEqual([2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
+    const stops = stopResponses(r2.entries);
+    expect(stops.length).toBe(1); // exactly the final step closes the turn
+    expect(stops[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
+    // the explicit turn.end marker also appears exactly once, on the same tail
+    const turnEnds = turnEndResponses(r2.entries);
+    expect(turnEnds.length).toBe(1);
+    expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
+  });
+
+  test('finalized trajectory whose tail was seen in a prior partial poll still stamps stop on the new tail', () => {
+    // Poll 1 saw steps 1-3 of an in-progress run (no stop). Poll 2 sees the
+    // finalized 5-step run; steps 4 and 5 are new, step 5 must carry stop.
+    const partial = partialTrajectory(3);
+    const r1 = convertTrajectory(partial, { seenStepNumbers: new Set() });
+    expect(stopResponses(r1.entries).length).toBe(0);
+
+    const finalized = JSON.parse(JSON.stringify(RAW));
+    finalized.agent_steps = finalized.agent_steps.slice(0, 5);
+    finalized.llm_interactions = finalized.llm_interactions.slice(0, 5);
+    // end_time / success retained from RAW => runComplete === true
+    const r2 = convertTrajectory(finalized, { seenStepNumbers: new Set(r1.emittedStepNumbers) });
+    expect(r2.emittedStepNumbers).toEqual([4, 5]);
+    const stops = stopResponses(r2.entries);
+    expect(stops.length).toBe(1);
+    expect(stops[0]['gen_ai.step.id'].endsWith(':s5')).toBe(true);
+    // turn.end rides on the same finalized tail (s5), never on the new-but-not-last s4
+    const turnEnds = turnEndResponses(r2.entries);
+    expect(turnEnds.length).toBe(1);
+    expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s5')).toBe(true);
+  });
+
+  test('intermediate step with a natural stop finish_reason is NOT marked turn.end while partial', () => {
+    // Regression for the double-flush bug: force step 2 of an in-progress run to
+    // carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run). Because end_time is empty the run is not final, so NO step may be
+    // stamped turn.end — otherwise the flusher closes the turn at step 2 and
+    // splits the ReAct run into duplicate traces.
+    const partial = partialTrajectory(3);
+    partial.llm_interactions[1].response.finish_reason = 'stop';
+    const { entries, emittedStepNumbers } = convertTrajectory(partial, { seenStepNumbers: new Set() });
+    expect(emittedStepNumbers).toEqual([1, 2, 3]);
+    expect(turnEndResponses(entries).length).toBe(0);
+  });
 });
 
 describe('convertTrajectory - strip task_done from last step output (P1-9)', () => {
