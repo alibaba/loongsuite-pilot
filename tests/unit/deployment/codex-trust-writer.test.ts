@@ -626,26 +626,33 @@ describe('Codex TOML reserialization compatibility', () => {
   });
 
 
-  test('declines retired-key cleanup so duplicate current trust can still be repaired', () => {
+  test('reconciles duplicate retired and current trust in one write', () => {
     const retiredKey = `${hooksPath}:pre_tool_use:0:0`;
     const retired = `[hooks.state."${retiredKey}"]\ntrusted_hash = "sha256:RETIRED"\n`;
+    const retiredQuoted = `["hooks"."state"."${retiredKey}"]\ntrusted_hash = "sha256:RETIRED"\n`;
     const current = `[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n`;
     const quoted = `["hooks"."state"."${key}"]\nenabled = false\ntrusted_hash = "${hash}"\n`;
-    const original = retired + current + quoted + other;
+    const original = retired + retiredQuoted + current + quoted + other;
     fs.writeFileSync(configPath, original);
 
-    // Deployment cleans up retired keys before calling writeTrustedHashes.
-    // Removing just the retired table leaves invalid current duplicates.
-    expect(removeTrustStateKeys(configPath, [retiredKey])).toBe(false);
-    expect(read()).toBe(original);
-    expect(writeTrustedHashes(opts())).toBe(true);
+    expect(writeTrustedHashes({ ...opts(), retiredKeys: [retiredKey] })).toBe(true);
     expect((parseToml(read()) as any).hooks.state[key]).toEqual({ enabled: false, trusted_hash: hash });
+    expect((parseToml(read()) as any).hooks.state[retiredKey]).toBeUndefined();
     expect(read()).toContain(other);
+    expect(verifyTrustHashes({ ...opts(), retiredKeys: [retiredKey] }).valid).toBe(true);
+    expect(writeTrustedHashes({ ...opts(), retiredKeys: [retiredKey] })).toBe(false);
+  });
 
-    // Once the duplicate configuration is repaired, cleanup can succeed.
-    expect(removeTrustStateKeys(configPath, [retiredKey])).toBe(true);
-    expect(read()).not.toContain(retiredKey);
+  test('does not return early when current trust is valid but retired trust remains', () => {
+    const retiredKey = `${hooksPath}:pre_tool_use:0:0`;
+    const original = `[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n\n`
+      + `[hooks.state."${retiredKey}"]\ntrusted_hash = "sha256:RETIRED"\n`;
+    fs.writeFileSync(configPath, original);
+
     expect(verifyTrustHashes(opts()).valid).toBe(true);
+    expect(writeTrustedHashes({ ...opts(), retiredKeys: [retiredKey] })).toBe(true);
+    expect((parseToml(read()) as any).hooks.state[retiredKey]).toBeUndefined();
+    expect(verifyTrustHashes({ ...opts(), retiredKeys: [retiredKey] }).valid).toBe(true);
   });
 
   test('does not hide filesystem errors during retired-key cleanup', () => {

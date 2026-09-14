@@ -25,7 +25,6 @@ import {
   installedHookStateKey,
   writeTrustedHashes,
   removeTrustBlock,
-  removeTrustStateKeys,
   verifyTrustHashes,
 } from './codex-trust-writer.js';
 
@@ -222,18 +221,16 @@ export class HookStrategy implements DeployStrategy {
           });
         }
       }
-      for (const retiredHookDef of retiredHookDefs) {
-        const removed = await this.hookManager.uninstallHook(retiredHookDef);
-        if (!removed) {
-          return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+      // Non-Codex agents have no trust transaction to protect. Preserve their
+      // existing cleanup-before-install order; Codex cleanup is deferred until
+      // the unified current+retired trust reconciliation succeeds below.
+      if (!hookConfig.trustToml) {
+        for (const retiredHookDef of retiredHookDefs) {
+          const removed = await this.hookManager.uninstallHook(retiredHookDef);
+          if (!removed) {
+            return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+          }
         }
-      }
-      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
-        const trust = hookConfig.trustToml;
-        removeTrustStateKeys(
-          resolveHome(trust.configPath),
-          retiredTrustKeys,
-        );
       }
 
       if (hookConfig.env) {
@@ -264,7 +261,16 @@ export class HookStrategy implements DeployStrategy {
       // Hook trust bypass 仅是 Codex 进程级 CLI 参数，不是合法的 config.toml 字段；
       // Pilot 不拥有 Codex 启动入口，因此这里不能提供 bypass 通道。
       if (hookConfig.trustToml) {
-        await this.writeCodexTrust(def);
+        await this.writeCodexTrust(def, retiredTrustKeys);
+        // Keep retired hooks installed until config.toml has been reconciled and
+        // re-read successfully. A failed trust repair then preserves the only
+        // runtime evidence from which their position-based keys can be proven.
+        for (const retiredHookDef of retiredHookDefs) {
+          const removed = await this.hookManager.uninstallHook(retiredHookDef);
+          if (!removed) {
+            return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+          }
+        }
       }
 
       logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
@@ -301,7 +307,10 @@ export class HookStrategy implements DeployStrategy {
    * 解决:HookManager 已支持每事件独立 hookCommand(我们在 buildHookDefinitions 里拼了 subcommand),
    * 见下方 buildHookDefinitions 改动。
    */
-  private async writeCodexTrust(def: AgentDefinition): Promise<void> {
+  private async writeCodexTrust(
+    def: AgentDefinition,
+    retiredKeys: readonly string[] = [],
+  ): Promise<void> {
     const cfg = def.hook!.trustToml!;
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
@@ -311,6 +320,7 @@ export class HookStrategy implements DeployStrategy {
       configPath,
       hooksJsonAbsPath,
       locations,
+      retiredKeys,
       marker: cfg.marker,
     });
 
@@ -318,6 +328,7 @@ export class HookStrategy implements DeployStrategy {
       configPath,
       hooksJsonAbsPath,
       locations,
+      retiredKeys,
       marker: cfg.marker,
     });
     if (!verify.valid) {
