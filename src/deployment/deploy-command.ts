@@ -24,32 +24,25 @@ export function isAgentGatedEnabled(config: AnalyticsConfig, agentId: string): b
 }
 
 /**
- * Resolve the package installation directory by reading the `current` pointer file.
- * Falls back to the module's own package root, then to dataDir.
+ * Resolve the package installation directory that owns the *currently running*
+ * code's assets (agents.d, assets/hooks/...).
  *
- * `moduleUrl` must be supplied by the caller so the module-root fallback is
+ * The running module's own package root is tried first and wins whenever it is a
+ * valid pilot package (has both package.json and agents.d). This is authoritative
+ * for the executing code, so a source/dev run (`node <repo>/dist/index.js`)
+ * resolves to the repo root even when an installed `current` pointer exists in
+ * dataDir — otherwise the run would borrow the installed version's assets and
+ * miss per-agent files that only exist in the source tree (e.g. a feature
+ * branch's assets/hooks/trae-agent/trajectory-converter.mjs).
+ *
+ * Only when the module root is not a valid pilot package (e.g. a bundled runtime
+ * whose dist has no sibling package.json/agents.d) do we fall back to the
+ * `current` pointer, then the legacy dataDir/package layout, then dataDir.
+ *
+ * `moduleUrl` must be supplied by the caller so the module-root resolution is
  * anchored at the caller's file, not at this shared helper.
  */
 export function resolvePilotDir(dataDir: string, moduleUrl: string): string {
-  try {
-    const currentFile = path.join(dataDir, 'current');
-    const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
-    if (versionName) {
-      const versionDir = path.join(dataDir, 'versions', versionName);
-      if (fsSync.existsSync(versionDir)) {
-        logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
-        return versionDir;
-      }
-    }
-  } catch {
-    // current file doesn't exist — legacy or dev layout
-  }
-
-  const legacyPackageDir = path.join(dataDir, 'package');
-  if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
-    return legacyPackageDir;
-  }
-
   try {
     const moduleDir = path.dirname(fileURLToPath(moduleUrl));
     const candidates = [
@@ -71,6 +64,25 @@ export function resolvePilotDir(dataDir: string, moduleUrl: string): string {
     }
   } catch {
     // Module URL is invalid or the runtime package does not include required assets.
+  }
+
+  try {
+    const currentFile = path.join(dataDir, 'current');
+    const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
+    if (versionName) {
+      const versionDir = path.join(dataDir, 'versions', versionName);
+      if (fsSync.existsSync(versionDir)) {
+        logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
+        return versionDir;
+      }
+    }
+  } catch {
+    // current file doesn't exist — legacy or dev layout
+  }
+
+  const legacyPackageDir = path.join(dataDir, 'package');
+  if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
+    return legacyPackageDir;
   }
 
   return dataDir;
