@@ -18,6 +18,7 @@ import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
+import type { CodexTranscriptCheckpoint, CodexTranscriptMeta } from '../../../../src/inputs/codex-transcript/codex-transcript-types.js';
 
 const tempDirs: string[] = [];
 const SUBAGENT_FIXTURE_DIR = path.resolve(process.cwd(), 'tests/fixtures/codex-subagent');
@@ -427,6 +428,142 @@ describe('CodexTranscriptInput', () => {
 
     expect(deltas[0].rawReadCalls).toBe(0);
     expect(deltas[0].rawReadBytes).toBe(0);
+  });
+
+  it('uses the actual file size as the metadata cache watermark during recovery', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-watermark-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const turnText = completedTurn();
+    const originalText = turnText + record('2026-06-24T06:01:00.000Z', 'event_msg', {
+      type: 'diagnostic',
+      padding: 'x'.repeat(32 * 1024),
+    }) + '\n';
+    const transcript = await writeTranscript(sessionDir, originalText);
+    const originalStat = await fs.stat(transcript);
+    const firstLineEndOffset = Buffer.byteLength(turnText.split('\n')[0]!) + 1;
+    const checkpoint: CodexTranscriptCheckpoint = {
+      inode: originalStat.ino,
+      scanOffset: Buffer.byteLength(turnText),
+      activeTurn: {
+        turnId: 'turn-1',
+        startOffset: firstLineEndOffset,
+        startedAtMs: Date.parse('2026-06-24T06:00:01.000Z'),
+      },
+      pendingTerminal: null,
+      pendingFusion: null,
+      pendingSubagent: null,
+      ownerSessionMetaOffset: 0,
+    };
+    const internals = input as unknown as {
+      recoverTurnSegment(
+        filePath: string,
+        checkpoint: CodexTranscriptCheckpoint,
+        endOffset: number,
+        terminal: boolean,
+      ): Promise<unknown>;
+      loadTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        runtime: InputRuntimeAccumulator,
+      ): Promise<CodexTranscriptMeta | null>;
+      transcriptMetaCacheByPath: Map<string, { fileSize: number }>;
+    };
+
+    await internals.recoverTurnSegment(transcript, checkpoint, Buffer.byteLength(turnText), true);
+    expect(internals.transcriptMetaCacheByPath.get(transcript)?.fileSize).toBe(originalStat.size);
+
+    const rewrittenLines = turnText.trimEnd().split('\n');
+    rewrittenLines[0] = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'replacement-session',
+      model_provider: 'openai',
+    });
+    const rewrittenText = rewrittenLines.join('\n') + '\n' + record(
+      '2026-06-24T06:00:12.000Z',
+      'event_msg',
+      { type: 'diagnostic', padding: 'y'.repeat(8 * 1024) },
+    ) + '\n';
+    await fs.writeFile(transcript, rewrittenText, 'utf8');
+    const rewrittenStat = await fs.stat(transcript);
+    expect(rewrittenStat.ino).toBe(originalStat.ino);
+    expect(rewrittenStat.size).toBeLessThan(originalStat.size);
+    expect(rewrittenStat.size).toBeGreaterThanOrEqual(Buffer.byteLength(turnText));
+
+    const runtime = new InputRuntimeAccumulator();
+    const replacement = await internals.loadTranscriptOwnerMeta(
+      transcript,
+      rewrittenStat.ino,
+      rewrittenStat.size,
+      0,
+      runtime,
+    );
+    expect(replacement?.threadId).toBe('replacement-session');
+    expect(runtime.finish(0).rawReadCalls).toBeGreaterThan(0);
+  });
+
+  it('reclaims metadata only after a transcript has remained absent for the TTL', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-absence-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      'rollout-meta-cache-absence.jsonl',
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: 'absence-session',
+        model_provider: 'openai',
+      }) + '\n',
+      { bootstrapFork: false },
+    );
+    const internals = input as unknown as {
+      indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+      pruneAbsentTranscriptMetaCache(discoveredPaths: Set<string>, now: number): void;
+      transcriptMetaCacheByPath: Map<string, { lastSeenAtMs: number }>;
+    };
+
+    await internals.indexDiscoveredTranscriptOwners([{ filePath: transcript, baselineOnStart: true }]);
+    const lastSeenAtMs = internals.transcriptMetaCacheByPath.get(transcript)!.lastSeenAtMs;
+    await fs.unlink(transcript);
+    await internals.indexDiscoveredTranscriptOwners([]);
+    expect(internals.transcriptMetaCacheByPath.has(transcript)).toBe(true);
+
+    internals.pruneAbsentTranscriptMetaCache(new Set(), lastSeenAtMs + 48 * 60 * 60 * 1_000 + 1);
+    expect(internals.transcriptMetaCacheByPath.has(transcript)).toBe(false);
+  });
+
+  it('bounds cached transcript metadata by estimated bytes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-bytes-'));
+    tempDirs.push(root);
+    const { input } = await createDormantInput(root);
+    const internals = input as unknown as {
+      transcriptMetaCacheMaxBytes: number;
+      transcriptMetaCacheBytes: number;
+      transcriptMetaCacheByPath: Map<string, unknown>;
+      rememberTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        meta: CodexTranscriptMeta,
+      ): void;
+    };
+    internals.transcriptMetaCacheMaxBytes = 2 * 1024;
+    const meta = (threadId: string): CodexTranscriptMeta => ({
+      threadId,
+      rootSessionId: threadId,
+      threadSource: 'user',
+      depth: 0,
+      provider: 'openai',
+      baseInstructions: 'x'.repeat(1_500),
+    });
+
+    internals.rememberTranscriptOwnerMeta('/tmp/first.jsonl', 1, 2_000, 0, meta('first'));
+    internals.rememberTranscriptOwnerMeta('/tmp/second.jsonl', 2, 2_000, 0, meta('second'));
+
+    expect(internals.transcriptMetaCacheByPath.has('/tmp/first.jsonl')).toBe(false);
+    expect(internals.transcriptMetaCacheByPath.has('/tmp/second.jsonl')).toBe(true);
+    expect(internals.transcriptMetaCacheBytes).toBeLessThanOrEqual(internals.transcriptMetaCacheMaxBytes);
   });
 
   it('moves the metadata cache when incremental scanning finds the owning session_meta', async () => {

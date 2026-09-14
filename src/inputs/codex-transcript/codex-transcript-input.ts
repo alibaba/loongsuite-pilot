@@ -67,6 +67,8 @@ const MAX_DYNAMIC_SESSION_DIRS = 64;
 const MAX_DYNAMIC_SESSION_FILES = 64;
 const MAX_DYNAMIC_DIRECTORIES_PER_ROOT = 8;
 const MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT = 256;
+const MAX_CACHED_TRANSCRIPT_META_BYTES = 64 * 1024 * 1024;
+const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS = 48 * 60 * 60 * 1_000;
 const WAKEUP_MARKER_DISCOVERY_TTL_MS = 48 * 60 * 60 * 1_000;
 const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
@@ -131,6 +133,8 @@ interface CachedCodexTranscriptMeta {
   fileSize: number;
   ownerSessionMetaOffset: number;
   meta: CodexTranscriptMeta;
+  estimatedBytes: number;
+  lastSeenAtMs: number;
 }
 
 interface DynamicDirectoryWalkBudget {
@@ -183,6 +187,8 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
   private readonly transcriptPathByThreadId = new Map<string, string>();
   private readonly transcriptMetaCacheByPath = new Map<string, CachedCodexTranscriptMeta>();
+  private readonly transcriptMetaCacheMaxBytes = MAX_CACHED_TRANSCRIPT_META_BYTES;
+  private transcriptMetaCacheBytes = 0;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -250,6 +256,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
     this.transcriptMetaCacheByPath.clear();
+    this.transcriptMetaCacheBytes = 0;
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
@@ -780,18 +787,33 @@ export class CodexTranscriptInput extends BaseInput {
       endOffset,
       runtime,
     );
-    let meta = this.cachedTranscriptOwnerMetaForCheckpoint(filePath, checkpoint);
+    let currentStat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      currentStat = await fs.stat(filePath);
+    } catch {
+      // The already-read recovery range can still be processed, but without a
+      // trustworthy file-size watermark its metadata must not enter the cache.
+    }
+    let meta = currentStat?.ino === checkpoint.inode
+      ? this.cachedTranscriptOwnerMetaForCheckpoint(filePath, checkpoint, currentStat.size)
+      : null;
     if (!meta && checkpoint.ownerSessionMetaOffset !== null) {
       const metaRecord = await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
       meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
       if (meta) {
-        this.rememberTranscriptOwnerMeta(
-          filePath,
-          checkpoint.inode,
-          Math.max(endOffset, checkpoint.ownerSessionMetaOffset + 1),
-          checkpoint.ownerSessionMetaOffset,
-          meta,
-        );
+        if (
+          currentStat?.ino === checkpoint.inode
+          && checkpoint.ownerSessionMetaOffset >= 0
+          && checkpoint.ownerSessionMetaOffset < currentStat.size
+        ) {
+          this.rememberTranscriptOwnerMeta(
+            filePath,
+            checkpoint.inode,
+            currentStat.size,
+            checkpoint.ownerSessionMetaOffset,
+            meta,
+          );
+        }
         this.publishTranscriptOwnerMeta(filePath, meta);
       }
     }
@@ -996,6 +1018,7 @@ export class CodexTranscriptInput extends BaseInput {
   private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
+    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
     for (const { filePath } of files) {
       let stat;
       try {
@@ -1036,20 +1059,14 @@ export class CodexTranscriptInput extends BaseInput {
     runtime?: InputRuntimeAccumulator | null,
   ): Promise<CodexTranscriptMeta | null> {
     const cached = this.transcriptMetaCacheByPath.get(filePath);
-    if (
-      cached
-      && cached.inode === inode
-      && cached.ownerSessionMetaOffset === ownerSessionMetaOffset
-      && fileSize >= cached.fileSize
-      && ownerSessionMetaOffset >= 0
-      && ownerSessionMetaOffset < fileSize
-    ) {
+    if (cached && reusableCachedTranscriptMeta(cached, inode, fileSize, ownerSessionMetaOffset)) {
       cached.fileSize = fileSize;
+      cached.lastSeenAtMs = Date.now();
       this.transcriptMetaCacheByPath.delete(filePath);
       this.transcriptMetaCacheByPath.set(filePath, cached);
       return cached.meta;
     }
-    if (cached) this.transcriptMetaCacheByPath.delete(filePath);
+    if (cached) this.removeTranscriptMetaCacheEntry(filePath);
     if (ownerSessionMetaOffset < 0 || ownerSessionMetaOffset >= fileSize) return null;
 
     const record = await readJsonLineAt(filePath, ownerSessionMetaOffset, runtime);
@@ -1066,32 +1083,74 @@ export class CodexTranscriptInput extends BaseInput {
     ownerSessionMetaOffset: number,
     meta: CodexTranscriptMeta,
   ): void {
-    this.transcriptMetaCacheByPath.delete(filePath);
-    this.transcriptMetaCacheByPath.set(filePath, {
+    this.removeTranscriptMetaCacheEntry(filePath);
+    const estimatedBytes = estimateCachedTranscriptMetaBytes(filePath, meta);
+    if (estimatedBytes > this.transcriptMetaCacheMaxBytes) return;
+    const cached: CachedCodexTranscriptMeta = {
       inode,
       fileSize,
       ownerSessionMetaOffset,
       meta,
-    });
-    trimOldestMap(this.transcriptMetaCacheByPath, MAX_LINK_DESCRIPTORS);
+      estimatedBytes,
+      lastSeenAtMs: Date.now(),
+    };
+    this.transcriptMetaCacheByPath.set(filePath, cached);
+    this.transcriptMetaCacheBytes += estimatedBytes;
+    this.trimTranscriptMetaCache();
   }
 
   private cachedTranscriptOwnerMetaForCheckpoint(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
+    fileSize: number,
   ): CodexTranscriptMeta | null {
     if (checkpoint.ownerSessionMetaOffset === null) return null;
     const cached = this.transcriptMetaCacheByPath.get(filePath);
     if (
       !cached
-      || cached.inode !== checkpoint.inode
-      || cached.ownerSessionMetaOffset !== checkpoint.ownerSessionMetaOffset
+      || !reusableCachedTranscriptMeta(
+        cached,
+        checkpoint.inode,
+        fileSize,
+        checkpoint.ownerSessionMetaOffset,
+      )
     ) {
       return null;
     }
+    cached.fileSize = fileSize;
+    cached.lastSeenAtMs = Date.now();
     this.transcriptMetaCacheByPath.delete(filePath);
     this.transcriptMetaCacheByPath.set(filePath, cached);
     return cached.meta;
+  }
+
+  private pruneAbsentTranscriptMetaCache(discoveredPaths: Set<string>, now: number): void {
+    for (const [filePath, cached] of this.transcriptMetaCacheByPath) {
+      if (
+        !discoveredPaths.has(filePath)
+        && now - cached.lastSeenAtMs >= CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS
+      ) {
+        this.removeTranscriptMetaCacheEntry(filePath);
+      }
+    }
+  }
+
+  private removeTranscriptMetaCacheEntry(filePath: string): void {
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (!cached) return;
+    this.transcriptMetaCacheByPath.delete(filePath);
+    this.transcriptMetaCacheBytes = Math.max(0, this.transcriptMetaCacheBytes - cached.estimatedBytes);
+  }
+
+  private trimTranscriptMetaCache(): void {
+    while (
+      this.transcriptMetaCacheByPath.size > MAX_LINK_DESCRIPTORS
+      || this.transcriptMetaCacheBytes > this.transcriptMetaCacheMaxBytes
+    ) {
+      const oldest = this.transcriptMetaCacheByPath.keys().next().value as string | undefined;
+      if (oldest === undefined) return;
+      this.removeTranscriptMetaCacheEntry(oldest);
+    }
   }
 
   private publishTranscriptOwnerMeta(filePath: string, meta: CodexTranscriptMeta): void {
@@ -2858,6 +2917,24 @@ function isCopiedParentTurnByTime(
 ): boolean {
   const uuidTimestamp = uuidV7TimestampMs(turnId);
   return (uuidTimestamp ?? observedStartedAtMs) < ownerCreatedAtMs;
+}
+
+function reusableCachedTranscriptMeta(
+  cached: CachedCodexTranscriptMeta,
+  inode: number,
+  fileSize: number,
+  ownerSessionMetaOffset: number,
+): boolean {
+  return cached.inode === inode
+    && cached.ownerSessionMetaOffset === ownerSessionMetaOffset
+    && fileSize >= cached.fileSize
+    && ownerSessionMetaOffset >= 0
+    && ownerSessionMetaOffset < fileSize;
+}
+
+function estimateCachedTranscriptMetaBytes(filePath: string, meta: CodexTranscriptMeta): number {
+  return Buffer.byteLength(filePath, 'utf8')
+    + Buffer.byteLength(JSON.stringify(meta), 'utf8');
 }
 
 function trimOldestMap<T>(values: Map<string, T>, maxSize: number): void {
