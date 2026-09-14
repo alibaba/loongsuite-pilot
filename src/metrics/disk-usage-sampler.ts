@@ -77,7 +77,7 @@ export class DiskUsageSampler {
       batchPauseMs: 20,
       maxDepth: 32,
       maxEntries: 200_000,
-      budgetMs: 60_000,
+      budgetMs: 10_000,
       onSample: () => {},
       ...options,
     };
@@ -262,6 +262,11 @@ export class DiskUsageSampler {
           const child = await io(() => fs.lstat(childPath));
           if (child.isSymbolicLink()) continue;
           if (child.isDirectory()) {
+            // Installed versions and bundled runtimes are immutable payloads,
+            // not user data growth. Prune only these root-level directories;
+            // nested directories with the same basenames remain observable.
+            if (frame.path === root
+              && (entry.name === 'versions' || entry.name === 'runtime')) continue;
             if (frames.length >= this.options.maxDepth) throw new ScanInterrupted('partial');
             await openDirectory(childPath, child, frame.inLogs
               || path.relative(path.join(root, 'logs'), childPath) === '');
