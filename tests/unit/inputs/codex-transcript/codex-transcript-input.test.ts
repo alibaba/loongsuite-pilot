@@ -10,7 +10,10 @@ import {
   CodexTranscriptInput,
   codexDefaultAllowedRootPaths,
 } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
-import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
+import {
+  InputRuntimeAccumulator,
+  type InputRuntimeDelta,
+} from '../../../../src/inputs/base/input-runtime-metrics.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
@@ -410,6 +413,97 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('reuses cached owner metadata on an unchanged idle collection cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-idle-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    await writeTranscript(sessionDir, completedTurn());
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    await input.stop();
+
+    expect(deltas[0].rawReadCalls).toBe(0);
+    expect(deltas[0].rawReadBytes).toBe(0);
+  });
+
+  it('moves the metadata cache when incremental scanning finds the owning session_meta', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-offset-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    const ownerId = uuidV7At('2026-06-24T06:00:00.000Z');
+    const copiedMeta = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'copied-parent',
+      model_provider: 'openai',
+    }) + '\n';
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      `rollout-2026-06-24T06-00-00-${ownerId}.jsonl`,
+      copiedMeta,
+      { bootstrapFork: false },
+    );
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    const ownerMeta = record('2026-06-24T06:00:01.000Z', 'session_meta', {
+      id: ownerId,
+      model_provider: 'openai',
+    }) + '\n';
+    await fs.appendFile(transcript, ownerMeta, 'utf8');
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 2);
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 3);
+
+    expect(transcriptCheckpoint(stateStore, transcript))
+      .toMatchObject({ ownerSessionMetaOffset: Buffer.byteLength(copiedMeta) });
+    expect(deltas[2].rawReadCalls).toBe(0);
+    expect(deltas[2].rawReadBytes).toBe(0);
+    await input.stop();
+  });
+
+  it('re-registers an evicted child relationship when owner metadata is served from cache', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-linker-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      fixture,
+      { bootstrapFork: false },
+    );
+    const runtime = new InputRuntimeAccumulator();
+    const internals = input as unknown as {
+      getInputRuntimeAccumulator(): InputRuntimeAccumulator;
+      indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+      registerSubagentOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number | null,
+      ): Promise<void>;
+      subagentLinker: { children: Map<string, unknown> };
+    };
+    internals.getInputRuntimeAccumulator = () => runtime;
+    const discovered = [{ filePath: transcript, baselineOnStart: true }];
+
+    await internals.indexDiscoveredTranscriptOwners(discovered);
+    expect(input.getSubagentLinkSnapshot().detectedChildren).toBe(1);
+    internals.subagentLinker.children.clear();
+    const cachedRuntime = new InputRuntimeAccumulator();
+    internals.getInputRuntimeAccumulator = () => cachedRuntime;
+    const stat = await fs.stat(transcript);
+    await internals.registerSubagentOwnerMeta(transcript, stat.ino, stat.size, 0);
+
+    expect(cachedRuntime.finish(0).rawReadCalls).toBe(0);
+    expect(input.getSubagentLinkSnapshot().detectedChildren).toBe(1);
+  });
+
   it('reports physical reads separately from uniquely consumed transcript records', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-runtime-metrics-'));
     tempDirs.push(root);

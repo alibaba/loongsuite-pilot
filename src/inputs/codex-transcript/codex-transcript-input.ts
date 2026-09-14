@@ -126,6 +126,13 @@ interface DiscoveredSessionFile {
   baselineOnStart: boolean;
 }
 
+interface CachedCodexTranscriptMeta {
+  inode: number;
+  fileSize: number;
+  ownerSessionMetaOffset: number;
+  meta: CodexTranscriptMeta;
+}
+
 interface DynamicDirectoryWalkBudget {
   remainingDirectories: number;
   remainingRolloutFiles: number;
@@ -175,6 +182,7 @@ export class CodexTranscriptInput extends BaseInput {
   private lastSpanContextCleanupAtMs = 0;
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
   private readonly transcriptPathByThreadId = new Map<string, string>();
+  private readonly transcriptMetaCacheByPath = new Map<string, CachedCodexTranscriptMeta>();
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -241,6 +249,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
+    this.transcriptMetaCacheByPath.clear();
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
@@ -380,7 +389,12 @@ export class CodexTranscriptInput extends BaseInput {
       );
       checkpointChanged = true;
     }
-    await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
+    await this.registerSubagentOwnerMeta(
+      filePath,
+      checkpoint.inode,
+      stat.size,
+      checkpoint.ownerSessionMetaOffset,
+    );
 
     const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
     const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
@@ -485,11 +499,25 @@ export class CodexTranscriptInput extends BaseInput {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
         if (line.record.type === 'session_meta') {
-          checkpoint.ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+          const ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
             filePath,
             checkpoint.ownerSessionMetaOffset,
             line,
           );
+          checkpoint.ownerSessionMetaOffset = ownerSessionMetaOffset;
+          if (ownerSessionMetaOffset === line.startOffset) {
+            const meta = extractCodexTranscriptMeta(line.record);
+            if (meta) {
+              this.rememberTranscriptOwnerMeta(
+                filePath,
+                checkpoint.inode,
+                stat.size,
+                ownerSessionMetaOffset,
+                meta,
+              );
+              this.publishTranscriptOwnerMeta(filePath, meta);
+            }
+          }
           return;
         }
 
@@ -752,10 +780,21 @@ export class CodexTranscriptInput extends BaseInput {
       endOffset,
       runtime,
     );
-    const metaRecord = checkpoint.ownerSessionMetaOffset === null
-      ? null
-      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
-    const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
+    let meta = this.cachedTranscriptOwnerMetaForCheckpoint(filePath, checkpoint);
+    if (!meta && checkpoint.ownerSessionMetaOffset !== null) {
+      const metaRecord = await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
+      meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
+      if (meta) {
+        this.rememberTranscriptOwnerMeta(
+          filePath,
+          checkpoint.inode,
+          Math.max(endOffset, checkpoint.ownerSessionMetaOffset + 1),
+          checkpoint.ownerSessionMetaOffset,
+          meta,
+        );
+        this.publishTranscriptOwnerMeta(filePath, meta);
+      }
+    }
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
       meta,
@@ -939,22 +978,19 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async registerSubagentOwnerMeta(
     filePath: string,
+    inode: number,
+    fileSize: number,
     ownerSessionMetaOffset: number | null,
   ): Promise<void> {
     if (ownerSessionMetaOffset === null) return;
-    const threadId = sessionIdFromTranscriptPath(filePath);
-    if (this.subagentLinker.hasThread(threadId)) return;
-    const record = await readJsonLineAt(
+    const meta = await this.loadTranscriptOwnerMeta(
       filePath,
+      inode,
+      fileSize,
       ownerSessionMetaOffset,
       this.getInputRuntimeAccumulator(),
     );
-    const meta = record ? extractCodexTranscriptMeta(record) : null;
-    if (meta) {
-      this.transcriptMetaByPath.set(filePath, meta);
-      this.transcriptPathByThreadId.set(meta.threadId, filePath);
-      this.subagentLinker.registerChild(meta);
-    }
+    if (meta) this.publishTranscriptOwnerMeta(filePath, meta);
   }
 
   private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
@@ -980,17 +1016,98 @@ export class CodexTranscriptInput extends BaseInput {
             this.getInputRuntimeAccumulator(),
           );
       if (ownerOffset === null) continue;
-      const record = await readJsonLineAt(
+      const meta = await this.loadTranscriptOwnerMeta(
         filePath,
+        stat.ino,
+        stat.size,
         ownerOffset,
         this.getInputRuntimeAccumulator(),
       );
-      const meta = record ? extractCodexTranscriptMeta(record) : null;
       if (!meta) continue;
-      this.transcriptMetaByPath.set(filePath, meta);
-      this.transcriptPathByThreadId.set(meta.threadId, filePath);
-      this.subagentLinker.registerChild(meta);
+      this.publishTranscriptOwnerMeta(filePath, meta);
     }
+  }
+
+  private async loadTranscriptOwnerMeta(
+    filePath: string,
+    inode: number,
+    fileSize: number,
+    ownerSessionMetaOffset: number,
+    runtime?: InputRuntimeAccumulator | null,
+  ): Promise<CodexTranscriptMeta | null> {
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (
+      cached
+      && cached.inode === inode
+      && cached.ownerSessionMetaOffset === ownerSessionMetaOffset
+      && fileSize >= cached.fileSize
+      && ownerSessionMetaOffset >= 0
+      && ownerSessionMetaOffset < fileSize
+    ) {
+      cached.fileSize = fileSize;
+      this.transcriptMetaCacheByPath.delete(filePath);
+      this.transcriptMetaCacheByPath.set(filePath, cached);
+      return cached.meta;
+    }
+    if (cached) this.transcriptMetaCacheByPath.delete(filePath);
+    if (ownerSessionMetaOffset < 0 || ownerSessionMetaOffset >= fileSize) return null;
+
+    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset, runtime);
+    const meta = record ? extractCodexTranscriptMeta(record) : null;
+    if (!meta) return null;
+    this.rememberTranscriptOwnerMeta(filePath, inode, fileSize, ownerSessionMetaOffset, meta);
+    return meta;
+  }
+
+  private rememberTranscriptOwnerMeta(
+    filePath: string,
+    inode: number,
+    fileSize: number,
+    ownerSessionMetaOffset: number,
+    meta: CodexTranscriptMeta,
+  ): void {
+    this.transcriptMetaCacheByPath.delete(filePath);
+    this.transcriptMetaCacheByPath.set(filePath, {
+      inode,
+      fileSize,
+      ownerSessionMetaOffset,
+      meta,
+    });
+    trimOldestMap(this.transcriptMetaCacheByPath, MAX_LINK_DESCRIPTORS);
+  }
+
+  private cachedTranscriptOwnerMetaForCheckpoint(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+  ): CodexTranscriptMeta | null {
+    if (checkpoint.ownerSessionMetaOffset === null) return null;
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (
+      !cached
+      || cached.inode !== checkpoint.inode
+      || cached.ownerSessionMetaOffset !== checkpoint.ownerSessionMetaOffset
+    ) {
+      return null;
+    }
+    this.transcriptMetaCacheByPath.delete(filePath);
+    this.transcriptMetaCacheByPath.set(filePath, cached);
+    return cached.meta;
+  }
+
+  private publishTranscriptOwnerMeta(filePath: string, meta: CodexTranscriptMeta): void {
+    const previous = this.transcriptMetaByPath.get(filePath);
+    if (
+      previous
+      && previous.threadId !== meta.threadId
+      && this.transcriptPathByThreadId.get(previous.threadId) === filePath
+    ) {
+      this.transcriptPathByThreadId.delete(previous.threadId);
+    }
+    this.transcriptMetaByPath.set(filePath, meta);
+    this.transcriptPathByThreadId.set(meta.threadId, filePath);
+    // Linker descriptors have an independent eviction policy. Re-register on
+    // every publish, including cache hits, so metadata and linkage cannot drift.
+    this.subagentLinker.registerChild(meta);
   }
 
   private registerPersistedSubagentSpawns(
