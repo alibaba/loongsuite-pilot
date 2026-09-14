@@ -1398,25 +1398,34 @@ remove_qoderclicn_token_intercept() {
 # variables via launchctl so GUI-launched apps inherit them. Linux/Windows are
 # skipped (Electron env injection there is tracked separately).
 # ============================================================
+# QODER_WORKER_RUNTIME_PATH has no collection consumer left; retire any
+# injection an earlier release wrote instead of refreshing it. Separate from
+# inject_qoderwork_runtime_wrapper so cmd_upgrade can restore the default
+# without it: upgrade leaves SELECTED_AGENTS empty, so the injector would read
+# that as "QwenWorkCN not wanted" and tear down a live injection.
+retire_qoderwork_runtime_env() {
+    if [ "$(uname)" != "Darwin" ]; then return 0; fi
+
+    local stale_qoder_plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist"
+    launchctl unload "$stale_qoder_plist" 2>/dev/null || true
+    rm -f "$stale_qoder_plist"
+    local current_qoder_runtime
+    current_qoder_runtime=$(launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null || true)
+    if [ "$current_qoder_runtime" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ] || printf '%s' "$current_qoder_runtime" | grep -q 'loongsuite-pilot'; then
+        launchctl unsetenv QODER_WORKER_RUNTIME_PATH
+    fi
+}
+
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
 
     local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
     local plist_dir="$HOME/Library/LaunchAgents"
 
-    # QODER_WORKER_RUNTIME_PATH has no collection consumer left; retire any
-    # injection an earlier release wrote instead of refreshing it. This runs
-    # before every early return below: leaving the override pointing at a
+    # Before every early return below: leaving the override pointing at a
     # wrapper we did not deploy is worse than never setting it, because
     # QwenWorkCN falls back to this variable when its own one is absent.
-    local stale_qoder_plist="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
-    launchctl unload "$stale_qoder_plist" 2>/dev/null || true
-    rm -f "$stale_qoder_plist"
-    local current_qoder_runtime
-    current_qoder_runtime=$(launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null || true)
-    if [ "$current_qoder_runtime" = "$wrapper_script" ] || printf '%s' "$current_qoder_runtime" | grep -q 'loongsuite-pilot'; then
-        launchctl unsetenv QODER_WORKER_RUNTIME_PATH
-    fi
+    retire_qoderwork_runtime_env
 
     local wants_qwen_work_cn=false
     if echo "$SELECTED_AGENTS" | grep -q 'qwen-work-cn'; then wants_qwen_work_cn=true; fi
@@ -2154,6 +2163,7 @@ cmd_upgrade() {
         exit 1
     fi
     install_loongsuite_pilot_command
+    retire_qoderwork_runtime_env
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."

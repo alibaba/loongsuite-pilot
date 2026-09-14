@@ -160,7 +160,7 @@ describe('rc intercept block sources safely in real shells', () => {
 describe.skipIf(!HAS_BASH)('installer CN runtime selection (temporary HOME, mocked launchctl)', () => {
   const installer = readFileSync(new URL('../../../deploy/installer-opensource.sh', import.meta.url), 'utf8');
   // Isolate function execution and app probes from the real installer and host applications.
-  const functions = ['inject_qoderwork_runtime_wrapper', 'remove_qoderwork_runtime_wrapper']
+  const functions = ['retire_qoderwork_runtime_env', 'inject_qoderwork_runtime_wrapper', 'remove_qoderwork_runtime_wrapper']
     .map(name => {
       const match = installer.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'));
       if (!match) throw new Error(`Missing installer function: ${name}`);
@@ -178,7 +178,7 @@ describe.skipIf(!HAS_BASH)('installer CN runtime selection (temporary HOME, mock
     mkdirSync(join(home, 'Applications', name), { recursive: true });
   }
 
-  function runInstaller(selection: string, qoder = '', qwen = '') {
+  function runInstaller(selection: string, qoder = '', qwen = '', entry = 'inject_qoderwork_runtime_wrapper') {
     execFileSync('bash', ['--noprofile', '--norc', '-c', `
 set -euo pipefail
 uname() { printf '%s\\n' Darwin; }
@@ -194,7 +194,7 @@ launchctl() {
   esac
 }
 ${functions}
-inject_qoderwork_runtime_wrapper
+${entry}
 printf '%s' "$QODER_WORKER_RUNTIME_PATH" > "$HOME/qoder.env"
 printf '%s' "$QW_QODER_WORKER_RUNTIME_PATH" > "$HOME/qwen.env"
 `], {
@@ -304,6 +304,28 @@ printf '%s' "$QW_QODER_WORKER_RUNTIME_PATH" > "$HOME/qwen.env"
     const result = runInstaller(selection, '/third-party/runtime.mjs', '/third-party/qwen.mjs');
     expect(result.qoder).toBe('/third-party/runtime.mjs');
     if (selection === 'qoder-work') expect(result.qwen).toBe('/third-party/qwen.mjs');
+    expect(result.calls).not.toContain('unsetenv|');
+  });
+
+  // cmd_upgrade calls the retirement alone, because it never runs select_agents:
+  // driving the full injector with an empty SELECTED_AGENTS would read as
+  // "QwenWorkCN not wanted" and tear down a live injection.
+  it('restores the legacy env on upgrade without touching the active Qwen injection', () => {
+    app('QwenWorkCN.app');
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    writeFileSync(plist('qwenworkcn-env'), 'active Pilot plist');
+    const result = runInstaller('', wrapper, wrapper, 'retire_qoderwork_runtime_env');
+    expect(result.qoder).toBe('');
+    expect(result.qwen).toBe(wrapper);
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(readFileSync(plist('qwenworkcn-env'), 'utf8')).toBe('active Pilot plist');
+    expect(result.calls).not.toContain('unsetenv|QW_QODER_WORKER_RUNTIME_PATH|');
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it('leaves a third-party legacy override alone on upgrade', () => {
+    const result = runInstaller('', '/third-party/runtime.mjs', '', 'retire_qoderwork_runtime_env');
+    expect(result.qoder).toBe('/third-party/runtime.mjs');
     expect(result.calls).not.toContain('unsetenv|');
   });
 });
