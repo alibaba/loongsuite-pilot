@@ -54,6 +54,10 @@ export interface HookDefinition {
    * Only emitted when set, so agents that omit it (e.g. codex) are unaffected.
    */
   shell?: string;
+  /** Optional hook timeout in seconds, written onto the command entry. */
+  timeout?: number;
+  /** Where to insert a new entry. Defaults to tail to keep collection hooks stable. */
+  insert?: 'head' | 'tail';
 }
 
 /**
@@ -122,29 +126,18 @@ export class HookManager {
         // (e.g. Qoder gained winShell after the hook was first installed) —
         // repair the stale entry in place instead of leaving it untouched.
         const shellRepaired = this.applyShellToEntries(updatedArr, def.hookCommand, def.shell);
-        if (updatedArr !== arr || shellRepaired) {
+        const timeoutRepaired = this.applyTimeoutToEntries(updatedArr, def.hookCommand, def.timeout);
+        const movedToHead = this.moveCommandToHead(updatedArr, def.hookCommand, def.insert);
+        if (updatedArr !== arr || shellRepaired || timeoutRepaired || movedToHead) {
           await writeJsonFile(def.settingsPath, settings);
         }
         logger.debug('hook already installed', { agentId: def.agentId });
         return true;
       }
 
-      const hookEntry = def.useNestedFormat
-        ? {
-            matcher: def.matcher ?? '*',
-            hooks: [{
-              command: def.hookCommand,
-              type: 'command',
-              ...(def.shell ? { shell: def.shell } : {}),
-            }],
-          }
-        : {
-            type: 'command',
-            command: def.hookCommand,
-            ...(def.matcher ? { matcher: def.matcher } : {}),
-          };
-
-      updatedArr.push(hookEntry);
+      const hookEntry = this.buildHookEntry(def);
+      if (def.insert === 'head') updatedArr.unshift(hookEntry);
+      else updatedArr.push(hookEntry);
       await writeJsonFile(def.settingsPath, settings);
 
       // Ensure log directory for this agent
@@ -236,7 +229,10 @@ export class HookManager {
       // A matching command whose nested entry lacks the required `shell` counts
       // as not fully installed, so an upgrade that adds winShell (Qoder family
       // on Windows) redeploys and repairs the entry rather than skipping it.
-      return this.hasRequiredShell(hooks, def.hookCommand, def.shell);
+      if (!this.hasRequiredShell(hooks, def.hookCommand, def.shell)) return false;
+      if (!this.hasRequiredTimeout(hooks, def.hookCommand, def.timeout)) return false;
+      if (def.insert === 'head' && !this.isCommandAtHead(hooks, def.hookCommand)) return false;
+      return true;
     } catch {
       return false;
     }
@@ -291,10 +287,12 @@ export class HookManager {
         ? editJsonc(raw, def.hookJsonPath, [hookEntry])
         : editJsonc(
             raw,
-            [...def.hookJsonPath, hooks.length],
+            [...def.hookJsonPath, def.insert === 'head' ? 0 : hooks.length],
             hookEntry,
             { isArrayInsertion: true },
           );
+    } else {
+      raw = this.repairJsoncHookEntry(raw, def, hooks);
     }
 
     if (document.status === 'ok' && raw === document.raw) {
@@ -380,6 +378,7 @@ export class HookManager {
   }
 
   private buildHookEntry(def: HookDefinition): Record<string, unknown> {
+    const timeout = typeof def.timeout === 'number' ? { timeout: def.timeout } : {};
     return def.useNestedFormat
       ? {
           matcher: def.matcher ?? '*',
@@ -387,12 +386,14 @@ export class HookManager {
             command: def.hookCommand,
             type: 'command',
             ...(def.shell ? { shell: def.shell } : {}),
+            ...timeout,
           }],
         }
       : {
           type: 'command',
           command: def.hookCommand,
           ...(def.matcher ? { matcher: def.matcher } : {}),
+          ...timeout,
         };
   }
 
@@ -616,6 +617,84 @@ export class HookManager {
       }
     }
     return changed;
+  }
+
+  private hasRequiredTimeout(arr: any[], command: string, timeout?: number): boolean {
+    if (timeout === undefined) return true;
+    return arr.some((entry: any) => {
+      if (entry.command === command) return entry.timeout === timeout;
+      return Array.isArray(entry.hooks)
+        && entry.hooks.some((h: any) => h.command === command && h.timeout === timeout);
+    });
+  }
+
+  private applyTimeoutToEntries(arr: any[], command: string, timeout?: number): boolean {
+    if (timeout === undefined) return false;
+    let changed = false;
+    for (const entry of arr) {
+      if (entry.command === command && entry.timeout !== timeout) {
+        entry.timeout = timeout;
+        changed = true;
+      }
+      if (!Array.isArray(entry.hooks)) continue;
+      for (const h of entry.hooks) {
+        if (h.command === command && h.timeout !== timeout) {
+          h.timeout = timeout;
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  private isCommandAtHead(arr: any[], command: string): boolean {
+    return arr.length > 0 && this.entryMatchesCommand(arr[0], command);
+  }
+
+  private moveCommandToHead(arr: any[], command: string, insert?: 'head' | 'tail'): boolean {
+    if (insert !== 'head' || this.isCommandAtHead(arr, command)) return false;
+    const index = arr.findIndex((entry) => this.entryMatchesCommand(entry, command));
+    if (index < 0) return false;
+    const [entry] = arr.splice(index, 1);
+    arr.unshift(entry);
+    return true;
+  }
+
+  private repairJsoncHookEntry(
+    raw: string,
+    def: HookDefinition,
+    hooks: any[],
+  ): string {
+    const index = hooks.findIndex((entry) => this.entryMatchesCommand(entry, def.hookCommand));
+    if (index < 0) return raw;
+    let next = this.applyTimeoutToJsonc(raw, def, hooks, index);
+    if (def.insert === 'head' && index > 0) {
+      const entry = hooks[index];
+      next = editJsonc(next, [...def.hookJsonPath, index], undefined);
+      next = editJsonc(next, [...def.hookJsonPath, 0], entry, { isArrayInsertion: true });
+    }
+    return next;
+  }
+
+  private applyTimeoutToJsonc(
+    raw: string,
+    def: HookDefinition,
+    hooks: any[],
+    entryIndex: number,
+  ): string {
+    if (def.timeout === undefined) return raw;
+    const entry = hooks[entryIndex];
+    if (entry?.command === def.hookCommand && entry.timeout !== def.timeout) {
+      return editJsonc(raw, [...def.hookJsonPath, entryIndex, 'timeout'], def.timeout);
+    }
+    if (!Array.isArray(entry?.hooks)) return raw;
+    const hookIndex = entry.hooks.findIndex((h: any) => h.command === def.hookCommand);
+    if (hookIndex < 0 || entry.hooks[hookIndex].timeout === def.timeout) return raw;
+    return editJsonc(
+      raw,
+      [...def.hookJsonPath, entryIndex, 'hooks', hookIndex, 'timeout'],
+      def.timeout,
+    );
   }
 
   private removeCommands(arr: any[], commands: string[]): any[] {

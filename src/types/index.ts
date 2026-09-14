@@ -129,6 +129,8 @@ export interface AnalyticsConfig {
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Rule switches for the interceptor daemon. Missing/false keys are bypassed. */
+  interceptor: Record<string, boolean>;
 }
 
 /**

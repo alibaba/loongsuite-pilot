@@ -17,20 +17,26 @@ set -euo pipefail
 # --- Constants ---
 _LOONGSUITE_PILOT_SERVICE_LABEL="com.loongsuite-pilot"
 _LOONGSUITE_PILOT_UPDATER_LABEL="com.loongsuite-pilot.updater"
+_LOONGSUITE_PILOT_INTERCEPTOR_LABEL="com.loongsuite-pilot.interceptor"
 _LOONGSUITE_PILOT_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${_LOONGSUITE_PILOT_SERVICE_LABEL}.plist"
 _LOONGSUITE_PILOT_UPDATER_PLIST="$HOME/Library/LaunchAgents/${_LOONGSUITE_PILOT_UPDATER_LABEL}.plist"
+_LOONGSUITE_PILOT_INTERCEPTOR_PLIST="$HOME/Library/LaunchAgents/${_LOONGSUITE_PILOT_INTERCEPTOR_LABEL}.plist"
 _LOONGSUITE_PILOT_SYSTEMD_UNIT="loongsuite-pilot.service"
 _LOONGSUITE_PILOT_UPDATER_UNIT="loongsuite-pilot-updater.service"
+_LOONGSUITE_PILOT_INTERCEPTOR_UNIT="loongsuite-pilot-interceptor.service"
 _LOONGSUITE_PILOT_SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 _LOONGSUITE_PILOT_SYSTEMD_UNIT_PATH="${_LOONGSUITE_PILOT_SYSTEMD_UNIT_DIR}/${_LOONGSUITE_PILOT_SYSTEMD_UNIT}"
 _LOONGSUITE_PILOT_UPDATER_UNIT_PATH="${_LOONGSUITE_PILOT_SYSTEMD_UNIT_DIR}/${_LOONGSUITE_PILOT_UPDATER_UNIT}"
+_LOONGSUITE_PILOT_INTERCEPTOR_UNIT_PATH="${_LOONGSUITE_PILOT_SYSTEMD_UNIT_DIR}/${_LOONGSUITE_PILOT_INTERCEPTOR_UNIT}"
 
 # Overridable paths
 LOONGSUITE_PILOT_BIN="${LOONGSUITE_PILOT_BIN:-$HOME/.local/bin/loongsuite-pilot}"
 LOONGSUITE_PILOT_DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+LOONGSUITE_PILOT_CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
 LOONGSUITE_PILOT_CONFIG_FILE="${LOONGSUITE_PILOT_CONFIG_FILE:-$LOONGSUITE_PILOT_DATA_DIR/config.json}"
 LOONGSUITE_PILOT_LOG_FILE="${LOONGSUITE_PILOT_LOG_FILE:-$LOONGSUITE_PILOT_DATA_DIR/logs/loongsuite-pilot-service.log}"
 LOONGSUITE_PILOT_UPDATER_LOG_FILE="${LOONGSUITE_PILOT_UPDATER_LOG_FILE:-$LOONGSUITE_PILOT_DATA_DIR/logs/loongsuite-pilot-updater.log}"
+LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE="${LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE:-$LOONGSUITE_PILOT_DATA_DIR/interceptor/logs/interceptor-service.log}"
 
 # ============================================================
 # Internal helpers
@@ -166,6 +172,70 @@ WantedBy=default.target
 UNITEOF
 }
 
+_write_launchd_interceptor_plist() {
+    mkdir -p "$(dirname "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST")"
+    mkdir -p "$(dirname "$LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE")"
+    cat > "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${_LOONGSUITE_PILOT_INTERCEPTOR_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${LOONGSUITE_PILOT_BIN}</string>
+        <string>run-interceptor</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AGENT_DATA_COLLECTION_CONFIG</key>
+        <string>${LOONGSUITE_PILOT_CONFIG_FILE}</string>
+        <key>LOONGSUITE_PILOT_DATA_DIR</key>
+        <string>${LOONGSUITE_PILOT_DATA_DIR}</string>
+        <key>LOONGSUITE_PILOT_CACHE_DIR</key>
+        <string>${LOONGSUITE_PILOT_CACHE_DIR}</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+PLISTEOF
+}
+
+_write_systemd_interceptor_unit() {
+    mkdir -p "$_LOONGSUITE_PILOT_SYSTEMD_UNIT_DIR"
+    mkdir -p "$(dirname "$LOONGSUITE_PILOT_INTERCEPTOR_LOG_FILE")"
+    cat > "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT_PATH" << UNITEOF
+[Unit]
+Description=LoongSuite Pilot Interceptor
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=${LOONGSUITE_PILOT_BIN} run-interceptor
+Restart=on-failure
+RestartSec=10
+Environment=AGENT_DATA_COLLECTION_CONFIG=${LOONGSUITE_PILOT_CONFIG_FILE}
+Environment=LOONGSUITE_PILOT_DATA_DIR=${LOONGSUITE_PILOT_DATA_DIR}
+Environment=LOONGSUITE_PILOT_CACHE_DIR=${LOONGSUITE_PILOT_CACHE_DIR}
+
+[Install]
+WantedBy=default.target
+UNITEOF
+}
+
 # ============================================================
 # Public API
 # ============================================================
@@ -178,23 +248,30 @@ autostart_install() {
         launchd)
             launchctl unload -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST" 2>/dev/null || true
             launchctl unload -w "$_LOONGSUITE_PILOT_UPDATER_PLIST" 2>/dev/null || true
+            launchctl unload -w "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST" 2>/dev/null || true
             _write_launchd_plist
             _write_launchd_updater_plist
+            _write_launchd_interceptor_plist
             launchctl load -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
             launchctl load -w "$_LOONGSUITE_PILOT_UPDATER_PLIST"
+            launchctl load -w "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST"
             echo "✅ Autostart enabled (launchd)"
-            echo "   Collector: $_LOONGSUITE_PILOT_LAUNCHD_PLIST"
-            echo "   Updater:   $_LOONGSUITE_PILOT_UPDATER_PLIST"
+            echo "   Collector:    $_LOONGSUITE_PILOT_LAUNCHD_PLIST"
+            echo "   Updater:      $_LOONGSUITE_PILOT_UPDATER_PLIST"
+            echo "   Interceptor:  $_LOONGSUITE_PILOT_INTERCEPTOR_PLIST"
             ;;
         systemd)
             _write_systemd_unit
             _write_systemd_updater_unit
+            _write_systemd_interceptor_unit
             systemctl --user daemon-reload
             systemctl --user enable --now "$_LOONGSUITE_PILOT_SYSTEMD_UNIT"
             systemctl --user enable --now "$_LOONGSUITE_PILOT_UPDATER_UNIT"
+            systemctl --user enable --now "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT"
             echo "✅ Autostart enabled and services started (systemd user units)"
-            echo "   Collector: $_LOONGSUITE_PILOT_SYSTEMD_UNIT_PATH"
-            echo "   Updater:   $_LOONGSUITE_PILOT_UPDATER_UNIT_PATH"
+            echo "   Collector:    $_LOONGSUITE_PILOT_SYSTEMD_UNIT_PATH"
+            echo "   Updater:      $_LOONGSUITE_PILOT_UPDATER_UNIT_PATH"
+            echo "   Interceptor:  $_LOONGSUITE_PILOT_INTERCEPTOR_UNIT_PATH"
             if command -v loginctl &>/dev/null; then
                 if loginctl enable-linger "$(whoami)" 2>/dev/null; then
                     echo "   Linger enabled (services start at boot without login)"
@@ -217,6 +294,8 @@ autostart_remove() {
 
     case "$init_system" in
         launchd)
+            launchctl unload -w "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST" 2>/dev/null || true
+            rm -f "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST"
             launchctl unload -w "$_LOONGSUITE_PILOT_UPDATER_PLIST" 2>/dev/null || true
             rm -f "$_LOONGSUITE_PILOT_UPDATER_PLIST"
             launchctl unload -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST" 2>/dev/null || true
@@ -224,6 +303,8 @@ autostart_remove() {
             echo "✅ Autostart disabled (launchd plists removed)"
             ;;
         systemd)
+            systemctl --user disable --now "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT" 2>/dev/null || true
+            rm -f "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT_PATH"
             systemctl --user disable --now "$_LOONGSUITE_PILOT_UPDATER_UNIT" 2>/dev/null || true
             rm -f "$_LOONGSUITE_PILOT_UPDATER_UNIT_PATH"
             systemctl --user disable --now "$_LOONGSUITE_PILOT_SYSTEMD_UNIT" 2>/dev/null || true
@@ -261,6 +342,15 @@ autostart_status() {
             else
                 echo "⚪ Updater autostart:   not configured"
             fi
+            if [ -f "$_LOONGSUITE_PILOT_INTERCEPTOR_PLIST" ]; then
+                if launchctl list 2>/dev/null | grep -q "$_LOONGSUITE_PILOT_INTERCEPTOR_LABEL"; then
+                    echo "✅ Interceptor autostart: enabled (launchd, loaded)"
+                else
+                    echo "⚠️  Interceptor autostart: plist exists but not loaded"
+                fi
+            else
+                echo "⚪ Interceptor autostart: not configured"
+            fi
             ;;
         systemd)
             if [ -f "$_LOONGSUITE_PILOT_SYSTEMD_UNIT_PATH" ]; then
@@ -280,6 +370,15 @@ autostart_status() {
                 fi
             else
                 echo "⚪ Updater autostart:   not configured"
+            fi
+            if [ -f "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT_PATH" ]; then
+                if systemctl --user is-enabled "$_LOONGSUITE_PILOT_INTERCEPTOR_UNIT" &>/dev/null; then
+                    echo "✅ Interceptor autostart: enabled (systemd)"
+                else
+                    echo "⚠️  Interceptor autostart: unit exists but not enabled"
+                fi
+            else
+                echo "⚪ Interceptor autostart: not configured"
             fi
             ;;
         *)

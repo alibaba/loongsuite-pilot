@@ -1114,4 +1114,57 @@ describe('HookStrategy', () => {
       expect(cliCall).toBeUndefined();
     });
   });
+
+  describe('interceptor hook definitions', () => {
+    function qoderWithInterceptor() {
+      return makeDef({
+        id: 'qoder',
+        hook: {
+          settingsPath: '/home/.qoder/settings.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+          format: 'nested',
+          matcher: '*',
+          interceptor: {
+            events: ['UserPromptSubmit', 'PreToolUse'],
+            hookCommand: '/opt/pilot/hooks/interceptor-hook.sh',
+            matcher: '*',
+            timeout: { UserPromptSubmit: 15, PreToolUse: 10 },
+            insert: 'head',
+          },
+        },
+      });
+    }
+
+    it('installs interceptor hooks before the collection hook', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(qoderWithInterceptor());
+
+      const commands = mockHookManager.installHook.mock.calls.map(([def]) => def.hookCommand);
+      expect(commands).toEqual([
+        '/opt/pilot/hooks/interceptor-hook.sh',
+        '/opt/pilot/hooks/interceptor-hook.sh',
+        '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+      ]);
+      expect(mockHookManager.installHook.mock.calls[0][0]).toMatchObject({
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        timeout: 15,
+        insert: 'head',
+      });
+      expect(mockHookManager.installHook.mock.calls[1][0]).toMatchObject({
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        timeout: 10,
+        insert: 'head',
+      });
+    });
+
+    it('needs deploy when the interceptor hook is missing or not at head', async () => {
+      mockHookManager.isHookInstalled
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true);
+      await expect(strategy.needsDeploy(qoderWithInterceptor())).resolves.toBe(true);
+    });
+  });
 });

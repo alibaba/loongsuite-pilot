@@ -24,7 +24,8 @@ Pilot 按以下顺序解析配置：
   "collectLog": true,
   "collectTrace": true,
   "dashboard": { "port": 8765 },
-  "serviceName": "my-agent-service"
+  "serviceName": "my-agent-service",
+  "interceptor": {}
 }
 ```
 
@@ -38,6 +39,7 @@ Pilot 按以下顺序解析配置：
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
+| `interceptor` | 本地拦截规则开关。扁平 `Record<string, boolean>`，只有值为 `true` 的已注册规则会执行。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 

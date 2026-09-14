@@ -120,6 +120,33 @@ await build({
   plugins: commonPlugins,
 });
 
+await build({
+  entryPoints: ['src/interceptor/cli.ts'],
+  outfile: 'dist/interceptor/cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+await build({
+  entryPoints: ['src/interceptor/daemon.ts'],
+  outfile: 'dist/interceptor/daemon.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
 

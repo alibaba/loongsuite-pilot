@@ -13,7 +13,17 @@
     "format": "nested",
     "matcher": "*",
     "winShell": "powershell",
-    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"]
+    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"],
+    "interceptor": {
+      "events": ["UserPromptSubmit", "PreToolUse"],
+      "hookCommand": "$PILOT_DATA/hooks/interceptor-hook.sh",
+      "matcher": "*",
+      "timeout": {
+        "UserPromptSubmit": 15,
+        "PreToolUse": 10
+      },
+      "insert": "head"
+    }
   },
   "input": {
     "type": "hook-jsonl",

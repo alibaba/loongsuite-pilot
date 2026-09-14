@@ -24,7 +24,10 @@
 │  FileCollectionManager → N × FilePipeline (FileTailer + SlsSender)│
 ├──────────────────────────────────────────────────────────────────┤
 │  Checkpoint (StateStore / SnapshotStore)  │  Updater (自动更新)    │
-└──────────────────────────────────────────┴───────────────────────┘
+├──────────────────────────────────────────────────────────────────┤
+│  Interceptor（同级独立服务：本地 hook 拦截判定）                    │
+│  CLI hook → loopback daemon → 顺序规则引擎（fail-open）            │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## 模块清单
@@ -39,6 +42,7 @@
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [临时异常下的 Checkpoint](docs/zh-CN/agent-onboarding.md#临时异常下的-checkpoint) |
 | 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [安装与服务管理](docs/zh-CN/installation.md) |
+| 本地拦截 | `src/interceptor/` | Qoder Desktop/CLI 同步拦截 hook + 机器级共享 daemon | [本地拦截](docs/zh-CN/interceptor.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 本地 Dashboard | `src/dashboard/` + `src/status-bar/metrics-summary-writer.ts` | 默认随主进程启停的本地页面；生成并展示 `metrics-summary.json` 汇总 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
@@ -47,7 +51,7 @@
 
 | Agent | ID | 部署模式 | 采集基类 | Input 实现 | 声明文件 |
 |-------|----|---------|---------|-----------|---------|
-| Qoder IDE | `qoder` | Hook | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder.json` |
+| Qoder IDE | `qoder` | Hook + Interceptor | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder.json` |
 | Qoder CN | `qoder-cn` | Hook | `BaseIdeInput` / `BaseSqliteInput` | `inputs/qoder-cn*/` | `agents.d/qoder-cn.json` |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only（复用 Qoder 采集） | 复用 Qoder Input | `inputs/qoder*/` | `agents.d/qoder-jetbrains.json` |
 | Qoder Work | `qoder-work` | Hook | `BaseSqliteInput` / `BaseHookInput` | `inputs/qoder-work*/` | `agents.d/qoder-work.json` |
@@ -112,6 +116,7 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 | `~/.loongsuite-pilot/agent-control.json` | 准入控制策略 |
 | `~/.loongsuite-pilot/deployed-agents.json` | 部署状态记录 |
 | `~/.loongsuite-pilot/hooks/` | 已部署的 Hook 脚本 |
+| `~/.loongsuite-pilot/interceptor/` | 拦截 daemon 的 runtime / pid / 日志 |
 | `~/.loongsuite-pilot/plugins/` | 已安装的 OTel 插件 |
 | `~/.loongsuite-pilot/logs/output/` | JSONL 采集输出 |
 | `~/.loongsuite-pilot/logs/input-state.json` | 输入源偏移状态 |
@@ -182,3 +187,4 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
 - **我要配置输出通道** → [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)
 - **我要了解部署运维** → [README.md](README.md)（打包/安装/升级/卸载）
 - **我要了解数据 Schema** → [docs/zh-CN/output-event-schema.md](docs/zh-CN/output-event-schema.md)
+- **我要了解本地拦截** → [docs/zh-CN/interceptor.md](docs/zh-CN/interceptor.md)

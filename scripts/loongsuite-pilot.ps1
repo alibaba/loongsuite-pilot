@@ -49,9 +49,12 @@ $BOOTSTRAP_DIR = Join-Path $CACHE_DIR "bin"
 $PACKAGE_DIR = Join-Path $CACHE_DIR "package"
 $PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot.pid"
 $UPDATER_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-updater.pid"
+$INTERCEPTOR_PID_FILE = Join-Path $DATA_DIR "interceptor\interceptor.pid"
 $LOG_DIR = Join-Path $DATA_DIR "logs"
 $LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-service.log"
 $UPDATER_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-updater.log"
+$INTERCEPTOR_LOG_DIR = Join-Path $DATA_DIR "interceptor\logs"
+$INTERCEPTOR_LOG_FILE = Join-Path $INTERCEPTOR_LOG_DIR "interceptor-service.log"
 $RUNTIME_FILE = Join-Path $LOG_DIR "runtime.json"
 $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
@@ -114,6 +117,7 @@ function Get-PilotUserTag {
 $USER_TAG = Get-PilotUserTag
 $TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
 $TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
+$TASK_NAME_INTERCEPTOR = "LoongsuitePilotInterceptor-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
 
 # Legacy global task names (pre per-user naming) -- cleaned up best-effort on start.
@@ -125,7 +129,7 @@ $LOONGSUITE_PILOT_BIN = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.
 # Helpers
 # ============================================================
 function Ensure-Dirs {
-    @($LOG_DIR, $BOOTSTRAP_DIR) | ForEach-Object {
+    @($LOG_DIR, $BOOTSTRAP_DIR, $INTERCEPTOR_LOG_DIR) | ForEach-Object {
         if (-not (Test-Path $_)) { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
     }
 }
@@ -216,12 +220,15 @@ function Sync-BootstrapScripts {
     Copy-Item $collectorSrc $BOOTSTRAP_DIR -Force
     $updaterSrc = Join-Path $srcDir "updater-daemon.js"
     if (Test-Path $updaterSrc) { Copy-Item $updaterSrc $BOOTSTRAP_DIR -Force }
+    $interceptorSrc = Join-Path $srcDir "interceptor-daemon.js"
+    if (Test-Path $interceptorSrc) { Copy-Item $interceptorSrc $BOOTSTRAP_DIR -Force }
 }
 
 function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
     $required = @("collector-daemon.js", "updater-daemon.js")
+    $optional = @("interceptor-daemon.js")
     foreach ($f in $required) {
         if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
     }
@@ -230,6 +237,13 @@ function Sync-InstalledScriptsFromVersion {
     foreach ($f in $required) {
         $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
         Copy-Item (Join-Path $srcDir $f) $tmp -Force
+        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
+    }
+    foreach ($f in $optional) {
+        $src = Join-Path $srcDir $f
+        if (-not (Test-Path $src)) { continue }
+        $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
+        Copy-Item $src $tmp -Force
         Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
     }
     return $true
@@ -427,7 +441,7 @@ function Stop-OrphanProcesses {
     # of \ and possibly regex metacharacters (a user profile can contain "["), and
     # escaping it for a regex buys nothing here. It is also a method call on [string], a
     # core type, so it stays CLM-safe.
-    param([string]$Match = "collector-daemon|updater-daemon")
+    param([string]$Match = "collector-daemon|updater-daemon|interceptor-daemon")
     $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
     # Query Win32_Process once. The old Get-Process pipeline issued one CIM query per
     # node process, so a machine with many IDE/agent runtimes paid N WMI round trips on
@@ -618,6 +632,16 @@ function Wait-ForUpdaterAlive {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         if (Test-PidAlive $UPDATER_PID_FILE) { return $true }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Wait-ForInterceptorAlive {
+    param([int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-PidAlive $INTERCEPTOR_PID_FILE) { return $true }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
     return $false
@@ -1158,12 +1182,46 @@ function Install-UpdaterTask {
         -description "LoongSuite Pilot auto-updater")
 }
 
+function Install-InterceptorTask {
+    param([string]$nodeBin)
+    $entry = Join-Path $BOOTSTRAP_DIR "interceptor-daemon.js"
+    if (-not (Test-Path $entry)) { return $false }
+
+    $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "interceptor-launch.vbs") $nodeBin $entry
+
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (Get-PilotAccountName)
+    $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)
+
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -DontStopOnIdleEnd `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    Stop-OrphanProcesses -Match "interceptor-daemon"
+
+    try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_INTERCEPTOR" /F 2>$null | Out-Null } catch {}
+    try { schtasks.exe /Delete /TN "$TASK_NAME_INTERCEPTOR" /F 2>$null | Out-Null } catch {}
+
+    return (Register-PilotTask `
+        -taskName $TASK_NAME_INTERCEPTOR `
+        -action $action `
+        -triggers @($triggerLogon, $triggerRepeat) `
+        -settings $settings `
+        -description "LoongSuite Pilot interceptor")
+}
+
 function Remove-AllTasks {
     $launchers = @{
         $TASK_NAME_COLLECTOR = "collector-launch.vbs"
         $TASK_NAME_UPDATER = "updater-launch.vbs"
+        $TASK_NAME_INTERCEPTOR = "interceptor-launch.vbs"
     }
-    foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
+    foreach ($name in @($TASK_NAME_INTERCEPTOR, $TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task) {
             if ($task.State -eq "Running") {
@@ -1233,6 +1291,27 @@ function Cmd-RunUpdater {
     & $nodeBin $entry
 }
 
+function Cmd-RunInterceptor {
+    Ensure-Dirs
+    Sync-BootstrapScripts
+
+    $entry = Join-Path $BOOTSTRAP_DIR "interceptor-daemon.js"
+    if (-not (Test-Path $entry)) {
+        Write-Error "Bootstrap script missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    & $nodeBin $entry
+}
+
 # ============================================================
 # CMD: start
 # ============================================================
@@ -1272,10 +1351,14 @@ function Cmd-Start {
     try {
         $ok1 = Install-CollectorTask $nodeBin
         $ok2 = Install-UpdaterTask $nodeBin
+        $ok3 = Install-InterceptorTask $nodeBin
         if ($ok1) {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             if ($ok2) {
                 Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+            }
+            if ($ok3) {
+                Start-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             }
             Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
             if (Wait-ForCollectorHeartbeat) {
@@ -1326,7 +1409,7 @@ function Cmd-Start {
 # ============================================================
 function Cmd-Stop {
     # Stop Task Scheduler tasks
-    foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
+    foreach ($name in @($TASK_NAME_INTERCEPTOR, $TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task -and $task.State -eq "Running") {
             Stop-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
@@ -1336,6 +1419,7 @@ function Cmd-Stop {
     # Stop PID-tracked processes
     Stop-PidFile $PID_FILE
     Stop-PidFile $UPDATER_PID_FILE
+    Stop-PidFile $INTERCEPTOR_PID_FILE
 
     # Kill orphan processes
     Stop-OrphanProcesses
@@ -1877,6 +1961,122 @@ function Cmd-RestartUpdater {
     }
 }
 
+function Cmd-StartInterceptor {
+    if (Test-PidAlive $INTERCEPTOR_PID_FILE) {
+        Write-Host "interceptor is already running"
+        return
+    }
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Host "node runtime not found" -ForegroundColor Yellow
+        exit 1
+    }
+
+    $query = Get-TaskQuery $TASK_NAME_INTERCEPTOR
+    $intent = Get-TaskStartIntent $query $TASK_NAME_INTERCEPTOR
+    if ([bool]$intent.should_start) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            if (Wait-ForInterceptorAlive 15) {
+                Write-Host "interceptor started (Task Scheduler)"
+                return
+            }
+        } catch {}
+    }
+
+    if (Install-InterceptorTask $nodeBin) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            if (Wait-ForInterceptorAlive 15) {
+                Write-Host "interceptor started (Task Scheduler)"
+                return
+            }
+        } catch {}
+    }
+
+    $initType = ""
+    if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+    if ($initType -eq "background" -or $initType -eq "unknown" -or $initType -eq "") {
+        $entry = Join-Path $BOOTSTRAP_DIR "interceptor-daemon.js"
+        if (Test-Path $entry) {
+            $errLog = Join-Path $INTERCEPTOR_LOG_DIR "interceptor-err.log"
+            Start-BackgroundDaemon "interceptor" $nodeBin $entry $INTERCEPTOR_LOG_FILE $errLog
+            if (Wait-ForInterceptorAlive 10) {
+                Write-Host "interceptor started (background fallback)"
+                return
+            }
+        }
+    }
+    Write-Host "Failed to start interceptor" -ForegroundColor Yellow
+    exit 1
+}
+
+function Cmd-RestartInterceptor {
+    $task = Get-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+    if ($task -and $task.State -eq "Running") {
+        Stop-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        Wait-ForTaskNotRunning $TASK_NAME_INTERCEPTOR | Out-Null
+    }
+    Stop-PidFile $INTERCEPTOR_PID_FILE
+    Stop-OrphanProcesses -Match "interceptor-daemon"
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Host "node runtime not found" -ForegroundColor Yellow
+        exit 1
+    }
+
+    $query = Get-TaskQuery $TASK_NAME_INTERCEPTOR
+    $intent = Get-TaskStartIntent $query $TASK_NAME_INTERCEPTOR
+    if ([bool]$intent.should_start) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            if (Wait-ForInterceptorAlive 15) {
+                Write-Host "interceptor restarted (Task Scheduler)"
+                return
+            }
+        } catch {}
+        $run = Invoke-SchtasksRun $TASK_NAME_INTERCEPTOR
+        if ($run) {
+            if (Wait-ForInterceptorAlive 15) {
+                Write-Host "interceptor restarted (schtasks /Run)"
+                return
+            }
+        }
+    }
+
+    if (Install-InterceptorTask $nodeBin) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_INTERCEPTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            if (Wait-ForInterceptorAlive 15) {
+                Write-Host "interceptor self-healed: registered with Task Scheduler"
+                return
+            }
+        } catch {}
+    }
+
+    $initType = ""
+    if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+    if ($initType -eq "background" -or $initType -eq "unknown" -or $initType -eq "") {
+        $entry = Join-Path $BOOTSTRAP_DIR "interceptor-daemon.js"
+        if (Test-Path $entry) {
+            $errLog = Join-Path $INTERCEPTOR_LOG_DIR "interceptor-err.log"
+            Start-BackgroundDaemon "interceptor" $nodeBin $entry $INTERCEPTOR_LOG_FILE $errLog
+            if (Wait-ForInterceptorAlive 10) {
+                Write-Host "interceptor restarted (background fallback)"
+                return
+            }
+        }
+    }
+    Write-Host "Service manager failed to restart interceptor" -ForegroundColor Yellow
+    exit 1
+}
+
 # ============================================================
 # CMD: status
 # ============================================================
@@ -1989,6 +2189,15 @@ function Cmd-Status {
         Write-Host "   updater: running (Task Scheduler)"
     } else {
         Write-Host "   updater: stopped"
+    }
+
+    if (Test-PidRunning $INTERCEPTOR_PID_FILE) {
+        $pidVal = (Get-Content $INTERCEPTOR_PID_FILE).Trim()
+        Write-Host "   interceptor: running (PID $pidVal)"
+    } elseif (Get-TaskRunning $TASK_NAME_INTERCEPTOR) {
+        Write-Host "   interceptor: running (Task Scheduler)"
+    } else {
+        Write-Host "   interceptor: stopped"
     }
 
     # Autostart status
@@ -2537,9 +2746,12 @@ switch ($Command.ToLower()) {
     "restart-collector"  { Cmd-RestartCollector -Options $SubArgs }
     "schedule-updater-restart" { Schedule-UpdaterRestart }
     "restart-updater"    { Cmd-RestartUpdater }
+    "start-interceptor"  { Cmd-StartInterceptor }
+    "restart-interceptor" { Cmd-RestartInterceptor }
     "diagnose-service"   { Cmd-DiagnoseService }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }
+    "run-interceptor"    { Cmd-RunInterceptor }
     "span-attr"          { Cmd-SpanAttr }
     { $_ -in "help","--help","-h" } { Cmd-Help }
     default {

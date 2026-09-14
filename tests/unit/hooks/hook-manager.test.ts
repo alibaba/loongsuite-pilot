@@ -489,4 +489,123 @@ describe('HookManager', () => {
       })).resolves.toBe(true);
     });
   });
+
+  describe('interceptor hook install', () => {
+    const COLLECT = '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh';
+    const INTERCEPT = '/opt/pilot/hooks/interceptor-hook.sh';
+
+    it('inserts the interceptor hook at the head and persists timeout', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 15,
+        insert: 'head',
+      });
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.UserPromptSubmit[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 15,
+      });
+      expect(settings.hooks.UserPromptSubmit[1].hooks[0].command).toBe(COLLECT);
+    });
+
+    it('moves an existing interceptor hook back to the head and repairs timeout', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+            {
+              matcher: '*',
+              hooks: [{ command: INTERCEPT, type: 'command', timeout: 3 }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      const def = {
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 10,
+        insert: 'head' as const,
+      };
+      expect(await manager.isHookInstalled(def)).toBe(false);
+      expect(await manager.installHook(def)).toBe(true);
+      expect(await manager.isHookInstalled(def)).toBe(true);
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.PreToolUse[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 10,
+      });
+      expect(settings.hooks.PreToolUse[1].hooks[0].command).toBe(COLLECT);
+    });
+
+    it('uninstalls only the interceptor command', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '*',
+              hooks: [{ command: INTERCEPT, type: 'command', timeout: 15 }],
+            },
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await manager.uninstallHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+      });
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.UserPromptSubmit).toEqual([
+        {
+          matcher: '*',
+          hooks: [{ command: COLLECT, type: 'command' }],
+        },
+      ]);
+    });
+  });
 });

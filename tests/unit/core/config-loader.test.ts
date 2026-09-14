@@ -1809,4 +1809,20 @@ describe('ConfigLoader', () => {
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
   });
+
+  describe('interceptor switches', () => {
+    it('defaults to an empty object', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({});
+    });
+
+    it('keeps only boolean rule switches', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: { keep: true, drop: false, skip: 'yes' },
+      });
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ keep: true, drop: false });
+    });
+  });
 });
