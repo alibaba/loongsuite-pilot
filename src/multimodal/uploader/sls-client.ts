@@ -628,7 +628,24 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
 
 /** Startup sniff. Shorter than upload timeout so a hung call does not stall start. */
 const SLS_STARTUP_TIMEOUT_MS = 5_000;
+const SLS_STARTUP_PROBE_ATTEMPTS = 3;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
+
+/** Deterministic capability/auth errors fail closed; timeout/429/5xx retry a few times. */
+async function probeSlsMultimodalCapability(
+  params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'>,
+): Promise<SlsPresignResult> {
+  let last: SlsPresignResult = { ok: false, error: 'sls multimodal probe failed' };
+  for (let attempt = 1; attempt <= SLS_STARTUP_PROBE_ATTEMPTS; attempt++) {
+    last = await slsGeneratePresignedUrl({
+      ...params,
+      objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+      timeoutMs: SLS_STARTUP_TIMEOUT_MS,
+    });
+    if (last.ok || !last.retryable) return last;
+  }
+  return last;
+}
 
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
   mode: 'ak' | 'apiKey';
@@ -698,13 +715,11 @@ export async function resolveMultimodalEventStorageBasePath(
     }
     if (config.storage.type === 'sls') {
       const { target, auth } = config.storage;
-      const probe = await slsGeneratePresignedUrl({
+      const probe = await probeSlsMultimodalCapability({
         endpoint: target.endpoint,
         project: target.project,
         logstore: target.logstore,
-        objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
         ...slsStorageAuthFields(auth),
-        timeoutMs: SLS_STARTUP_TIMEOUT_MS,
       });
       if (!probe.ok) {
         return { ok: false, error: probe.error || 'sls multimodal probe failed' };

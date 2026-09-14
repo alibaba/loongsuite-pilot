@@ -25,7 +25,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 两处同时就绪：
 
-1. 全局对象存储。完整 `apiKey` 目标恰好一条时可省略 `multimodal.storage` 整段复用（旁边的 AK/WebTracking 不参与计数），或只写 `target.logstore` 换 Logstore。其余 storage 必须写完整，不会从 flusher 补字段。AK/SK、WebTracking 凭证不会拷进 multimodal。目标 Logstore 需要支持 SLS 对象上传（`PutObject`）。
+1. 全局对象存储。完整 `apiKey` 目标恰好一条时可省略 `multimodal.storage` 整段复用（旁边的 AK/WebTracking 不参与计数），或只写 `target.logstore` 换 Logstore（`type` 可为 `"sls"` / `"delegatedOss"`，后者还可写 `ossBucket`）。其余 storage 必须写完整，不会从 flusher 补字段。AK/SK、WebTracking 凭证不会拷进 multimodal。目标 Logstore 需要支持 SLS 对象上传（`PutObject`）。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
 示例（Codex + Qoder IDE）：

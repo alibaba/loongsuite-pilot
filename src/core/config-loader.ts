@@ -343,7 +343,7 @@ function buildMultimodalConfig(
   file: ConfigFile | null,
   sls?: SlsFlusherConfig,
 ): MultimodalRuntimeConfig | undefined {
-  const slsTarget = findUniqueSlsApiKeyTarget(sls);
+  const slsTarget = findUniqueSlsApiKeyTarget(sls, file);
   const block = file?.multimodal;
   if (block == null) {
     return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
@@ -365,8 +365,16 @@ function buildMultimodalConfig(
     }
     const storageRaw = block.storage;
     if (slsTarget && isLogstoreOnlyShorthand(storageRaw)) {
-      const logstore = (storageRaw.target?.logstore ?? '').trim();
-      return multimodalFromSlsApiKey({ ...slsTarget, logstore });
+      const logstore = isNonEmptyString(storageRaw.target?.logstore)
+        ? storageRaw.target.logstore.trim()
+        : slsTarget.logstore;
+      const type = typeof storageRaw.type === 'string' && storageRaw.type.trim() === 'delegatedOss'
+        ? 'delegatedOss'
+        : 'sls';
+      const ossBucket = type === 'delegatedOss' && isNonEmptyString(storageRaw.target?.ossBucket)
+        ? storageRaw.target.ossBucket.trim()
+        : undefined;
+      return multimodalFromSlsApiKey({ ...slsTarget, logstore }, type, ossBucket);
     }
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
@@ -388,7 +396,11 @@ function buildMultimodalConfig(
 }
 
 /** Complete apiKey targets only; AK / WebTracking do not count. */
-function findUniqueSlsApiKeyTarget(sls: SlsFlusherConfig | undefined): SlsApiKeyTarget | undefined {
+function findUniqueSlsApiKeyTarget(
+  sls: SlsFlusherConfig | undefined,
+  file: ConfigFile | null,
+): SlsApiKeyTarget | undefined {
+  if (fileSlsHasConflictingApiKeys(file)) return undefined;
   let unique: SlsApiKeyTarget | undefined;
   for (const ep of sls?.endpoints ?? []) {
     if (ep.mode !== 'apiKey' || hasAmbiguousSlsCredentials(ep)) continue;
@@ -403,13 +415,48 @@ function findUniqueSlsApiKeyTarget(sls: SlsFlusherConfig | undefined): SlsApiKey
   return unique;
 }
 
-function multimodalFromSlsApiKey(target: SlsApiKeyTarget): MultimodalRuntimeConfig {
+/** Same dest + different apiKeys in raw `file.sls` (before flusher dedup). */
+function fileSlsHasConflictingApiKeys(file: ConfigFile | null): boolean {
+  const raw = file?.sls;
+  if (!Array.isArray(raw)) return false;
+  const byDest = new Map<string, string>();
+  for (const ep of raw) {
+    if (inferSlsMode(ep) !== 'apiKey' || (ep.apiKey && (ep.accessKeyId || ep.accessKeySecret))) continue;
+    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
+    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
+    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
+    if (!apiKey || !endpoint || !project || !logstore) continue;
+    const dest = `${normalizeEndpointUrl(endpoint)}|${project}|${logstore}`;
+    const existing = byDest.get(dest);
+    if (existing !== undefined && existing !== apiKey) return true;
+    byDest.set(dest, apiKey);
+  }
+  return false;
+}
+
+function multimodalFromSlsApiKey(
+  target: SlsApiKeyTarget,
+  type: 'sls' | 'delegatedOss' = 'sls',
+  ossBucket?: string,
+): MultimodalRuntimeConfig {
   return {
-    storage: {
-      type: 'sls',
-      target: { endpoint: target.endpoint, project: target.project, logstore: target.logstore },
-      auth: { mode: 'apiKey', apiKey: target.apiKey },
-    },
+    storage: type === 'delegatedOss'
+      ? {
+          type: 'delegatedOss',
+          target: {
+            endpoint: target.endpoint,
+            project: target.project,
+            logstore: target.logstore,
+            ...(ossBucket ? { ossBucket } : {}),
+          },
+          auth: { mode: 'apiKey', apiKey: target.apiKey },
+        }
+      : {
+          type: 'sls',
+          target: { endpoint: target.endpoint, project: target.project, logstore: target.logstore },
+          auth: { mode: 'apiKey', apiKey: target.apiKey },
+        },
     storageBasePath: `sls://${target.project}/${target.logstore}`,
   };
 }
@@ -418,16 +465,28 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-/** `{ type?: 'sls', target: { logstore } }` — anything else is an independent storage block. */
+/** `{ type?: 'sls'|'delegatedOss', target: { logstore?, ossBucket? } }` */
 function isLogstoreOnlyShorthand(raw: MultimodalStorageRaw): boolean {
-  const type = typeof raw.type === 'string' ? raw.type.trim() : '';
-  if (type && type !== 'sls') return false;
-  if (raw.auth != null) return false;
-  return isNonEmptyString(raw.target?.logstore)
-    && !isNonEmptyString(raw.target?.endpoint)
-    && !isNonEmptyString(raw.target?.project)
-    && !isNonEmptyString(raw.target?.ossBucket)
-    && !isNonEmptyString(raw.target?.storageBasePath);
+  for (const key of Object.keys(raw)) {
+    if (key !== 'type' && key !== 'target') return false;
+  }
+  let type = 'sls';
+  if ('type' in raw) {
+    if (typeof raw.type !== 'string') return false;
+    const trimmed = raw.type.trim();
+    if (trimmed !== 'sls' && trimmed !== 'delegatedOss') return false;
+    type = trimmed;
+  }
+  const target = raw.target;
+  if (target == null || typeof target !== 'object' || Array.isArray(target)) return false;
+  for (const key of Object.keys(target)) {
+    if (key === 'logstore' || (key === 'ossBucket' && type === 'delegatedOss')) {
+      if (!isNonEmptyString(target[key as keyof typeof target])) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function buildMultimodalOssStorage(

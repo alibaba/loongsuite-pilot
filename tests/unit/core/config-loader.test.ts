@@ -1140,6 +1140,12 @@ describe('ConfigLoader', () => {
           { name: 'two', endpoint: 'https://cn-shanghai.log.aliyuncs.com', project: 'p2', logstore: 'l2', mode: 'apiKey' as const, apiKey: slsApiKey.apiKey },
         ],
       }],
+      ['same dest with conflicting apiKeys', {
+        sls: [
+          { name: 'one', ...slsApiKey, apiKey: 'key-1' },
+          { name: 'two', ...slsApiKey, apiKey: 'key-2' },
+        ],
+      }],
     ])('does not reuse sls when it is not a unique apiKey target (%s)', async (_label, file) => {
       mockReadJsonFile.mockResolvedValueOnce(file);
       const config = await loadConfig();
@@ -1196,6 +1202,83 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.multimodal).toBeUndefined();
+    });
+
+    it('reuses the unique apiKey sls as delegatedOss with logstore only', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: { logstore: 'multimodal' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'delegatedOss',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'multimodal',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://user-proj/multimodal',
+      });
+    });
+
+    it('reuses the unique apiKey sls as delegatedOss with ossBucket only', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: { ossBucket: 'user-bucket' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'delegatedOss',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'user-store',
+            ossBucket: 'user-bucket',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://user-proj/user-store',
+      });
+    });
+
+    it('reuses the unique apiKey sls as delegatedOss with logstore and ossBucket', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: { logstore: 'multimodal', ossBucket: 'user-bucket' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'delegatedOss',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'multimodal',
+            ossBucket: 'user-bucket',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://user-proj/multimodal',
+      });
     });
 
     it('reuses the unique apiKey sls with a logstore-only override', async () => {
@@ -1283,6 +1366,11 @@ describe('ConfigLoader', () => {
       ['multimodal is not an object', { sls: slsApiKey, multimodal: false }],
       ['storage is a string', { sls: slsApiKey, multimodal: { storage: 'sls' } }],
       ['storage is an array', { sls: slsApiKey, multimodal: { storage: [] } }],
+      ['storage type is not a string', { sls: slsApiKey, multimodal: { storage: { type: 42, target: { logstore: 'mm' } } } }],
+      ['target.endpoint is not a string', { sls: slsApiKey, multimodal: { storage: { type: 'sls', target: { logstore: 'mm', endpoint: 42 } } } }],
+      ['target has an unknown key', { sls: slsApiKey, multimodal: { storage: { type: 'sls', target: { logstore: 'mm', endpont: 'typo' } } } }],
+      ['sls shorthand includes ossBucket', { sls: slsApiKey, multimodal: { storage: { type: 'sls', target: { logstore: 'mm', ossBucket: 'user-bucket' } } } }],
+      ['delegatedOss ossBucket is empty', { sls: slsApiKey, multimodal: { storage: { type: 'delegatedOss', target: { logstore: 'mm', ossBucket: '  ' } } } }],
     ])('does not infer sls when %s', async (_label, file) => {
       mockReadJsonFile.mockResolvedValueOnce(file);
       const config = await loadConfig();

@@ -79,8 +79,8 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 存储有两种写法：
 
-1. **复用唯一的 SLS `apiKey` 目标。** 解析后的 SLS 端点里，完整 `apiKey` 目标必须恰好一条（endpoint / project / logstore / apiKey，且该目标未混写 AK）。旁边的 AK/SK 或 WebTracking 不参与计数，不阻止复用。两条 `apiKey` 目标不推断。省略 `multimodal.storage` 即整段复用；也可以只写 `target.logstore`（`type` 可省略或为 `"sls"`），在同一套凭证下换 Logstore。AK/SK、WebTracking 凭证不会拷进 multimodal。目标 Logstore 需要支持 SLS 对象上传（`PutObject`）。
-2. **独立的 `multimodal.storage`。** 其余形态（换 endpoint/project、`delegatedOss`、`oss`、AK 等）都是完整独立配置，不会从 flusher 补字段。`multimodal` 或 `storage` 写了但类型无效时，直接关闭上传，不会回退到 flusher。
+1. **复用唯一的 SLS `apiKey` 目标。** 解析后的 SLS 端点里，完整 `apiKey` 目标必须恰好一条（endpoint / project / logstore / apiKey，且该目标未混写 AK）。旁边的 AK/SK 或 WebTracking 不参与计数，不阻止复用。两条 `apiKey` 目标不推断。省略 `multimodal.storage` 即整段复用；也可以只写 `target.logstore`（`type` 可省略、`"sls"` 或 `"delegatedOss"`），在同一套凭证下换 Logstore。`type: "delegatedOss"` 还可以写 `target.ossBucket`。AK/SK、WebTracking 凭证不会拷进 multimodal。目标 Logstore 需要支持 SLS 对象上传（`PutObject`）。
+2. **独立的 `multimodal.storage`。** 其余形态（换 endpoint/project、`oss`、AK 等）都是完整独立配置，不会从 flusher 补字段。`multimodal` 或 `storage` 写了但类型无效时，直接关闭上传，不会回退到 flusher。
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 

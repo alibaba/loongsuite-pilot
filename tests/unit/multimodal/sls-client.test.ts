@@ -841,6 +841,93 @@ describe('sls-client (presign)', () => {
     }
   });
 
+  it('retries type=sls probe on timeout then succeeds', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    });
+    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries type=sls probe on 429 then succeeds', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('429 busy', { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    });
+    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries type=sls probe on 5xx then gives up', async () => {
+    const fetchMock = vi.fn(async () => new Response('500 down', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    });
+    expect(result.ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry type=sls probe on a capability 400', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      errorCode: 'ParameterInvalid',
+      errorMessage: 'LogStore multimodal is not enabled. Please enable multimodal configuration first.',
+    }), { status: 400 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'multimodal_test_disable',
+        },
+        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/multimodal_test_disable',
+    });
+    expect(result.ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('resolves oss:// for delegatedOss via one presign', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
       url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
