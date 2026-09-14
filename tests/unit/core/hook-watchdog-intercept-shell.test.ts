@@ -286,6 +286,19 @@ printf '%s' "$QW_QODER_WORKER_RUNTIME_PATH" > "$HOME/qwen.env"
     expect(existsSync(wrapper)).toBe(true);
   });
 
+  it('retires the legacy env even when the wrapper failed to deploy', () => {
+    // Windows retires unconditionally; leaving the override pointing at a
+    // wrapper that is not on disk is worse than never having set it, because
+    // QwenWorkCN falls back to this variable.
+    app('QwenWorkCN.app');
+    writeFileSync(plist('qoderwork-env'), 'legacy Pilot plist');
+    rmSync(wrapper);
+    const result = runInstaller('qwen-work-cn', wrapper, wrapper);
+    expect(result.qoder).toBe('');
+    expect(existsSync(plist('qoderwork-env'))).toBe(false);
+    expect(result.calls).not.toContain('unsetenv|QW_QODER_WORKER_RUNTIME_PATH|');
+  });
+
   it.each(['qoder-work', 'qoder-work,qwen-work-cn'])('preserves third-party env during cleanup for %s', selection => {
     app('QwenWorkCN.app');
     const result = runInstaller(selection, '/third-party/runtime.mjs', '/third-party/qwen.mjs');

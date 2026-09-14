@@ -748,8 +748,9 @@ export class HookWatchdog {
           id: def.id,
           enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
           precondition: async () => {
+            if (!await fileExists(wrapperPath)) return false;
             for (const appPath of appPaths) {
-              if (await directoryExists(appPath)) return fileExists(wrapperPath);
+              if (await directoryExists(appPath)) return true;
             }
             return false;
           },

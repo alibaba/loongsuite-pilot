@@ -1400,23 +1400,15 @@ remove_qoderclicn_token_intercept() {
 # ============================================================
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
-    local wants_qwen_work_cn=false
-    if echo "$SELECTED_AGENTS" | grep -q 'qwen-work-cn'; then wants_qwen_work_cn=true; fi
-    if [ "$wants_qwen_work_cn" != "true" ]; then
-        remove_qoderwork_runtime_wrapper
-        return 0
-    fi
 
     local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
-    if [ ! -f "$wrapper_script" ]; then return 0; fi
-
-    msg "==> 配置 QoderWork 系列 token 采集..." "==> Configuring QoderWork-family token intercept..."
-
     local plist_dir="$HOME/Library/LaunchAgents"
-    mkdir -p "$plist_dir"
 
     # QODER_WORKER_RUNTIME_PATH has no collection consumer left; retire any
-    # injection an earlier release wrote instead of refreshing it.
+    # injection an earlier release wrote instead of refreshing it. This runs
+    # before every early return below: leaving the override pointing at a
+    # wrapper we did not deploy is worse than never setting it, because
+    # QwenWorkCN falls back to this variable when its own one is absent.
     local stale_qoder_plist="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
     launchctl unload "$stale_qoder_plist" 2>/dev/null || true
     rm -f "$stale_qoder_plist"
@@ -1425,6 +1417,19 @@ inject_qoderwork_runtime_wrapper() {
     if [ "$current_qoder_runtime" = "$wrapper_script" ] || printf '%s' "$current_qoder_runtime" | grep -q 'loongsuite-pilot'; then
         launchctl unsetenv QODER_WORKER_RUNTIME_PATH
     fi
+
+    local wants_qwen_work_cn=false
+    if echo "$SELECTED_AGENTS" | grep -q 'qwen-work-cn'; then wants_qwen_work_cn=true; fi
+    if [ "$wants_qwen_work_cn" != "true" ]; then
+        remove_qoderwork_runtime_wrapper
+        return 0
+    fi
+
+    if [ ! -f "$wrapper_script" ]; then return 0; fi
+
+    msg "==> 配置 QoderWork 系列 token 采集..." "==> Configuring QoderWork-family token intercept..."
+
+    mkdir -p "$plist_dir"
 
     # QwenWorkCN checks this product-specific override before falling back to
     # the SDK-wide QODER_WORKER_RUNTIME_PATH. Setting it prevents another
