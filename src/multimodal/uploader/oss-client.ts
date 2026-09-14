@@ -1,5 +1,6 @@
 import { createHmac, createHash } from 'node:crypto';
 import { createLogger } from '../../utils/logger.js';
+import { normalizeOssEndpoint, type OssEndpoint } from '../resolve.js';
 
 const logger = createLogger('OssClient');
 
@@ -7,7 +8,6 @@ const OSS_V4_ALGORITHM = 'OSS4-HMAC-SHA256';
 const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 const DEFAULT_SIGNED_HEADERS = new Set(['content-md5', 'content-type']);
 const BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
-const REGIONAL_ENDPOINT_RE = /^oss-(?<region>[a-z0-9-]+?)(?:-internal)?\.aliyuncs\.com(?:\.cn)?$/;
 
 export interface OssPutObjectParams {
   endpoint: string;
@@ -20,6 +20,7 @@ export interface OssPutObjectParams {
   contentType: string;
   timeoutMs: number;
   meta?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface OssPutObjectResult {
@@ -28,12 +29,6 @@ export interface OssPutObjectResult {
   requestId?: string;
   error?: string;
   retryable?: boolean;
-}
-
-interface OssEndpoint {
-  scheme: string;
-  host: string;
-  region: string;
 }
 
 /** OSS PutObject (V4). */
@@ -53,7 +48,12 @@ export async function ossPutObject(params: OssPutObjectParams): Promise<OssPutOb
       meta: params.meta,
     });
 
+    if (params.signal?.aborted) {
+      return { ok: false, error: 'aborted', retryable: false };
+    }
     const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    params.signal?.addEventListener('abort', onExternalAbort);
     const timer = setTimeout(() => controller.abort(), params.timeoutMs);
     try {
       const resp = await fetch(url, {
@@ -77,10 +77,14 @@ export async function ossPutObject(params: OssPutObjectParams): Promise<OssPutOb
         retryable,
       };
     } catch (err) {
+      if (params.signal?.aborted) {
+        return { ok: false, error: 'aborted', retryable: false };
+      }
       const error = err instanceof Error ? err.message : String(err);
       return { ok: false, error, retryable: true };
     } finally {
       clearTimeout(timer);
+      params.signal?.removeEventListener('abort', onExternalAbort);
     }
   } catch (err) {
     return {
@@ -161,35 +165,6 @@ export function buildV4PutRequest(args: {
   const encodedKey = v4UriEncode(args.objectKey, true);
   const url = `${args.endpoint.scheme}://${args.bucket}.${args.endpoint.host}/${encodedKey}`;
   return { url, headers };
-}
-
-export function normalizeOssEndpoint(endpoint: string): OssEndpoint {
-  let raw = (endpoint || '').trim();
-  if (!raw) throw new Error('OSS endpoint is required');
-  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
-
-  const parsed = new URL(raw);
-  if (parsed.username || parsed.password || (parsed.pathname && parsed.pathname !== '/')
-    || parsed.search || parsed.hash) {
-    throw new Error('OSS endpoint must be a standard regional endpoint without path/query/credentials');
-  }
-
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
-  if (host.startsWith('oss-accelerate.')) {
-    throw new Error('OSS accelerate endpoints are not supported');
-  }
-  const match = REGIONAL_ENDPOINT_RE.exec(host);
-  const region = match?.groups?.region;
-  if (!region) {
-    throw new Error('OSS endpoint must be a standard regional aliyuncs.com endpoint');
-  }
-
-  const port = parsed.port ? `:${parsed.port}` : '';
-  return {
-    scheme: parsed.protocol.replace(':', ''),
-    host: `${host}${port}`,
-    region,
-  };
 }
 
 function validateBucket(bucket: string): string {

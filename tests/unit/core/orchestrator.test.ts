@@ -119,47 +119,11 @@ vi.mock('sqlite3', () => ({
   },
 }));
 
-vi.mock('../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js', () => ({
-  QoderSqliteInput: vi.fn().mockImplementation(() => ({
-    id: 'qoder-sqlite',
-    agentType: 'qoder',
-    collectionMethod: 'sqlite-polling',
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
-
 vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   QoderWorkInput: vi.fn().mockImplementation(() => ({
     id: 'qoder-work',
     agentType: 'qoder-work',
     collectionMethod: 'sqlite-polling',
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
-
-vi.mock('../../../src/inputs/qoder-cli/qoder-cli-input.js', () => ({
-  QoderCliInput: vi.fn().mockImplementation(() => ({
-    id: 'qoder-cli-hook',
-    agentType: 'qoder-cli',
-    collectionMethod: 'hook-jsonl',
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
-
-vi.mock('../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js', () => ({
-  QoderCliSessionInput: vi.fn().mockImplementation(() => ({
-    id: 'qoder-cli-session',
-    agentType: 'qoder-cli',
-    collectionMethod: 'session-file-polling',
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -180,20 +144,11 @@ vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
 }));
 
 // Static methods need to be mocked on the mock class itself
-import { QoderSqliteInput } from '../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
-import { QoderCliInput } from '../../../src/inputs/qoder-cli/qoder-cli-input.js';
-import { QoderCliSessionInput } from '../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { CursorHookInput } from '../../../src/inputs/cursor-hook/cursor-hook-input.js';
 
-(QoderSqliteInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-db']);
-(QoderSqliteInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (QoderWorkInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-work']);
 (QoderWorkInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
-(QoderCliInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-cli']);
-(QoderCliInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
-(QoderCliSessionInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-cli-session']);
-(QoderCliSessionInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (CursorHookInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/cursor-hook']);
 (CursorHookInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 
@@ -204,6 +159,29 @@ vi.mock('../../../src/metrics/alarm-manager.js', () => ({
   })),
 }));
 
+const {
+  mockResolveMultimodalEventStorageBasePath,
+  mockCreateUploader,
+  MockMultimodalProcessor,
+} = vi.hoisted(() => ({
+  mockResolveMultimodalEventStorageBasePath: vi.fn(),
+  mockCreateUploader: vi.fn(),
+  MockMultimodalProcessor: vi.fn(),
+}));
+
+vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/multimodal/index.js')>();
+  return {
+    ...actual,
+    resolveMultimodalEventStorageBasePath: (...args: unknown[]) => (
+      mockResolveMultimodalEventStorageBasePath(...args)
+    ),
+    createUploader: (...args: unknown[]) => mockCreateUploader(...args),
+    MultimodalProcessor: MockMultimodalProcessor,
+  };
+});
+
+import { InputManager } from '../../../src/core/input-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
@@ -214,10 +192,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     userId: 'test-user',
     listeners: {
       qoder: { enabled: true, pollInterval: 60000 },
-      'qoder-sqlite': { enabled: true, pollInterval: 60000 },
+      'qoder-trace': { enabled: true, pollInterval: 60000 },
       'qoder-work': { enabled: true, pollInterval: 60000 },
-      'qoder-cli-hook': { enabled: true, pollInterval: 60000 },
-      'qoder-cli-session': { enabled: true, pollInterval: 60000 },
       'cursor-hook': { enabled: true, pollInterval: 60000 },
     },
     flushers: {
@@ -236,6 +212,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       hookDebugDays: 7,
       outputDays: 7,
       slsFailedDays: 7,
+      otlpFailedDays: 7,
+      metricAlarmDays: 7,
     },
     hookWatchdog: {
       enabled: false, // disabled by default in tests to avoid spawning child processes
@@ -327,6 +305,30 @@ describe('Orchestrator', () => {
       expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(false);
     });
 
+    it('reports a menu bar stop failure during orchestrator shutdown', async () => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      mockStatusBarStop.mockRejectedValueOnce(new Error('menu bar still running'));
+      const orch = new Orchestrator(makeConfig({
+        statusBar: {
+          enabled: true,
+          metricsSummaryIntervalMs: 60_000,
+          runtimeRefreshIntervalMs: 30_000,
+        },
+      }));
+
+      try {
+        await orch.start();
+        await expect(orch.stop()).resolves.toBeUndefined();
+        expect(mockLoggerWarn).toHaveBeenCalledWith(
+          'status bar app stop failed during orchestrator shutdown',
+          { error: 'Error: menu bar still running' },
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', platform);
+      }
+    });
+
     it('calls subsystems in correct order', async () => {
       const callOrder: string[] = [];
       mockEnsureDir.mockImplementation(async () => { callOrder.push('ensureDir'); });
@@ -374,6 +376,20 @@ describe('Orchestrator', () => {
       await orch.start();
 
       const input = (orch as any).inputManager.getInput('opencode-log');
+      expect(input).toBeDefined();
+      expect(input.pollIntervalMs).toBe(1000);
+
+      await orch.stop();
+    });
+
+    it('passes the configured QoderCN trace poll interval to the input', async () => {
+      const config = makeConfig();
+      config.listeners['qoder-cn-trace'] = { enabled: true, pollInterval: 1000 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = (orch as any).inputManager.getInput('qoder-cn-trace');
       expect(input).toBeDefined();
       expect(input.pollIntervalMs).toBe(1000);
 
@@ -471,6 +487,25 @@ describe('Orchestrator', () => {
       await orch.stop();
 
       expect(events).toContain('stopped');
+    });
+
+    it('still shuts down the flusher and saves state when metrics stop fails', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const metricsWriter = (orch as any).metricsWriter;
+      const flusher = (orch as any).flusher;
+      vi.spyOn(metricsWriter, 'stop').mockRejectedValueOnce(new Error('snapshot exploded'));
+      const flusherShutdown = vi.spyOn(flusher, 'shutdown');
+      mockStateStoreSave.mockClear();
+
+      await expect(orch.stop()).resolves.toBeUndefined();
+
+      expect(flusherShutdown).toHaveBeenCalledOnce();
+      expect(mockStateStoreSave).toHaveBeenCalled();
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        'metrics writer stop failed during orchestrator shutdown',
+        { error: 'Error: snapshot exploded' },
+      );
     });
   });
 
@@ -578,6 +613,106 @@ describe('Orchestrator', () => {
       handler('cursor-hook', 'shutdown');
       expect(mockAlarmRecord).not.toHaveBeenCalled();
 
+      await orch.stop();
+    });
+  });
+
+  describe('multimodal startup wiring', () => {
+    const fakeUploader = { upload: vi.fn(), shutdown: vi.fn() };
+    const agentsWantMultimodal = {
+      codex: {
+        enabled: true,
+        captureMessageContent: true,
+        multimodal: { uploadMode: 'input' as const },
+      },
+    };
+    const delegatedOss = {
+      storage: {
+        type: 'delegatedOss' as const,
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: {
+          mode: 'ak' as const,
+          accessKeyId: 'ak',
+          accessKeySecret: 'sk',
+        },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    };
+
+    let setProcessor: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockCreateUploader.mockReturnValue(fakeUploader);
+      MockMultimodalProcessor.mockImplementation((base: string) => ({
+        storageBasePath: base,
+        shutdown: vi.fn().mockResolvedValue(undefined),
+      }));
+      setProcessor = vi.spyOn(InputManager.prototype, 'setMultimodalProcessor');
+    });
+
+    afterEach(() => {
+      setProcessor.mockRestore();
+    });
+
+    it('does not install a processor when event-base resolution fails', async () => {
+      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
+        ok: false,
+        error: 'presign failed',
+      });
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: delegatedOss,
+      }));
+
+      await orch.start();
+
+      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
+      expect(mockCreateUploader).not.toHaveBeenCalled();
+      expect(MockMultimodalProcessor).not.toHaveBeenCalled();
+      expect(setProcessor).not.toHaveBeenCalled();
+      await orch.stop();
+    });
+
+    it('installs a processor when event-base resolution succeeds', async () => {
+      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
+        ok: true,
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+      });
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: {
+          ...delegatedOss,
+          storage: {
+            ...delegatedOss.storage,
+            target: {
+              ...delegatedOss.storage.target,
+              ossBucket: 'user-bucket',
+            },
+          },
+        },
+      }));
+
+      await orch.start();
+
+      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
+      expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
+        storage: expect.objectContaining({ type: 'delegatedOss' }),
+      }), {
+        expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+      });
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        'oss://user-bucket/proj/logstore',
+        fakeUploader,
+      );
+      expect(setProcessor).toHaveBeenCalledTimes(1);
+      expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+      });
       await orch.stop();
     });
   });

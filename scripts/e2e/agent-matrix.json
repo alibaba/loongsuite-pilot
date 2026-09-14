@@ -44,7 +44,7 @@
       "binary": "qoder",
       "versionArg": "--version",
       "slsAgentTypeHint": "qoder-cli",
-      "notes": "L1 CLI identity is qoder-cli. Hook input watches ~/.loongsuite-pilot/logs/qoder/history and qoder-cli-session reads ~/.qoder/logs/sessions. Non-interactive probes use qodercli-runtime-wrapper.sh when installed so Node/Bun token intercept is active (needs E2E_QODER_PERSONAL_ACCESS_TOKEN).",
+      "notes": "L1 CLI identity is qoder-cli. The single qoder-trace input merges ~/.loongsuite-pilot/logs/qoder/history (hook JSONL) with ~/.qoder/logs/sessions segments. Non-interactive probes use qodercli-runtime-wrapper.sh when installed so Node/Bun token intercept is active (needs E2E_QODER_PERSONAL_ACCESS_TOKEN).",
       "npmPackage": "@qoder-ai/qodercli",
       "representativeVersions": ["latest"],
       "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",

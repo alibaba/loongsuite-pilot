@@ -77,8 +77,86 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     expect(existsSync(path.join(dataDir, 'logs', 'qoderworkcn-intercept.jsonl'))).toBe(false);
   });
 
+  it('recognizes QwenWorkCN from a direct Windows resources path', async () => {
+    const marker = path.join(root, 'windows-qwen-runtime-loaded');
+    const resources = await createWindowsHostRuntime('QwenWorkCN', marker);
+
+    runWrapper(resources, marker);
+
+    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
+      loaded: true,
+      parseUnchanged: false,
+      stringifyUnchanged: false,
+    });
+    const intercept = await fs.readFile(
+      path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'),
+      'utf-8',
+    );
+    expect(JSON.parse(intercept.trim().split('\n')[0])).toMatchObject({
+      id: 'chatcmpl-wrapper-test',
+      total_tokens: 3,
+    });
+  });
+
+  it.each([
+    ['QwenWorkCN', 'qwenworkcn-intercept.jsonl'],
+    ['QoderWork', null],
+    ['QoderWorkCN', null],
+    ['QoderWork CN', null],
+  ])('classifies versioned Windows %s resources without cross-agent writes', async (
+    appName,
+    expectedIntercept,
+  ) => {
+    const marker = path.join(root, `windows-${appName}-runtime-loaded`);
+    const resources = await createWindowsHostRuntime(appName, marker, '0.1.8-26081406');
+
+    runWrapper(resources, marker, {
+      QW_QODER_WORKER_RUNTIME_PATH: wrapper,
+      QODER_WORKER_RUNTIME_PATH: wrapper,
+    });
+
+    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
+      loaded: true,
+      parseUnchanged: expectedIntercept === null,
+      stringifyUnchanged: expectedIntercept === null,
+    });
+    for (const intercept of [
+      'qwenworkcn-intercept.jsonl',
+      'qoderwork-intercept.jsonl',
+      'qoderworkcn-intercept.jsonl',
+    ]) {
+      expect(existsSync(path.join(dataDir, 'logs', intercept))).toBe(intercept === expectedIntercept);
+    }
+  });
+
+  it('does not classify a deeper unrelated Windows descendant as an app host', async () => {
+    const marker = path.join(root, 'windows-nested-runtime-loaded');
+    const resources = path.join(root, 'Programs', 'QwenWorkCN', 'version', 'nested', 'resources');
+    await createRuntimeAt(resources, marker);
+
+    runWrapper(resources, marker, { QW_QODER_WORKER_RUNTIME_PATH: wrapper });
+
+    expect(JSON.parse(await fs.readFile(marker, 'utf-8'))).toEqual({
+      loaded: true,
+      parseUnchanged: true,
+      stringifyUnchanged: true,
+    });
+    expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
+  });
+
   async function createHostRuntime(appName, marker) {
     const resources = path.join(root, appName, 'Contents', 'Resources');
+    await createRuntimeAt(resources, marker);
+    return resources;
+  }
+
+  async function createWindowsHostRuntime(appName, marker, version) {
+    const resources = path.join(root, 'Programs', appName, ...(version ? [version] : []), 'resources');
+    await createRuntimeAt(resources, marker);
+    return resources;
+  }
+
+  async function createRuntimeAt(resources, marker) {
     const runtimeDir = path.join(resources, sdkWorkerRelative);
     await fs.mkdir(runtimeDir, { recursive: true });
     await fs.writeFile(
@@ -98,10 +176,9 @@ JSON.parse(JSON.stringify({
 JSON.stringify({ messages: [{ role: 'system', content: 'Synthetic system instruction. '.repeat(5) }] });
 `,
     );
-    return resources;
   }
 
-  function runWrapper(resources, marker) {
+  function runWrapper(resources, marker, extraEnv = {}) {
     const launcher = `
 globalThis.originalParse = JSON.parse;
 globalThis.originalStringify = JSON.stringify;
@@ -118,6 +195,7 @@ import(process.env.PILOT_TEST_WRAPPER).catch(error => {
         PILOT_TEST_RESOURCES: resources,
         PILOT_TEST_WRAPPER: wrapper,
         PILOT_WRAPPER_MARKER: marker,
+        ...extraEnv,
       },
     });
     expect(result.status, result.stderr).toBe(0);

@@ -18,6 +18,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
+import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { formatTime } from '../utils/time-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,16 +38,55 @@ import {
   type ToolSpanIdReservations,
 } from './tool-span-id-reservation.js';
 
+import {
+  OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
+} from '../normalization/openclaw-session-key.js';
+
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
+const GROK_PASSTHROUGH_KEYS = [
+  'loongsuite.grok.match.strategy',
+  'loongsuite.grok.timing.source',
+] as const;
+const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
+  'agent.openclaw.compatibility',
+  'agent.openclaw.timing.inferred',
+  'agent.openclaw.timing.source',
+  'agent.openclaw.timing.quantized_ms',
+  'agent.openclaw.collection.incomplete',
+  'agent.openclaw.collection.end_reason',
+  'agent.openclaw.correlation.ambiguous',
+] as const;
+
+function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
+  const endings = new Map<string, Partial<AgentActivityEntry>>();
+  for (const r of records) {
+    if (r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup') {
+      endings.set(key(r), {
+        'agent.openclaw.collection.incomplete': true,
+        'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        ...(r['agent.openclaw.correlation.ambiguous'] === true
+          ? { 'agent.openclaw.correlation.ambiguous': true } : {}),
+      });
+    }
+  }
+  // The converter discards non-input `other` records before collecting span
+  // attributes. Carry only content-free terminal diagnostics on same-turn
+  // copies so an incomplete trace does not look like complete collection.
+  return endings.size ? records.map(r => ({ ...r, ...endings.get(key(r)) })) : records;
+}
 // Hard cap on simultaneously-open turn buffers. Above this, the oldest
 // incomplete buffers are force-flushed to bound memory in pathological
 // cases (e.g. an agent that never emits a terminal llm.response AND never
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// Bound diagnostics even if input supplies arbitrary agent names.
+const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
   'gen_ai.skill.name',
   'gen_ai.skill.id',
@@ -62,6 +103,10 @@ interface TurnBuffer {
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
+  logicalBytes: number;
+  unmeasuredRecords: number;
+  openedAtMs: number;
+  runtimeCounters?: TraceRuntimeCounters;
 }
 
 interface AgentConvertState {
@@ -70,6 +115,165 @@ interface AgentConvertState {
   inMem: InMemorySpanExporter;
   toolSpanIds: ToolSpanIdReservations;
   active: number;
+}
+
+interface GrokConversionMetadata {
+  systemInstructions: unknown[];
+  agentDescription?: string;
+  dataSourceId?: string;
+}
+
+interface OpenClawIdentityMetadata {
+  senderId?: string;
+  channel?: string;
+  accountId?: string;
+  channelId?: string;
+  userIdSource?: string;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * OpenClaw's before_model_resolve hook can emit before before_agent_run exposes
+ * senderId. Reconcile record copies at the full-turn boundary so the converter
+ * cannot select the earlier collector fallback as the trace-wide user ID.
+ */
+function prepareOpenClawIdentityRecords(records: AgentActivityEntry[]): {
+  records: AgentActivityEntry[];
+  metadata: OpenClawIdentityMetadata;
+} {
+  const metadata: OpenClawIdentityMetadata = {};
+  let senderIdentity: OpenClawIdentityMetadata | undefined;
+
+  for (const record of records) {
+    const recordSenderId = nonEmptyString(record['agent.openclaw.sender.id']);
+    metadata.senderId ??= recordSenderId;
+    metadata.channel ??= nonEmptyString(record['agent.openclaw.channel']);
+    metadata.accountId ??= nonEmptyString(record['agent.openclaw.account.id']);
+    metadata.channelId ??= nonEmptyString(record['agent.openclaw.channel.id']);
+    metadata.userIdSource ??= nonEmptyString(record['agent.openclaw.user.id.source']);
+    if (record['agent.openclaw.user.id.source'] === 'sender' && recordSenderId) {
+      // Keep the selected sender and its provenance metadata atomic. Otherwise
+      // an earlier config/hostname fallback can survive as the turn-wide source
+      // even after user.id has been reconciled to a later sender.
+      senderIdentity = {
+        senderId: recordSenderId,
+        channel: nonEmptyString(record['agent.openclaw.channel']),
+        accountId: nonEmptyString(record['agent.openclaw.account.id']),
+        channelId: nonEmptyString(record['agent.openclaw.channel.id']),
+        userIdSource: 'sender',
+      };
+    }
+  }
+
+  if (!senderIdentity?.senderId) return { records, metadata };
+  const senderUserId = senderIdentity.senderId;
+  const reconciledMetadata: OpenClawIdentityMetadata = {
+    senderId: senderUserId,
+    channel: senderIdentity.channel ?? metadata.channel,
+    accountId: senderIdentity.accountId ?? metadata.accountId,
+    channelId: senderIdentity.channelId ?? metadata.channelId,
+    userIdSource: 'sender',
+  };
+  const reconciledFields = {
+    'user.id': senderUserId,
+    'agent.openclaw.sender.id': senderUserId,
+    ...(reconciledMetadata.channel
+      ? { 'agent.openclaw.channel': reconciledMetadata.channel }
+      : {}),
+    ...(reconciledMetadata.accountId
+      ? { 'agent.openclaw.account.id': reconciledMetadata.accountId }
+      : {}),
+    ...(reconciledMetadata.channelId
+      ? { 'agent.openclaw.channel.id': reconciledMetadata.channelId }
+      : {}),
+    'agent.openclaw.user.id.source': 'sender',
+  };
+  return {
+    records: records.map(record => ({ ...record, ...reconciledFields })),
+    metadata: reconciledMetadata,
+  };
+}
+
+function parseGrokSystemInstructions(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+  return [{ type: 'text', content: value }];
+}
+
+function stripSystemRoleMessages(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.filter(message =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system');
+  }
+  if (typeof value !== 'string' || value.length === 0) return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return value;
+    return JSON.stringify(parsed.filter(message =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system'));
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Isolate Grok-only reconstruction fields from the generic converter. The
+ * upstream converter treats several record attributes as turn-wide and can
+ * otherwise copy a system prompt or one tool's duration to sibling spans.
+ */
+function prepareGrokConversionRecords(records: AgentActivityEntry[]): {
+  records: AgentActivityEntry[];
+  metadata: GrokConversionMetadata;
+} {
+  const metadata: GrokConversionMetadata = { systemInstructions: [] };
+  const prepared = records.map((record) => {
+    const copy = { ...record } as AgentActivityEntry;
+    if (metadata.systemInstructions.length === 0 && copy['gen_ai.system_instructions'] != null) {
+      metadata.systemInstructions = parseGrokSystemInstructions(copy['gen_ai.system_instructions']);
+    }
+    if (!metadata.agentDescription && typeof copy['gen_ai.agent.description'] === 'string') {
+      metadata.agentDescription = copy['gen_ai.agent.description'];
+    }
+    if (!metadata.dataSourceId && typeof copy['gen_ai.data_source.id'] === 'string') {
+      metadata.dataSourceId = copy['gen_ai.data_source.id'];
+    }
+
+    delete copy['gen_ai.system_instructions'];
+    delete copy['gen_ai.agent.description'];
+    delete copy['gen_ai.data_source.id'];
+    delete copy['gen_ai.tool.call.duration'];
+    for (const key of ['gen_ai.input.messages', 'gen_ai.input.messages_delta'] as const) {
+      if (copy[key] != null) copy[key] = stripSystemRoleMessages(copy[key]) as never;
+    }
+
+    // Preserve a content-free structural marker for prompt-only and failed
+    // turns. The converter ignores an `other` event without a messages field.
+    if (
+      copy['event.name'] === 'other'
+      && copy['gen_ai.input.messages'] == null
+      && copy['gen_ai.input.messages_delta'] == null
+    ) {
+      copy['gen_ai.input.messages_delta'] = [] as never;
+    }
+
+    // Terminal errors describe ENTRY/AGENT, not the preceding tool_call LLM.
+    // Root status is applied after conversion using the original records.
+    if (copy['event.name'] === 'other') {
+      delete copy['error.type'];
+      delete copy['error.message'];
+    }
+    return copy;
+  });
+  return { records: prepared, metadata };
 }
 
 /** Minimal exporter surface used by the flusher; lets tests inject fakes. */
@@ -97,6 +301,75 @@ interface ResolvedOtlpEndpoint {
 
 interface AgentExportState {
   exporters: Array<{ name: string; exporter: TraceExporterLike }>;
+}
+
+/**
+ * Per-endpoint export counters, mirroring SlsFlusher's EndpointCounter so both
+ * output legs of the agent pipeline can be reported side by side in L2.
+ * Unit is spans (the OTLP equivalent of SLS log entries).
+ */
+export interface OtlpEndpointCounter {
+  inSpans: number;
+  inBytes: number;
+  outSpans: number;
+  /**
+   * Estimated bytes actually exported to this endpoint (same estimator as
+   * inBytes). Counted per endpoint, so a span exported to two backends is
+   * counted twice — the billing view wants both writes.
+   */
+  outBytes: number;
+  outFailed: number;
+  totalDelayMs: number;
+  lastFlushTime: string;
+  startTime: string;
+  /** True when this endpoint is an ARMS/CMS backend (x-arms-* / x-cms-* headers). */
+  isCms: boolean;
+  /**
+   * SLS project this backend's spans land in, so a CMS destination is billable
+   * on the same project axis as an SLS one. ARMS derives it from the endpoint
+   * host, which config-loader has already done into `x-arms-project`; empty for
+   * a plain OTLP backend, whose storage is not ours to name.
+   */
+  project: string;
+  /** ARMS's fixed trace logstore. Empty for a plain OTLP backend. */
+  logstore: string;
+}
+
+/**
+ * Every ARMS trace endpoint writes into this one logstore inside its project —
+ * ARMS's own convention, not something the endpoint or headers tell us, so it
+ * is hardcoded here rather than derived.
+ */
+const ARMS_TRACE_LOGSTORE = 'logstore-tracing';
+
+/**
+ * A CMS/ARMS backend is an OTLP endpoint carrying the ARMS auth headers that
+ * cmsEntryToOtlpEndpoint injects. Classifying by header (not by endpoint name)
+ * keeps a plain user-configured OTLP backend from being mislabelled as CMS.
+ */
+function isCmsEndpoint(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((h) => {
+    const k = h.toLowerCase();
+    return k === 'x-cms-workspace' || k === 'x-arms-license-key' || k === 'x-arms-project';
+  });
+}
+
+/**
+ * The ARMS project for a CMS endpoint. config-loader already resolved it (from
+ * the entry's explicit project, else the endpoint host) into `x-arms-project`,
+ * so read that instead of parsing the URL a second time and risking a different
+ * answer. Falls back to the host's first label — an endpoint classified as CMS
+ * by workspace/license header alone carries no project header.
+ */
+function cmsProjectOf(headers: Record<string, string>, url: string): string {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === 'x-arms-project' && value) return value;
+  }
+  try {
+    return new URL(url).hostname.split('.')[0] ?? '';
+  } catch {
+    return '';
+  }
 }
 
 const RESERVED_RESOURCE_KEYS = new Set([
@@ -156,7 +429,83 @@ function estimateSpanSize(span: ReadableSpan): number {
   return size;
 }
 
+/**
+ * Apply QoderWork's explicit loop.iteration boundaries to STEP spans without
+ * changing the enclosed LLM timestamps. The converter otherwise derives STEP
+ * start/end from child records, which loses the small but real orchestration
+ * window around each model/tool wave.
+ */
+export function applyQoderWorkStepTiming(
+  records: AgentActivityEntry[],
+  spans: ReadableSpan[],
+): void {
+  // OtlpTraceFlusher invokes the converter once per turn, so session + round
+  // uniquely identifies a STEP even though the converter does not carry the
+  // event-log turn id onto STEP spans.
+  const boundaries = new Map<string, { startNano?: string; endNano?: string }>();
+  for (const record of records) {
+    const sessionId = record['gen_ai.session.id'];
+    const stepId = record['gen_ai.step.id'];
+    if (typeof sessionId !== 'string' || typeof stepId !== 'string') continue;
+    const startNano = record['agent.qoderwork.step.start_time_unix_nano'];
+    const endNano = record['agent.qoderwork.step.end_time_unix_nano'];
+    if (typeof startNano !== 'string' && typeof endNano !== 'string') continue;
+    const round = stepRound(stepId);
+    if (round === undefined) continue;
+    boundaries.set(`${sessionId}\0${round}`, {
+      ...(typeof startNano === 'string' ? { startNano } : {}),
+      ...(typeof endNano === 'string' ? { endNano } : {}),
+    });
+  }
+  if (boundaries.size === 0) return;
+
+  for (const span of spans) {
+    if (span.attributes['gen_ai.span.kind'] !== 'STEP') continue;
+    const sessionId = span.attributes['gen_ai.session.id'];
+    const round = span.attributes['gen_ai.react.round'];
+    if (typeof sessionId !== 'string' || typeof round !== 'number') continue;
+    const boundary = boundaries.get(`${sessionId}\0${round}`);
+    if (!boundary) continue;
+
+    const currentStartNano = hrTimeToNano(span.startTime);
+    const currentEndNano = currentStartNano + hrTimeToNano(span.duration);
+    const desiredStartNano = parseNano(boundary.startNano) ?? currentStartNano;
+    const desiredEndNano = parseNano(boundary.endNano) ?? currentEndNano;
+    if (desiredEndNano < desiredStartNano) continue;
+
+    // ReadableSpan declares these values readonly and SDK Span exposes duration
+    // through a getter. Define per-instance values so this stays independent of
+    // the SDK Span's private backing fields.
+    Object.defineProperties(span, {
+      startTime: { value: nanoToHrTime(desiredStartNano), configurable: true },
+      endTime: { value: nanoToHrTime(desiredEndNano), configurable: true },
+      duration: { value: nanoToHrTime(desiredEndNano - desiredStartNano), configurable: true },
+    });
+  }
+}
+
+function stepRound(stepId: string): number | undefined {
+  const match = stepId.match(/(?:^|[_:s])(\d+)$/);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function parseNano(value: string | undefined): bigint | undefined {
+  if (!value) return undefined;
+  try { return BigInt(value); } catch { return undefined; }
+}
+
+function hrTimeToNano(value: readonly [number, number]): bigint {
+  return BigInt(value[0]) * 1_000_000_000n + BigInt(value[1]);
+}
+
+function nanoToHrTime(value: bigint): [number, number] {
+  return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+}
+
 export class OtlpTraceFlusher extends BaseFlusher {
+  private readonly runtimeCounters = new Map<string, TraceRuntimeCounters>();
   readonly name = 'otlp-trace';
 
   private readonly cfg: OtlpTraceFlusherConfig;
@@ -166,6 +515,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly instanceId = randomUUID();
   private readonly pilotVersion: string;
   private readonly endpoints: ResolvedOtlpEndpoint[];
+  private readonly endpointCounters: Map<string, OtlpEndpointCounter> = new Map();
   private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
@@ -207,6 +557,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       serviceName: ep.serviceName || cfg.serviceName,
       appendAgentTypeToServiceName: cfg.appendAgentTypeToServiceName !== false,
     }));
+    for (const ep of this.endpoints) {
+      const isCms = isCmsEndpoint(ep.headers);
+      this.endpointCounters.set(ep.name, {
+        inSpans: 0, inBytes: 0, outSpans: 0, outBytes: 0, outFailed: 0,
+        totalDelayMs: 0, lastFlushTime: '', startTime: '',
+        isCms,
+        project: isCms ? cmsProjectOf(ep.headers, ep.url) : '',
+        logstore: isCms ? ARMS_TRACE_LOGSTORE : '',
+      });
+    }
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
@@ -235,7 +595,70 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   // --- Public API (BaseFlusher) ---
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  override getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] {
+    const now = performance.now();
+    const rows = new Map<string, TraceRuntimeSnapshot>();
+    for (const [agentType, counters] of this.runtimeCounters) {
+      rows.set(agentType, {
+        ...counters,
+        agent_type: agentType,
+        pending_buffers: 0,
+        pending_records: 0,
+        pending_logical_bytes: 0,
+        pending_unmeasured_records: 0,
+        largest_buffer_logical_bytes: 0,
+        largest_buffer_records: 0,
+        largest_buffer_age_ms: 0,
+        oldest_buffer_age_ms: 0,
+      });
+    }
+    // Inspect only existing bounded buffers, never walk or copy their records.
+    // In-flight conversion/export has already left this map and is excluded.
+    for (const buf of this.turnBuffers.values()) {
+      const row = rows.get(buf.agentType);
+      if (!row) continue;
+      const age = Math.max(0, Math.round(now - buf.openedAtMs));
+      row.pending_buffers++;
+      row.pending_records += buf.records.length;
+      row.pending_logical_bytes += buf.logicalBytes;
+      row.pending_unmeasured_records += buf.unmeasuredRecords;
+      row.oldest_buffer_age_ms = Math.max(row.oldest_buffer_age_ms, age);
+      if (row.pending_buffers === 1 || buf.logicalBytes > row.largest_buffer_logical_bytes) {
+        row.largest_buffer_logical_bytes = buf.logicalBytes;
+        row.largest_buffer_records = buf.records.length;
+        row.largest_buffer_age_ms = age;
+        row.largest_buffer_turn_id = buf.keySource === 'turn_id' ? buf.keyValue : undefined;
+        row.largest_buffer_session_id = buf.sessionId;
+      }
+    }
+    return [...rows.values()];
+  }
+
+  private getRuntimeCounters(agentType: string): TraceRuntimeCounters | undefined {
+    let counters = this.runtimeCounters.get(agentType);
+    if (!counters && this.runtimeCounters.size < MAX_RUNTIME_AGENTS) {
+      counters = {
+        removed_buffers_total: 0,
+        removed_logical_bytes_total: 0,
+        removed_unmeasured_records_total: 0,
+        converter_calls_total: 0,
+        converter_duration_ms_total: 0,
+        converter_failed_total: 0,
+      };
+      this.runtimeCounters.set(agentType, counters);
+    }
+    return counters;
+  }
+
+  private recordBufferRemoval(buf: TurnBuffer): void {
+    const counters = buf.runtimeCounters;
+    if (!counters) return;
+    counters.removed_buffers_total++;
+    counters.removed_logical_bytes_total += buf.logicalBytes;
+    counters.removed_unmeasured_records_total += buf.unmeasuredRecords;
+  }
+
+  async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -304,6 +727,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
+        logicalBytes: 0,
+        unmeasuredRecords: 0,
+        openedAtMs: performance.now(),
+        runtimeCounters: this.getRuntimeCounters(agentType),
       };
       this.turnBuffers.set(key, buf);
     } else if (!buf.sessionId && incomingSessionId) {
@@ -311,6 +738,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
+    if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
+      buf.logicalBytes += logicalBytes;
+    } else {
+      buf.unmeasuredRecords++;
+    }
 
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
@@ -326,13 +758,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
     // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
     // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
     this._deferSignalA = true;
     try {
-      for (const entry of entries) {
-        await this.send(entry);
+      for (let i = 0; i < entries.length; i++) {
+        await this.send(entries[i], sizes?.[i]);
       }
     } finally {
       this._deferSignalA = false;
@@ -409,9 +842,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
-    // stable end-of-run boundary in every supported version (>=2026.5.12).
+    // stable successful-run boundary. Legacy failed attempts can terminate
+    // before llm_output; the adapter explicitly seals those at agent_end.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
-      return entry['agent.openclaw.hook'] === 'llm_output';
+      return entry['agent.openclaw.hook'] === 'llm_output'
+        || (entry['agent.openclaw.compatibility'] === 'legacy'
+          && (entry['agent.openclaw.hook'] === 'agent_end' || entry['agent.openclaw.hook'] === 'legacy_cleanup')
+          && entry['gen_ai.turn.end'] === true);
+    }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'grok-build') {
+      // The Grok processor emits one explicit turn-terminal `other` record.
+      // LLM finish reasons close model attempts, not the turn buffer itself;
+      // requiring the terminal record also prevents a single-record delivery
+      // path from flushing before later TOOL/terminal evidence arrives.
+      return entry['event.name'] === 'other'
+        && (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])
+          || hasFinishReason(
+            entry['gen_ai.response.finish_reasons'],
+            GROK_TERMINAL_FINISH_REASONS,
+          ));
     }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
@@ -445,6 +894,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.flushedTurnKeys.add(buf.key);
     }
     this.turnBuffers.delete(buf.key);
+    this.recordBufferRemoval(buf);
     const p = this.flushSingleTurn(buf).catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
@@ -460,6 +910,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         completed.push(buf);
         this.flushedTurnKeys.add(key);
         this.turnBuffers.delete(key);
+        this.recordBufferRemoval(buf);
       }
     }
     await Promise.allSettled(
@@ -527,6 +978,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     );
     const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
+    let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
+    let openClawIdentity: OpenClawIdentityMetadata = {};
 
     try {
       try {
@@ -552,13 +1005,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
+        const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
+          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...agentSpecificKeys,
           ...customKeys,
           ...prefixKeys,
         ])];
-        const recordsForConversion = customKeys.length === 0
+        let recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {
               const copy: AgentActivityEntry = { ...r };
@@ -567,6 +1023,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
               return copy;
             });
+        if (agentType === 'openclaw') {
+          recordsForConversion = prepareOpenClawCollectionRecords(recordsForConversion);
+          const prepared = prepareOpenClawIdentityRecords(recordsForConversion);
+          recordsForConversion = prepared.records;
+          openClawIdentity = prepared.metadata;
+        }
+        if (agentType === 'grok-build') {
+          const prepared = prepareGrokConversionRecords(recordsForConversion);
+          recordsForConversion = prepared.records;
+          grokMetadata = prepared.metadata;
+        }
+
+        // agent.input is a compatibility copy of the input-bearing `other`.
+        // Keep it in the normal OTLP flusher path, but exclude it at the
+        // EventLog-to-Trace boundary so the converter does not emit an extra
+        // empty STEP for the duplicate input boundary.
+        const traceConversionRecords = recordsForConversion.filter(
+          record => record['event.name'] !== 'agent.input',
+        );
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
@@ -574,16 +1049,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(recordsForConversion);
+        const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
         let result;
+        const counters = this.getRuntimeCounters(agentType);
+        const convertStarted = performance.now();
+        let succeeded = false;
         try {
           result = convertEventLogToTrace(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },
           );
+          succeeded = true;
         } finally {
           toolSpanIds.clear();
+          if (counters) {
+            counters.converter_calls_total++;
+            counters.converter_duration_ms_total += performance.now() - convertStarted;
+            if (!succeeded) counters.converter_failed_total++;
+          }
         }
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
@@ -606,10 +1090,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       inMem.reset();
 
       if (spans.length === 0) return;
+      applyQoderWorkStepTiming(records, spans);
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
+        this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
+        this.enrichOpenClawSessionKey(records, spans);
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
+      }
+      if (agentType === 'grok-build') {
+        this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
 
       const exportState = this.getOrCreateExportState(agentType, serviceName);
@@ -680,20 +1170,41 @@ export class OtlpTraceFlusher extends BaseFlusher {
     agentType: string,
     spans: ReadableSpan[],
   ): Promise<void> {
+    const counter = this.endpointCounters.get(endpointName);
+    const startMs = Date.now();
+    // Sized once and reused on the success path: in and out must measure the
+    // same thing, or the drop rate between them becomes meaningless.
+    let batchBytes = 0;
+    if (counter) {
+      counter.inSpans += spans.length;
+      for (const span of spans) batchBytes += estimateSpanSize(span);
+      counter.inBytes += batchBytes;
+      if (!counter.startTime) counter.startTime = formatTime(new Date());
+    }
     // Never rejects: a failing backend is isolated + persisted, not propagated.
     return new Promise<void>((resolve) => {
       exporter.export(spans, (result) => {
+        if (counter) counter.totalDelayMs += Date.now() - startMs;
         if (result.code !== ExportResultCode.SUCCESS) {
+          if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
           this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
           }).catch(() => undefined);
+        } else if (counter) {
+          counter.outSpans += spans.length;
+          counter.outBytes += batchBytes;
+          counter.lastFlushTime = formatTime(new Date());
         }
         resolve();
       });
     });
+  }
+
+  getEndpointCounters(): Map<string, OtlpEndpointCounter> {
+    return this.endpointCounters;
   }
 
   private getOrCreateConvertState(
@@ -810,6 +1321,200 @@ export class OtlpTraceFlusher extends BaseFlusher {
           span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
         }
       }
+    }
+  }
+
+  private enrichOpenClawSessionKey(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const keys = new Set<string>();
+    const scopes = new Set<string>();
+    for (const record of records) {
+      if (record['gen_ai.agent.type'] !== 'openclaw'
+        || record[OPENCLAW_SESSION_KEY_AMBIGUOUS] === true) return;
+      scopes.add(JSON.stringify([
+        record.trace_id, record['gen_ai.session.id'], record['gen_ai.turn.id'],
+        record['gen_ai.agent.id'], record['gen_ai.agent.name'], record['gen_ai.agent.scope'],
+      ]));
+      const value = record[OPENCLAW_SESSION_KEY];
+      if (value !== undefined && value !== null) {
+        if (!isOpenClawSessionKey(value)) return;
+        keys.add(value);
+      }
+    }
+    // Normal OpenClaw buffers contain a single native run. Do not guess for a
+    // mixed/fused scope (especially a child without its own key), or conflicts.
+    // This is deliberately post-conversion: passthrough can select a first value
+    // and not all synthetic parent/STEP spans carry the native turn identifier.
+    if (scopes.size !== 1 || keys.size !== 1) return;
+    const sessionKey = [...keys][0];
+    const traceId = records[0]?.trace_id;
+    for (const span of spans) {
+      if (span.spanContext().traceId === traceId
+        && ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL'].includes(String(span.attributes['gen_ai.span.kind']))) {
+        span.attributes[OPENCLAW_SESSION_KEY] = sessionKey;
+      }
+    }
+  }
+
+  private enrichOpenClawIdentityAttributes(
+    identity: OpenClawIdentityMetadata,
+    spans: ReadableSpan[],
+  ): void {
+    const attributes = {
+      ...(identity.senderId ? { 'agent.openclaw.sender.id': identity.senderId } : {}),
+      ...(identity.channel ? { 'agent.openclaw.channel': identity.channel } : {}),
+      ...(identity.accountId ? { 'agent.openclaw.account.id': identity.accountId } : {}),
+      ...(identity.channelId ? { 'agent.openclaw.channel.id': identity.channelId } : {}),
+      ...(identity.userIdSource
+        ? { 'agent.openclaw.user.id.source': identity.userIdSource }
+        : {}),
+    };
+    if (Object.keys(attributes).length === 0) return;
+    for (const span of spans) Object.assign(span.attributes, attributes);
+  }
+
+  private enrichGrokBuildSpans(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+    metadata: GrokConversionMetadata,
+  ): void {
+    const toolData = new Map<string, {
+      duration?: number;
+      status?: string;
+      errorType?: string;
+      matchStrategy?: string;
+      timingSource?: string;
+    }>();
+    const llmData = new Map<string, {
+      errorType?: string;
+      timingSource?: string;
+    }>();
+    let terminal: { reason: string; errorType?: string } | undefined;
+
+    for (const record of records) {
+      if (record['event.name'] === 'tool.call' || record['event.name'] === 'tool.result') {
+        const callId = record['gen_ai.tool.call.id'];
+        if (typeof callId === 'string' && callId) {
+          const current = toolData.get(callId) ?? {};
+          const duration = record['gen_ai.tool.call.duration'];
+          const status = record['tool.result.status'];
+          const errorType = record['error.type'];
+          const matchStrategy = record['loongsuite.grok.match.strategy'];
+          const timingSource = record['loongsuite.grok.timing.source'];
+          if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+            current.duration = duration;
+          }
+          if (typeof status === 'string' && status) current.status = status;
+          if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+          if (typeof matchStrategy === 'string' && matchStrategy) current.matchStrategy = matchStrategy;
+          if (typeof timingSource === 'string' && timingSource) current.timingSource = timingSource;
+          toolData.set(callId, current);
+        }
+      }
+
+      if (record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response') {
+        const responseId = record['gen_ai.response.id'];
+        if (typeof responseId === 'string' && responseId) {
+          const current = llmData.get(responseId) ?? {};
+          const errorType = record['error.type'];
+          const timingSource = record['loongsuite.grok.timing.source'];
+          if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+          if (typeof timingSource === 'string' && timingSource) current.timingSource = timingSource;
+          llmData.set(responseId, current);
+        }
+      }
+
+      if (record['event.name'] === 'other') {
+        const rawReasons = record['gen_ai.response.finish_reasons'];
+        const reasons = Array.isArray(rawReasons)
+          ? rawReasons.filter((reason): reason is string => typeof reason === 'string')
+          : [];
+        const reason = reasons.find(value => value === 'error' || value === 'cancelled');
+        if (reason) {
+          const errorType = record['error.type'];
+          terminal = {
+            reason,
+            errorType: typeof errorType === 'string' && errorType ? errorType : undefined,
+          };
+        }
+      }
+    }
+
+    const llmSpans: ReadableSpan[] = [];
+    for (const span of spans) {
+      const spanKind = span.attributes['gen_ai.span.kind'];
+      if (spanKind === 'TOOL') {
+        const callId = span.attributes['gen_ai.tool.call.id'];
+        if (typeof callId !== 'string') continue;
+        const data = toolData.get(callId);
+        if (!data) continue;
+        if (data.duration !== undefined) {
+          span.attributes['gen_ai.tool.call.duration'] = data.duration;
+        }
+        if (data.status) span.attributes['tool.result.status'] = data.status;
+        if (data.matchStrategy) span.attributes['loongsuite.grok.match.strategy'] = data.matchStrategy;
+        if (data.timingSource) span.attributes['loongsuite.grok.timing.source'] = data.timingSource;
+        if (data.status === 'failure' || data.status === 'cancelled') {
+          const cancelled = data.status === 'cancelled';
+          span.attributes['error.type'] = data.errorType
+            ?? (cancelled ? 'ToolCancelled' : 'ToolError');
+          span.attributes['error.message'] = cancelled
+            ? 'tool execution cancelled'
+            : 'tool execution failed';
+          Object.assign(span.status, {
+            code: SpanStatusCode.ERROR,
+            message: cancelled ? 'tool execution cancelled' : 'tool execution failed',
+          });
+        }
+        continue;
+      }
+
+      if (spanKind === 'LLM') {
+        llmSpans.push(span);
+        const responseId = span.attributes['gen_ai.response.id'];
+        if (typeof responseId !== 'string') continue;
+        const data = llmData.get(responseId);
+        if (!data) continue;
+        if (data.timingSource) span.attributes['loongsuite.grok.timing.source'] = data.timingSource;
+        if (data.errorType) {
+          span.attributes['error.type'] = data.errorType;
+          span.attributes['error.message'] = 'model request failed';
+          Object.assign(span.status, {
+            code: SpanStatusCode.ERROR,
+            message: 'model request failed',
+          });
+        }
+        continue;
+      }
+
+      if (spanKind === 'AGENT') {
+        if (metadata.agentDescription) {
+          span.attributes['gen_ai.agent.description'] = metadata.agentDescription;
+        }
+        if (metadata.dataSourceId) {
+          span.attributes['gen_ai.data_source.id'] = metadata.dataSourceId;
+        }
+      }
+
+      if (terminal && (spanKind === 'AGENT' || spanKind === 'ENTRY')) {
+        const cancelled = terminal.reason === 'cancelled';
+        span.attributes['error.type'] = terminal.errorType
+          ?? (cancelled ? 'cancelled' : 'model_error');
+        span.attributes['error.message'] = cancelled ? 'turn cancelled' : 'model request failed';
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: cancelled ? 'turn cancelled' : 'model request failed',
+        });
+      }
+    }
+
+    if (metadata.systemInstructions.length > 0 && llmSpans.length > 0) {
+      llmSpans.sort((left, right) => {
+        if (left.startTime[0] !== right.startTime[0]) return left.startTime[0] - right.startTime[0];
+        return left.startTime[1] - right.startTime[1];
+      });
+      llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
+        metadata.systemInstructions,
+      );
     }
   }
 
@@ -1091,7 +1796,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const svcName = `${this.cfg.serviceName}-${agentType}__${safeEndpoint}`;
       const dir = this.failedDir;
       await ensureDir(dir);
-      const filepath = path.join(dir, `${svcName}.jsonl`);
+      const filepath = path.join(dir, `${svcName}-${getTodayDateString()}.jsonl`);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
         const obj = JSON.parse(line);
@@ -1117,8 +1822,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
 }
 
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
+  return hasFinishReason(finishReasons, TERMINAL_FINISH_REASONS);
+}
+
+function hasFinishReason(finishReasons: unknown, expected: ReadonlySet<string>): boolean {
   return Array.isArray(finishReasons)
-    && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+    && finishReasons.some(reason => typeof reason === 'string' && expected.has(reason));
 }
 
 /**

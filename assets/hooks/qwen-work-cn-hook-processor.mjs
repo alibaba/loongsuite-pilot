@@ -159,7 +159,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
   const promptRow = turnRows.find(isPromptRow);
   const promptText = extractText(promptRow);
   const promptTs = timestampToUnixNanos(promptRow.timestamp);
-  const version = stringValue(promptRow.version);
   const turnMetadata = { 'agent.qwenworkcn.promptId': stringValue(promptRow.promptId) || turnId };
 
   if (promptText) {
@@ -174,7 +173,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: promptText }] }],
       time_unix_nano: promptTs,
       observed_time_unix_nano: observedTs,
-      version,
     }, promptRow, runtimeConfig, cwd, `${turnId}:other`));
   }
 
@@ -221,7 +219,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
       observedTs,
       runtimeConfig,
       cwd,
-      version,
       inputDelta,
       requestTs: index === 0 ? promptTs : previousToolResultTs,
       isLastStep: index === groups.length - 1,
@@ -265,7 +262,7 @@ function indexToolResults(rows) {
 function buildStepEvents(opts) {
   const {
     group, toolResults, stepId, turnId, sessionId, userId, observedTs,
-    runtimeConfig, cwd, version, inputDelta, requestTs, isLastStep, turnMetadata,
+    runtimeConfig, cwd, inputDelta, requestTs, isLastStep, turnMetadata,
   } = opts;
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -302,7 +299,6 @@ function buildStepEvents(opts) {
     'gen_ai.agent.type': 'qwen-work-cn',
     'gen_ai.provider.name': provider,
     'user.id': userId,
-    version,
   };
   const records = [];
 

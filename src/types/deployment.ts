@@ -206,6 +206,8 @@ export interface DirectoryPluginActivationConfig {
   timeoutMs?: number;
   /** Arguments that enable the plugin after it has been copied. */
   enableArgs: string[];
+  /** Arguments appended only when the capability probe output contains each exact argument. */
+  optionalEnableArgs?: string[];
   /** Best-effort arguments that disable the plugin before Pilot removes it. */
   disableArgs?: string[];
 }

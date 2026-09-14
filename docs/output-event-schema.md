@@ -18,7 +18,19 @@ boundary.
 | `tool.result` | The result returned by a tool execution. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
+| `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
 | `other` | Other events that cannot be classified into the above event names. |
+
+During the compatibility period, an `other` carrying `gen_ai.input.messages` or
+`gen_ai.input.messages_delta` is preserved and followed by one `agent.input`.
+The compatibility copy preserves the input content and context, but has a
+deterministically derived `event.id` and omits `gen_ai.turn.start` and
+`gen_ai.turn.end`; the legacy `other` remains the sole owner of Turn boundaries.
+Expansion runs after the content policy, so no `agent.input` is generated when
+that policy removes both canonical input fields. SLS, JSONL, and HTTP retain both
+events when a copy is generated. OTLP Trace conversion continues to consume the
+legacy `other` and excludes the compatibility copy, so the Span tree does not
+gain an empty STEP.
 
 The four core `event.name` values map to GenAI audit events as follows:
 
@@ -52,6 +64,7 @@ Required levels follow OpenTelemetry wording:
 | `host.ip` | string | Recommended | Host IP or log source IP. |
 | `service.name` | string | Recommended | Service name used to distinguish agent instances or product lines. |
 | `gen_ai.session.id` | string | Conditionally Required when the agent maintains session context | User session or conversation ID. |
+| `agent.openclaw.session_key` | string | Recommended when exposed by OpenClaw | Native logical routing key; distinct from the conversation UUID in `gen_ai.session.id`. Preserved in canonical event logs and OpenClaw ENTRY/AGENT/STEP/LLM/TOOL Span attributes (not Resources) when the run has an unambiguous native key. |
 | `gen_ai.turn.id` | string | Recommended | One user request through the agent's final response. |
 | `gen_ai.step.id` | string | Recommended | One ReAct loop or intermediate agent step. |
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
@@ -79,6 +92,7 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
 | `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on this entry; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the message contains media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
@@ -101,7 +115,31 @@ Required levels follow OpenTelemetry wording:
 
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
 
+## OpenClaw Session Key
+
+OpenClaw session keys are supported by both the legacy (2026.3.8+) and modern
+adapters. Run events (`other`, `agent.input`, `llm.request`, `llm.response`,
+`tool.call`, `tool.result`) retain the key when available; lifecycle-only
+`session_start`/`session_end` records remain excluded from canonical output.
+Missing, malformed, oversized (over 1024 characters), or conflicting keys are
+not guessed or replaced with session IDs. A reset may retain the routing key
+while changing the conversation UUID. Keys can contain channel/user identifiers,
+so they pass through configured masking rules before event/trace export; disabling
+message content alone does not remove this metadata. All other agent-scoped
+extensions retain their existing JSONL/SLS filtering behavior. This field does
+not automatically create an SLS index or a dedicated ARMS UI column.
+
+## System Instructions
+
+`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It rides the existing message-content controls (Opt-In requirement level, per-agent `captureMessageContent`, and the masking pipeline), so it is omitted entirely when content capture is disabled.
+
+For `hermes` the prompt is read from the provider request body observed at `pre_api_request`, because `conversation_history` never replays system messages. Provider shapes are normalized to the same parts array: OpenAI-compatible `messages[]` entries with role `system` / `developer`, Responses API top-level `instructions`, Anthropic and Bedrock top-level `system` (string or block list), and Gemini `systemInstruction.parts[].text`. A blank or absent prompt yields no field.
+
+For `hermes`, system instructions remain only in `gen_ai.system_instructions`; they are not synthesized into `gen_ai.input.messages` or `gen_ai.input.messages_delta`. This keeps the established business-turn input and `gen_ai.input.messages_hash` semantics unchanged for LLM, AGENT, and ENTRY spans.
+
 ## Multimodal Message Parts
+
+> **Experimental.** Multimodal `uri` parts and `gen_ai.*.multimodal_metadata` may change.
 
 When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Multimodal Collection](multimodal.md)), media in message `parts` uses object-storage references instead of inline base64:
 
@@ -121,7 +159,7 @@ When a supported agent process starts with the following environment variables, 
 | `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`, `resourceAttributes["agentteams.worker.name"]` | Logical worker name; takes precedence over the native name for a main agent. |
 | `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | Concrete worker instance; never overwrites `gen_ai.agent.id`. |
 
-This is currently supported for Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
+Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI support both variables. OpenClaw and Hermes Agent support only `AGENTTEAMS_WORKER_NAME` and do not currently consume `AGENTTEAMS_INSTANCE_ID`. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
 
 ## Provider Names
 

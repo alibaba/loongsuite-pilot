@@ -1,15 +1,65 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
-import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
+import {
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichCliTurn,
+  enrichIdeTurn,
+  injectTraceId,
+  needsCliSegmentFallback,
+} from '../../../src/inputs/qoder-trace/token-enricher.js';
+import {
+  clearAttachedImagePathsCache,
+  deriveSyntheticIdeRequestEventId,
+  enrichIdeMultimodal,
+  extractMarkdownImagePaths,
+  extractToolImagePaths,
+} from '../../../src/inputs/qoder-trace/qoder-ide-multimodal.js';
+import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+  applyInvocationIdentity,
+} from '../../../src/normalization/invocation-identity.js';
+import {
+  QoderTraceInput,
+  qoderDefaultAllowedRootPaths,
+  resolveQoderAllowedRootPaths,
+} from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { canonicalizeRootPath } from '../../../src/multimodal/resolve.js';
+import { withDeadline } from '../../../src/multimodal/processor.js';
+import { fakePathToUri } from '../multimodal/fake-uri.js';
+import { MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
-import type { SqliteTokenData } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
+import {
+  readAttachedImagePathsForRequestIds,
+  type AttachedImageLookup,
+  type SqliteTokenData,
+} from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
+// The dev validator's enum, imported so a drift in the runtime copy fails here
+// rather than at collection time.
+import { VALID_FINISH_REASONS as VALIDATOR_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+
+vi.mock('../../../src/inputs/qoder-trace/sqlite-token-reader.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/inputs/qoder-trace/sqlite-token-reader.js')>();
+  return {
+    ...actual,
+    readAttachedImagePathsForRequestIds: vi.fn(),
+  };
+});
+
+const mockReadAttachedImagePaths = vi.mocked(readAttachedImagePathsForRequestIds);
+
+function attached(paths: string[], startMs?: number): AttachedImageLookup {
+  return startMs === undefined ? { paths } : { paths, startMs };
+}
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -37,15 +87,33 @@ function makeIntercept(overrides: Partial<InterceptTokenData> = {}): InterceptTo
   };
 }
 
+function makeSegment(overrides: Partial<SegmentTokenData> = {}): SegmentTokenData {
+  return {
+    requestId: 'req-A',
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    requestStartTs: 1780000000000,
+    responseEndTs: 1780000001000,
+    toolFinishedTs: 0,
+    stopReason: '',
+    model: '',
+    ...overrides,
+  };
+}
+
 describe('QoderTraceInput token-enricher', () => {
-  describe('enrichCliTurn (precise response_id match)', () => {
-    it('injects tokens from segment into matching hook events', () => {
-      // Simulate old processor output (time == observed → enricher overwrites timestamp)
+  // Segments are paired with llm.response by completion instant, so a fixture's
+  // response time must sit within the join tolerance of its responseEndTs - the
+  // hook fires just after the response lands, 0-32ms later on real data.
+  describe('enrichCliTurn (segment paired by response completion time)', () => {
+    it('injects tokens without moving only one side of an incomplete Hook interval', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'gen_ai.response.id': 'req-A',
           'event.name': 'llm.response',
-          time_unix_nano: '1780000001000000000',
+          time_unix_nano: '1780000002030000000',
           observed_time_unix_nano: '1780000001000000000',
         } as any),
       ];
@@ -67,15 +135,20 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
       expect(entries[0]['gen_ai.usage.output_tokens']).toBe(200);
       expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(3000);
-      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[0].time_unix_nano).toBe('1780000002030000000');
     });
 
-    it('always overwrites timestamp with segment time for CLI (unified clock source)', () => {
+    it('preserves an already-valid Hook LLM interval', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'gen_ai.response.id': 'req-A',
+          'event.name': 'llm.request',
+          time_unix_nano: '1780000001000000000',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'req-A',
           'event.name': 'llm.response',
-          time_unix_nano: '1780000005000000000',
+          time_unix_nano: '1780000002030000000',
           observed_time_unix_nano: '1780000009000000000',
         } as any),
       ];
@@ -94,15 +167,15 @@ describe('QoderTraceInput token-enricher', () => {
 
       enrichCliTurn(entries, segments);
 
-      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
-      // CLI always uses segment timestamps (unified clock)
-      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[0].time_unix_nano).toBe('1780000001000000000');
+      expect(entries[1].time_unix_nano).toBe('1780000002030000000');
     });
 
     it('only writes tokens to first response of same response.id (thinking+text)', () => {
       const entries: AgentActivityEntry[] = [
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000001000000000' }),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000001500000000' }),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000002000000000' }),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', time_unix_nano: '1780000002010000000' }),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -128,7 +201,7 @@ describe('QoderTraceInput token-enricher', () => {
     it('injects real model name from segment into llm.request and llm.response', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.request', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto' } as any),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto', 'gen_ai.response.model': 'auto' } as any),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto', 'gen_ai.response.model': 'auto', time_unix_nano: '1780000002000000000' } as any),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -136,8 +209,9 @@ describe('QoderTraceInput token-enricher', () => {
         outputTokens: 200,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        // Left at 0 so no request timestamp is backfilled, isolating the model assertion.
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: 'ultimate',
@@ -152,7 +226,7 @@ describe('QoderTraceInput token-enricher', () => {
 
     it('does not override model when segment model is empty or unknown', () => {
       const entries: AgentActivityEntry[] = [
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.request.model': 'auto' } as any),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.request.model': 'auto', time_unix_nano: '1780000002000000000' } as any),
       ];
       const segments: SegmentTokenData[] = [{
         requestId: 'req-A',
@@ -161,7 +235,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -214,6 +288,7 @@ describe('QoderTraceInput token-enricher', () => {
           'gen_ai.usage.input_tokens': 10,
           'gen_ai.usage.output_tokens': 1,
           'gen_ai.usage.total_tokens': 11,
+          time_unix_nano: '1780000002000000000',
         }),
       ];
       const segments: SegmentTokenData[] = [{
@@ -223,7 +298,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 3000,
         cacheCreationTokens: 100,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -244,6 +319,7 @@ describe('QoderTraceInput token-enricher', () => {
           'gen_ai.usage.input_tokens': 700,
           'gen_ai.usage.output_tokens': 30,
           'gen_ai.usage.total_tokens': 730,
+          time_unix_nano: '1780000002000000000',
         }),
       ];
       const segments: SegmentTokenData[] = [{
@@ -253,7 +329,7 @@ describe('QoderTraceInput token-enricher', () => {
         cacheReadTokens: 3000,
         cacheCreationTokens: 0,
         requestStartTs: 0,
-        responseEndTs: 0,
+        responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: '',
         model: '',
@@ -324,6 +400,464 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[1].time_unix_nano).toBe(ms(base + 201));
       expect(entries[2].time_unix_nano).toBe(ms(base + 4201));
       expect(entries[2]['gen_ai.tool.call.duration']).toBe(4000);
+    });
+
+    // Segments carry Anthropic's native stop_reason, but finish_reasons is the
+    // OTel GenAI enum. This path used to write the raw value through, so a
+    // segment could put tool_use / stop_sequence on a span while the transcript
+    // hook normalized the very same reason.
+    it('maps vendor stop_reason spellings onto the OTel finish_reason enum', () => {
+      const cases: Array<[string, string]> = [
+        ['tool_use', 'tool_call'],
+        ['stop_sequence', 'stop'],
+        ['refusal', 'stop'],
+        ['model_context_window_exceeded', 'length'],
+      ];
+
+      for (const [raw, expected] of cases) {
+        const entries: AgentActivityEntry[] = [
+          makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+        ];
+        enrichCliTurn(entries, [makeSegment({ stopReason: raw })]);
+        expect(entries[0]['gen_ai.response.finish_reasons']).toEqual([expected]);
+      }
+    });
+
+    // Dropped rather than coerced to `stop`: pause_turn is mid-turn, and reading
+    // it as terminal would make Signal A flush the turn buffer early, trading a
+    // validator error for a fragmented trace.
+    it('leaves finish_reasons absent for stop_reasons outside the enum', () => {
+      for (const raw of ['pause_turn', 'some_future_reason']) {
+        const entries: AgentActivityEntry[] = [
+          makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+        ];
+        enrichCliTurn(entries, [makeSegment({ stopReason: raw })]);
+        expect(entries[0]['gen_ai.response.finish_reasons']).toBeUndefined();
+      }
+    });
+
+    it('never emits a finish_reason the trace validator rejects', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' } as any),
+      ];
+      enrichCliTurn(entries, [makeSegment({ stopReason: 'tool_use' })]);
+      const reasons = entries[0]['gen_ai.response.finish_reasons'] as string[];
+      for (const reason of reasons) {
+        expect(VALIDATOR_FINISH_REASONS).toContain(reason);
+      }
+    });
+  });
+
+  // agent.client_request_id carries the CLI's own request id, the same id a
+  // segment records, so pairing no longer depends on the two clocks agreeing.
+  // The timestamp pass above stays for JSONL written before the hook had it.
+  describe('enrichCliTurn (segment paired by agent.client_request_id)', () => {
+    it('pairs on the client request id even when the clocks are far apart', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_provider_A',
+          'event.name': 'llm.response',
+          'agent.client_request_id': 'cli-req-A',
+          // 30s away: the timestamp pass would reject this outright.
+          time_unix_nano: '1780000032000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(5000);
+      expect(entries[0].time_unix_nano).toBe('1780000032000000000');
+    });
+
+    // The whole point of the exact key: a burst of calls closer together than
+    // the tolerance can no longer be attributed to the wrong segment.
+    it('keeps near-simultaneous responses on their own segments', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 10),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_B',
+          'gen_ai.step.id': 'turn-1:s2',
+          'agent.client_request_id': 'cli-req-B',
+          time_unix_nano: ms(base + 12),
+        } as any),
+      ];
+      // Deliberately inverted: B's segment is nearer to A's response time, so a
+      // purely temporal match would swap the two.
+      const segments = [
+        makeSegment({ requestId: 'cli-req-A', inputTokens: 100, outputTokens: 1, responseEndTs: base + 40 }),
+        makeSegment({ requestId: 'cli-req-B', inputTokens: 200, outputTokens: 2, responseEndTs: base + 11 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+      expect(entries[0].time_unix_nano).toBe(ms(base + 10));
+      expect(entries[1].time_unix_nano).toBe(ms(base + 12));
+    });
+
+    it('falls back to the timestamp pass for entries without the id', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_legacy',
+          'gen_ai.step.id': 'turn-1:s2',
+          time_unix_nano: ms(base + 20),
+        } as any),
+      ];
+      const segments = [
+        makeSegment({ requestId: 'cli-req-A', inputTokens: 100, outputTokens: 1, responseEndTs: base + 9000 }),
+        makeSegment({ requestId: 'cli-req-legacy', inputTokens: 200, outputTokens: 2, responseEndTs: base + 30 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+    });
+
+    // A segment already claimed by an exact match must not be reused by the
+    // fallback, otherwise one provider call's usage lands on two spans.
+    it('does not let the timestamp pass re-consume an exactly matched segment', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_legacy',
+          'gen_ai.step.id': 'turn-1:s2',
+          time_unix_nano: ms(base + 20),
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 100,
+        outputTokens: 1,
+        responseEndTs: base + 20,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(entries[1].time_unix_nano).toBe(ms(base + 20));
+    });
+
+    // Both ids come from the CLI's own namespace, so a segment carrying a
+    // different one provably belongs to another request. The CLI makes internal
+    // calls (title generation) whose segments have no response in the batch, and
+    // proximity alone would happily attribute one of those to this response.
+    it('does not fall back to proximity when the exact key found no segment', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'agent.client_request_id': 'cli-req-missing',
+          time_unix_nano: '1780000002000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-other',
+        inputTokens: 100,
+        outputTokens: 1,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(entries[0].time_unix_nano).toBe('1780000002000000000');
+    });
+
+    // Exact pairing accepts a segment whose timestamps failed to parse, so the
+    // timestamp injection has to stand on its own guard: moving llm.response onto
+    // a zero clock would put it before its llm.request (negative-duration span)
+    // and stamp tool.call at 1970.
+    it('takes usage from a segment with unparseable timestamps without moving any clock', () => {
+      const hookTs = '1780000099000000000';
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: hookTs,
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(5000);
+      for (const entry of entries) {
+        expect(entry.time_unix_nano).toBe(hookTs);
+      }
+    });
+
+    // Segment usage is zero on current qodercli releases; timestamps are the
+    // reason to pair at all, so an all-zero segment must still be joined.
+    it('joins a zero-usage segment for its timestamps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'resp_A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'cli-req-A',
+          'gen_ai.usage.input_tokens': 700,
+          'gen_ai.usage.output_tokens': 30,
+          time_unix_nano: '1780000099000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000099000000000',
+        } as any),
+      ];
+      const segments = [makeSegment({
+        requestId: 'cli-req-A',
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+      })];
+
+      enrichCliTurn(entries, segments);
+
+      // Native usage is preserved, timing comes from the segment.
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(700);
+      expect(entries[0].time_unix_nano).toBe(String(BigInt(1780000002000) * 1_000_000n));
+      expect(entries[1].time_unix_nano).toBe(String(BigInt(1780000000000) * 1_000_000n));
+    });
+
+    it('consumes two segments when two response groups share one client request id', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'shared-request',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-b',
+          'gen_ai.step.id': 'turn-1:s2',
+          'agent.client_request_id': 'shared-request',
+        } as any),
+      ];
+      const segments = [
+        makeSegment({ requestId: 'shared-request', inputTokens: 100, outputTokens: 1 }),
+        makeSegment({ requestId: 'shared-request', inputTokens: 200, outputTokens: 2 }),
+      ];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(100);
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(200);
+    });
+  });
+
+  describe('conditional CLI segment fallback', () => {
+    it('does not request segment for optional model, finish, or tool timing gaps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.response.id': 'chatcmpl-A',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780000001000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliPrimary(entries, undefined, [makeIntercept()]);
+
+      expect(needsCliSegmentFallback(entries)).toBe(false);
+    });
+
+    it('requests segment when usage remains missing', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({ time_unix_nano: '1780000001000000000' }),
+      ];
+
+      expect(needsCliSegmentFallback(entries)).toBe(true);
+    });
+
+    it('requests segment when the Hook LLM interval is zero-width despite valid usage', () => {
+      const hookTs = '1780000001000000000';
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          time_unix_nano: hookTs,
+        } as any),
+        makeEntry({
+          'gen_ai.usage.input_tokens': 10,
+          'gen_ai.usage.output_tokens': 2,
+          'gen_ai.usage.total_tokens': 12,
+          time_unix_nano: hookTs,
+        }),
+      ];
+
+      expect(needsCliSegmentFallback(entries)).toBe(true);
+    });
+
+    it('keeps tool timing untouched when segment is read only for missing usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'agent.client_request_id': 'req-a',
+          time_unix_nano: '1780000001000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        inputTokens: 100,
+        outputTokens: 20,
+        requestStartTs: 1_779_999_999_000,
+        responseEndTs: 1_780_000_000_500,
+        toolFinishedTs: 1_780_000_002_000,
+      })]);
+
+      expect(entries[0].time_unix_nano).toBe('1780000000000000000');
+      expect(entries[1].time_unix_nano).toBe('1780000001000000000');
+      expect(entries[2].time_unix_nano).toBeUndefined();
+      expect(entries[3].time_unix_nano).toBeUndefined();
+      expect(entries[3]['gen_ai.tool.call.duration']).toBeUndefined();
+    });
+
+    it('switches tool timing together with an invalid Hook LLM interval', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'req-a',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.step.id': 'turn-1:s1',
+          time_unix_nano: undefined,
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        requestStartTs: 1_780_000_000_000,
+        responseEndTs: 1_780_000_002_000,
+        toolFinishedTs: 1_780_000_003_500,
+      })]);
+
+      expect(entries[0].time_unix_nano).toBe(String(1_780_000_000_000n * 1_000_000n));
+      expect(entries[1].time_unix_nano).toBe(String(1_780_000_002_000n * 1_000_000n));
+      expect(entries[2].time_unix_nano).toBe(String(1_780_000_002_000n * 1_000_000n));
+      expect(entries[3].time_unix_nano).toBe(String(1_780_000_003_500n * 1_000_000n));
+      expect(entries[3]['gen_ai.tool.call.duration']).toBe(1500);
+    });
+
+    it('does not replace a concrete Hook model while filling other gaps', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'hook-model',
+        } as any),
+        makeEntry({
+          'gen_ai.response.id': 'provider-a',
+          'gen_ai.step.id': 'turn-1:s1',
+          'agent.client_request_id': 'req-a',
+          'gen_ai.request.model': 'hook-model',
+          'gen_ai.response.model': 'hook-model',
+        } as any),
+      ];
+
+      enrichCliFromSegments(entries, [makeSegment({
+        requestId: 'req-a',
+        inputTokens: 100,
+        outputTokens: 20,
+        model: 'segment-model',
+      })]);
+
+      expect(entries[0]['gen_ai.request.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.request.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.response.model']).toBe('hook-model');
+      expect(entries[1]['gen_ai.usage.total_tokens']).toBe(120);
     });
   });
 
@@ -553,7 +1087,174 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[4].time_unix_nano).toBe(ms(base + 4201));
       expect(entries[4]['gen_ai.tool.call.duration']).toBe(4000);
       expect(entries[4]['tool.result.status']).toBe('failure');
-      expect(entries[5].time_unix_nano).toBe(ms(base + 4202));
+      expect(entries[5].time_unix_nano).toBe(String(BigInt(ms(base + 4201)) + 1n));
+    });
+
+    it('starts a later request after the latest preceding tool result', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 1200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 1800),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 9999),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 2500),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-tools', requestId: 'request-tools', messageId: 'message-1',
+          gmtCreate: base + 200, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+        {
+          sessionId: 'sess-tools', requestId: 'request-tools', messageId: 'message-2',
+          gmtCreate: base + 2500, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[4].time_unix_nano).toBe(String(BigInt(ms(base + 1800)) + 1n));
+    });
+
+    it('keeps the next request after its predecessors when the SQLite clock is earlier', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base + 200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s1',
+          time_unix_nano: ms(base + 6000),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s2',
+          time_unix_nano: ms(base + 6001),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-clamp',
+          'gen_ai.turn.id': 'turn-clamp', 'gen_ai.step.id': 'turn-clamp:s2',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-clamp', requestId: 'request-clamp', messageId: 'message-1',
+          gmtCreate: base + 200, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+        {
+          sessionId: 'sess-clamp', requestId: 'request-clamp', messageId: 'message-2',
+          gmtCreate: base + 5000, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[3].time_unix_nano).toBe(String(BigInt(ms(base + 6000)) + 1n));
+      expect(entries[4].time_unix_nano).toBe(String(BigInt(ms(base + 6000)) + 2n));
+      expect(BigInt(entries[2].time_unix_nano))
+        .toBeLessThan(BigInt(entries[3].time_unix_nano));
+      expect(BigInt(entries[3].time_unix_nano))
+        .toBeLessThan(BigInt(entries[4].time_unix_nano));
+    });
+
+    it('orders adjacent steps when SQLite responses share the same millisecond', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'other', 'gen_ai.session.id': 'sess-same-ms',
+          'gen_ai.turn.id': 'turn-same-ms', 'gen_ai.step.id': undefined,
+          'gen_ai.input.messages_delta': [{ role: 'user', parts: [] }],
+          time_unix_nano: ms(base - 100),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-same-ms',
+          'gen_ai.turn.id': 'turn-same-ms', 'gen_ai.step.id': 'turn-same-ms:s1',
+          time_unix_nano: ms(base - 50),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-same-ms',
+          'gen_ai.turn.id': 'turn-same-ms', 'gen_ai.step.id': 'turn-same-ms:s1',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request', 'gen_ai.session.id': 'sess-same-ms',
+          'gen_ai.turn.id': 'turn-same-ms', 'gen_ai.step.id': 'turn-same-ms:s2',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response', 'gen_ai.session.id': 'sess-same-ms',
+          'gen_ai.turn.id': 'turn-same-ms', 'gen_ai.step.id': 'turn-same-ms:s2',
+          time_unix_nano: ms(base),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-same-ms', requestId: 'request-same-ms', messageId: 'message-1',
+          gmtCreate: base, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+        {
+          sessionId: 'sess-same-ms', requestId: 'request-same-ms', messageId: 'message-2',
+          gmtCreate: base, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[2].time_unix_nano).toBe(ms(base));
+      expect(entries[3].time_unix_nano).toBe(String(BigInt(ms(base)) + 1n));
+      expect(entries[4].time_unix_nano).toBe(String(BigInt(ms(base)) + 2n));
+      expect(BigInt(entries[2].time_unix_nano))
+        .toBeLessThan(BigInt(entries[3].time_unix_nano));
+      expect(BigInt(entries[3].time_unix_nano))
+        .toBeLessThan(BigInt(entries[4].time_unix_nano));
     });
   });
 
@@ -755,6 +1456,1423 @@ describe('QoderTraceInput token-enricher', () => {
   });
 });
 
+describe('QoderTraceInput conditional segment reads', () => {
+  it('reads segment only after primary enrichment leaves a critical gap', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-segment-gate-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const completeTurn = [
+        makeEntry({
+          'event.id': 'complete-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-complete',
+          'gen_ai.step.id': 'turn-complete:s1',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'complete-response',
+          'gen_ai.turn.id': 'turn-complete',
+          'gen_ai.step.id': 'turn-complete:s1',
+          'gen_ai.usage.input_tokens': 100,
+          'gen_ai.usage.output_tokens': 20,
+          'gen_ai.usage.total_tokens': 120,
+          time_unix_nano: '1780000001000000000',
+        }),
+      ];
+      await fs.writeFile(logFile, completeTurn.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const stateStore = new MockStateStore();
+      stateStore.set('qoder-trace', {
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+      class TestInput extends QoderTraceInput {
+        segmentReadCount = 0;
+        expectedRequestIds: string[] = [];
+
+        protected override async readCliIntercept(): Promise<{ tokens: []; systemPrompt: null }> {
+          return { tokens: [], systemPrompt: null };
+        }
+
+        protected override async readCliSegments(
+          _sessionId: string,
+          expectedRequestIds: readonly string[],
+        ): Promise<SegmentTokenData[]> {
+          this.segmentReadCount += 1;
+          this.expectedRequestIds = [...expectedRequestIds];
+          return [
+            makeSegment({
+              requestId: 'missing-request-id',
+              inputTokens: 200,
+              outputTokens: 30,
+              requestStartTs: 1_780_000_002_000,
+              responseEndTs: 1_780_000_003_000,
+            }),
+            makeSegment({
+              requestId: 'second-missing-request-id',
+              inputTokens: 300,
+              outputTokens: 40,
+              requestStartTs: 1_780_000_004_000,
+              responseEndTs: 1_780_000_005_000,
+            }),
+          ];
+        }
+      }
+      const input = new TestInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+
+      const first = await (input as any).collect() as AgentActivityEntry[];
+      expect(first.find(entry => entry['event.id'] === 'complete-response')?.['gen_ai.usage.total_tokens'])
+        .toBe(120);
+      expect(input.segmentReadCount).toBe(0);
+
+      const missingTurn = [
+        makeEntry({
+          'event.id': 'missing-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-missing',
+          'gen_ai.step.id': 'turn-missing:s1',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'missing-response',
+          'gen_ai.turn.id': 'turn-missing',
+          'gen_ai.step.id': 'turn-missing:s1',
+          'agent.client_request_id': 'missing-request-id',
+          time_unix_nano: '1780000004000000000',
+        } as any),
+      ];
+      const secondMissingTurn = [
+        makeEntry({
+          'event.id': 'second-missing-request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-second-missing',
+          'gen_ai.step.id': 'turn-second-missing:s1',
+          time_unix_nano: '1780000006000000000',
+        } as any),
+        makeEntry({
+          'event.id': 'second-missing-response',
+          'gen_ai.turn.id': 'turn-second-missing',
+          'gen_ai.step.id': 'turn-second-missing:s1',
+          'agent.client_request_id': 'second-missing-request-id',
+          time_unix_nano: '1780000006000000000',
+        } as any),
+      ];
+      await fs.appendFile(
+        logFile,
+        [...missingTurn, ...secondMissingTurn].map(entry => JSON.stringify(entry)).join('\n') + '\n',
+      );
+
+      const second = await (input as any).collect() as AgentActivityEntry[];
+      expect(input.segmentReadCount).toBe(1);
+      expect(input.expectedRequestIds).toEqual([
+        'missing-request-id',
+        'second-missing-request-id',
+      ]);
+      expect(second.find(entry => entry['event.id'] === 'missing-response'))
+        .toMatchObject({
+          'gen_ai.usage.input_tokens': 200,
+          'gen_ai.usage.output_tokens': 30,
+          time_unix_nano: String(1_780_000_003_000n * 1_000_000n),
+        });
+      expect(second.find(entry => entry['event.id'] === 'second-missing-response'))
+        .toMatchObject({
+          'gen_ai.usage.input_tokens': 300,
+          'gen_ai.usage.output_tokens': 40,
+          time_unix_nano: String(1_780_000_005_000n * 1_000_000n),
+        });
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('QoderTraceInput multimodal', () => {
+  const mmTmpDirs: string[] = [];
+
+  function makeMmTempDir(): string {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'pilot-qoder-mm-'));
+    mmTmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of mmTmpDirs.splice(0)) {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function writePng(dir: string, name: string, content = 'png-bytes'): string {
+    const file = path.join(dir, name);
+    fsSync.writeFileSync(file, Buffer.from(content));
+    return file;
+  }
+
+  function mmEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
+    return {
+      'event.id': 'e1',
+      'event.name': 'other',
+      'gen_ai.agent.type': 'qoder',
+      'gen_ai.session.id': 'sess',
+      'gen_ai.turn.id': 'turn-1',
+      time_unix_nano: String(1_700_000_000_000_000_000n),
+      ...overrides,
+    } as AgentActivityEntry;
+  }
+
+  it('includes tmp, vibe_images, and IDE cache/images in default roots', () => {
+    const roots = qoderDefaultAllowedRootPaths();
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'tmp'));
+    expect(roots).toContain(path.join(os.homedir(), '.qoder', 'vibe_images'));
+    const appRoot = process.platform === 'darwin'
+      ? path.join(os.homedir(), 'Library', 'Application Support', 'Qoder')
+      : process.platform === 'win32'
+        ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Qoder')
+        : path.join(os.homedir(), '.config', 'Qoder');
+    expect(roots).toContain(path.join(appRoot, 'SharedClientCache', 'cache', 'images'));
+  });
+
+  it('merges user-configured roots with defaults', () => {
+    const extra = canonicalizeRootPath('~/Documents');
+    const merged = resolveQoderAllowedRootPaths(['~/Documents']);
+    expect(merged).toContain(canonicalizeRootPath(path.join(os.homedir(), '.qoder', 'tmp')));
+    expect(merged).toContain(extra);
+  });
+
+  describe('extractToolImagePaths / extractMarkdownImagePaths', () => {
+    it('parses Read and ImageGen tool result paths', () => {
+      expect(extractToolImagePaths('Image file: /tmp/a.png')).toEqual(['/tmp/a.png']);
+      const gen = [
+        'Image generated successfully! The absolute path of the image is: /tmp/gen.png',
+        'Request ID: x',
+      ].join('\n');
+      expect(extractToolImagePaths(gen)).toEqual(['/tmp/gen.png']);
+    });
+
+    it('parses markdown image paths', () => {
+      expect(extractMarkdownImagePaths('see ![x](/tmp/a.png) and ![y](/tmp/b.jpg)')).toEqual([
+        '/tmp/a.png',
+        '/tmp/b.jpg',
+      ]);
+    });
+
+    it('parses markdown destinations and joins relative paths with cwd', () => {
+      const cwd = '/proj';
+      expect(extractMarkdownImagePaths('![x](images/a.png)', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](<images/My Image.png>)', cwd)).toEqual([
+        path.resolve(cwd, 'images/My Image.png'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](images/a.png "preview")', cwd)).toEqual([
+        path.resolve(cwd, 'images/a.png'),
+      ]);
+      expect(extractMarkdownImagePaths("![x](rel/b.jpg 'preview')", cwd)).toEqual([
+        path.resolve(cwd, 'rel/b.jpg'),
+      ]);
+      expect(extractMarkdownImagePaths('![x](/tmp/a.png)', cwd)).toEqual(['/tmp/a.png']);
+      expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)', cwd)).toEqual(['/tmp/My Image.png']);
+      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual(['images/a.png']);
+    });
+
+    it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
+      const started = Date.now();
+      const noise = '!['.repeat(80_000);
+      expect(extractMarkdownImagePaths(`${noise} ![x](/tmp/ok.png)`)).toEqual(['/tmp/ok.png']);
+      expect(Date.now() - started).toBeLessThan(200);
+      expect(extractMarkdownImagePaths(noise)).toEqual([]);
+    });
+
+    it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      expect(extractToolImagePaths(listed.map(p => `Image file: ${p}`).join('\n'))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+      expect(extractMarkdownImagePaths(listed.map((p, i) => `![n${i}](${p})`).join(' '))).toEqual(
+        listed.slice(0, MAX_MULTIMODAL_PARTS),
+      );
+    });
+  });
+
+  describe('enrichIdeMultimodal', () => {
+    describe('attached image paths (mocked sqlite map)', () => {
+      beforeEach(() => {
+        clearAttachedImagePathsCache();
+        mockReadAttachedImagePaths.mockReset();
+        mockReadAttachedImagePaths.mockResolvedValue(new Map());
+      });
+
+      it('attaches paths onto llm.request messages_delta by request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'attach.png', 'attach');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-1',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockImplementation(async (ids) => {
+          expect(ids).toEqual(['req-1']);
+          return new Map([['req-1', attached([img])]]);
+        });
+
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'text')).toBe(true);
+        expect(parts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/attach')).toBe(true);
+        expect(request['gen_ai.input.multimodal_metadata']).toEqual([
+          { uri: 'oss://test/attach', mime_type: 'image/png', modality: 'image' },
+        ]);
+      });
+
+      it('uploadMode gates input attach: tool/output skip; both enriches', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'in-gate.png', 'in-gate');
+        const makeRequest = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-in-gate',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-in-gate', attached([img])]]));
+
+        for (const mode of ['tool', 'output'] as const) {
+          clearAttachedImagePathsCache();
+          const request = makeRequest();
+          await enrichIdeMultimodal([request], { uploadMode: mode, pathToUri: fakePathToUri });
+          const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
+          expect(parts, mode).toHaveLength(1);
+          expect(parts[0].type, mode).toBe('text');
+        }
+
+        clearAttachedImagePathsCache();
+        const both = makeRequest();
+        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+        expect((both['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
+      });
+
+      it('prefers llm.request over other when both carry the same request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'prefer.png', 'prefer');
+        const pathToUri = fakePathToUri;
+        const user = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-pref',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
+          ],
+        });
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-pref',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'ctx' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-pref', attached([img])]]));
+
+        await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
+
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+      });
+
+      it('batches multiple request_ids and only enriches matching rows', async () => {
+        const dir = makeMmTempDir();
+        const imgA = writePng(dir, 'a.png', 'a');
+        const imgB = writePng(dir, 'b.png', 'b');
+        const pathToUri = fakePathToUri;
+        const reqA = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a' }] },
+          ],
+        });
+        const reqB = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-b',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'b' }] },
+          ],
+        });
+        const reqNoAttach = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-empty',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'none' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockImplementation(async (ids) => {
+          expect(ids.sort()).toEqual(['req-a', 'req-b', 'req-empty'].sort());
+          return new Map([
+            ['req-a', attached([imgA])],
+            ['req-b', attached([imgB])],
+            ['req-empty', attached([])],
+          ]);
+        });
+
+        await enrichIdeMultimodal([reqA, reqB, reqNoAttach], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        expect((reqA['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((reqB['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+        expect((reqNoAttach['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+      });
+
+      it('skips when request_id missing or map is empty', async () => {
+        const pathToUri = vi.fn(fakePathToUri);
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+          ],
+        });
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+        expect(pathToUri).not.toHaveBeenCalled();
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+      });
+
+      it('caps persistent lookup failures at three attempts and still processes tool surface', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 't.png', 't');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-x',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'hi' }] },
+          ],
+        });
+        const tool = mmEntry({
+          'event.name': 'tool.result',
+          'gen_ai.tool.call.result': `Image file: ${img}`,
+        });
+        mockReadAttachedImagePaths.mockRejectedValue(new Error('sqlite down'));
+
+        await enrichIdeMultimodal([request, tool], {
+          uploadMode: 'both',
+          pathToUri,
+        });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(3);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(1, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(2, ['req-x']);
+        expect(mockReadAttachedImagePaths).toHaveBeenNthCalledWith(3, ['req-x']);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toHaveLength(1);
+        expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
+      });
+
+      it('retries a lookup exception and attaches when the next query recovers', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'recovered.png', 'recovered');
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-recovered',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+        mockReadAttachedImagePaths
+          .mockRejectedValueOnce(new Error('sqlite busy'))
+          .mockResolvedValueOnce(new Map([['req-recovered', attached([img])]]));
+
+        await enrichIdeMultimodal([request], {
+          uploadMode: 'input',
+          pathToUri: fakePathToUri,
+        });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/recovered')).toBe(true);
+      });
+
+      it('falls back to same-turn carrier when only llm.response has request_id', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'fb.png', 'fb');
+        const pathToUri = fakePathToUri;
+        const other = mmEntry({
+          'event.name': 'other',
+          'gen_ai.turn.id': 't1',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'img?' }] },
+          ],
+        });
+        const response = mmEntry({
+          'event.name': 'llm.response',
+          'gen_ai.turn.id': 't1',
+          'gen_ai.request.id': 'req-fb',
+          'gen_ai.output.messages': [
+            { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fb', attached([img])]]));
+
+        await enrichIdeMultimodal([other, response], {
+          uploadMode: 'input',
+          pathToUri,
+        });
+
+        const parts = (other['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('after attach, same request_id is neither re-queried nor re-attached', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'cached.png', 'cached');
+        const pathToUri = vi.fn(fakePathToUri);
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', attached([img])]]));
+
+        const first = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-cache',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: '1' }] },
+          ],
+        });
+        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+
+        const second = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-cache',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: '2' }] },
+          ],
+        });
+        await enrichIdeMultimodal([second], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect((second['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect(pathToUri).toHaveBeenCalledTimes(1);
+      });
+
+      it('only queries uncached request_ids when a batch mixes done and new ids', async () => {
+        const dir = makeMmTempDir();
+        const imgA = writePng(dir, 'a.png', 'a');
+        const imgB = writePng(dir, 'b.png', 'b');
+        const pathToUri = fakePathToUri;
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', attached([imgA])]]));
+        const first = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a' }] },
+          ],
+        });
+        await enrichIdeMultimodal([first], { uploadMode: 'input', pathToUri });
+
+        mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', attached([imgB])]]));
+        const againA = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-a',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'a2' }] },
+          ],
+        });
+        const freshB = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-b',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'b' }] },
+          ],
+        });
+        await enrichIdeMultimodal([againA, freshB], { uploadMode: 'input', pathToUri });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect(mockReadAttachedImagePaths).toHaveBeenLastCalledWith(['req-b']);
+        expect((againA['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect((freshB['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('synthesizes a uri-only llm.request when sqlite has images but no user carrier', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'solo.png', 'solo');
+        const pathToUri = vi.fn(fakePathToUri);
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-solo', attached([img])]]));
+
+        const responseOnly = mmEntry({
+          'event.id': 'resp-solo',
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-solo',
+          'gen_ai.turn.start': true,
+          'gen_ai.turn.end': true,
+          'gen_ai.output.messages': [
+            { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
+          ],
+        });
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri });
+
+        expect(batch).toHaveLength(2);
+        expect(batch[0]).toBe(responseOnly);
+        const request = batch[1];
+        expect(request['event.name']).toBe('llm.request');
+        expect(request['event.id']).toBe(deriveSyntheticIdeRequestEventId('resp-solo', 'req-solo'));
+        expect(request['gen_ai.request.id']).toBe('req-solo');
+        expect(request['gen_ai.turn.start']).toBe(true);
+        expect(request['gen_ai.turn.end']).toBeUndefined();
+        expect(request.time_unix_nano).toBe(responseOnly.time_unix_nano);
+        expect(responseOnly['gen_ai.turn.start']).toBeUndefined();
+        expect(responseOnly['gen_ai.turn.end']).toBe(true);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts).toEqual([
+          { type: 'uri', mime_type: 'image/png', modality: 'image', uri: 'oss://test/solo' },
+        ]);
+
+        const laterUser = mmEntry({
+          'event.name': 'other',
+          'gen_ai.request.id': 'req-solo',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
+          ],
+        });
+        await enrichIdeMultimodal([laterUser], { uploadMode: 'input', pathToUri });
+        expect((laterUser['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect(pathToUri).toHaveBeenCalledTimes(1);
+      });
+
+      it('uses the user chat_message clock on the synthetic request when it is earlier than Stop', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'clock.png', 'clock');
+        mockReadAttachedImagePaths.mockResolvedValue(
+          new Map([['req-clock', attached([img], 1_699_999_995_000)]]),
+        );
+
+        const responseOnly = mmEntry({
+          'event.id': 'resp-clock',
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-clock',
+          time_unix_nano: '1700000000000000000',
+        });
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri: fakePathToUri });
+
+        expect(batch[1].time_unix_nano).toBe('1699999995000000000');
+        expect(responseOnly.time_unix_nano).toBe('1700000000000000000');
+      });
+
+      it('inherits shared context and strips response-only fields on the synthetic request', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'ctx.png', 'ctx');
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-ctx', attached([img])]]));
+
+        const responseOnly = mmEntry({
+          'event.id': 'resp-ctx',
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-ctx',
+          'user.id': 'native-user',
+          'gen_ai.session.id': 'native-sess',
+          'agent.source': 'qoder-hook',
+          'workspace.path': '/tmp/ws',
+          'git.repo': 'org/repo',
+          observed_time_unix_nano: '1700000000000000001',
+          resourceAttributes: { 'service.version': '1.0.0' },
+          'multica.issue.id': 'ISSUE-1',
+          [INVOCATION_SESSION_ID_FIELD]: 'inv-sess',
+          [INVOCATION_USER_ID_FIELD]: 'inv-user',
+          'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'ok' }] }],
+          'gen_ai.response.id': 'chatcmpl-1',
+          'gen_ai.response.finish_reasons': ['stop'],
+          'gen_ai.usage.input_tokens': 12,
+          'error.type': 'none',
+          'agent.stop_reason': 'end_turn',
+          'agent.client_request_id': 'cli-req',
+          'agent.qoder.match_ts': 1_700_000_000_000,
+        } as Partial<AgentActivityEntry>);
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri: fakePathToUri });
+
+        const request = batch[1];
+        expect(request['event.name']).toBe('llm.request');
+        expect(request['agent.source']).toBe('qoder-hook');
+        expect(request['workspace.path']).toBe('/tmp/ws');
+        expect(request['git.repo']).toBe('org/repo');
+        expect(request.time_unix_nano).toBe(responseOnly.time_unix_nano);
+        expect(request.observed_time_unix_nano).toBe('1700000000000000001');
+        expect(request['agent.stop_reason']).toBeUndefined();
+        expect(request['agent.client_request_id']).toBeUndefined();
+        expect(request['agent.qoder.match_ts']).toBeUndefined();
+        expect(request.resourceAttributes).toEqual({ 'service.version': '1.0.0' });
+        expect(request['multica.issue.id']).toBe('ISSUE-1');
+        expect(request[INVOCATION_SESSION_ID_FIELD]).toBe('inv-sess');
+        expect(request[INVOCATION_USER_ID_FIELD]).toBe('inv-user');
+        expect(request['gen_ai.output.messages']).toBeUndefined();
+        expect(request['gen_ai.response.id']).toBeUndefined();
+        expect(request['gen_ai.response.finish_reasons']).toBeUndefined();
+        expect(request['gen_ai.usage.input_tokens']).toBeUndefined();
+        expect(request['error.type']).toBeUndefined();
+
+        applyInvocationIdentity(request, '', 'fallback');
+        applyInvocationIdentity(responseOnly, '', 'fallback');
+        expect(request['gen_ai.session.id']).toBe('inv-sess');
+        expect(responseOnly['gen_ai.session.id']).toBe('inv-sess');
+        expect(request['user.id']).toBe('inv-user');
+        expect(responseOnly['user.id']).toBe('inv-user');
+      });
+
+      it('derives the same synthetic event.id when the same response is replayed', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'replay.png', 'replay');
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-replay', attached([img])]]));
+
+        const makeResponse = () => mmEntry({
+          'event.id': 'resp-replay',
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-replay',
+        });
+        const first = [makeResponse()];
+        await enrichIdeMultimodal(first, { uploadMode: 'input', pathToUri: fakePathToUri });
+        clearAttachedImagePathsCache();
+        const second = [makeResponse()];
+        await enrichIdeMultimodal(second, { uploadMode: 'input', pathToUri: fakePathToUri });
+
+        expect(first[1]['event.id']).toBe(second[1]['event.id']);
+        expect(first[1]['event.id']).toBe(deriveSyntheticIdeRequestEventId('resp-replay', 'req-replay'));
+      });
+
+      it('drops the synthetic request when pathToUri fails', async () => {
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-fail', attached(['/tmp/missing.png'])]]));
+        const responseOnly = mmEntry({
+          'event.name': 'llm.response',
+          'gen_ai.request.id': 'req-fail',
+          'gen_ai.turn.start': true,
+        });
+        const batch = [responseOnly];
+        await enrichIdeMultimodal(batch, { uploadMode: 'input', pathToUri: async () => null });
+        expect(batch).toEqual([responseOnly]);
+        expect(responseOnly['gen_ai.turn.start']).toBe(true);
+      });
+
+      it('caches a confirmed empty lookup and does not re-query', async () => {
+        const pathToUri = vi.fn(fakePathToUri);
+        const makeReq = () => mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-empty',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-empty', attached([])]]));
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        await enrichIdeMultimodal([makeReq()], { uploadMode: 'input', pathToUri });
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(1);
+        expect(pathToUri).not.toHaveBeenCalled();
+      });
+
+      it('retries an absent row within the same event and attaches when it appears', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'retry.png', 'retry');
+        const pathToUri = fakePathToUri;
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-retry',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+        });
+
+        mockReadAttachedImagePaths
+          .mockResolvedValueOnce(new Map())
+          .mockResolvedValueOnce(new Map([['req-retry', attached([img])]]));
+
+        await enrichIdeMultimodal([request], { uploadMode: 'input', pathToUri });
+
+        expect(mockReadAttachedImagePaths).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/retry')).toBe(true);
+      });
+    });
+
+    it('tool mode rewrites Image file tool.result to text+uri parts', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'read.png', 'read-img');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'Read',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result[0]).toEqual({ type: 'text', content: `Image file: ${img}` });
+      expect(result[1]).toMatchObject({ type: 'uri', uri: 'oss://test/read-img', modality: 'image' });
+    });
+
+    it('caps pathToUri attempts for missing tool images', async () => {
+      const listed = Array.from({ length: MAX_MULTIMODAL_PARTS + 20 }, (_, i) => `/tmp/missing-${i}.png`);
+      const pathToUri = vi.fn(async () => null);
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': listed.map(p => `Image file: ${p}`).join('\n'),
+      });
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
+      expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Image file: ${p}`).join('\n'));
+    });
+
+    it('tool mode parses ImageGen success path', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'gen.png', 'gen-img');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'ImageGen',
+        'gen_ai.tool.call.result':
+          `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
+      });
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img')).toBe(true);
+    });
+
+    it('uploadMode gates ImageGen tool: input/output skip; both enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'gen-gate.png', 'gen-gate');
+      const makeTool = () => mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.name': 'ImageGen',
+        'gen_ai.tool.call.result':
+          `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
+      });
+
+      for (const mode of ['input', 'output'] as const) {
+        const tool = makeTool();
+        const before = tool['gen_ai.tool.call.result'];
+        await enrichIdeMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri });
+        expect(tool['gen_ai.tool.call.result'], mode).toBe(before);
+      }
+
+      const both = makeTool();
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      const result = both['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-gate')).toBe(true);
+    });
+
+    it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
+      const dir = makeMmTempDir();
+      writePng(dir, 'rel.png', 'rel-img');
+      const pathToUri = vi.fn(fakePathToUri);
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          {
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'here ![g](rel.png)' }],
+          },
+        ],
+      });
+      (response as Record<string, unknown>)['agent.qoder.cwd'] = dir;
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      expect(pathToUri).toHaveBeenCalledWith(path.resolve(dir, 'rel.png'), expect.any(Number));
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/rel-img' });
+    });
+
+    it('output mode appends uri parts for markdown images on llm.response', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'out.png', 'out-img');
+      const pathToUri = fakePathToUri;
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          {
+            role: 'assistant',
+            parts: [{ type: 'text', content: `here ![g](${img})` }],
+          },
+        ],
+      });
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts[0].type).toBe('text');
+      expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
+    });
+
+    it('uploadMode gates output markdown: input/tool skip; both enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'out-gate.png', 'out-gate');
+      const makeResponse = () => mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          { role: 'assistant', parts: [{ type: 'text', content: `here ![g](${img})` }] },
+        ],
+      });
+
+      for (const mode of ['input', 'tool'] as const) {
+        const response = makeResponse();
+        await enrichIdeMultimodal([response], { uploadMode: mode, pathToUri: fakePathToUri });
+        const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+        expect(parts, mode).toHaveLength(1);
+        expect(parts[0].type, mode).toBe('text');
+      }
+
+      const both = makeResponse();
+      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      expect((both['gen_ai.output.messages'] as any[])[0].parts.some((p: any) =>
+        p.type === 'uri' && p.uri === 'oss://test/out-gate')).toBe(true);
+    });
+
+    it('both mode converts tool+output surfaces', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'shared.png', 'shared');
+      const pathToUri = fakePathToUri;
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [
+          { role: 'assistant', parts: [{ type: 'text', content: `![x](${img})` }] },
+        ],
+      });
+
+      await enrichIdeMultimodal([tool, response], { uploadMode: 'both', pathToUri });
+      expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      expect(parts.some((p: any) => p.type === 'uri')).toBe(true);
+    });
+
+    it('uploadMode none / missing paths / toUri null leave entries unchanged', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'x.png', 'x');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      const before = structuredClone(tool);
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'none', pathToUri: fakePathToUri });
+      expect(tool).toEqual(before);
+
+      const missing = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': 'Image file: /no/such/file.png',
+      });
+      await enrichIdeMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri });
+      expect(missing['gen_ai.tool.call.result']).toBe('Image file: /no/such/file.png');
+
+      const nullUri = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      await enrichIdeMultimodal([nullUri], { uploadMode: 'tool', pathToUri: async () => null });
+      expect(nullUri['gen_ai.tool.call.result']).toBe(`Image file: ${img}`);
+    });
+
+    it('caps converted images at MAX_MULTIMODAL_PARTS', async () => {
+      const dir = makeMmTempDir();
+      const paths: string[] = [];
+      for (let i = 0; i < MAX_MULTIMODAL_PARTS + 3; i++) {
+        paths.push(writePng(dir, `n${i}.png`, `img-${i}`));
+      }
+      const pathToUri = fakePathToUri;
+      const response = mmEntry({
+        'event.name': 'llm.response',
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [{
+            type: 'text',
+            content: paths.map((p, i) => `![${i}](${p})`).join('\n'),
+          }],
+        }],
+      });
+
+      await enrichIdeMultimodal([response], { uploadMode: 'output', pathToUri });
+      const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
+      const uriCount = parts.filter((p: any) => p.type === 'uri').length;
+      expect(uriCount).toBe(MAX_MULTIMODAL_PARTS);
+    });
+
+    it('does not throw when pathToUri throws; entries remain processable', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'boom.png', 'boom');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+      await expect(enrichIdeMultimodal([tool], {
+        uploadMode: 'tool',
+        pathToUri: async () => {
+          throw new Error('processor boom');
+        },
+      })).resolves.toBeUndefined();
+      expect(tool['event.name']).toBe('tool.result');
+      expect(tool['gen_ai.tool.call.result']).toBeDefined();
+    });
+
+    it('skips a throwing path and still converts later images with metadata', async () => {
+      const dir = makeMmTempDir();
+      const boom = writePng(dir, 'boom.png', 'boom');
+      const ok = writePng(dir, 'ok.png', 'ok');
+      const tool = mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${boom}\nImage file: ${ok}`,
+      });
+      await enrichIdeMultimodal([tool], {
+        uploadMode: 'tool',
+        pathToUri: async (filePath: string) => {
+          if (filePath === boom) throw new Error('processor boom');
+          return {
+            uri: 'oss://test/ok',
+            mime_type: 'image/png',
+            modality: 'image',
+            size: 2,
+            sha256: 'ok',
+          };
+        },
+      });
+      const result = tool['gen_ai.tool.call.result'] as any[];
+      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
+      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
+      ]);
+    });
+  });
+
+  describe('IDE gate via collect', () => {
+    it('converts IDE and CLI tool Image file paths and preserves invocation attributes', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const ideTool = {
+          'event.id': 'ide-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          'multica.issue.id': 'IDE-992',
+          'agentcore.task_id': 'task-ide-runtime',
+          time_unix_nano: '1780000000000000000',
+        };
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          'multica.issue.id': 'CLI-992',
+          'agentcore.task_id': 'task-cli-runtime',
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(
+          logFile,
+          [ideTool, cliTool].map(e => JSON.stringify(e)).join('\n') + '\n',
+        );
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
+        const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
+        expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+        expect(Array.isArray(cli['gen_ai.tool.call.result'])).toBe(true);
+        expect(ide['multica.issue.id']).toBe('IDE-992');
+        expect(cli['multica.issue.id']).toBe('CLI-992');
+        expect(ide['agentcore.task_id']).toBe('task-ide-runtime');
+        expect(cli['agentcore.task_id']).toBe('task-cli-runtime');
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('collect inserts the synthetic request before its response on the user chat_message clock', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-solo-'));
+      const imgPath = path.join(tmpDir, 'solo.png');
+      await fs.writeFile(imgPath, Buffer.from('solo'));
+      clearAttachedImagePathsCache();
+      mockReadAttachedImagePaths.mockReset();
+      mockReadAttachedImagePaths.mockResolvedValue(
+        new Map([['req-solo', attached([imgPath], 1_779_999_995_000)]]),
+      );
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const responseOnly = {
+          'event.id': 'resp-solo',
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.request.id': 'req-solo',
+          'gen_ai.turn.start': true,
+          'gen_ai.turn.end': true,
+          'gen_ai.output.messages': [
+            { role: 'assistant', parts: [{ type: 'text', content: 'ok' }] },
+          ],
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(responseOnly)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'input',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        expect(entries.map(e => e['event.name'])).toEqual(['llm.request', 'llm.response']);
+        expect(entries[0]['event.id']).toBe(deriveSyntheticIdeRequestEventId('resp-solo', 'req-solo'));
+        expect(entries[0]['gen_ai.turn.start']).toBe(true);
+        expect(entries[1]['event.id']).toBe('resp-solo');
+        expect(entries[1]['gen_ai.turn.start']).toBeUndefined();
+        expect(entries[0].trace_id).toBe(entries[1].trace_id);
+        expect(entries[0].trace_id).toBeTruthy();
+        expect(entries[0].time_unix_nano).toBe('1779999995000000000');
+        expect(entries[1].time_unix_nano).toBe('1780000000000000000');
+
+        new TurnBoundaryProcessor().enrich(entries);
+        expect(entries[0]['gen_ai.turn.start']).toBe(true);
+        expect(entries[1]['gen_ai.turn.end']).toBe(true);
+        expect(entries[1]['gen_ai.turn.start']).toBeUndefined();
+
+        process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
+        process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
+        const { convertEventLogToReadableSpans } = await import('@loongsuite/otel-util-genai');
+        const result = await convertEventLogToReadableSpans(entries as never, { strict: false });
+        const llm = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+        expect(llm).toBeDefined();
+        const durationNs = llm!.duration[0] * 1_000_000_000 + llm!.duration[1];
+        expect(durationNs).toBe(5_000_000_000);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+        clearAttachedImagePathsCache();
+      }
+    });
+
+    it('skips JetBrains qoder-idea sessions and still converts desktop IDE', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-idea-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const ideaTool = {
+          'event.id': 'idea-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-idea',
+          'gen_ai.session.id': 'idea-sess',
+          'gen_ai.turn.id': 'idea-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        const ideTool = {
+          'event.id': 'ide-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'ide-sess',
+          'gen_ai.turn.id': 'ide-turn',
+          'gen_ai.tool.call.result': `Image file: ${imgPath}`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(
+          logFile,
+          [ideaTool, ideTool].map(e => JSON.stringify(e)).join('\n') + '\n',
+        );
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        const idea = entries.find(e => e['event.id'] === 'idea-tool')!;
+        const ide = entries.find(e => e['event.id'] === 'ide-tool')!;
+        expect(idea['gen_ai.tool.call.result']).toBe(`Image file: ${imgPath}`);
+        expect(Array.isArray(ide['gen_ai.tool.call.result'])).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('collect still returns text when pathToUri never resolves', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-hang-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) =>
+                withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 40, () => null),
+            } as any,
+          },
+        });
+
+        const started = Date.now();
+        const entries = await (input as any).collect() as AgentActivityEntry[];
+        expect(Date.now() - started).toBeLessThan(500);
+        const cli = entries.find(e => e['event.id'] === 'cli-tool')!;
+        expect(cli['gen_ai.tool.call.result']).toBe(`Read image: ${imgPath} (1KB)`);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resumes image enrichment after stop then start', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-restart-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const toolEvent = (id: string, turnId: string) => ({
+          'event.id': id,
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': turnId,
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(toolEvent('cli-tool-1', 'cli-turn-1'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const entries: AgentActivityEntry[] = [];
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: fakePathToUri,
+            } as any,
+          },
+        });
+        input.on('entries', batch => entries.push(...batch));
+
+        await input.start();
+        const first = entries.find(e => e['event.id'] === 'cli-tool-1');
+        expect(Array.isArray(first?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+
+        await fs.appendFile(logFile, `${JSON.stringify(toolEvent('cli-tool-2', 'cli-turn-2'))}\n`);
+        await input.start();
+        const second = entries.find(e => e['event.id'] === 'cli-tool-2');
+        expect(Array.isArray(second?.['gen_ai.tool.call.result'])).toBe(true);
+        await input.stop();
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('stop finishes while a collect cycle is blocked on never-resolving pathToUri', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-stop-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const cliTool = {
+          'event.id': 'cli-tool',
+          'event.name': 'tool.result',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': 'cli-turn',
+          'gen_ai.tool.call.result': `Read image: ${imgPath} (1KB)`,
+          time_unix_nano: '1780000000000000000',
+        };
+        await fs.writeFile(logFile, `${JSON.stringify(cliTool)}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        let pathToUriCalls = 0;
+        const input = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'tool',
+            processor: {
+              pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) => {
+                pathToUriCalls += 1;
+                return withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 80, () => null);
+              },
+            } as any,
+          },
+        });
+
+        const started = input.start();
+        await vi.waitFor(() => expect(pathToUriCalls).toBeGreaterThan(0));
+        const stopStarted = Date.now();
+        await expect(input.stop()).resolves.toBeUndefined();
+        expect(Date.now() - stopStarted).toBeLessThan(500);
+        await expect(started).resolves.toBeUndefined();
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops agent.qoder.attachments before emit', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-attach-'));
+      const imgPath = path.join(tmpDir, 'shot.png');
+      await fs.writeFile(imgPath, Buffer.from('shot'));
+      try {
+        const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+        const logFile = path.join(tmpDir, logFileName);
+        const withAttach = (id: string, extra: Record<string, unknown> = {}) => ({
+          'event.id': id,
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.session.id': 'cli-sess',
+          'gen_ai.turn.id': id,
+          'agent.qoder.attachments': [
+            { type: 'image_file', filename: imgPath },
+          ],
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'look' }] },
+          ],
+          time_unix_nano: '1780000000000000000',
+          ...extra,
+        });
+        await fs.writeFile(logFile, `${JSON.stringify(withAttach('cli-off'))}\n`);
+
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', {
+          lastFile: logFileName,
+          lastOffset: 0,
+          extra: { hookHistoryInitialized: true },
+        });
+        const off = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+        });
+        const offEntries = await (off as any).collect() as AgentActivityEntry[];
+        expect(offEntries[0]).not.toHaveProperty('agent.qoder.attachments');
+
+        await fs.appendFile(logFile, `${JSON.stringify(withAttach('cli-on'))}\n`);
+        const on = new QoderTraceInput({
+          stateStore: stateStore as any,
+          logDir: tmpDir,
+          pollIntervalMs: 60_000,
+          multimodal: {
+            enabled: true,
+            uploadMode: 'input',
+            processor: { pathToUri: fakePathToUri } as any,
+          },
+        });
+        const onEntries = await (on as any).collect() as AgentActivityEntry[];
+        const cli = onEntries.find(e => e['event.id'] === 'cli-on')!;
+        expect(cli).not.toHaveProperty('agent.qoder.attachments');
+        const parts = (cli['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(parts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/shot')).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
 describe('QoderTraceInput bootstrap history filtering', () => {
   it('consumes every session batch created after startup with an empty history', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-empty-start-'));
@@ -842,6 +2960,70 @@ describe('QoderTraceInput bootstrap history filtering', () => {
         'session-a-latest',
         'session-b-latest',
       ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('QoderTraceInput runtime metrics', () => {
+  it('separates physical reads from complete unique records and preserves a half line', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-runtime-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const current = JSON.stringify(makeEntry({ 'event.id': 'current' }));
+      const later = JSON.stringify(makeEntry({
+        'event.id': 'later',
+        'gen_ai.turn.id': 'turn-2',
+      }));
+      const splitAt = Math.floor(later.length / 2);
+      const completePrefix = `not-json\n${current}\n`;
+      await fs.writeFile(logFile, completePrefix + later.slice(0, splitAt));
+
+      const stateStore = new MockStateStore();
+      stateStore.set('qoder-trace', {
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+      const deltas: any[] = [];
+      input.on('input-runtime-delta', delta => deltas.push(delta));
+
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0]).toMatchObject({
+        sourceKind: 'primary',
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completePrefix + later.slice(0, splitAt)),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(completePrefix),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+      expect(deltas[0].rawInMaxRecordBytes).toBe(Buffer.byteLength(`${current}\n`));
+      expect(stateStore.get('qoder-trace').lastOffset).toBe(Buffer.byteLength(completePrefix));
+
+      await fs.appendFile(logFile, `${later.slice(splitAt)}\n`);
+      await input.start();
+      await input.stop();
+
+      expect(deltas).toHaveLength(2);
+      expect(deltas[1]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(`${later}\n`),
+        rawInRecords: 1,
+        rawInBytes: Buffer.byteLength(`${later}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 0,
+      });
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

@@ -216,8 +216,11 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
       // Each staged payload must be handed to node as argv[1] and then deleted: it
       // carries the SLS AccessKeySecret and the CMS license key.
       const consumed = text.match(/^'@ \$cfgTmp$/gm) || [];
+      // installer-opensource.ps1 stages under $env:TEMP, which Windows may hand out as an
+      // 8.3 short path that Remove-Item then refuses to walk, so there the delete goes
+      // through the helper (see installer-short-path.test.mjs).
       const removed = text.match(
-        /Remove-Item -LiteralPath \$cfgTmp -Force -ErrorAction SilentlyContinue/g) || [];
+        /Remove-Item -LiteralPath \$cfgTmp -Force -ErrorAction SilentlyContinue|Remove-PilotPathQuietly \$cfgTmp\b/g) || [];
       expect(staged.length).toBeGreaterThanOrEqual(floor);
       expect(consumed.length).toBe(staged.length);
       expect(removed.length).toBe(staged.length);

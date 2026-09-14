@@ -157,6 +157,8 @@ describe('QwenWorkCN hook processor', () => {
       'llm.request', 'llm.response',
     ]);
     expect(events.every(event => event['gen_ai.agent.type'] === 'qwen-work-cn')).toBe(true);
+    expect(events.every(event => event.version === undefined)).toBe(true);
+    expect(events.every(event => event['agent.qwenworkcn.version'] === '0.1.5')).toBe(true);
     expect(events.every(event => event['gen_ai.turn.id'] === 'prompt-turn-1')).toBe(true);
     expect(events.filter(event => event['event.name'] !== 'other').map(event => event['gen_ai.step.id'])).toEqual([
       'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1',

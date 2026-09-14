@@ -38,6 +38,31 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
+  // The guard must run BEFORE this bundle's module graph loads: the graph
+  // imports sqlite3 at top level (orchestrator.ts → qoder-*-sqlite inputs), so
+  // on a libc that cannot load the addon the bundle dies mid-import, before any
+  // logging exists, and the spawners used to drop that stderr. A static import
+  // in the banner is evaluated first by Node, so the guard's check — and its
+  // readable FATAL diagnostic — precede the crash it replaces. See
+  // src/native-deps-guard.ts.
+  banner: { js: "import './native-deps-guard.cjs';" },
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+// Loaded by the banner above, before the daemon graph. Must keep
+// `packages: 'external'`: its require('sqlite3') has to resolve against the
+// payload's node_modules at runtime — bundling it would try to inline a native
+// addon and defeat the check.
+await build({
+  entryPoints: ['src/native-deps-guard.ts'],
+  outfile: 'dist/native-deps-guard.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  packages: 'external',
+  minifySyntax: true,
   define: commonDefine,
   plugins: commonPlugins,
 });
@@ -49,6 +74,32 @@ await build({
   target: 'es2022',
   format: 'cjs',
   bundle: true,
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+// Self-contained CJS, like cli-probe above: no `packages: 'external'`, so it
+// needs no node_modules at runtime. That is the point — the K8s preload blocks
+// the business process on this while it runs, so it must start at bare-node
+// cost rather than dragging in the daemon's dependency graph.
+await build({
+  entryPoints: ['src/inject-hooks.ts'],
+  outfile: 'dist/inject-hooks.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  // Prefer each package's ESM build over its `main`. Needed for real
+  // self-containment: jsonc-parser's `main` is a UMD file whose deps are
+  // fetched with a runtime require('./impl/format'), which esbuild cannot
+  // follow — the bundle then builds fine and throws MODULE_NOT_FOUND on first
+  // run without node_modules. Its `module` entry uses static imports that
+  // bundle cleanly. Verified by running the artifact with node_modules absent.
+  mainFields: ['module', 'main'],
+  // Keeps pilot's own logging off the agent's stdout/stderr; this process runs
+  // attached to a business workload, and some agents parse their own output.
   banner: { js: "process.env.LOG_LEVEL = 'silent';" },
   minifySyntax: true,
   define: commonDefine,

@@ -1,10 +1,11 @@
 /**
  * loongsuite-pilot OpenClaw event_t plugin
  *
- * Runs inside the OpenClaw process (Node.js). Registers 16 plugin hooks
+ * Runs inside the OpenClaw process (Node.js). Modern hosts register 16 hooks
  * (7 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
  * converts OpenClaw hook events into ARMS GenAI event_t JSONL records for
- * consumption by loongsuite-pilot's BaseHookInput pipeline.
+ * consumption by loongsuite-pilot's BaseHookInput pipeline. Hosts before
+ * 2026.5.12 use the separate 9-hook legacy-adapter.mjs.
  *
  * Zero external dependencies — only Node.js built-in APIs. The plugin entry
  * shape mirrors what `definePluginEntry(...)` from `openclaw/plugin-sdk/core`
@@ -17,17 +18,26 @@
  * ground truth — do NOT synthesize payloads.
  *
  * Span mapping (per /event-log-spec):
- *   ENTRY  ← session_start / session_end (sessionId)
- *   AGENT  ← before_agent_run → agent_end (runId)
+ *   ENTRY / AGENT ← before_agent_run → agent_end (runId)
  *   STEP   ← model_call_started / model_call_ended (callId = <runId>:model:<N>)
  *   LLM    ← llm_input / llm_output / model_call_* (callId)
  *   TOOL   ← before_tool_call / after_tool_call / tool_result_persist (toolCallId)
+ *   session_start / session_end stay in the private raw log as lifecycle signals
+ *   and are filtered by OpenClawPluginInput before the canonical event pipeline.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
+import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
+import { createLegacyHandlers } from "./legacy-adapter.mjs";
+import { createObservationClock } from "./legacy-utils.mjs";
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from "../shared/resource-context.mjs";
 
 const AGENT_TYPE = "openclaw";
 const PLUGIN_ID = "loongsuite-pilot-openclaw";
@@ -37,7 +47,16 @@ const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
-const MIN_OPENCLAW_VERSION = "2026.5.12";
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
+  agentId: AGENT_TYPE,
+  fieldMap: {
+    AGENTTEAMS_WORKER_NAME: "agentteams.worker.name",
+  },
+});
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ---------------------------------------------------------------------------
 // Caller-supplied span attributes (inlined mirror of resource-context.mjs)
@@ -57,9 +76,10 @@ const SPAN_ATTR_RESERVED_PREFIXES = [
 const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
 const SPAN_ATTR_SENSITIVE_RE =
   /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+const INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id";
 const INVOCATION_IDENTITY_FIELD_MAP = {
   "gen_ai.session.id": "agent.pilot.invocation.session.id",
-  "gen_ai.user.id": "agent.pilot.invocation.user.id",
+  "gen_ai.user.id": INVOCATION_USER_ID_FIELD,
 };
 
 function parseSpanAttributesFromEnv(env = process.env) {
@@ -127,8 +147,9 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+let legacyClock;
 function nowNanos() {
-  return `${Date.now()}000000`;
+  return legacyClock ? legacyClock() : `${Date.now()}000000`;
 }
 
 function completionNanos(startNanos, durationMs) {
@@ -225,15 +246,45 @@ function loadPilotConfig() {
   return value;
 }
 
-function resolveUserId(cfg) {
-  return (
-    process.env.LOONGSUITE_USER_ID ||
-    process.env.LOONGSUITE_PILOT_USER_ID ||
-    cfg.userId ||
-    cfg["user.id"] ||
-    os.hostname() ||
-    "unknown"
+function normalizeIdentityValue(value) {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+    return undefined;
+  }
+  const normalized = String(value).trim();
+  return normalized.length > 0 && normalized.length <= SPAN_ATTR_MAX_VALUE_LENGTH
+    ? normalized
+    : undefined;
+}
+
+function resolveSenderId(event, ctx) {
+  return normalizeIdentityValue(event?.senderId)
+    || normalizeIdentityValue(ctx?.senderId)
+    || normalizeIdentityValue(ctx?.channelContext?.sender?.id);
+}
+
+function resolveUserIdentity(cfg, senderId) {
+  const invocationUserId = normalizeIdentityValue(SPAN_ATTRIBUTES[INVOCATION_USER_ID_FIELD]);
+  if (invocationUserId) return { userId: invocationUserId, source: "invocation" };
+
+  const environmentUserId = normalizeIdentityValue(
+    process.env.LOONGSUITE_PILOT_USER_ID || process.env.LOONGSUITE_USER_ID,
   );
+  if (environmentUserId) return { userId: environmentUserId, source: "environment" };
+
+  const nativeSenderId = normalizeIdentityValue(senderId);
+  if (nativeSenderId) return { userId: nativeSenderId, source: "sender" };
+
+  const configuredUserId = normalizeIdentityValue(cfg.userId || cfg["user.id"]);
+  if (configuredUserId) return { userId: configuredUserId, source: "config" };
+
+  return {
+    userId: normalizeIdentityValue(os.hostname()) || "unknown",
+    source: "hostname",
+  };
+}
+
+function resolveUserId(cfg) {
+  return resolveUserIdentity(cfg).userId;
 }
 
 function isExplicitlyFalse(value) {
@@ -288,6 +339,7 @@ const CONTENT_RECORD_FIELDS = [
   "agent.openclaw.persisted_message",
   "agent.openclaw.message",
   "agent.openclaw.last_assistant_message",
+  "error.message",
 ];
 
 function redactRecordContent(record) {
@@ -363,6 +415,25 @@ function bindSessionRun(sessionKey, runId) {
   }
 }
 
+// Keep this validator aligned with normalization/openclaw-session-key.ts.
+function isSessionKey(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+    && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function observeSessionKey(run, event, ctx) {
+  // Separate telemetry identity from the existing native hook-routing cache.
+  // A conflicting key must not silently relabel this run or its exported spans.
+  for (const value of [event?.sessionKey, ctx?.sessionKey]) {
+    if (value == null || value === "") continue;
+    if (!isSessionKey(value) || (run.telemetrySessionKey && run.telemetrySessionKey !== value)) {
+      run.sessionKeyAmbiguous = true;
+    } else {
+      run.telemetrySessionKey = value;
+    }
+  }
+}
+
 function getRun(runId, event, ctx) {
   if (!runId) return null;
   let r = runs.get(runId);
@@ -396,19 +467,38 @@ function getRun(runId, event, ctx) {
     runs.delete(runId);
   }
   runs.set(runId, r);
+  observeSessionKey(r, event, ctx);
   const sessionKey = event?.sessionKey || ctx?.sessionKey || r.sessionKey;
   if (sessionKey && !r.completed) {
     r.sessionKey = sessionKey;
     bindSessionRun(sessionKey, runId);
   }
   if (runs.size > MAX_RUNS) {
-    const oldest = runs.keys().next().value;
+    // Completed tombstones must not evict a long-running active turn.
+    const oldest = [...runs].find(([, run]) => run.completed)?.[0] ?? runs.keys().next().value;
+    const evicted = runs.get(oldest);
     runs.delete(oldest);
     for (const [key, value] of sessionRunIds) {
       if (value === oldest) sessionRunIds.delete(key);
     }
+    evicted?.onEvict?.();
   }
   return r;
+}
+
+function updateRunUserIdentity(run, event, ctx, cfg) {
+  if (!run) return;
+  const senderId = resolveSenderId(event, ctx) || run.senderId;
+
+  const identity = resolveUserIdentity(cfg, senderId);
+  run.userId = identity.userId;
+  run.userIdSource = identity.source;
+  if (senderId) {
+    run.senderId = senderId;
+    run.channel = normalizeIdentityValue(ctx?.channel || event?.channel) || run.channel;
+    run.accountId = normalizeIdentityValue(event?.accountId || ctx?.accountId) || run.accountId;
+    run.channelId = normalizeIdentityValue(event?.channelId || ctx?.channelId) || run.channelId;
+  }
 }
 
 function resolveContextRun(event, ctx) {
@@ -489,27 +579,41 @@ function getSession(sessionId) {
 // ---------------------------------------------------------------------------
 
 function buildCommonFields(run, sessionId, userId) {
+  const resolvedUserId = run?.userId || userId;
   const base = {
     time_unix_nano: nowNanos(),
-    observed_time_unix_nano: nowNanos(),
+    observed_time_unix_nano: legacyClock ? legacyClock.observed() : nowNanos(),
     "event.id": crypto.randomUUID(),
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
-    "user.id": userId,
+    "user.id": resolvedUserId,
     ...(agentCwd ? { "agent.openclaw.cwd": agentCwd } : {}),
+    ...(run?.senderId ? { "agent.openclaw.sender.id": run.senderId } : {}),
+    ...(run?.channel ? { "agent.openclaw.channel": run.channel } : {}),
+    ...(run?.accountId ? { "agent.openclaw.account.id": run.accountId } : {}),
+    ...(run?.channelId ? { "agent.openclaw.channel.id": run.channelId } : {}),
+    ...(run?.userIdSource ? { "agent.openclaw.user.id.source": run.userIdSource } : {}),
+    ...(["invocation", "environment", "sender"].includes(run?.userIdSource)
+      ? { [INVOCATION_USER_ID_FIELD]: resolvedUserId }
+      : {}),
     ...SPAN_ATTRIBUTES,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
   if (run) {
     base.trace_id = run.traceId;
-    base["gen_ai.turn.id"] = run.runId;
+    base["gen_ai.turn.id"] = run.turnId || run.runId;
+    if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
+    if (run.sessionKeyAmbiguous) base["agent.openclaw.session_key.ambiguous"] = true;
+    else if (isSessionKey(run.telemetrySessionKey)) base["agent.openclaw.session_key"] = run.telemetrySessionKey;
     if (run.provider) base["gen_ai.provider.name"] = run.provider;
     if (run.model) base["gen_ai.request.model"] = run.model;
   } else if (sessionId) {
     const s = getSession(sessionId);
     base.trace_id = s.traceId;
     base["gen_ai.session.id"] = sessionId;
-    if (s.sessionKey) base["agent.openclaw.session_key"] = s.sessionKey;
+    if (isSessionKey(s.sessionKey)) base["agent.openclaw.session_key"] = s.sessionKey;
   }
   return base;
 }
@@ -746,10 +850,11 @@ function handleSessionEnd(event, ctx, userId, emit) {
   if (s.sessionKey) sessionRunIds.delete(s.sessionKey);
 }
 
-function handleBeforeModelResolve(event, ctx, userId, emit) {
+function handleBeforeModelResolve(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
@@ -761,18 +866,20 @@ function handleBeforeModelResolve(event, ctx, userId, emit) {
   emit(record);
 }
 
-function handleBeforePromptBuild(event, ctx, userId) {
+function handleBeforePromptBuild(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   if (event?.prompt) run.userPromptText = event.prompt;
   // No emission — redundant with before_agent_run which has richer fields.
 }
 
-function handleBeforeAgentRun(event, ctx, userId, emit) {
+function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId || event?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   if (event?.prompt) run.userPromptText = event.prompt;
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
@@ -786,7 +893,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit) {
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
     "gen_ai.system_instructions": run.systemPrompt
-      ? truncate(run.systemPrompt, MAX_CONTENT_SIZE)
+      ? [{ type: "text", content: truncate(run.systemPrompt, MAX_CONTENT_SIZE) }]
       : undefined,
   };
   emit(record);
@@ -804,10 +911,11 @@ function handleBeforeAgentReply(event, ctx, userId, emit) {
   emit(record);
 }
 
-function handleLlmInput(event, ctx, userId) {
+function handleLlmInput(event, ctx, userId, emit, cfg) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
+  updateRunUserIdentity(run, event, ctx, cfg);
   // OpenClaw v2026.6.10 can reuse a runId for a provider fallback after the
   // first agent cycle has already emitted llm_output. A fresh llm_input is the
   // unambiguous start of that next cycle; late terminal hooks must not revive
@@ -864,7 +972,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
         ? run.pendingToolInputMessages.splice(0)
         : undefined);
   const systemInstructions = startsAgentCycle && stash?.systemPrompt
-    ? truncate(stash.systemPrompt, MAX_CONTENT_SIZE)
+    ? [{ type: "text", content: truncate(stash.systemPrompt, MAX_CONTENT_SIZE) }]
     : undefined;
   const toolDefinitions = startsAgentCycle ? buildToolDefinitions(stash?.tools) : undefined;
   if (startsAgentCycle) run.llmInputStash = null;
@@ -1228,38 +1336,11 @@ function makeHandler(fn) {
       const cfg = loadPilotConfig();
       const userId = resolveUserId(cfg);
       const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
-      fn(event, ctx, userId, emit);
+      fn(event, ctx, userId, emit, cfg);
     } catch (err) {
       writeError(fn.name || "handler", err);
     }
   };
-}
-
-function parseOpenClawVersion(value) {
-  if (typeof value !== "string") return null;
-  const match = value.trim().match(
-    /^v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
-  );
-  if (!match) return null;
-  return {
-    core: [Number(match[1]), Number(match[2]), Number(match[3])],
-    suffix: match[4],
-  };
-}
-
-function isSupportedOpenClawVersion(value) {
-  const parsed = parseOpenClawVersion(value);
-  const minimum = parseOpenClawVersion(MIN_OPENCLAW_VERSION);
-  if (!parsed || !minimum) return false;
-
-  for (let i = 0; i < minimum.core.length; i++) {
-    if (parsed.core[i] > minimum.core[i]) return true;
-    if (parsed.core[i] < minimum.core[i]) return false;
-  }
-
-  // OpenClaw numeric suffixes are release corrections (for example -1),
-  // while named prereleases at the minimum core remain below the floor.
-  return !parsed.suffix || /^\d+(?:\.\d+)*$/.test(parsed.suffix);
 }
 
 function reportUnsupportedHost(api, detail) {
@@ -1281,7 +1362,7 @@ export default {
   id: PLUGIN_ID,
   name: "loongsuite-pilot-openclaw",
   description:
-    "ARMS GenAI event_t producer: captures 16 OpenClaw plugin hooks and writes JSONL for loongsuite-pilot BaseHookInput.",
+    "ARMS GenAI event_t producer with automatic legacy/modern OpenClaw hook adaptation.",
 
   register(api) {
     // OpenClaw's CLI metadata discovery provides a stub runtime and noop hook
@@ -1297,7 +1378,8 @@ export default {
     }
 
     const hostVersion = api?.runtime?.version;
-    if (!isSupportedOpenClawVersion(hostVersion)) {
+    const capabilities = resolveRuntimeCapabilities(hostVersion);
+    if (!capabilities) {
       const versionLabel = typeof hostVersion === "string" && hostVersion.length > 0
         ? hostVersion
         : "unavailable";
@@ -1320,6 +1402,19 @@ export default {
     const on = (name, fn) => {
       api.on(name, makeHandler(fn));
     };
+
+    if (capabilities.adapter === "legacy") {
+      legacyClock = createObservationClock();
+      const handlers = createLegacyHandlers({
+        nowNanos, buildCommonFields, advanceClockTo: value => legacyClock.advanceTo(value),
+        resolveContextRun, safeStringify, buildAssistantOutputMessagesFromOpenClawMessage,
+        handleLlmInput, handleBeforeAgentRun, handleModelCallStarted, handleBeforeMessageWrite,
+        handleBeforeToolCall, handleAfterToolCall, handleToolResultPersist,
+        handleAgentEnd, handleLlmOutput, handleSessionStart, handleSessionEnd, completeRun,
+      });
+      for (const [name, handler] of Object.entries(handlers)) on(name, handler);
+      return;
+    }
 
     // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
     on("before_model_resolve", handleBeforeModelResolve);

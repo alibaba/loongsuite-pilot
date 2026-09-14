@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import type { AgentActivityEntry } from '../../types/index.js';
+import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import type { InterceptTokenData } from './intercept-token-reader.js';
 import type { SegmentTokenData } from './segment-token-reader.js';
 import type { SqliteTokenData } from './sqlite-token-reader.js';
@@ -10,9 +11,28 @@ import type { SqliteTokenData } from './sqlite-token-reader.js';
 // ~1.4s; the accurate agent.qoder.match_ts (when present) matches within a few ms.
 const TIMESTAMP_THRESHOLD_MS = 5000;
 
+// Fallback bound for pairing a segment with the llm.response it describes when
+// the hook did not record agent.client_request_id (older JSONL). gen_ai.response.id
+// is the provider's id while a segment request_id is the CLI's own uuid, so those
+// two never compare equal and the response completion instant is used instead.
+// The hook fires just after the response lands, trailing the segment by 0-32ms on
+// observed data, and 50ms is where the match rate saturates - widening it further
+// pairs nothing extra.
+const SEGMENT_JOIN_TOLERANCE_MS = 50;
+
 export function enrichCliTurn(
   entries: AgentActivityEntry[],
   segments: SegmentTokenData[],
+  systemPrompt?: string,
+  interceptTokens: InterceptTokenData[] = [],
+): void {
+  enrichCliPrimary(entries, systemPrompt, interceptTokens);
+  enrichCliFromSegments(entries, segments);
+}
+
+/** Apply the Hook-adjacent sources before deciding whether segment fallback is needed. */
+export function enrichCliPrimary(
+  entries: AgentActivityEntry[],
   systemPrompt?: string,
   interceptTokens: InterceptTokenData[] = [],
 ): void {
@@ -27,13 +47,53 @@ export function enrichCliTurn(
     }
   }
 
-  for (const seg of segments) {
-    const matches = entries.filter(e =>
-      e['gen_ai.response.id'] === seg.requestId && e['event.name'] === 'llm.response',
+  // Intercept is the authoritative qodercli token source. Applying it before
+  // the missing-data check avoids touching segment files when Hook + intercept
+  // already provide a usable step.
+  applyInterceptUsage(entries, interceptTokens);
+}
+
+/**
+ * Segment can repair missing usage or an invalid LLM interval. A missing model,
+ * finish reason, or tool timestamp alone is deliberately not enough to trigger
+ * disk I/O; those fields are only filled opportunistically after a critical
+ * gap has already required the fallback.
+ */
+export function needsCliSegmentFallback(entries: AgentActivityEntry[]): boolean {
+  for (const group of buildResponseGroups(entries).values()) {
+    if (!hasPositiveEntryUsage(group.matches[0])) return true;
+
+    const stepId = group.matches[0]['gen_ai.step.id'];
+    if (typeof stepId !== 'string' || !stepId) continue;
+    const request = entries.find(entry =>
+      entry['event.name'] === 'llm.request' && entry['gen_ai.step.id'] === stepId,
     );
+    // Segment enrichment cannot synthesize a missing request event.
+    if (!request) continue;
+    const requestNs = parseUnixNanos(request.time_unix_nano);
+    const responseNs = parseUnixNanos(group.matches[0].time_unix_nano);
+    if (requestNs === undefined || responseNs === undefined || requestNs >= responseNs) {
+      return true;
+    }
+  }
+  return false;
+}
 
-    if (matches.length === 0) continue;
+/** Request ids the current Hook batch expects to find in the segment index. */
+export function collectCliExpectedRequestIds(entries: AgentActivityEntry[]): string[] {
+  const ids: string[] = [];
+  for (const group of buildResponseGroups(entries).values()) {
+    if (group.clientRequestId) ids.push(group.clientRequestId);
+  }
+  return ids;
+}
 
+/** Fill only gaps that remain after Hook and intercept enrichment. */
+export function enrichCliFromSegments(
+  entries: AgentActivityEntry[],
+  segments: SegmentTokenData[],
+): void {
+  for (const { seg, matches } of pairSegmentsWithResponses(entries, segments)) {
     // Segment usage is a compatibility fallback only. New qodercli releases
     // emit zero token fields in segments, while intercept observes the actual
     // provider usage. Preserve any native usage already present on the entry.
@@ -54,71 +114,210 @@ export function enrichCliTurn(
     }
 
     if (seg.stopReason && !matches[0]['gen_ai.response.finish_reasons']) {
-      matches[0]['gen_ai.response.finish_reasons'] = [seg.stopReason];
+      // seg.stopReason is Anthropic's native spelling; finish_reasons is the OTel
+      // GenAI enum. Writing it through raw is how tool_use / stop_sequence /
+      // model_context_window_exceeded reached the validator as illegal values.
+      // Unmappable values are left absent rather than guessed, matching the
+      // transcript hook.
+      const normalized = normalizeFinishReason(seg.stopReason);
+      if (normalized) {
+        matches[0]['gen_ai.response.finish_reasons'] = [normalized];
+      }
     }
 
-    // Inject segment-derived timestamps and model for the entire step (unified clock source)
     const stepId = matches[0]['gen_ai.step.id'];
+    const req = entries.find(e =>
+      e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+    );
 
-    // Inject real model name from segment (overrides 'auto' from hook-processor)
+    // Model is an opportunistic fallback. A concrete Hook value is already
+    // authoritative enough and must not cause segment reads on its own.
     if (seg.model && seg.model !== 'unknown') {
-      matches[0]['gen_ai.request.model'] = seg.model;
-      matches[0]['gen_ai.response.model'] = seg.model;
-      const req = entries.find(e =>
-        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
-      );
-      if (req) req['gen_ai.request.model'] = seg.model;
-    }
-
-    // llm.request: use segment requestStartTs
-    if (seg.requestStartTs > 0) {
-      const req = entries.find(e =>
-        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
-      );
-      if (req) {
-        req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
+      if (isMissingModel(matches[0]['gen_ai.request.model'])) {
+        matches[0]['gen_ai.request.model'] = seg.model;
+      }
+      if (isMissingModel(matches[0]['gen_ai.response.model'])) {
+        matches[0]['gen_ai.response.model'] = seg.model;
+      }
+      if (req && isMissingModel(req['gen_ai.request.model'])) {
+        req['gen_ai.request.model'] = seg.model;
       }
     }
 
-    // llm.response: use segment responseEndTs
-    if (seg.responseEndTs > 0) {
+    // Timestamps are injected as a set, never piecemeal. A segment whose
+    // responseEndTs failed to parse would otherwise move llm.request onto the
+    // segment clock while llm.response stayed on the hook clock - inverting the
+    // two into a negative-duration span - and would stamp tool.call with
+    // BigInt(0), i.e. 1970. Exact-id pairing accepts such a segment for its
+    // usage, so this is reachable; the timestamp pass rejects it outright.
+    //
+    // requestStartTs === responseEndTs is rejected for the same reason: a
+    // request whose start could not be anchored would otherwise be published as
+    // an instantaneous span, which is worse than leaving it on the hook clock
+    // because it looks like a measurement rather than a gap.
+    const requestNs = req ? parseUnixNanos(req.time_unix_nano) : undefined;
+    const responseNs = parseUnixNanos(matches[0].time_unix_nano);
+    const hookIntervalIsValid = requestNs !== undefined
+      && responseNs !== undefined
+      && requestNs < responseNs;
+    if (
+      req
+      && !hookIntervalIsValid
+      && seg.responseEndTs > 0
+      && seg.requestStartTs > 0
+      && seg.requestStartTs < seg.responseEndTs
+    ) {
+      // llm.request: use segment requestStartTs
+      req.time_unix_nano = String(BigInt(seg.requestStartTs) * 1_000_000n);
+
+      // llm.response: use segment responseEndTs
       matches[0].time_unix_nano = String(BigInt(seg.responseEndTs) * 1_000_000n);
-    }
 
-    // Preserve per-tool hook timestamps when available. Segment timing has no
-    // tool ID, so it is only a fallback for legacy hook records.
-    if (stepId && seg.toolFinishedTs > 0) {
-      const toolCalls = entries.filter(e =>
-        e['event.name'] === 'tool.call' && e['gen_ai.step.id'] === stepId,
-      );
-      const toolResults = entries.filter(e =>
-        e['event.name'] === 'tool.result' && e['gen_ai.step.id'] === stepId,
-      );
-      const toolCallTs = String(BigInt(seg.responseEndTs) * 1_000_000n);
-      const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
-      const toolDurationMs = seg.responseEndTs > 0
-        ? seg.toolFinishedTs - seg.responseEndTs
-        : 0;
-      for (const tc of toolCalls) {
-        if (parseUnixNanos(tc.time_unix_nano) === undefined) {
-          tc.time_unix_nano = toolCallTs;
+      // Tool timing is part of the same clock switch. Never stamp a tool from
+      // segment while preserving an already-valid Hook LLM interval: that would
+      // mix two clocks inside one step and can move the tool outside its span.
+      if (stepId && seg.toolFinishedTs > 0) {
+        const toolCalls = entries.filter(e =>
+          e['event.name'] === 'tool.call' && e['gen_ai.step.id'] === stepId,
+        );
+        const toolResults = entries.filter(e =>
+          e['event.name'] === 'tool.result' && e['gen_ai.step.id'] === stepId,
+        );
+        const toolCallTs = String(BigInt(seg.responseEndTs) * 1_000_000n);
+        const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
+        const toolDurationMs = seg.toolFinishedTs - seg.responseEndTs;
+        for (const tc of toolCalls) {
+          if (parseUnixNanos(tc.time_unix_nano) === undefined) {
+            tc.time_unix_nano = toolCallTs;
+          }
         }
-      }
-      for (const tr of toolResults) {
-        if (parseUnixNanos(tr.time_unix_nano) === undefined) {
-          tr.time_unix_nano = toolResultTs;
-        }
-        if (tr['gen_ai.tool.call.duration'] === undefined && toolDurationMs > 0) {
-          (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
+        for (const tr of toolResults) {
+          if (parseUnixNanos(tr.time_unix_nano) === undefined) {
+            tr.time_unix_nano = toolResultTs;
+          }
+          if (tr['gen_ai.tool.call.duration'] === undefined && toolDurationMs > 0) {
+            (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
+          }
         }
       }
     }
   }
+}
 
-  // Intercept is the authoritative qodercli token source. Apply it last so an
-  // exact response-id match overrides native/legacy segment usage, but never
-  // guesses by order or timestamp when ids differ.
-  applyInterceptUsage(entries, interceptTokens);
+/**
+ * Pair segments with the llm.response entries they describe.
+ *
+ * The hook copies the CLI's own request id onto agent.client_request_id, which
+ * is the same id a segment records, so that pairing is exact. Records written
+ * before the hook carried that field fall back to the response completion
+ * instant.
+ */
+function pairSegmentsWithResponses(
+  entries: AgentActivityEntry[],
+  segments: SegmentTokenData[],
+): { seg: SegmentTokenData; matches: AgentActivityEntry[] }[] {
+  const groups = buildResponseGroups(entries);
+  if (groups.size === 0) return [];
+
+  const usedSegments = new Set<SegmentTokenData>();
+  const usedKeys = new Set<string>();
+  const paired: { seg: SegmentTokenData; matches: AgentActivityEntry[] }[] = [];
+
+  // Pass A: exact id join. Deliberately not gated on responseEndTs, unlike the
+  // timestamp pass which cannot work without it - a segment that only carries
+  // usage still enriches tokens here.
+  const segmentsByRequestId = new Map<string, SegmentTokenData[]>();
+  for (const seg of segments) {
+    if (!seg.requestId) continue;
+    const list = segmentsByRequestId.get(seg.requestId);
+    if (list) list.push(seg);
+    else segmentsByRequestId.set(seg.requestId, [seg]);
+  }
+  for (const [key, group] of groups) {
+    if (!group.clientRequestId) continue;
+    const seg = segmentsByRequestId.get(group.clientRequestId)?.find(s => !usedSegments.has(s));
+    if (!seg) continue;
+    usedKeys.add(key);
+    usedSegments.add(seg);
+    paired.push({ seg, matches: group.matches });
+  }
+
+  // Pass B: whatever is left is matched on the response completion instant.
+  // Only records without the exact key take part. Every segment carries a
+  // request_id from the same namespace as agent.client_request_id, so a segment
+  // that Pass A did not claim for this group describes a different request -
+  // pairing it by proximity would copy another call's usage and clock onto this
+  // response. Segments with no counterpart in the batch (the CLI's own internal
+  // calls) are exactly what would be grabbed here.
+  const candidates: { key: string; seg: SegmentTokenData; delta: number }[] = [];
+  for (const [key, group] of groups) {
+    if (usedKeys.has(key) || group.clientRequestId || group.ms === undefined) continue;
+    for (const seg of segments) {
+      if (seg.responseEndTs <= 0 || usedSegments.has(seg)) continue;
+      const delta = Math.abs(group.ms - seg.responseEndTs);
+      if (delta <= SEGMENT_JOIN_TOLERANCE_MS) candidates.push({ key, seg, delta });
+    }
+  }
+
+  // Closest pair wins globally and each side is consumed once, so a burst of
+  // near-simultaneous calls cannot collapse onto a single segment. Matching
+  // greedily in entry order would instead reject pairs a later entry owns.
+  candidates.sort((a, b) => a.delta - b.delta);
+  for (const candidate of candidates) {
+    if (usedKeys.has(candidate.key) || usedSegments.has(candidate.seg)) continue;
+    usedKeys.add(candidate.key);
+    usedSegments.add(candidate.seg);
+    paired.push({ seg: candidate.seg, matches: groups.get(candidate.key)!.matches });
+  }
+  return paired;
+}
+
+function buildResponseGroups(entries: AgentActivityEntry[]): Map<string, ResponseGroup> {
+  // One provider response can be represented by several llm.response entries
+  // (separate thinking/text parts, or one hook row observed twice). Group them
+  // so a segment enriches every entry of the response it belongs to, and so a
+  // group consumes only one segment. Exact-id matching remains available when
+  // the Hook timestamp itself is missing; only the timestamp fallback needs ms.
+  const groups = new Map<string, ResponseGroup>();
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'llm.response') continue;
+    const nanos = parseUnixNanos(entry.time_unix_nano);
+    const responseId = entry['gen_ai.response.id'];
+    const key = typeof responseId === 'string' && responseId
+      ? `id:${responseId}`
+      : `step:${String(entry['gen_ai.step.id'] ?? '')}`;
+    const clientRequestId = readClientRequestId(entry);
+    const group = groups.get(key);
+    if (group) {
+      group.matches.push(entry);
+      if (!group.clientRequestId && clientRequestId) group.clientRequestId = clientRequestId;
+      if (group.ms === undefined && nanos !== undefined) group.ms = Number(nanos / 1_000_000n);
+    } else {
+      groups.set(key, {
+        matches: [entry],
+        ...(nanos !== undefined ? { ms: Number(nanos / 1_000_000n) } : {}),
+        clientRequestId,
+      });
+    }
+  }
+  return groups;
+}
+
+interface ResponseGroup {
+  matches: AgentActivityEntry[];
+  ms?: number;
+  clientRequestId?: string;
+}
+
+function isMissingModel(value: unknown): boolean {
+  return typeof value !== 'string' || !value || value === 'auto' || value === 'unknown';
+}
+
+// The CLI's own request id, written by the hook from the transcript's usage
+// object. Absent on records collected before the hook carried it.
+function readClientRequestId(entry: AgentActivityEntry): string | undefined {
+  const raw = (entry as Record<string, unknown>)['agent.client_request_id'];
+  return typeof raw === 'string' && raw ? raw : undefined;
 }
 
 function applyInterceptUsage(
@@ -271,18 +470,12 @@ export function enrichIdeTurn(
   }
   matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
 
-  // Find the user-boundary entry for step 1's request time.
-  // The normalizer emits user prompts as 'other' (not 'llm.request'), so match both.
-  const userBoundary = entries.find(e =>
-    !e['gen_ai.step.id'] &&
-    (e['event.name'] === 'llm.request' || (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
-  );
-
   for (let i = 0; i < matchedPairs.length; i++) {
     const { entry: respEntry, gmtCreate } = matchedPairs[i];
+    let responseTime = BigInt(gmtCreate) * 1_000_000n;
 
     // llm.response: use gmt_create as real response time
-    respEntry.time_unix_nano = String(BigInt(gmtCreate) * 1_000_000n);
+    respEntry.time_unix_nano = String(responseTime);
 
     // Find the llm.request for this response's step (same step.id).
     // Restrict to the same step to avoid cross-turn contamination in
@@ -308,47 +501,67 @@ export function enrichIdeTurn(
     }
 
     if (req) {
-      if (i > 0) {
-        // Start after the previous response and all of its tools. Hook records
-        // now carry per-tool result timestamps, so a fixed +1ms after the
-        // response would make the next LLM overlap a still-running tool.
-        let requestStart = BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n;
-        const previousResponseIndex = entries.indexOf(matchedPairs[i - 1].entry);
+      const turnId = respEntry['gen_ai.turn.id'];
+      const previousPair = matchedPairs
+        .slice(0, i)
+        .reverse()
+        .find(pair => pair.entry['gen_ai.turn.id'] === turnId);
+      let requestStart: bigint | undefined;
+
+      if (previousPair) {
+        // Start strictly after every event that precedes this provider call:
+        // the previous response and all tool results produced by that Step.
+        let latestPredecessor = parseUnixNanos(previousPair.entry.time_unix_nano)
+          ?? BigInt(previousPair.gmtCreate) * 1_000_000n;
+        const previousResponseIndex = entries.indexOf(previousPair.entry);
         const currentResponseIndex = entries.indexOf(respEntry);
         for (let j = previousResponseIndex + 1; j < currentResponseIndex; j++) {
-          if (entries[j]['event.name'] !== 'tool.result') continue;
+          if (entries[j]['event.name'] !== 'tool.result' ||
+              entries[j]['gen_ai.turn.id'] !== turnId) continue;
           const resultTime = parseUnixNanos(entries[j].time_unix_nano);
-          if (resultTime !== undefined && resultTime >= requestStart) {
-            requestStart = resultTime + 1_000_000n;
+          if (resultTime !== undefined && resultTime > latestPredecessor) {
+            latestPredecessor = resultTime;
           }
         }
-        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
-        if (hookRequestTime !== undefined && hookRequestTime > requestStart) {
-          requestStart = hookRequestTime;
-        }
-        req.time_unix_nano = String(requestStart);
-      } else if (userBoundary) {
-        // Use userBoundary.time + 1ms so the LLM request starts strictly after
-        // the user prompt event. When both share the same timestamp the converter
-        // generates a duplicate empty STEP (0ms, no LLM children) because it
-        // sees two events at the same instant inside step s1.
-        const ubNs = BigInt(String(userBoundary.time_unix_nano));
-        const minimumRequestTime = ubNs + 1_000_000n;
-        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
-        req.time_unix_nano = String(
-          hookRequestTime !== undefined && hookRequestTime > minimumRequestTime
-            ? hookRequestTime
-            : minimumRequestTime,
+        requestStart = latestPredecessor + 1n;
+      } else {
+        // The normalizer emits user prompts as `other`; find the opening event
+        // for this Turn instead of borrowing one from another Turn in the batch.
+        const userBoundary = entries.find(e =>
+          e['gen_ai.turn.id'] === turnId &&
+          !e['gen_ai.step.id'] &&
+          (e['event.name'] === 'llm.request' ||
+            (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
         );
+        if (userBoundary) {
+          // Advance by the smallest representable unit so the LLM request starts strictly after
+          // the user prompt event. When both share the same timestamp the converter
+          // generates a duplicate empty STEP (0ms, no LLM children) because it
+          // sees two events at the same instant inside step s1.
+          const ubNs = parseUnixNanos(userBoundary.time_unix_nano);
+          if (ubNs !== undefined) requestStart = ubNs + 1n;
+        }
+      }
+
+      if (requestStart !== undefined) {
+        // SQLite stores only milliseconds. Equal gmt_create values and source-clock
+        // conflicts can leave no point between the previous Step and this response.
+        // Move the response forward by the minimum amount instead of clamping the
+        // request backwards into the previous Step.
+        if (requestStart >= responseTime) responseTime = requestStart + 1n;
+        if (requestStart >= 0n) {
+          req.time_unix_nano = String(requestStart);
+          respEntry.time_unix_nano = String(responseTime);
+        }
       }
     }
 
     // Preserve per-tool timestamps emitted by the hook. SQLite has no tool ID
-    // or tool-finished timestamp, so it cannot improve those values. The old
-    // gmt_create/+1ms fallback is retained only for legacy records whose tool
-    // timestamps are missing or malformed.
-    const toolCallTs = String(BigInt(gmtCreate) * 1_000_000n);
-    const toolResultTs = String(BigInt(gmtCreate + 1) * 1_000_000n);
+    // or tool-finished timestamp, so it cannot improve those values. For legacy
+    // records whose tool timestamps are missing or malformed, place the call and
+    // result immediately after the ordered response.
+    const toolCallTs = String(responseTime + 1n);
+    const toolResultTs = String(responseTime + 2n);
     const respIdx = entries.indexOf(respEntry);
     const rightBound = i < matchedPairs.length - 1
       ? entries.indexOf(matchedPairs[i + 1].entry)

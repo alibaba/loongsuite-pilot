@@ -57,6 +57,7 @@ $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
+$OPEN_SOURCE_INSTALLER_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1"
 
 # >>> pilot-account-identity >>>
 # Windows account identity, DOMAIN\user, without whoami. On 5.1 a native command's
@@ -160,16 +161,25 @@ function Resolve-Node {
     # 2. Fallback search
     $candidates = @()
 
-    # nvm-windows
-    if ($env:NVM_HOME -and (Test-Path $env:NVM_HOME)) {
+    # nvm-windows. Both probes below must be non-fatal. NVM_HOME is often a *machine*
+    # level variable pointing into another account's profile
+    # (C:\Users\Administrator\AppData\Local\nvm was measured), and that directory's DACL
+    # grants nothing to the current user: a bare Test-Path raises a PermissionDenied
+    # UnauthorizedAccessException record, which this file's $ErrorActionPreference = "Stop"
+    # promotes to a terminating error. Resolve-Node runs on the way into start / stop /
+    # status / restart-collector, so one unreadable third-party node manager took down
+    # every service command -- including the restart-collector the updater issues after
+    # deploying a version. The Get-ChildItem calls were already guarded; these two were
+    # not. -LiteralPath as well, because a version manager path may contain [ or ].
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME -ErrorAction SilentlyContinue)) {
         Get-ChildItem $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "node.exe" }
     }
 
-    # fnm
+    # fnm -- same unreadable-directory hazard as the nvm branch above.
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
+    if (Test-Path -LiteralPath $fnmDir -ErrorAction SilentlyContinue) {
         Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { $candidates += Join-Path $_.FullName "installation\node.exe" }
@@ -239,6 +249,27 @@ function Resolve-CurrentVersion {
     return $null
 }
 
+function Get-BuildEdition {
+    try {
+        $versionDir = Resolve-CurrentVersion
+        if (-not $versionDir) { return "" }
+
+        $probe = Join-Path $versionDir "dist\cli-probe.cjs"
+        if (-not (Test-Path -LiteralPath $probe)) { return "" }
+
+        $nodeBin = Resolve-Node
+        if (-not $nodeBin) { return "" }
+
+        return ([string](& $nodeBin $probe --build-edition 2>$null)).Trim()
+    } catch {
+        return ""
+    }
+}
+
+function Test-OpenSourceBuild {
+    return (Get-BuildEdition) -eq "opensource"
+}
+
 function Resolve-PreviousVersion {
     if (Test-Path $PREVIOUS_FILE) {
         $dir = (Get-Content $PREVIOUS_FILE -ErrorAction SilentlyContinue).Trim()
@@ -286,6 +317,25 @@ function Test-PidRunning {
     if ($proc) { return $true }
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     return $false
+}
+
+# Read-only cousin of Test-PidRunning. Wait loops must not delete the pid file: a
+# successor can write a new pid between the probe and the Remove-Item, and Unix
+# wait_for_* is read-only (kill -0 / process_matches_installed_entry). Stale-pid
+# cleanup stays in Stop-PidFile.
+function Test-PidAlive {
+    param([string]$pidFile)
+    if (-not (Test-Path $pidFile)) { return $false }
+    try {
+        $raw = Get-Content $pidFile -ErrorAction SilentlyContinue
+        if (-not $raw) { return $false }
+        $pidVal = ([string]$raw).Trim()
+        if (-not $pidVal) { return $false }
+        $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
+        return $null -ne $proc
+    } catch {
+        return $false
+    }
 }
 
 function Get-CollectorRuntime {
@@ -337,22 +387,59 @@ function Stop-PidFile {
     }
     # Force kill if still running
     try { Stop-Process -Id $pidVal -Force -ErrorAction SilentlyContinue } catch {}
-    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+
+    # Delete the file only while it still names the process we just killed. Up to ten
+    # seconds elapse in the wait loop above, and the collector task carries a five-minute
+    # repeating trigger, so a successor may already have started and written its own pid
+    # here -- unconditional removal then deleted a live daemon's pid file, after which
+    # status reported it as not running and the next start raced a second instance against
+    # it. Same rule the daemons themselves follow on shutdown (removeOwnPidFileSync in
+    # src/utils/pid-utils.ts). Re-read rather than trusting $pidVal: the point is what is
+    # on disk now, not what was there before Stop-Process.
+    $currentPid = ""
+    if (Test-Path -LiteralPath $pidFile) {
+        $currentPid = ([string](Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue)).Trim()
+    }
+    if ($currentPid -eq $pidVal) {
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Stop-OrphanProcesses {
     # $Match limits which daemons are terminated; the default kills both. Callers that
     # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
     # narrow pattern so they only reap the daemon they are about to re-launch.
+    #
+    # Both conditions below are required, and the second one is the point. The daemon
+    # names are shared by every installation on the machine: on a multi-account box each
+    # user runs their own collector and updater out of their own %USERPROFILE%, and
+    # matching on the name alone made any install / restart / stop kill all of them.
+    # Get-Process only enumerates other users' processes when the caller is elevated, so
+    # the blast radius was exactly the elevated sessions -- their victims' pid files were
+    # left pointing at dead pids, which is where the "stale single-instance lock" reports
+    # came from. $BOOTSTRAP_DIR is the directory the entry script is loaded from
+    # (New-HiddenTaskAction writes "<node>" "<$BOOTSTRAP_DIR\<name>-daemon.js>", and
+    # Cmd-Start builds the same pair), so it appears verbatim in the command line and
+    # identifies this installation and no other. It is non-empty by construction:
+    # $CACHE_DIR falls back to $DEFAULT_PILOT_DIR.
+    #
+    # .ToLower().Contains() rather than -match: the scope is a literal Windows path full
+    # of \ and possibly regex metacharacters (a user profile can contain "["), and
+    # escaping it for a regex buys nothing here. It is also a method call on [string], a
+    # core type, so it stays CLM-safe.
     param([string]$Match = "collector-daemon|updater-daemon")
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
+    $ownRoot = ([string]$BOOTSTRAP_DIR).ToLower()
+    # Query Win32_Process once. The old Get-Process pipeline issued one CIM query per
+    # node process, so a machine with many IDE/agent runtimes paid N WMI round trips on
+    # every upgrade. CommandLine and ProcessId already come from this single result set.
+    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match $Match
+                $cmdLine = [string]$_.CommandLine
+                ($cmdLine -match $Match) -and $cmdLine.ToLower().Contains($ownRoot)
             } catch { $false }
         } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
 }
 
@@ -372,6 +459,140 @@ function Get-TaskRunning {
     return $task.State -eq "Running"
 }
 
+function Get-TaskQuery {
+    param([string]$taskName)
+    $result = @{ task = $null; exists = $false; error = "" }
+    try {
+        $result.task = Get-ScheduledTask -TaskName $taskName -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+        $result.exists = $null -ne $result.task
+    } catch {
+        $message = [string]$_.Exception.Message
+        $category = ""
+        if ($_.CategoryInfo) { $category = [string]$_.CategoryInfo.Category }
+        # "No MSFT_ScheduledTask objects found ..." is the ordinary not-registered
+        # answer from the CIM-backed cmdlet; only anything else is an unknown.
+        if ($category -eq "ObjectNotFound" -or $message -match "No MSFT_ScheduledTask objects found") {
+            $result.error = ""
+        } else {
+            $result.error = $message
+        }
+    }
+    return $result
+}
+
+# Second opinion on whether the task exists, from a completely different code path
+# (schtasks.exe instead of the ScheduledTasks CIM module). Returns "yes", "no" or
+# "unknown: <reason>". A "no" from Get-TaskQuery next to a "yes" here is the signature
+# of a broken query rather than a missing task.
+#
+# The EAP dance is mandatory, not defensive: under $ErrorActionPreference = "Stop" a
+# native command writing one line to stderr while a 2>&1 redirect is in effect raises a
+# NativeCommandError whose message is that raw line, so every branch below would be
+# skipped and the caller would see the bare schtasks text instead of a diagnosis.
+# Restore in finally -- an exception thrown out of the try would otherwise leave the
+# whole script running under "Continue", silently disabling every later fail-fast check.
+function Test-TaskExistsViaSchtasks {
+    param([string]$taskName)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # Preset to a non-zero value: if schtasks.exe never launches at all, $LASTEXITCODE
+    # still holds whatever the previous command left there (possibly 0 = success).
+    $code = 9009
+    try {
+        $out = & schtasks.exe /Query /TN "$TASK_FOLDER\$taskName" 2>&1
+        $code = $LASTEXITCODE
+        if ($code -eq 0) { return "yes" }
+        # Every stderr line arrives as an ErrorRecord, and an empty one stringifies to its
+        # exception type name -- measured on 5.1, the raw join reported
+        # "ERROR: The system cannot find the file specified. System.Management.Automation.RemoteException".
+        # No type literal here (Constrained Language Mode): read .Exception.Message if present.
+        $parts = @()
+        foreach ($item in $out) {
+            $line = [string]$item
+            if ($item.Exception -and $item.Exception.Message) { $line = [string]$item.Exception.Message }
+            $line = $line.Trim()
+            if (-not $line) { continue }
+            if ($line -eq "System.Management.Automation.RemoteException") { continue }
+            $parts += $line
+        }
+        $text = ($parts -join " ").Trim()
+        if ($text.Length -gt 200) { $text = $text.Substring(0, 200) }
+        # The message is localized on non-English Windows, so no attempt is made to
+        # classify it as "no": the exit code plus the raw text is what a human needs.
+        return "unknown: exit=$code $text"
+    } catch {
+        return "unknown: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+# Start a task that Get-ScheduledTask could not see (CIM query failed, or schtasks
+# said yes while CIM said no). Same EAP / 2>&1 / $LASTEXITCODE / finally shape as
+# Test-TaskExistsViaSchtasks: under EAP=Stop a native stderr line would skip every
+# branch below and surface as a bare schtasks message.
+function Invoke-SchtasksRun {
+    param([string]$taskName)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 9009
+    $result = @{ ok = $false; error = "" }
+    try {
+        $out = & schtasks.exe /Run /TN "$TASK_FOLDER\$taskName" 2>&1
+        $code = $LASTEXITCODE
+        if ($code -eq 0) {
+            $result.ok = $true
+            return $result
+        }
+        $parts = @()
+        foreach ($item in $out) {
+            $line = [string]$item
+            if ($item.Exception -and $item.Exception.Message) { $line = [string]$item.Exception.Message }
+            $line = $line.Trim()
+            if (-not $line) { continue }
+            if ($line -eq "System.Management.Automation.RemoteException") { continue }
+            $parts += $line
+        }
+        $text = ($parts -join " ").Trim()
+        if ($text.Length -gt 200) { $text = $text.Substring(0, 200) }
+        $result.error = "exit=$code $text"
+        return $result
+    } catch {
+        $result.error = [string]$_.Exception.Message
+        return $result
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+# CIM found the task, the query itself broke, or schtasks says yes: Start may still
+# work, so do not skip it. Confirmed missing (CIM not-found AND schtasks did not say
+# yes) is the only case that should re-register.
+function Get-TaskStartIntent {
+    param($Query, [string]$TaskName)
+    $existsSchtasks = Test-TaskExistsViaSchtasks $TaskName
+    $shouldStart = $false
+    if ($Query.exists) { $shouldStart = $true }
+    if ($Query.error) { $shouldStart = $true }
+    if ($existsSchtasks -eq "yes") { $shouldStart = $true }
+    $confirmedMissing = $true
+    if ($Query.exists) { $confirmedMissing = $false }
+    if ($Query.error) { $confirmedMissing = $false }
+    if ($existsSchtasks -eq "yes") { $confirmedMissing = $false }
+    return @{
+        should_start = $shouldStart
+        confirmed_missing = $confirmedMissing
+        exists_schtasks = $existsSchtasks
+    }
+}
+
+function Get-InitType {
+    if (-not (Test-Path $INIT_TYPE_FILE)) { return "" }
+    $value = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue)
+    if (-not $value) { return "" }
+    return ([string]$value).Trim()
+}
+
 function Wait-ForCollectorHeartbeat {
     param([int]$TimeoutSeconds = 15)
     $notBefore = (Get-Date).AddSeconds(-2)
@@ -379,13 +600,328 @@ function Wait-ForCollectorHeartbeat {
     do {
         if (
             (Get-CollectorRuntime -NotBefore $notBefore) -or
-            (Test-PidRunning $PID_FILE)
+            (Test-PidAlive $PID_FILE)
         ) {
             return $true
         }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
     return $false
+}
+
+# Task State=Running is not liveness. Start-ScheduledTask makes the task Running as
+# soon as wscript is up, before node has written a pid; Stop-ScheduledTask also leaves
+# State=Running until the old instance actually exits. Collector wait uses a pid check
+# (Get-CollectorRuntime / Test-PidAlive); updater must do the same.
+function Wait-ForUpdaterAlive {
+    param([int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-PidAlive $UPDATER_PID_FILE) { return $true }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+# Best-effort: Start-ScheduledTask on a task that is still Running is often a no-op, so
+# restart would "succeed" against the outgoing instance. Mirror the 10s wait in
+# Start-CompatibleExistingCollectorTask. Failure to leave Running is not fatal; the
+# caller still Stop-PidFile / Start.
+function Wait-ForTaskNotRunning {
+    param([string]$TaskName, [int]$TimeoutSeconds = 10)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne "Running") { return $true }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+# ============================================================
+# Restart failure diagnostics
+#
+# Every non-success exit of Cmd-RestartCollector / Cmd-RestartUpdater goes through
+# Write-RestartFailure, which prints the reason and drops a breadcrumb file that the
+# calling collector/updater reads (src/utils/restart-breadcrumb.ts) to enrich its alarm.
+# The file channel exists because the streams are not trustworthy here: the caller uses
+# execFile and only surfaces stderr in err.message, $OutputEncoding is ASCII on 5.1, and
+# the installer's Restart-StaleCollector merges both streams with 2>&1.
+# ============================================================
+function Get-RestartFailureFile {
+    param([string]$Target)
+    return (Join-Path $LOG_DIR "last-restart-failure-$Target.json")
+}
+
+# Cleared at the start of every restart attempt, so a file that is present always
+# describes the most recent attempt (same invariant as the startup-crash breadcrumb).
+function Clear-RestartFailure {
+    param([string]$Target)
+    try {
+        $file = Get-RestartFailureFile $Target
+        if (Test-Path -LiteralPath $file) {
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+# Whether a failure is a permission denial, which decides between the "register-denied"
+# stage (someone installed while elevated, so the task is owned by BUILTIN\Administrators
+# and this unelevated session can start it but never rewrite it) and a generic
+# registration failure. The HRESULT is checked first because the message is localized on
+# non-English Windows -- on a Chinese box the English phrase never appears, so matching
+# text alone would misfile the single most common real cause.
+function Test-AccessDeniedError {
+    param($ErrorRecord)
+    try {
+        if ($ErrorRecord.Exception -and $null -ne $ErrorRecord.Exception.HResult) {
+            # 0x80070005 E_ACCESSDENIED, as an int32.
+            if ([int]$ErrorRecord.Exception.HResult -eq -2147024891) { return $true }
+        }
+        $message = [string]$ErrorRecord.Exception.Message
+        return ($message -match "(?i)access is denied|0x80070005")
+    } catch {
+        return $false
+    }
+}
+
+# Get-Date -UFormat %s is unusable on 5.1: it formats local time as if it were UTC, so
+# the value is off by the timezone offset (8h here) and the reader's freshness check
+# would either reject this breadcrumb or accept a stale one.
+function Get-EpochSeconds {
+    return [int](((Get-Date).ToUniversalTime() - (Get-Date -Date "1970-01-01 00:00:00")).TotalSeconds)
+}
+
+# 5.1 ConvertTo-Json serializes a nested hashtable as [{Key, Value}, ...], not a JSON
+# object. The reader then Object.keys the array and loses definition_owner / task_state.
+# Hand-write the diag object the way loongsuite-pilot.sh does. Hashtable-only: CLM.
+function Escape-RestartJsonString {
+    param([string]$Value)
+    $s = [string]$Value
+    if (-not $s) { return "" }
+    $s = $s.Replace("`r", " ").Replace("`n", " ").Replace("`t", " ")
+    $s = $s -replace '[\u0000-\u001F]', ''
+    return $s.Replace('\', '\\').Replace('"', '\"')
+}
+
+function ConvertTo-RestartFailureJson {
+    param(
+        [int]$Ts,
+        [string]$Target,
+        [string]$Stage,
+        [string]$InitType,
+        [string]$Detail,
+        [hashtable]$Diag
+    )
+    $diagLines = @()
+    if ($Diag) {
+        foreach ($key in ($Diag.Keys | Sort-Object)) {
+            $k = Escape-RestartJsonString ([string]$key)
+            if (-not $k) { continue }
+            $v = Escape-RestartJsonString ([string]$Diag[$key])
+            $diagLines += '    "' + $k + '": "' + $v + '"'
+        }
+    }
+    $diagBody = $diagLines -join ",`n"
+    $lines = @(
+        '{'
+        '  "schema": 1,'
+        ('  "ts": ' + $Ts + ',')
+        ('  "target": "' + (Escape-RestartJsonString $Target) + '",')
+        ('  "stage": "' + (Escape-RestartJsonString $Stage) + '",')
+        ('  "init_type": "' + (Escape-RestartJsonString $InitType) + '",')
+        ('  "detail": "' + (Escape-RestartJsonString $Detail) + '",')
+        '  "diag": {'
+        $diagBody
+        '  }'
+        '}'
+    )
+    return ($lines -join "`n")
+}
+
+# Everything worth knowing about why a restart did not take, as a flat string map
+# (flat because the reader renders it into a single-line alarm message, and because a
+# nested [pscustomobject] cannot be built under Constrained Language Mode).
+# Read-only by contract: no Test-PidRunning here, which deletes the pid file it finds
+# stale -- diagnostics must not change the state they are describing.
+function Get-RestartDiagnostics {
+    param(
+        [string]$TaskName,
+        [string]$PidFile,
+        [string]$LogFile,
+        [hashtable]$Extra = $null
+    )
+    $diag = @{}
+
+    $query = Get-TaskQuery $TaskName
+    $diag["exists_ps"] = if ($query.exists) { "yes" } else { "no" }
+    if ($query.error) { $diag["query_error"] = $query.error }
+    # Second opinion from schtasks.exe. "no" from the CIM cmdlet next to "yes" here is
+    # the signature of a broken query rather than a task that is really gone.
+    $diag["exists_schtasks"] = Test-TaskExistsViaSchtasks $TaskName
+
+    $task = $query.task
+    if ($task) {
+        try {
+            $diag["task_state"] = [string]$task.State
+            $principal = $task.Principal
+            if ($principal) {
+                $diag["principal_user"] = [string]$principal.UserId
+                $diag["logon_type"] = [string]$principal.LogonType
+                $diag["run_level"] = [string]$principal.RunLevel
+            }
+            $action = $task.Actions | Select-Object -First 1
+            if ($action) {
+                $diag["action_exe"] = [string]$action.Execute
+                $diag["action_args"] = [string]$action.Arguments
+            }
+        } catch {
+            $diag["task_read_error"] = [string]$_.Exception.Message
+        }
+    }
+
+    try {
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        if ($info) {
+            $diag["last_run_time"] = [string]$info.LastRunTime
+            $diag["last_task_result"] = ("0x{0:X8}" -f [int]$info.LastTaskResult)
+            $diag["missed_runs"] = [string]$info.NumberOfMissedRuns
+        }
+    } catch {}
+
+    # Owner of the on-disk task definition. An elevated install re-owns it to
+    # BUILTIN\Administrators; UAC filters that group out of an unelevated token, so this
+    # session can start the task but can never delete or re-register it (measured: the
+    # task's own principal keeps only Read, Synchronize). That single field distinguishes
+    # "denied because someone installed as admin" from every other denial.
+    try {
+        $taskFolderLeaf = ([string]$TASK_FOLDER).TrimStart("\")
+        $definition = Join-Path (Join-Path $env:SystemRoot "System32\Tasks") (Join-Path $taskFolderLeaf $TaskName)
+        # No Test-Path short-circuit: on 5.1 Test-Path returns $false for both a missing
+        # file and ERROR_ACCESS_DENIED on System32\Tasks, so an admin-owned definition
+        # was reported as "no definition file". Get-Acl and let catch name the reason.
+        $diag["definition_owner"] = [string](Get-Acl -LiteralPath $definition).Owner
+    } catch {
+        $diag["definition_owner"] = "unreadable: $($_.Exception.Message)"
+    }
+
+    $pidState = "no pid file"
+    try {
+        if ($PidFile -and (Test-Path -LiteralPath $PidFile)) {
+            $pidValue = ([string](Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue)).Trim()
+            $proc = $null
+            if ($pidValue) { $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue }
+            $pidState = if ($proc) { "pid=$pidValue running" } else { "pid=$pidValue not running" }
+        }
+    } catch {
+        $pidState = "unreadable: $($_.Exception.Message)"
+    }
+    $diag["pid_state"] = $pidState
+
+    try {
+        $node = Resolve-Node
+        $diag["node_bin"] = if ($node) { $node } else { "not found" }
+    } catch {
+        $diag["node_bin"] = "resolve failed: $($_.Exception.Message)"
+    }
+
+    try {
+        if ($LogFile -and (Test-Path -LiteralPath $LogFile)) {
+            $tail = Get-Content -LiteralPath $LogFile -Tail 3 -ErrorAction SilentlyContinue
+            $joined = ([string]($tail -join " / ")).Trim()
+            if ($joined.Length -gt 300) { $joined = $joined.Substring(0, 300) }
+            if ($joined) { $diag["log_tail"] = $joined }
+        }
+    } catch {}
+
+    if ($Extra) {
+        foreach ($key in $Extra.Keys) {
+            $value = [string]$Extra[$key]
+            if ($value) { $diag[$key] = $value }
+        }
+    }
+
+    return $diag
+}
+
+# Prints the failure and persists it. MUST be called before Write-Error / exit: under
+# $ErrorActionPreference = "Stop" (top of this file) Write-Error is a terminating error,
+# so anything after it is unreachable -- that is exactly how the old code path ended up
+# reporting "Service manager failed to restart updater" with no reason attached.
+# Wrapped in try/catch throughout: diagnostics must never become a new failure source.
+function Write-RestartFailure {
+    param(
+        [string]$Target,
+        [string]$Stage,
+        [string]$Detail = "",
+        [hashtable]$Extra = $null
+    )
+    $initType = ""
+    try { $initType = Get-InitType } catch {}
+
+    $diag = @{}
+    try {
+        if ($Target -eq "updater") {
+            $diag = Get-RestartDiagnostics `
+                -TaskName $TASK_NAME_UPDATER `
+                -PidFile $UPDATER_PID_FILE `
+                -LogFile $UPDATER_LOG_FILE `
+                -Extra $Extra
+        } else {
+            $diag = Get-RestartDiagnostics `
+                -TaskName $TASK_NAME_COLLECTOR `
+                -PidFile $PID_FILE `
+                -LogFile $LOG_FILE `
+                -Extra $Extra
+        }
+    } catch {
+        $diag = @{ diag_error = [string]$_.Exception.Message }
+        if ($Extra) {
+            foreach ($key in $Extra.Keys) { $diag[$key] = [string]$Extra[$key] }
+        }
+    }
+
+    # Console copy first: it is the only one a human running the command by hand sees,
+    # and it must survive a failure of the file write below.
+    Write-Host "[restart-failure] target=$Target stage=$Stage init_type=$initType"
+    if ($Detail) { Write-Host "[restart-failure] reason=$Detail" }
+    try {
+        foreach ($key in ($diag.Keys | Sort-Object)) {
+            Write-Host "[restart-failure] ${key}=$($diag[$key])"
+        }
+    } catch {}
+
+    try {
+        Ensure-Dirs
+        $payload = @{
+            schema = 1
+            ts = (Get-EpochSeconds)
+            target = $Target
+            stage = $Stage
+            init_type = $initType
+            detail = $Detail
+            diag = $diag
+        }
+        $file = Get-RestartFailureFile $Target
+        $tmp = "$file.tmp"
+        # Hand-written JSON: 5.1 ConvertTo-Json turns a nested hashtable into
+        # [{Key,Value},...], which summarizeRestartFailure cannot read as diag fields.
+        # -Encoding UTF8 is mandatory: Set-Content defaults to the ANSI codepage while
+        # node reads this as UTF-8, and a non-ASCII account name or localized Windows
+        # message in any field would come back mojibake. 5.1 always adds a BOM; the
+        # reader goes through readJsonFile, which strips it.
+        $json = ConvertTo-RestartFailureJson `
+            -Ts ([int]$payload.ts) `
+            -Target ([string]$payload.target) `
+            -Stage ([string]$payload.stage) `
+            -InitType ([string]$payload.init_type) `
+            -Detail ([string]$payload.detail) `
+            -Diag $payload.diag
+        Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $file -Force
+    } catch {
+        Write-Host "[restart-failure] breadcrumb write failed: $($_.Exception.Message)"
+    }
 }
 
 function Start-CompatibleExistingCollectorTask {
@@ -536,7 +1072,7 @@ sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 }
 
 function Install-CollectorTask {
-    param([string]$nodeBin)
+    param([string]$nodeBin, [switch]$SkipCleanup)
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
     if (-not (Test-Path $entry)) {
         Write-Host "Bootstrap script missing: $entry"
@@ -569,12 +1105,14 @@ function Install-CollectorTask {
     # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
     # new registration -- so without this reap the orphan keeps running alongside the new
     # instance and both write the same output (duplicate-collection incident root cause).
-    Stop-OrphanProcesses -Match "collector-daemon"
+    if (-not $SkipCleanup) {
+        Stop-OrphanProcesses -Match "collector-daemon"
 
-    # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
-    # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
-    try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
-    try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
+        # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+        try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
+    }
 
     return (Register-PilotTask `
         -taskName $TASK_NAME_COLLECTOR `
@@ -814,27 +1352,162 @@ function Cmd-Restart {
     Cmd-Start
 }
 
+function Start-BackgroundDaemon {
+    param(
+        [string]$DaemonName,
+        [string]$NodeBin,
+        [string]$Entry,
+        [string]$OutputLog,
+        [string]$ErrorLog
+    )
+    $launcherPath = Join-Path $BOOTSTRAP_DIR "$DaemonName-background.ps1"
+    $escapedDataDir = ([string]$DATA_DIR).Replace("'", "''")
+    $escapedCacheDir = ([string]$CACHE_DIR).Replace("'", "''")
+    $escapedConfig = ([string]$CONFIG_FILE).Replace("'", "''")
+    $escapedNode = ([string]$NodeBin).Replace("'", "''")
+    $escapedEntry = ([string]$Entry).Replace("'", "''")
+    $escapedOutput = ([string]$OutputLog).Replace("'", "''")
+    $escapedError = ([string]$ErrorLog).Replace("'", "''")
+    @(
+        "`$env:LOONGSUITE_PILOT_DATA_DIR = '$escapedDataDir'",
+        "`$env:LOONGSUITE_PILOT_CACHE_DIR = '$escapedCacheDir'",
+        "`$env:AGENT_DATA_COLLECTION_CONFIG = '$escapedConfig'",
+        "& '$escapedNode' '$escapedEntry' >> '$escapedOutput' 2>> '$escapedError'"
+    ) | Set-Content -LiteralPath $launcherPath -Encoding Unicode
+
+    # Use -File so paths are parsed only inside the generated script, where every
+    # single quote has been escaped. Directly interpolating them into -Command breaks
+    # profiles and custom data dirs such as C:\Users\O'Brien.
+    $launcherArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPath`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $launcherArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+}
+
+# Start the collector without stopping it or scanning for processes. This command is
+# the updater's recovery path after restart-collector times out: the timed-out command
+# may already have completed the stop half, so running another restart would extend the
+# collection gap. If a partial upgrade deleted the scheduled task, recreate only that
+# missing task without the destructive cleanup used by normal registration.
+function Cmd-StartCollector {
+    if ((Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)) {
+        Write-Host "collector is already running"
+        return
+    }
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $query = Get-TaskQuery $TASK_NAME_COLLECTOR
+    $intent = Get-TaskStartIntent $query $TASK_NAME_COLLECTOR
+    $shouldStart = [bool]$intent.should_start
+    $confirmedMissing = [bool]$intent.confirmed_missing
+
+    if ($shouldStart) {
+        try {
+            Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+            Write-Host "collector start requested (Task Scheduler)"
+            return
+        } catch {
+            $run = Invoke-SchtasksRun $TASK_NAME_COLLECTOR
+            if ($run.ok) {
+                Write-Host "collector start requested (schtasks /Run)"
+                return
+            }
+            Write-Host "Task Scheduler start failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($query.exists) {
+                Write-Error "Service manager failed to start collector"
+                exit 1
+            }
+        }
+    }
+
+    if ($confirmedMissing) {
+        try {
+            $ok = Install-CollectorTask $nodeBin -SkipCleanup
+            if ($ok) {
+                Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                Write-Host "collector task restored and start requested (Task Scheduler)"
+                return
+            }
+        } catch {
+            Write-Host "Collector task recovery failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    # A missing task can be the result of an interrupted activation. Keep collection
+    # available even when task repair is denied; the updater's runtime/PID validation
+    # decides whether this detached fallback really became healthy.
+    $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
+    if (-not (Test-Path $entry)) {
+        Write-Error "Bootstrap script missing"
+        exit 1
+    }
+    $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
+    Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
+    Write-Host "collector start requested (background fallback)" -ForegroundColor Yellow
+}
+
+function Schedule-UpdaterRestart {
+    Ensure-Dirs
+    $handoffScript = Join-Path $BOOTSTRAP_DIR "restart-updater-delayed.ps1"
+    $escapedBin = ([string]$LOONGSUITE_PILOT_BIN).Replace("'", "''")
+    $escapedLog = ([string]$UPDATER_LOG_FILE).Replace("'", "''")
+    @(
+        "Start-Sleep -Seconds 10",
+        "& '$escapedBin' restart-updater *>> '$escapedLog'"
+    ) | Set-Content -LiteralPath $handoffScript -Encoding Unicode
+
+    # Start-Process creates an independent process instead of a PowerShell job owned by
+    # this invocation. It therefore survives long enough to stop/relaunch the updater
+    # after the current health check and bookkeeping have completed.
+    $handoffArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$handoffScript`""
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $handoffArgs `
+        -WorkingDirectory $CACHE_DIR `
+        -WindowStyle Hidden
+    Write-Host "updater restart scheduled"
+}
+
 # ============================================================
 # CMD: restart-collector (used by updater after deploying a new version)
 # ============================================================
 function Cmd-RestartCollector {
+    param([string[]]$Options = @())
+    Clear-RestartFailure "collector"
+
+    $deferUpdaterRestart = $false
+    foreach ($option in $Options) {
+        if ($option -eq "--defer-updater-restart") {
+            $deferUpdaterRestart = $true
+        } else {
+            Write-RestartFailure -Target "collector" -Stage "service-manager-refused" `
+                -Detail "Unknown restart-collector option: $option"
+            Write-Error "Unknown restart-collector option: $option"
+            exit 1
+        }
+    }
+
     # Stop collector only (leave updater running)
     $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        Wait-ForTaskNotRunning $TASK_NAME_COLLECTOR | Out-Null
     }
     Stop-PidFile $PID_FILE
 
-    # Kill orphan collector processes
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "collector-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Kill orphan collector processes. Was an inline copy of Stop-OrphanProcesses that
+    # predated the -Match parameter; it also missed the installation scope the shared
+    # helper now applies, and restart-collector is the command the updater runs on every
+    # deploy -- i.e. the one that reached other accounts most often.
+    Stop-OrphanProcesses -Match "collector-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
@@ -842,15 +1515,39 @@ function Cmd-RestartCollector {
 
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
+        Write-RestartFailure -Target "collector" -Stage "node-missing" `
+            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         exit 1
     }
 
+    $initType = Get-InitType
+    # See Cmd-RestartUpdater: narrowed as the ladder proceeds so the exit can name a cause.
+    $stage = "service-manager-refused"
+    $detail = "no restart path succeeded"
+    $extra = @{}
+
     # Restart via Task Scheduler if registered
     $restarted = $false
-    if (Get-TaskExists $TASK_NAME_COLLECTOR) {
-        # Re-register with potentially updated paths -- best-effort, and deliberately
-        # in its OWN try so a failure here can no longer skip the start below.
+    $query = Get-TaskQuery $TASK_NAME_COLLECTOR
+    $intent = Get-TaskStartIntent $query $TASK_NAME_COLLECTOR
+    $shouldStart = [bool]$intent.should_start
+    $confirmedMissing = [bool]$intent.confirmed_missing
+    $extra["exists_schtasks"] = [string]$intent.exists_schtasks
+    if ($query.error) {
+        $stage = "task-query-failed"
+        $detail = "Get-ScheduledTask failed: $($query.error)"
+        Write-Host "Task query failed for $TASK_FOLDER\$TASK_NAME_COLLECTOR : $($query.error)" -ForegroundColor Yellow
+    } elseif (-not $query.exists) {
+        $stage = "task-missing"
+        $detail = "scheduled task $TASK_FOLDER\$TASK_NAME_COLLECTOR is not registered"
+        Write-Host "Scheduled task not registered: $TASK_FOLDER\$TASK_NAME_COLLECTOR" -ForegroundColor Yellow
+    }
+
+    if ($shouldStart) {
+        # Re-register with potentially updated paths -- best-effort, and only when CIM
+        # actually found the task. A query-fail or schtasks-yes must not delete+recreate.
+        # The Install call is in its OWN try so a failure here can no longer skip start.
         #
         # A scheduled task grants its own principal only Read: every write ACE sits on
         # BUILTIN\Administrators, and UAC filters that group out of the token of a
@@ -870,45 +1567,98 @@ function Cmd-RestartCollector {
         # the self-heal branch below is skipped, so the update ended in "Service manager
         # failed to restart collector" + exit 1 while the collector stayed down until the
         # task's own 5-minute watchdog trigger happened to relaunch it.
-        try {
-            Install-CollectorTask $nodeBin | Out-Null
-        } catch {
-            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        if ($query.exists) {
+            try {
+                Install-CollectorTask $nodeBin | Out-Null
+            } catch {
+                $extra["register_error"] = [string]$_.Exception.Message
+                Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
         try {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-            Write-Host "collector restarted (Task Scheduler)"
-            $restarted = $true
+            # Start-ScheduledTask only means Task Scheduler accepted the request. Waiting
+            # for the heartbeat (the same criterion Cmd-Start uses) is what keeps a new
+            # version that crashes on startup from being reported as a successful restart.
+            if (Wait-ForCollectorHeartbeat 20) {
+                Write-Host "collector restarted (Task Scheduler)"
+                $restarted = $true
+            } else {
+                $stage = "not-running-after-start"
+                $detail = "Start-ScheduledTask returned success but no collector heartbeat or pid appeared within 20s"
+                Write-Host "Task started but no collector heartbeat: $TASK_NAME_COLLECTOR" -ForegroundColor Yellow
+            }
         } catch {
-            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $message = [string]$_.Exception.Message
+            $run = Invoke-SchtasksRun $TASK_NAME_COLLECTOR
+            if ($run.ok) {
+                if (Wait-ForCollectorHeartbeat 20) {
+                    Write-Host "collector restarted (schtasks /Run)"
+                    $restarted = $true
+                } else {
+                    $stage = "not-running-after-start"
+                    $detail = "schtasks /Run returned success but no collector heartbeat or pid appeared within 20s"
+                    Write-Host "Task started via schtasks /Run but no collector heartbeat: $TASK_NAME_COLLECTOR" -ForegroundColor Yellow
+                }
+            } else {
+                $extra["start_error"] = $message
+                $extra["schtasks_run_error"] = [string]$run.error
+                $stage = if (Test-AccessDeniedError $_) { "register-denied" } else { "start-failed" }
+                $detail = "Start-ScheduledTask failed: $message"
+                Write-Host "Task Scheduler restart failed: $message" -ForegroundColor Yellow
+            }
         }
     }
 
     if (-not $restarted) {
-        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
-        $initType = ""
-        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
-        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
-        if ($initType -in @("background", "unknown", "")) {
+        # Self-heal, no longer gated on init_type -- see the equivalent comment in
+        # Cmd-RestartUpdater: the gate left a taskscheduler install with a broken task no
+        # way to repair itself. Only when the task is confirmed missing: a query-fail or
+        # schtasks-yes means Start may still work, and delete+recreate would be denied.
+        if ($confirmedMissing) {
             try {
                 $ok = Install-CollectorTask $nodeBin
-                if ($ok) {
-                    Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-                    Start-Sleep -Seconds 1
-                    if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+                if (-not $ok) {
+                    $stage = "bootstrap-missing"
+                    $detail = "Install-CollectorTask declined: collector-daemon.js missing under $BOOTSTRAP_DIR"
+                    Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
+                } else {
+                    # Registration succeeded: this install is now managed. Flip in-memory
+                    # type first so a Set-Content failure cannot fall through to background.
+                    $initType = "taskscheduler"
+                    try {
                         Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    } catch {
+                        # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
+                    }
+                    Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    if (Wait-ForCollectorHeartbeat 20) {
                         Write-Host "collector self-healed: registered with Task Scheduler"
                         $restarted = $true
+                    } else {
+                        $stage = "selfheal-not-running"
+                        $detail = "task re-registered but no collector heartbeat within 20s"
+                        Write-Host "Self-heal registered the task but nothing came up" -ForegroundColor Yellow
                     }
                 }
             } catch {
-                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                $message = [string]$_.Exception.Message
+                $extra["selfheal_error"] = $message
+                $stage = if (Test-AccessDeniedError $_) { "register-denied" } else { "selfheal-register-failed" }
+                $detail = "self-heal failed: $message"
+                Write-Host "Self-heal failed: $message" -ForegroundColor Yellow
             }
+        } else {
+            Write-Host "Self-heal skipped: task not confirmed missing (exists_schtasks=$($intent.exists_schtasks))" -ForegroundColor Yellow
         }
         if (-not $restarted) {
+            # Restricted to installs that never had a task, and reported when skipped --
+            # see Cmd-RestartUpdater.
             if ($initType -in @("background", "unknown", "")) {
                 $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
                 if (-not (Test-Path $entry)) {
+                    Write-RestartFailure -Target "collector" -Stage "bootstrap-missing" `
+                        -Detail "collector-daemon.js not found at $entry" -Extra $extra
                     Write-Error "Bootstrap script missing"
                     exit 1
                 }
@@ -916,45 +1666,50 @@ function Cmd-RestartCollector {
                 # node publishes its own pid file on Windows (see src/index.ts); export the
                 # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here --
                 # $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
-                Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+                Start-BackgroundDaemon "collector" $nodeBin $entry $LOG_FILE $errLog
+                if (Wait-ForCollectorHeartbeat 10) {
+                    Write-Host "collector restarted (background fallback after stage=$stage : $detail)" -ForegroundColor Yellow
+                } else {
+                    Write-RestartFailure -Target "collector" -Stage "not-running-after-start" `
+                        -Detail "background fallback started but no collector heartbeat or pid appeared within 10s" `
+                        -Extra $extra
+                    Write-Error "Service manager failed to restart collector (init_type=$initType stage=not-running-after-start): background fallback did not come up"
+                    exit 1
+                }
             } else {
-                Write-Error "Service manager failed to restart collector (init_type=$initType)"
+                # Diagnostics before Write-Error: EAP=Stop makes it terminating, so nothing
+                # after it runs (the old `exit 1` never executed either).
+                Write-RestartFailure -Target "collector" -Stage $stage -Detail $detail -Extra $extra
+                Write-Error "Service manager failed to restart collector (init_type=$initType stage=$stage): $detail"
                 exit 1
             }
         }
     }
 
-    # Schedule updater restart in background (equivalent to setsid on Linux)
-    Start-Job -ScriptBlock {
-        Start-Sleep -Seconds 10
-        & $using:LOONGSUITE_PILOT_BIN restart-updater
-    } | Out-Null
+    if (-not $deferUpdaterRestart) {
+        Schedule-UpdaterRestart
+    }
 }
 
 # ============================================================
 # CMD: restart-updater
 # ============================================================
 function Cmd-RestartUpdater {
+    # Any breadcrumb still on disk describes an older attempt. Clearing it here is what
+    # lets the caller treat "file present and fresh" as "this attempt failed, here is why".
+    Clear-RestartFailure "updater"
+
     # Stop updater
     $task = Get-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+        Wait-ForTaskNotRunning $TASK_NAME_UPDATER | Out-Null
     }
     Stop-PidFile $UPDATER_PID_FILE
 
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "updater-daemon"
-            } catch { $false }
-        } | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Second inline copy, same history and same missing scope as the one in
+    # Cmd-RestartCollector.
+    Stop-OrphanProcesses -Match "updater-daemon"
 
     Start-Sleep -Seconds 1
     Ensure-Dirs
@@ -962,72 +1717,160 @@ function Cmd-RestartUpdater {
 
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
+        Write-RestartFailure -Target "updater" -Stage "node-missing" `
+            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         return
     }
 
+    $initType = Get-InitType
+    # Stage/detail carry the most specific thing learned so far, so the exit at the
+    # bottom can name a cause instead of just "the service manager refused". They start
+    # at the generic label and are narrowed as the ladder proceeds.
+    $stage = "service-manager-refused"
+    $detail = "no restart path succeeded"
+    $extra = @{}
+
     # Restart via Task Scheduler
     $restarted = $false
-    if (Get-TaskExists $TASK_NAME_UPDATER) {
+    $query = Get-TaskQuery $TASK_NAME_UPDATER
+    $intent = Get-TaskStartIntent $query $TASK_NAME_UPDATER
+    $shouldStart = [bool]$intent.should_start
+    $confirmedMissing = [bool]$intent.confirmed_missing
+    $extra["exists_schtasks"] = [string]$intent.exists_schtasks
+    if ($query.error) {
+        # Not the same thing as "not registered": the query itself broke, so re-registering
+        # is the wrong reflex and the reason must be reported verbatim.
+        $stage = "task-query-failed"
+        $detail = "Get-ScheduledTask failed: $($query.error)"
+        Write-Host "Task query failed for $TASK_FOLDER\$TASK_NAME_UPDATER : $($query.error)" -ForegroundColor Yellow
+    } elseif (-not $query.exists) {
+        $stage = "task-missing"
+        $detail = "scheduled task $TASK_FOLDER\$TASK_NAME_UPDATER is not registered"
+        Write-Host "Scheduled task not registered: $TASK_FOLDER\$TASK_NAME_UPDATER" -ForegroundColor Yellow
+    }
+
+    if ($shouldStart) {
         # Best-effort re-registration in its own try, for the same reason as in
         # Cmd-RestartCollector above (a -RunLevel Limited task cannot rewrite its own
-        # definition; only starting it works). See the comment there.
-        try {
-            Install-UpdaterTask $nodeBin | Out-Null
-        } catch {
-            Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+        # definition; only starting it works). Skip Install when CIM did not actually
+        # find the task: query-fail / schtasks-yes must not delete+recreate.
+        if ($query.exists) {
+            try {
+                Install-UpdaterTask $nodeBin | Out-Null
+            } catch {
+                $extra["register_error"] = [string]$_.Exception.Message
+                Write-Host "Task re-registration skipped (start still attempted): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
         try {
             Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-            Start-Sleep -Seconds 1
-            if (Get-TaskRunning $TASK_NAME_UPDATER) {
+            if (Wait-ForUpdaterAlive) {
                 Write-Host "updater restarted (Task Scheduler)"
                 $restarted = $true
+            } else {
+                $stage = "not-running-after-start"
+                $detail = "Start-ScheduledTask returned success but no updater pid appeared within 15s"
+                Write-Host "Task started but no updater came up: $TASK_NAME_UPDATER" -ForegroundColor Yellow
             }
         } catch {
-            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $message = [string]$_.Exception.Message
+            $run = Invoke-SchtasksRun $TASK_NAME_UPDATER
+            if ($run.ok) {
+                if (Wait-ForUpdaterAlive) {
+                    Write-Host "updater restarted (schtasks /Run)"
+                    $restarted = $true
+                } else {
+                    $stage = "not-running-after-start"
+                    $detail = "schtasks /Run returned success but no updater pid appeared within 15s"
+                    Write-Host "Task started via schtasks /Run but no updater came up: $TASK_NAME_UPDATER" -ForegroundColor Yellow
+                }
+            } else {
+                $extra["start_error"] = $message
+                $extra["schtasks_run_error"] = [string]$run.error
+                $stage = if (Test-AccessDeniedError $_) { "register-denied" } else { "start-failed" }
+                $detail = "Start-ScheduledTask failed: $message"
+                Write-Host "Task Scheduler restart failed: $message" -ForegroundColor Yellow
+            }
         }
     }
 
     if (-not $restarted) {
-        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
-        $initType = ""
-        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
-        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
-        if ($initType -in @("background", "unknown", "")) {
+        # Self-heal: re-register from scratch. No longer gated on init_type. The gate used
+        # to read @("background","unknown","") -- so a taskscheduler install whose task was
+        # missing or unusable was not allowed to repair itself and could only fall through
+        # to a reasonless Write-Error, once per updater cycle, forever.
+        # Only when confirmed missing: a query-fail or schtasks-yes is not a missing task.
+        if ($confirmedMissing) {
             try {
                 $ok = Install-UpdaterTask $nodeBin
-                if ($ok) {
-                    Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
-                    Start-Sleep -Seconds 1
-                    if (Get-TaskRunning $TASK_NAME_UPDATER) {
+                if (-not $ok) {
+                    $stage = "bootstrap-missing"
+                    $detail = "Install-UpdaterTask declined: updater-daemon.js missing under $BOOTSTRAP_DIR"
+                    Write-Host "Self-heal skipped: $detail" -ForegroundColor Yellow
+                } else {
+                    $initType = "taskscheduler"
+                    try {
                         Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                    } catch {
+                        # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
+                    }
+                    Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    if (Wait-ForUpdaterAlive) {
                         Write-Host "updater self-healed: registered with Task Scheduler"
                         $restarted = $true
+                    } else {
+                        $stage = "selfheal-not-running"
+                        $detail = "task re-registered but no updater pid appeared within 15s"
+                        Write-Host "Self-heal registered the task but nothing came up" -ForegroundColor Yellow
                     }
                 }
             } catch {
-                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                $message = [string]$_.Exception.Message
+                $extra["selfheal_error"] = $message
+                $stage = if (Test-AccessDeniedError $_) { "register-denied" } else { "selfheal-register-failed" }
+                $detail = "self-heal failed: $message"
+                Write-Host "Self-heal failed: $message" -ForegroundColor Yellow
             }
+        } else {
+            Write-Host "Self-heal skipped: task not confirmed missing (exists_schtasks=$($intent.exists_schtasks))" -ForegroundColor Yellow
         }
         if (-not $restarted) {
+            # The detached-powershell fallback stays restricted to installs that never had
+            # a task: on a taskscheduler install it is not a repair but a second unmanaged
+            # daemon that dies at the next logoff while hiding the real breakage. What
+            # changed is that skipping it is now reported instead of falling through to a
+            # Write-Error carrying nothing but init_type.
             if ($initType -in @("background", "unknown", "")) {
                 $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
                 if (-not (Test-Path $entry)) {
-                    Write-Host "Updater bootstrap script missing"
+                    # Used to be Write-Host + return, i.e. exit 0: the caller recorded a
+                    # successful restart of an updater that was never started.
+                    Write-RestartFailure -Target "updater" -Stage "bootstrap-missing" `
+                        -Detail "updater-daemon.js not found at $entry" -Extra $extra
+                    Write-Error "Updater bootstrap script missing"
                     return
                 }
                 $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
                 # node publishes its own pid file on Windows (see src/updater/index.ts); export
                 # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
                 # Set-Content -- $proc.Id would be the wrapper pid, not node's.
-                Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-                    -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden
-                Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+                Start-BackgroundDaemon "updater" $nodeBin $entry $UPDATER_LOG_FILE $updaterErrLog
+                if (Wait-ForUpdaterAlive 10) {
+                    Write-Host "updater restarted (background fallback after stage=$stage : $detail)" -ForegroundColor Yellow
+                } else {
+                    Write-RestartFailure -Target "updater" -Stage "not-running-after-start" `
+                        -Detail "background fallback started but no updater pid appeared within 10s" `
+                        -Extra $extra
+                    Write-Error "Service manager failed to restart updater (init_type=$initType stage=not-running-after-start): background fallback did not come up"
+                    return
+                }
             } else {
-                Write-Error "Service manager failed to restart updater (init_type=$initType)"
+                # Order matters: under EAP=Stop (top of this file) Write-Error is a
+                # terminating error, so the diagnostics have to be written BEFORE it. The
+                # `return` that used to sit after it was dead code.
+                Write-RestartFailure -Target "updater" -Stage $stage -Detail $detail -Extra $extra
+                Write-Error "Service manager failed to restart updater (init_type=$initType stage=$stage): $detail"
                 return
             }
         }
@@ -1216,6 +2059,92 @@ function Cmd-Info {
         # BOM sniffing then falls back to ANSI, printing a Chinese prefix as mojibake.
         Get-Content $CONFIG_FILE -Encoding UTF8
     }
+}
+
+function Show-UpgradeUsage {
+    Write-Host "Usage: loongsuite-pilot upgrade [--version <version>]"
+    Write-Host ""
+    Write-Host "Upgrade the open-source edition to the latest release, or to a specific version."
+}
+
+function Cmd-Upgrade {
+    $version = ""
+    for ($i = 0; $i -lt $SubArgs.Count; $i++) {
+        $arg = [string]$SubArgs[$i]
+        if ($arg -in @("--version", "-Version")) {
+            if ($i + 1 -ge $SubArgs.Count -or -not $SubArgs[$i + 1]) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+            $i++
+            $version = [string]$SubArgs[$i]
+        } elseif ($arg -match '^--version=(.*)$') {
+            $version = [string]$Matches[1]
+            if (-not $version) {
+                Write-Error "--version requires a value"
+                exit 1
+            }
+        } elseif ($arg -in @("help", "--help", "-h")) {
+            Show-UpgradeUsage
+            return
+        } else {
+            Write-Host "Unknown upgrade option: $arg" -ForegroundColor Red
+            Show-UpgradeUsage
+            exit 1
+        }
+    }
+
+    if ($version -and $version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
+        Write-Host "Invalid version: $version (expected e.g. 1.6.0)" -ForegroundColor Red
+        exit 1
+    }
+
+    $tempRoot = if ($env:TEMP) { $env:TEMP } else { $DEFAULT_PILOT_DIR }
+    if (-not (Test-Path -LiteralPath $tempRoot)) {
+        New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    }
+    $installerFile = Join-Path $tempRoot ("loongsuite-pilot-installer-" + (Get-Random) + ".ps1")
+
+    $installerExit = 1
+    try {
+        # Windows PowerShell 5.1 may still default to TLS 1.0. Match the
+        # open-source installer's best-effort TLS 1.2 compatibility handling;
+        # the assignment can be blocked under Constrained Language Mode.
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        try {
+            Invoke-WebRequest -Uri $OPEN_SOURCE_INSTALLER_URL -OutFile $installerFile -UseBasicParsing
+        } catch {
+            Write-Host "Failed to download the open-source installer: $_" -ForegroundColor Red
+            exit 1
+        }
+        $installerArgs = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $installerFile,
+            "upgrade",
+            "-DataDir", $DATA_DIR
+        )
+        if ($version) { $installerArgs += @("-Version", $version) }
+
+        $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+        $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+        & powershell.exe @installerArgs
+        $installerExit = $LASTEXITCODE
+    } finally {
+        # Cleanup must not replace the installer's real success/failure result.
+        # In particular, some 8.3-short %TEMP% paths make the FileSystem
+        # provider throw a terminating normalization error that SilentlyContinue
+        # cannot suppress.
+        try {
+            if (Test-Path -LiteralPath $installerFile -ErrorAction SilentlyContinue) {
+                Remove-Item -LiteralPath $installerFile -Force -ErrorAction Stop
+            }
+        } catch {
+            Write-Warning "Failed to remove temporary installer: $_"
+        }
+    }
+
+    if ($installerExit -ne 0) { exit $installerExit }
 }
 
 # ============================================================
@@ -1518,6 +2447,40 @@ if (op === "set") {
     if ($sub -ne "" -and $sub.ToLower() -notin @("help", "-h", "--help")) { exit 1 }
 }
 
+# ============================================================
+# CMD: diagnose-service
+# ============================================================
+# Same collection Write-RestartFailure persists, on demand and without touching
+# anything: the fastest way to answer "why can this box not restart its daemons"
+# without waiting for the next failed cycle.
+function Cmd-DiagnoseService {
+    Write-Host "init_type: $(Get-InitType)"
+    Write-Host "task folder: $TASK_FOLDER"
+    Write-Host ""
+    foreach ($target in @("collector", "updater")) {
+        if ($target -eq "updater") {
+            $diag = Get-RestartDiagnostics -TaskName $TASK_NAME_UPDATER -PidFile $UPDATER_PID_FILE -LogFile $UPDATER_LOG_FILE
+            Write-Host "[updater] task: $TASK_NAME_UPDATER"
+        } else {
+            $diag = Get-RestartDiagnostics -TaskName $TASK_NAME_COLLECTOR -PidFile $PID_FILE -LogFile $LOG_FILE
+            Write-Host "[collector] task: $TASK_NAME_COLLECTOR"
+        }
+        foreach ($key in ($diag.Keys | Sort-Object)) {
+            Write-Host "[$target] ${key}=$($diag[$key])"
+        }
+        $file = Get-RestartFailureFile $target
+        if (Test-Path -LiteralPath $file) {
+            Write-Host "[$target] last restart failure ($file):"
+            Get-Content -LiteralPath $file -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "[$target]   $_"
+            }
+        } else {
+            Write-Host "[$target] no restart failure recorded"
+        }
+        Write-Host ""
+    }
+}
+
 function Cmd-Help {
     Write-Host "Usage: loongsuite-pilot <command>"
     Write-Host ""
@@ -1535,7 +2498,11 @@ function Cmd-Help {
     Write-Host "  tokens          Alias for token-usage"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
+    if (Test-OpenSourceBuild) {
+        Write-Host "  upgrade [opts]  Upgrade to latest or --version <version> (open-source only)"
+    }
     Write-Host "  rollback        Roll back to the previous version"
+    Write-Host "  diagnose-service  Dump why the service tasks cannot start/restart"
     Write-Host "  worker          Manage local Workers:"
     Write-Host "                    worker connect/list/status/disconnect/delete"
     Write-Host "  help            Show this help message"
@@ -1554,11 +2521,23 @@ switch ($Command.ToLower()) {
     "deploy"             { Cmd-Deploy }
     "token-usage"        { Cmd-TokenUsage }
     "tokens"             { Cmd-TokenUsage }
+    "upgrade" {
+        if (Test-OpenSourceBuild) {
+            Cmd-Upgrade
+        } else {
+            Write-Host "Unknown command: upgrade"
+            Cmd-Help
+            exit 1
+        }
+    }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
     "agent"              { Cmd-Agent }
-    "restart-collector"  { Cmd-RestartCollector }
+    "start-collector"    { Cmd-StartCollector }
+    "restart-collector"  { Cmd-RestartCollector -Options $SubArgs }
+    "schedule-updater-restart" { Schedule-UpdaterRestart }
     "restart-updater"    { Cmd-RestartUpdater }
+    "diagnose-service"   { Cmd-DiagnoseService }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }
     "span-attr"          { Cmd-SpanAttr }

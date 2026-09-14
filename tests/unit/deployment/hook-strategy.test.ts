@@ -39,6 +39,7 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
     SubagentStart: 'subagent_start',
     SubagentStop: 'subagent_stop',
     Stop: 'stop',
+    PreToolUse: 'pre_tool_use',
     PostToolUse: 'post_tool_use',
   },
   installedHookStateKey: vi.fn((hooksPath: string, location: { eventKey: string; groupIndex: number; handlerIndex: number }) =>
@@ -278,7 +279,7 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
-    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+    it('quotes Codex PowerShell hook paths and removes the previous Windows command', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       try {
@@ -303,6 +304,36 @@ describe('HookStrategy', () => {
           hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
             + `-File "${script}" stop`,
           replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('quotes Grok Build PowerShell paths and preserves snake_case event names', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/pilot data/hooks/grok-build-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'grok-build',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.grok/hooks/loongsuite-pilot.json',
+            events: ['stop_failure'],
+            hookCommand: script,
+            format: 'nested',
+            eventSubcommand: 'as-is',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'stop_failure'],
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop_failure`,
+          replaceHookCommands: [`${script} stop_failure`],
         });
       } finally {
         if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
@@ -732,9 +763,11 @@ describe('HookStrategy', () => {
       vi.mocked(readJsonFile).mockResolvedValue({
         hooks: {
           Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          PreToolUse: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh pre-tool-use' }] }],
         },
       });
       mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(true);
       vi.mocked(writeTrustedHashes).mockImplementationOnce(() => {
         throw new Error('trust write failed');
       });
@@ -744,6 +777,7 @@ describe('HookStrategy', () => {
         hook: {
           settingsPath: '/home/.codex/hooks.json',
           events: ['Stop'],
+          retiredEvents: ['PreToolUse'],
           hookCommand: '/opt/pilot/hooks/codex-hook.sh',
           format: 'nested',
           eventSubcommand: 'kebab-case',
@@ -757,6 +791,44 @@ describe('HookStrategy', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('trust write failed');
+      expect(mockHookManager.uninstallHook).not.toHaveBeenCalled();
+    });
+
+    it('reconciles Codex trust before removing retired hooks and checks removal', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          PreToolUse: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh pre-tool-use' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(false);
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          retiredEvents: ['PreToolUse'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(writeTrustedHashes).toHaveBeenCalledWith(expect.objectContaining({
+        retiredKeys: ['/home/.codex/hooks.json:pre_tool_use:0:0'],
+      }));
+      expect(vi.mocked(writeTrustedHashes).mock.invocationCallOrder[0]).toBeLessThan(
+        mockHookManager.uninstallHook.mock.invocationCallOrder[0],
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('failed to remove retired hook event');
     });
 
     it('returns failure when Codex trust self-check fails', async () => {

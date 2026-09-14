@@ -33,6 +33,7 @@ describe('AcpCorrelateRetentionService', () => {
     const svc = new AcpCorrelateRetentionService(dataDir, {
       enabled: true,
       propagateToTools: false,
+      generateTraceWhenMissing: false,
       ttlMs: 24 * 3600_000,
     });
     const result = await svc.runCleanup();
@@ -48,6 +49,7 @@ describe('AcpCorrelateRetentionService', () => {
     const svc = new AcpCorrelateRetentionService(dataDir, {
       enabled: true,
       propagateToTools: false,
+      generateTraceWhenMissing: false,
       ttlMs: 1000,
     });
     const result = await svc.runCleanup();

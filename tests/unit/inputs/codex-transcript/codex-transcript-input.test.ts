@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -7,9 +6,14 @@ import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
-import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import {
+  CodexTranscriptInput,
+  codexDefaultAllowedRootPaths,
+} from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
-import type { BlobToUriFn, BlobToUriParams } from '../../../../src/multimodal/types.js';
+import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
+import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -406,6 +410,51 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('reports physical reads separately from uniquely consumed transcript records', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-runtime-metrics-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+
+    const transcriptText = completedTurn();
+    const transcript = await writeTranscript(sessionDir, transcriptText);
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 2);
+
+    const firstRead = deltas[1];
+    const recordCount = transcriptText.trimEnd().split('\n').length;
+    expect(firstRead.rawReadCalls).toBeGreaterThan(0);
+    expect(firstRead.rawReadBytes).toBeGreaterThanOrEqual(firstRead.rawInBytes);
+    expect(firstRead.rawInBytes).toBe(Buffer.byteLength(transcriptText));
+    expect(firstRead.rawInRecords).toBe(recordCount);
+    expect(firstRead.parseSuccessRecords).toBe(recordCount);
+    expect(firstRead.parseFailedRecords).toBe(0);
+    expect(firstRead.rawInMaxBatchBytes).toBeGreaterThan(0);
+    expect(firstRead.rawInMaxRecordBytes).toBeGreaterThan(0);
+    expect(firstRead.readDurationMs).toBeGreaterThanOrEqual(0);
+    expect(firstRead.processDurationMs).toBeGreaterThanOrEqual(0);
+    expect(firstRead).not.toHaveProperty('session_id');
+    expect(firstRead).not.toHaveProperty('turn_id');
+    expect(firstRead).not.toHaveProperty('trace_id');
+
+    const invalidLine = 'not-json\n';
+    await fs.appendFile(transcript, invalidLine, 'utf8');
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 3);
+
+    const invalidRead = deltas[2];
+    expect(invalidRead.rawInBytes).toBe(Buffer.byteLength(invalidLine));
+    expect(invalidRead.rawInRecords).toBe(1);
+    expect(invalidRead.parseSuccessRecords).toBe(0);
+    expect(invalidRead.parseFailedRecords).toBe(1);
+
+    await input.stop();
+  });
+
   it('extracts the single-level subagent relationship from owning session metadata', async () => {
     const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
     const firstRecord = JSON.parse(fixture.split('\n')[0]) as Record<string, unknown>;
@@ -3948,19 +3997,6 @@ describe('Codex transcript multimodal extraction', () => {
     return { timestamp, type, payload };
   }
 
-  const fakeBlobToUri: BlobToUriFn = (input: BlobToUriParams) => {
-    const mimeType = input.mime_type ?? 'image/png';
-    const bytes = Buffer.from(input.content, 'base64');
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    return {
-      uri: `oss://test/${digest}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
-      mime_type: mimeType,
-      modality: 'image',
-      size: bytes.length,
-      sha256: digest,
-    };
-  };
-
   function userContentItem(content: unknown[]): TurnBodyItem {
     return {
       type: 'response_item',
@@ -4043,6 +4079,10 @@ describe('Codex transcript multimodal extraction', () => {
   function userParts(turn: NonNullable<ReturnType<typeof extractCodexPartialTurn>>): any[] {
     return (turn.inputMessages[0] as any).parts;
   }
+
+  it('defaults allowed roots to ~/.codex', () => {
+    expect(codexDefaultAllowedRootPaths()).toEqual([path.join(os.homedir(), '.codex')]);
+  });
 
   it('write-time converts input_image to uri parts and keeps text-only prompt', () => {
     // Shape mirrors real Codex paste/upload turns (codex-hook-debug):

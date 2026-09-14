@@ -177,6 +177,21 @@ describe('qoderwork-hook-processor cursor recovery', () => {
 });
 
 describe('qoderwork-hook-processor user prompt extraction', () => {
+  test('keeps the QoderWork runtime version agent-scoped', () => {
+    writeTranscript(baseRows([{ type: 'text', text: 'check version fields' }]).map((row) => ({
+      ...row,
+      version: '1.1.26',
+    })));
+
+    const result = runHook('sess-no-runtime-version');
+    expect(result.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every((record) => record.version === undefined)).toBe(true);
+    expect(records.every((record) => record['agent.qoderwork.version'] === '1.1.26')).toBe(true);
+  });
+
   test('emits per-step input deltas that the converter accumulates', async () => {
     writeTranscript([
       {

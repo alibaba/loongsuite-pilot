@@ -1,6 +1,14 @@
 // QoderWork-family worker runtime wrapper — transparent, app-agnostic shim.
 //
-// Shared launchd overrides can reach sibling apps; resolve the runtime from the host, not the intercept target.
+// Loaded through the dedicated QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN), or
+// through a QODER_WORKER_RUNTIME_PATH left behind by an older release. These
+// User-level variables can coexist and are inherited globally, so the variable
+// that happened to load us is never valid host identity. On macOS the overrides
+// are also global to the launchd user domain. Consequences:
+//   • Every GUI app inherits the variable, but only apps that actually run the
+//     @qoder-ai SDK ever load this file as their worker entry.
+//   • Therefore this wrapper CAN be the worker entry of ANY sibling app, not
+//     just QwenWorkCN. It MUST NOT assume which app loaded it.
 //
 // Design priority (do NOT weaken): NEVER break the host app. We only ever hand
 // control to the *host app's OWN* bundled runtime, located dynamically from the
@@ -17,7 +25,7 @@
 // process lifecycles belong to different products.
 
 import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 const require = createRequire(import.meta.url);
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,6 +43,7 @@ const HOSTS = [
   {
     id: 'qwen-work-cn',
     appNames: ['QwenWorkCN.app'],
+    windowsAppNames: ['QwenWorkCN'],
     interceptFile: 'qwenworkcn-intercept.jsonl',
   },
 ];
@@ -132,13 +141,30 @@ function candidateResourceRoots() {
 function classifyHost(resourceRoots) {
   for (const root of resourceRoots) {
     const normalized = root.replace(/\\/g, '/');
+    const normalizedLower = normalized.toLowerCase();
     for (const host of HOSTS) {
       if (host.appNames.some(appName => normalized.includes(`/${appName}/Contents/Resources`))) {
+        return host;
+      }
+      if (host.windowsAppNames?.some(appName =>
+        matchesWindowsResourcePath(normalizedLower, appName))) {
         return host;
       }
     }
   }
   return null;
+}
+
+function matchesWindowsResourcePath(normalizedLower, appName) {
+  const parts = normalizedLower.split('/').filter(Boolean);
+  const appIndex = parts.lastIndexOf(appName.toLowerCase());
+  const resourcesIndex = parts.lastIndexOf('resources');
+  return appIndex >= 0
+    && resourcesIndex === parts.length - 1
+    && resourcesIndex > appIndex
+    // Support both <App>/resources and <App>/<version>/resources. Do not
+    // accept an arbitrary descendant: that could classify a nested sibling.
+    && resourcesIndex - appIndex <= 2;
 }
 
 // Locate the host app's OWN worker runtime. Returns an absolute path or null.
@@ -178,7 +204,8 @@ if (hostRuntime) {
     installInterceptHooks(interceptFile);
   }
   try {
-    await import(hostRuntime);
+    // Use file:// URL so Windows absolute paths (C:\...) work with ESM import.
+    await import(pathToFileURL(hostRuntime).href);
   } catch (e) {
     // The app's own runtime failed to load — the app would have hit this even
     // without us. Do not throw (module-level throw crashes the worker_thread and

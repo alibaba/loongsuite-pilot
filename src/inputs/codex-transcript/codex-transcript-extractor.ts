@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { MAX_MULTIMODAL_PARTS, type BlobToUriFn } from '../../multimodal/types.js';
+import { MAX_MULTIMODAL_PARTS, type BlobToUriFn, type UriPart } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesTool,
@@ -685,7 +685,7 @@ function normalizeToolInput(name: string, value: unknown): JsonValue | undefined
 
 type TranscriptMessagePart =
   | { type: 'text'; content: string }
-  | { type: 'uri'; mime_type: string; modality: 'image'; uri: string };
+  | UriPart;
 
 /** Codex content blocks → GenAI parts (text + uri). */
 function transcriptInputMessage(
@@ -694,9 +694,9 @@ function transcriptInputMessage(
   blobToUri?: BlobToUriFn,
   timestampMs = 0,
   recordOffset?: number,
-): { role: string; parts: TranscriptMessagePart[] } | null {
+): JsonValue | null {
   const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
-  return parts.length > 0 ? { role, parts } : null;
+  return parts.length > 0 ? { role, parts } as unknown as JsonValue : null;
 }
 
 function extractMessageParts(

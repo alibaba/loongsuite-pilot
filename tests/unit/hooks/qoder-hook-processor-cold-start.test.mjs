@@ -8,6 +8,7 @@ import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
 } from '../../../assets/hooks/shared/resource-context.mjs';
+import { VALID_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
@@ -158,6 +159,27 @@ describe('qoder-hook-processor cold-start recovery', () => {
       expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
       expect(record['gen_ai.session.id']).toBe('session-old');
       expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
+  });
+
+  it('stamps safe invocation attributes from env onto every hook record', () => {
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'custom attribute prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runProcessor('session-custom-attributes', {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+        'multica.issue.id=AGE-992,multica.user.id=staff-1,multica.api_token=blocked',
+    });
+
+    expect(result.status).toBe(0);
+    const records = readHistory();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['multica.issue.id']).toBe('AGE-992');
+      expect(record['multica.user.id']).toBe('staff-1');
+      expect(record['multica.api_token']).toBeUndefined();
     }
   });
 
@@ -483,5 +505,22 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(responses.map(record => record['gen_ai.response.finish_reasons'])).toEqual([
       ['tool_call'], ['tool_call'], ['end_turn'],
     ]);
+    // Every emitted finish reason must survive validate-trace.mjs, whose
+    // VALID_FINISH_REASONS is hand-maintained and rejects vendor spellings such
+    // as Anthropic's `tool_use`. Checking against the whole set (rather than the
+    // two literals above) also catches any future stop_reason that reaches the
+    // output unmapped, since the transcript can carry arbitrary vendor values.
+    // The set is imported rather than copied: a local copy is exactly how
+    // `cancelled` drifted out of the validator.
+    for (const record of responses) {
+      for (const reason of record['gen_ai.response.finish_reasons']) {
+        expect(VALID_FINISH_REASONS).toContain(reason);
+      }
+      // output.messages carries its own copy; validate-trace.mjs errors on that
+      // one specifically (rule schema.output_messages), so assert it too.
+      for (const message of record['gen_ai.output.messages'] ?? []) {
+        expect(VALID_FINISH_REASONS).toContain(message.finish_reason);
+      }
+    }
   });
 });

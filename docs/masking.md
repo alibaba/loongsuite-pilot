@@ -108,6 +108,7 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - LLM input and output messages.
 - Tool call arguments.
 - Tool call results.
+- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. This metadata is masked even with message-content capture disabled; masking mode `none` still leaves it unchanged.
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.

@@ -33,6 +33,11 @@ interface DirectoryPluginMarker {
   activationStatus?: 'activated' | 'unsupported';
 }
 
+interface ActivationCommandOutput {
+  stdout: string;
+  stderr: string;
+}
+
 type TargetState =
   | { kind: 'missing' }
   | { kind: 'empty' }
@@ -236,12 +241,16 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     command: string,
     args: string[],
     timeoutMs = DEFAULT_ACTIVATION_TIMEOUT_MS,
-  ): Promise<void> {
-    await execFile(command, args, {
+  ): Promise<ActivationCommandOutput> {
+    const result = await execFile(command, args, {
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
       windowsHide: true,
     });
+    return {
+      stdout: String(result.stdout),
+      stderr: String(result.stderr),
+    };
   }
 
   private hashActivation(config?: DirectoryPluginActivationConfig): string | undefined {
@@ -252,6 +261,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       probeArgs: config.probeArgs ?? [],
       timeoutMs: config.timeoutMs ?? DEFAULT_ACTIVATION_TIMEOUT_MS,
       enableArgs: config.enableArgs,
+      optionalEnableArgs: config.optionalEnableArgs ?? [],
       disableArgs: config.disableArgs ?? [],
     }));
     return `sha256:${hash.digest('hex')}`;
@@ -260,17 +270,20 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   private async activate(
     config: DirectoryPluginActivationConfig,
   ): Promise<'activated' | 'unsupported'> {
-    if (!(await this.supportsActivation(config))) return 'unsupported';
+    const probeOutput = await this.probeActivation(config);
+    if (probeOutput === null) return 'unsupported';
+    const optionalArgs = (config.optionalEnableArgs ?? [])
+      .filter(arg => probeOutput.includes(arg));
     await this.runActivationCommand(
       config.command,
-      config.enableArgs,
+      [...config.enableArgs, ...optionalArgs],
       this.resolveActivationTimeout(config),
     );
     return 'activated';
   }
 
   private async deactivate(config: DirectoryPluginActivationConfig): Promise<void> {
-    if (!config.disableArgs?.length || !(await this.supportsActivation(config))) return;
+    if (!config.disableArgs?.length || await this.probeActivation(config) === null) return;
     await this.runActivationCommand(
       config.command,
       config.disableArgs,
@@ -278,21 +291,21 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     );
   }
 
-  private async supportsActivation(config: DirectoryPluginActivationConfig): Promise<boolean> {
-    if (!config.probeArgs?.length) return true;
+  private async probeActivation(config: DirectoryPluginActivationConfig): Promise<string | null> {
+    if (!config.probeArgs?.length) return '';
     try {
-      await this.runActivationCommand(
+      const result = await this.runActivationCommand(
         config.command,
         config.probeArgs,
         this.resolveActivationTimeout(config),
       );
-      return true;
+      return `${result.stdout}\n${result.stderr}`;
     } catch (err) {
       if (!this.isExplicitUnsupportedError(err)) throw err;
       logger.info('directory plugin activation is unsupported by target CLI', {
         command: config.command,
       });
-      return false;
+      return null;
     }
   }
 

@@ -15,6 +15,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'opencode': 'opencode',
   'mimo-code': 'mimo-code',
   'pi-coding-agent': 'pi',
+  'grok-build': 'grok',
   'hermes': 'hermes',
   'wukong': 'wukong',
   'workbuddy': 'workbuddy',

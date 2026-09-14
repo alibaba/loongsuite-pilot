@@ -26,6 +26,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Cursor CLI | Shared Cursor hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + local session logs | Yes | Yes | Yes | Yes |
 | Hermes Agent | Native directory plugin | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | MiMo Code | Plugin injection | Yes | Yes | Yes | Yes |
@@ -43,7 +44,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
 
-OpenClaw integration requires OpenClaw 2026.5.12 or later.
+OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
 
 ### Documented Windows Agent Support
 

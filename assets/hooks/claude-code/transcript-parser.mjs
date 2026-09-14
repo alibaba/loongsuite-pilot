@@ -115,6 +115,17 @@ function normalizeRequestStart(candidate, responseTs) {
   return candidate;
 }
 
+function fillRequestStartTimes(llmCalls, promptTimestamp) {
+  // Apply the same source-time fallback to every call, including turns without
+  // promptId. Keep this scoped to one turn so unrelated prompts cannot leak in.
+  let fallbackTs = promptTimestamp || llmCalls[0]?.timestamp || null;
+  for (const call of llmCalls) {
+    const candidate = call.request_start_time || fallbackTs || call.timestamp || null;
+    call.request_start_time = normalizeRequestStart(candidate, call.timestamp);
+    fallbackTs = laterTimestamp(fallbackTs, call.timestamp);
+  }
+}
+
 /**
  * 解析 Claude Code transcript JSONL 文件。
  *
@@ -500,8 +511,9 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
   }
 
   if (promptIdOrder.length === 0) {
-    // 无 promptId (所有 user record 都是系统注入的),fallback 为单 turn
+    // 当前片段没有 promptId，fallback 为单 turn。
     const firstTs = llmCalls[0]?.timestamp || null;
+    fillRequestStartTimes(llmCalls, firstTs);
     return [{
       promptId: null,
       prompt: '',
@@ -520,15 +532,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
     const info = promptIdInfo.get(pid) || {};
     const promptTimestamp = info.promptTimestamp || promptIdBoundaryTs.get(pid) || turnLlmCalls[0]?.timestamp || null;
 
-    // request_start_time: 每个 llmCall 都必须有有效起点。
-    // Claude Code resume 会在真实回答前插入 synthetic "No response requested" 调用,
-    // 不能只给第一个 llmCall 补时间,否则后续真实调用会落成 time_unix_nano=0。
-    let fallbackTs = promptTimestamp || turnLlmCalls[0]?.timestamp || null;
-    for (const call of turnLlmCalls) {
-      const candidate = call.request_start_time || fallbackTs || call.timestamp || null;
-      call.request_start_time = normalizeRequestStart(candidate, call.timestamp);
-      fallbackTs = laterTimestamp(fallbackTs, call.timestamp);
-    }
+    fillRequestStartTimes(turnLlmCalls, promptTimestamp);
 
     turns.push({
       promptId: pid,
@@ -543,6 +547,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
   const orphanCalls = llmCalls.filter((c) => !c.promptId);
   if (orphanCalls.length > 0) {
     // 无法归属的 assistant 使用独立 fallback turn,不能污染任何真实 promptId。
+    fillRequestStartTimes(orphanCalls, orphanCalls[0]?.timestamp);
     turns.push({
       promptId: null,
       prompt: '',

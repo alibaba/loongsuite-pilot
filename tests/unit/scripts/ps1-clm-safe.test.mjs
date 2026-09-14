@@ -60,6 +60,12 @@ const ALLOWED_STATIC_ACCESS = new Set([
   // than piped -- see tests/unit/scripts/ps1-json-encoding.test.mjs.
   '[Console]::OutputEncoding',
   '[System.Text.Encoding]::UTF8',
+  // (c) Test-PilotElevated, in try/catch. GetCurrent() is a static *method* call and so
+  // is genuinely CLM-forbidden; the catch returns $false, which only costs the elevated
+  // install warning -- see the pilot-elevation-warning block. Administrator is an enum
+  // field read, i.e. (a) as well.
+  '[Security.Principal.WindowsIdentity]::GetCurrent',
+  '[Security.Principal.WindowsBuiltInRole]::Administrator',
 ]);
 
 // Shapes that are never acceptable, whatever the file. `.PSObject` is included
@@ -142,6 +148,14 @@ describe('the CLM-safe rewrites stay in place', () => {
     expect(cli).toMatch(/Select-Object -Property \* -ExcludeProperty 'hermes-agent'/);
     // -Property * is required alongside -ExcludeProperty on PowerShell 5.1.
     expect(cli).not.toMatch(/Select-Object -ExcludeProperty/);
+  });
+
+  it('the public installer checks bound parameters without ContainsKey', () => {
+    // installer-opensource.ps1 is still in KNOWN_CLM_UNSAFE for older violations,
+    // so pin this top-level check separately: it runs for every subcommand.
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    expect(installer).toContain("$PSBoundParameters.Keys -contains 'DashboardPort'");
+    expect(installer).not.toMatch(/\$PSBoundParameters\.ContainsKey\(/);
   });
 
   it('the CLI wrapper validates an absolute path with a regex, not IsPathRooted', () => {

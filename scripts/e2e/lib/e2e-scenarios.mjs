@@ -760,7 +760,7 @@ const COMMON_REQUIRED = [
 ];
 const EVENT_NAME_ENUM = new Set([
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
-  'skill.use', 'tool.approve', 'other',
+  'skill.use', 'tool.approve', 'agent.input', 'other',
 ]);
 const CONDITIONAL_REQUIRED = {
   'tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],

@@ -19,7 +19,7 @@ export const RETRY_BASE_DELAY_MS = 1000;
 export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 export class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
+  constructor(readonly status: number, readonly body: string) {
     super(`${status} ${body}`);
   }
 }

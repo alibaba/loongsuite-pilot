@@ -33,7 +33,7 @@ describe('RuntimeWriter', () => {
   });
 
   it('writes runtime.json on start', async () => {
-    const writer = new RuntimeWriter(tmpDir, makeConfig(), '1.2.3');
+    const writer = new RuntimeWriter(tmpDir, makeConfig(), '1.2.3', 'abc123');
     writer.start();
 
     // Give async write time to complete
@@ -44,6 +44,7 @@ describe('RuntimeWriter', () => {
 
     expect(content.status).toBe('active');
     expect(content.packageVersion).toBe('1.2.3');
+    expect(content.gitCommit).toBe('abc123');
     expect(content.pid).toBe(process.pid);
     expect(content.updatedAt).toBeTruthy();
 

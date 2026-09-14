@@ -187,14 +187,20 @@ export class AgentDefLoader {
 
   private resolveHermesCli(hermesHome: string): string {
     if (process.env.HERMES_CLI) return process.env.HERMES_CLI;
+    const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
     const bundledCli = resolveHome(path.join(
       hermesHome,
       'hermes-agent',
       'venv',
       process.platform === 'win32' ? 'Scripts' : 'bin',
-      process.platform === 'win32' ? 'hermes.exe' : 'hermes',
+      executable,
     ));
     if (existsSync(bundledCli)) return bundledCli;
-    return process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+    const homeDir = process.platform === 'win32'
+      ? process.env.USERPROFILE || resolveHome('~')
+      : process.env.HOME || resolveHome('~');
+    const userCli = path.join(homeDir, '.local', 'bin', executable);
+    if (existsSync(userCli)) return userCli;
+    return executable;
   }
 }

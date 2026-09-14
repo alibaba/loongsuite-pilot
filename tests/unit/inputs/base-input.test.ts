@@ -210,13 +210,24 @@ describe('BaseInput', () => {
       };
 
       const emitted: AgentActivityEntry[][] = [];
+      const runtimeDeltas: Array<Record<string, number | string>> = [];
       input.on('entries', (e) => emitted.push(e));
+      input.on('input-runtime-delta', delta => runtimeDeltas.push(delta));
 
       await input.start();
       expect(emitted).toHaveLength(0);
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        sourceKind: 'primary',
+        rawReadCalls: 0,
+        rawReadBytes: 0,
+        rawInRecords: 0,
+        rawInBytes: 0,
+      });
 
       await vi.advanceTimersByTimeAsync(5_000);
       expect(emitted).toHaveLength(1);
+      expect(runtimeDeltas).toHaveLength(2);
     });
   });
 });

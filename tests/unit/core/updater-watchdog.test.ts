@@ -60,6 +60,19 @@ async function writeHeartbeat(
   );
 }
 
+/**
+ * Writes the restart-failure breadcrumb the way loongsuite-pilot.ps1 does, BOM included:
+ * PowerShell 5.1 has no utf8NoBOM, so `Set-Content -Encoding UTF8` always emits one.
+ */
+async function writeBreadcrumb(dataDir: string, payload: unknown): Promise<void> {
+  await fs.mkdir(path.join(dataDir, 'logs'), { recursive: true });
+  await fs.writeFile(
+    path.join(dataDir, 'logs', 'last-restart-failure-updater.json'),
+    `\uFEFF${JSON.stringify(payload, null, 2)}\n`,
+    'utf-8',
+  );
+}
+
 function makeAlarmManager(): AlarmManager {
   return new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test-user' });
 }
@@ -147,6 +160,139 @@ describe('UpdaterWatchdog', () => {
       alarm_type: 'SERVICE_NOT_RUNNING_ALARM',
       input_name: 'updater',
     });
+  });
+
+  it('does not alarm from an overlapping tick while restart-updater is still running', async () => {
+    let release: ((value: { stdout: string; stderr: string }) => void) | undefined;
+    mockExecFileAsync.mockImplementation((cmd: string, _args?: unknown, opts?: { timeout?: number }) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        expect(opts?.timeout).toBe(90_000);
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    const first = wd.runCheck();
+    await vi.waitFor(() => {
+      expect(mockExecFileAsync.mock.calls.some(([cmd]) => cmd === '/bin/loongsuite-pilot')).toBe(true);
+    });
+    // serialize() drains the map; snapshot once so the overlapping tick can be shown
+    // to have added nothing.
+    expect(alarms.serialize().filter((a) => a.alarm_type === 'SERVICE_NOT_RUNNING_ALARM')).toHaveLength(1);
+
+    const second = await wd.runCheck();
+    expect(second).toEqual({
+      status: 'restart-rate-limited',
+      reason: 'check already in flight',
+      restarted: false,
+    });
+    expect(alarms.serialize()).toEqual([]);
+    expect(mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot')).toHaveLength(1);
+
+    release?.({ stdout: '', stderr: '' });
+    await expect(first).resolves.toMatchObject({ status: 'restart-attempted' });
+  });
+
+  it('uses startup grace before restarting for a missing updater process', async () => {
+    // The install sequence registers the collector task before the updater one, and
+    // start() runs its first check immediately, so this branch used to fire on every
+    // install: an alarm plus a restart-updater racing the installer. Nothing here is
+    // wrong yet at this point -- the process is simply not up.
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 60_000,
+      alarmManager: alarms,
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    // The alarm has to stay behind the grace check as well, not just the restart.
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('uses startup grace before restarting for a command mismatch', async () => {
+    // Mid-install and mid-deploy the pid file legitimately still names the outgoing
+    // version's process; inside the window that is a handover, not a broken updater.
+    await writeHeartbeat(tmpDir);
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 60_000,
+      alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: false,
+        pid: UPDATER_PID,
+        source: 'none',
+        reason: 'pid file points to mismatched process',
+        pidFileState: 'stale',
+        pidFileProcessAlive: true,
+        pidFileCommand: 'node /tmp/other.js',
+        pidFileCommandMatched: false,
+      }),
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('uses sleep/wake grace before restarting for a missing updater process', async () => {
+    // A machine that suspended for longer than one interval comes back with processes
+    // that did not survive it; the repeating task trigger brings the updater back on its
+    // own, so restarting from here only adds a race and an alarm.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'));
+    await writePid(tmpDir);
+    await writeHeartbeat(tmpDir);
+    const alarms = makeAlarmManager();
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      intervalMs: 1_000,
+      startupGraceMs: 0,
+      sleepWakeGraceMs: 5_000,
+      alarmManager: alarms,
+      updaterLiveness: (() => {
+        let first = true;
+        return () => {
+          if (first) {
+            first = false;
+            return { running: true, pid: UPDATER_PID, source: 'pid-file' as const, reason: 'ok' };
+          }
+          return { running: false, source: 'none' as const, reason: 'pid file is missing; no matching process found' };
+        };
+      })(),
+    });
+
+    expect((await wd.runCheck()).status).toBe('healthy');
+    vi.setSystemTime(new Date('2026-06-16T00:00:07Z'));
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+    expect(alarms.serialize()).toEqual([]);
   });
 
   it('reports healthy when updater PID changed but process identity matches heartbeat', async () => {
@@ -306,6 +452,249 @@ describe('UpdaterWatchdog', () => {
     expect(alarms.serialize()).toEqual(expect.arrayContaining([
       expect.objectContaining({ alarm_type: 'UPDATER_FAILURE_ALARM', input_name: 'updater' }),
     ]));
+  });
+
+  it('enriches the failure alarm with the breadcrumb the script left behind', async () => {
+    // The production symptom this fixes: the alarm said only "Command failed:
+    // powershell.exe ... restart-updater". execFile puts the child's stderr in
+    // err.message and nothing else, so the reasons the script printed on stdout never
+    // reached the alarm -- and under $ErrorActionPreference = "Stop" the script's own
+    // Write-Error is terminating, so it could not print them afterwards either.
+    await writeBreadcrumb(tmpDir, {
+      schema: 1,
+      ts: Math.floor(Date.now() / 1000),
+      target: 'updater',
+      stage: 'register-denied',
+      init_type: 'taskscheduler',
+      detail: 'self-heal failed: Access is denied.',
+      diag: { task_state: 'Ready', definition_owner: 'BUILTIN\\Administrators' },
+    });
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        return Promise.reject(Object.assign(new Error('Command failed: loongsuite-pilot restart-updater'), {
+          code: 1,
+          stdout: '[restart-failure] target=updater stage=register-denied\n',
+          stderr: 'Service manager failed to restart updater\n',
+        }));
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('restart-failed');
+    const message = alarms.serialize()
+      .find((a) => a.alarm_type === 'UPDATER_FAILURE_ALARM' && a.alarm_message.includes('restart command failed'))
+      ?.alarm_message ?? '';
+    expect(message).toContain('stage=register-denied');
+    expect(message).toContain('reason="self-heal failed: Access is denied."');
+    expect(message).toContain('init_type=taskscheduler');
+    expect(message).toContain('definition_owner="BUILTIN\\Administrators"');
+    expect(message).toContain('exit=1');
+    expect(message).toContain('stdout="[restart-failure] target=updater stage=register-denied"');
+    expect(message).toContain('stderr="Service manager failed to restart updater"');
+  });
+
+  it('ignores a breadcrumb left by an earlier attempt', async () => {
+    await writeBreadcrumb(tmpDir, {
+      schema: 1,
+      ts: Math.floor(Date.now() / 1000) - 600,
+      target: 'updater',
+      stage: 'register-denied',
+      detail: 'stale evidence from ten minutes ago',
+    });
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === '/bin/loongsuite-pilot') return Promise.reject(new Error('spawn ENOENT'));
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    await wd.runCheck();
+
+    const message = alarms.serialize()
+      .find((a) => a.alarm_message.includes('restart command failed'))?.alarm_message ?? '';
+    expect(message).toContain('stage=unknown');
+    expect(message).not.toContain('register-denied');
+    expect(message).not.toContain('stale evidence');
+  });
+
+  it('reports a timeout kill as its own stage', async () => {
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        return Promise.reject(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    await wd.runCheck();
+
+    const message = alarms.serialize()
+      .find((a) => a.alarm_message.includes('restart command failed'))?.alarm_message ?? '';
+    expect(message).toContain('stage=timeout');
+    expect(message).toContain('killed=true signal=SIGTERM');
+
+    const breadcrumbFile = path.join(tmpDir, 'logs', 'last-restart-failure-updater.json');
+    const written = JSON.parse(await fs.readFile(breadcrumbFile, 'utf-8'));
+    expect(written.stage).toBe('timeout');
+  });
+
+  it('attaches the timeout breadcrumb to cooldown SERVICE_NOT_RUNNING_ALARM', async () => {
+    mockExecFileAsync.mockImplementation((cmd: string) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        return Promise.reject(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      restartCooldownMs: 60_000,
+      alarmManager: alarms,
+    });
+
+    expect((await wd.runCheck()).status).toBe('restart-failed');
+    expect((await wd.runCheck()).status).toBe('restart-rate-limited');
+    const service = alarms.serialize()
+      .filter((a) => a.alarm_type === 'SERVICE_NOT_RUNNING_ALARM')
+      .pop()?.alarm_message ?? '';
+    expect(service).toContain('last_restart_failure: stage=timeout');
+  });
+
+  it('aborts an in-flight restart on stop without recording a failure alarm', async () => {
+    let seenSignal: AbortSignal | undefined;
+    let commandStarted!: () => void;
+    const commandStartedP = new Promise<void>((resolve) => {
+      commandStarted = resolve;
+    });
+    mockExecFileAsync.mockImplementation((cmd: string, _args?: unknown, opts?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/loongsuite-pilot') {
+        seenSignal = opts?.signal;
+        commandStarted();
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' }));
+          });
+        });
+      }
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    const pending = wd.runCheck();
+    await commandStartedP;
+    wd.stop();
+    const result = await pending;
+
+    expect(seenSignal?.aborted).toBe(true);
+    expect(result.status).toBe('restart-failed');
+    expect(result.reason).toBe('aborted by stop');
+    expect(alarms.serialize().filter((a) => a.alarm_type === 'UPDATER_FAILURE_ALARM')).toEqual([]);
+  });
+
+  it('does not launch restart-updater after stop()', async () => {
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+    });
+    wd.stop();
+    const result = await wd.runCheck();
+    expect(result.status).toBe('disabled');
+    expect(result.reason).toBe('stopped');
+    expect(mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot')).toHaveLength(0);
+  });
+
+  it('does not launch restart-updater if stop() raced during the health probe', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let probeStarted!: () => void;
+    const probeStartedP = new Promise<void>((resolve) => {
+      probeStarted = resolve;
+    });
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      updaterLiveness: async () => {
+        probeStarted();
+        await held;
+        return { running: false, source: 'none', reason: 'missing pid file' };
+      },
+    });
+
+    const pending = wd.runCheck();
+    await probeStartedP;
+    wd.stop();
+    release();
+    const result = await pending;
+
+    expect(result.status).toBe('restart-failed');
+    expect(result.reason).toBe('aborted by stop');
+    expect(result.restarted).toBe(false);
+    expect(mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot')).toHaveLength(0);
+  });
+
+  it('attaches the previous restart failure to the alarm raised before this restart', async () => {
+    await writeBreadcrumb(tmpDir, {
+      schema: 1,
+      ts: Math.floor(Date.now() / 1000) - 300,
+      target: 'updater',
+      stage: 'task-missing',
+      init_type: 'taskscheduler',
+      detail: 'scheduled task LoongsuitePilotUpdater does not exist',
+    });
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    await wd.runCheck();
+
+    const message = alarms.serialize()
+      .find((a) => a.alarm_type === 'SERVICE_NOT_RUNNING_ALARM')?.alarm_message ?? '';
+    expect(message).toContain('last_restart_failure: stage=task-missing');
+    expect(message).toContain('reason="scheduled task LoongsuitePilotUpdater does not exist"');
   });
 
   it('defaults Windows pilot bin to loongsuite-pilot-service.ps1', async () => {

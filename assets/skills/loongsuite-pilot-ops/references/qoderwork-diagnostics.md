@@ -206,6 +206,7 @@ Qoder Work 的 token 优先来自 session segments；segment 无有效 usage 时
 
 共享的 `qoderwork-runtime-wrapper.mjs` 现在只服务 Qwen Work CN，不应删除。
 Qoder Work 与 Qoder Work CN 都不再注入该 wrapper；旧版本留下的 `QODER_WORKER_RUNTIME_PATH`
+（macOS 的 launchctl 环境变量与 LaunchAgent plist、Windows 的 `HKCU\Environment` 值）
 会由 installer 与 watchdog 主动清退。若某个 Qoder Work 家族进程仍通过共享入口启动，
 它会被透明转发到自身 runtime，但不再旁录 token / system prompt。
 

@@ -12,7 +12,8 @@
     "activation": {
       "command": "$HERMES_CLI",
       "probeArgs": ["plugins", "enable", "--help"],
-      "enableArgs": ["plugins", "enable", "loongsuite-pilot", "--no-allow-tool-override"],
+      "enableArgs": ["plugins", "enable", "loongsuite-pilot"],
+      "optionalEnableArgs": ["--no-allow-tool-override"],
       "disableArgs": ["plugins", "disable", "loongsuite-pilot"]
     }
   },

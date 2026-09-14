@@ -110,8 +110,12 @@ describe('DirectoryPluginStrategy', () => {
   it('activates supported target plugins and records the activation contract', async () => {
     const commands: string[][] = [];
     class RecordingStrategy extends DirectoryPluginStrategy {
-      protected override async runActivationCommand(_command: string, args: string[]): Promise<void> {
+      protected override async runActivationCommand(
+        _command: string,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string }> {
         commands.push(args);
+        return { stdout: '', stderr: '' };
       }
     }
     const activatedStrategy = new RecordingStrategy();
@@ -134,10 +138,48 @@ describe('DirectoryPluginStrategy', () => {
     ]);
   });
 
+  it('only appends optional enable arguments advertised by the target CLI', async () => {
+    const commands: string[][] = [];
+    class RecordingStrategy extends DirectoryPluginStrategy {
+      constructor(private readonly help: string) {
+        super();
+      }
+
+      protected override async runActivationCommand(
+        _command: string,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string }> {
+        commands.push(args);
+        return {
+          stdout: args.includes('--help') ? this.help : '',
+          stderr: '',
+        };
+      }
+    }
+    const def = withActivation(makeDef());
+    def.directoryPlugin!.activation!.optionalEnableArgs = ['--no-allow-tool-override'];
+
+    await expect(new RecordingStrategy(
+      'usage: hermes plugins enable [--no-allow-tool-override] name',
+    ).deploy(def)).resolves.toMatchObject({ success: true });
+    expect(commands.slice(-1)).toEqual([[
+      'plugins', 'enable', 'loongsuite-pilot', '--no-allow-tool-override',
+    ]]);
+
+    commands.length = 0;
+    await expect(new RecordingStrategy(
+      'usage: hermes plugins enable [-h] name',
+    ).deploy(def)).resolves.toMatchObject({ success: true });
+    expect(commands.slice(-1)).toEqual([['plugins', 'enable', 'loongsuite-pilot']]);
+  });
+
   it('keeps compatibility with targets that do not expose activation commands', async () => {
     const commands: string[][] = [];
     class LegacyStrategy extends DirectoryPluginStrategy {
-      protected override async runActivationCommand(_command: string, args: string[]): Promise<void> {
+      protected override async runActivationCommand(
+        _command: string,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string }> {
         commands.push(args);
         if (args.includes('--help')) {
           throw Object.assign(new Error('unknown command: plugins'), {
@@ -145,6 +187,7 @@ describe('DirectoryPluginStrategy', () => {
             stderr: 'unknown command: plugins',
           });
         }
+        return { stdout: '', stderr: '' };
       }
     }
     const legacyStrategy = new LegacyStrategy();
@@ -161,7 +204,7 @@ describe('DirectoryPluginStrategy', () => {
 
   it('keeps activation pending when the probe times out', async () => {
     class TimedOutProbeStrategy extends DirectoryPluginStrategy {
-      protected override async runActivationCommand(): Promise<void> {
+      protected override async runActivationCommand(): Promise<{ stdout: string; stderr: string }> {
         throw Object.assign(new Error('probe timed out'), {
           code: 'ETIMEDOUT',
           killed: true,
@@ -185,8 +228,9 @@ describe('DirectoryPluginStrategy', () => {
         _command: string,
         args: string[],
         timeoutMs?: number,
-      ): Promise<void> {
+      ): Promise<{ stdout: string; stderr: string }> {
         calls.push({ args, timeoutMs });
+        return { stdout: '', stderr: '' };
       }
     }
     const def = withActivation(makeDef());
@@ -202,8 +246,12 @@ describe('DirectoryPluginStrategy', () => {
 
   it('leaves activation pending when a supported target rejects enablement', async () => {
     class FailingActivationStrategy extends DirectoryPluginStrategy {
-      protected override async runActivationCommand(_command: string, args: string[]): Promise<void> {
+      protected override async runActivationCommand(
+        _command: string,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string }> {
         if (!args.includes('--help')) throw Object.assign(new Error('enable failed'), { code: 1 });
+        return { stdout: '', stderr: '' };
       }
     }
     const failingStrategy = new FailingActivationStrategy();

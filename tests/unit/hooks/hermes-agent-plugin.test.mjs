@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { INVOCATION_USER_ID_FIELD } from '../../../assets/hooks/shared/resource-context.mjs';
 
 const PLUGIN = path.resolve(
   fileURLToPath(import.meta.url),
@@ -48,6 +49,40 @@ function assistantToolCall(id, command) {
 
 function toolMessage(id, output) {
   return { role: 'tool', content: JSON.stringify({ output, exit_code: 0, error: null }), tool_call_id: id };
+}
+
+function toolDefinitionsTurn(...requestBodies) {
+  const prompt = 'Report the available tool surface.';
+  const finalText = 'The tool surface is available.';
+  const requests = requestBodies.map((requestBody, index) => ({
+    ...apiPayload(TURN_ONE, index + 1),
+    request: {
+      method: 'POST',
+      body: {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: prompt }],
+        ...requestBody,
+      },
+    },
+  }));
+  return [
+    { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, user_message: prompt, conversation_history: [{ role: 'user', content: prompt }], model: 'qwen3-coder-plus', platform: 'cli' } },
+    ...requests.flatMap(request => [
+      { hook: 'pre_api_request', payload: request },
+      { hook: 'post_api_request', payload: { ...request, finish_reason: 'stop', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } },
+    ]),
+    { hook: 'post_llm_call', payload: {
+      session_id: SESSION_ID,
+      user_message: prompt,
+      assistant_response: finalText,
+      conversation_history: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: finalText, finish_reason: 'stop' },
+      ],
+      model: 'qwen3-coder-plus',
+      platform: 'cli',
+    } },
+  ];
 }
 
 function priorHistory() {
@@ -248,8 +283,10 @@ function skillViewTurn() {
 
 function replay(events, {
   captureMessageContent = true,
+  agentTeamsWorkerName,
   pilotEnvUser,
   legacyEnvUser,
+  spanAttributes,
   configUser = 'pilot-config-user',
   dataDirSource = 'env',
   beforeSpawn,
@@ -318,6 +355,10 @@ print(json.dumps(sorted(ctx.hooks)))
   else env.LOONGSUITE_PILOT_USER_ID = pilotEnvUser;
   if (legacyEnvUser === undefined) delete env.LOONGSUITE_USER_ID;
   else env.LOONGSUITE_USER_ID = legacyEnvUser;
+  if (spanAttributes === undefined) delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  else env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = spanAttributes;
+  if (agentTeamsWorkerName === undefined) delete env.AGENTTEAMS_WORKER_NAME;
+  else env.AGENTTEAMS_WORKER_NAME = agentTeamsWorkerName;
   const run = spawnSync('python3', ['-c', driver, pluginPath, path.join(root, 'events.jsonl')], {
     cwd: root,
     env,
@@ -408,6 +449,8 @@ describe('Hermes Agent native plugin', () => {
     expect(new Set(records.map(record => record['gen_ai.turn.id']))).toEqual(new Set([TURN_ONE]));
     expect(records.every(record => record['gen_ai.session.id'] === SESSION_ID)).toBe(true);
     expect(records.every(record => record['user.id'] === 'pilot-env-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'pilot-env-user')).toBe(true);
     expect(records.every(record => record['gen_ai.agent.type'] === 'hermes')).toBe(true);
     expect(records.every(record => record['gen_ai.provider.name'] === 'qwen')).toBe(true);
 
@@ -430,6 +473,30 @@ describe('Hermes Agent native plugin', () => {
     expect(responseTwo['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', () => {
+    const { records } = replay(firstTurn(), {
+      agentTeamsWorkerName: ' planner ',
+    });
+
+    expect(records).not.toHaveLength(0);
+    expect(records.every(record => record['gen_ai.agent.name'] === 'planner')).toBe(true);
+    expect(records.every(record =>
+      record.resourceAttributes?.['agentteams.worker.name'] === 'planner')).toBe(true);
+    expect(new Set(records.map(record => record['event.name']))).toEqual(new Set([
+      'llm.request', 'llm.response', 'tool.call', 'tool.result',
+    ]));
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['overlong', 'x'.repeat(513)],
+  ])('ignores a %s AGENTTEAMS_WORKER_NAME value', (_label, agentTeamsWorkerName) => {
+    const { records } = replay(firstTurn(), { agentTeamsWorkerName });
+
+    expect(records.every(record => !('gen_ai.agent.name' in record))).toBe(true);
+    expect(records.every(record => !('resourceAttributes' in record))).toBe(true);
+  });
+
   it('emits an error response when a provider request fails before post_llm_call', () => {
     const { records } = replay(failedApiTurn());
 
@@ -442,6 +509,215 @@ describe('Hermes Agent native plugin', () => {
     expect(response['error.type']).toBe('RateLimitError');
     expect(response['error.message']).toBe('Too many requests');
     expect(response['http.status_code']).toBe(429);
+  });
+
+  it('normalizes each Hermes provider tool shape and ignores invalid or built-in tools', () => {
+    // Shapes are derived from Hermes 0.19's provider request builders. The
+    // native observer exposes the resulting body at pre_api_request.request.body.
+    const { records } = replay(toolDefinitionsTurn(
+      {
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'terminal',
+            description: 'Run a command.',
+            parameters: { type: 'object', properties: { command: { type: 'string' } } },
+          },
+        }],
+      },
+      {
+        tools: [{
+          name: 'web_search',
+          description: 'Search the web.',
+          input_schema: { type: 'object', properties: { query: { type: 'string' } } },
+        }],
+      },
+      {
+        tools: [
+          { type: 'web_search' },
+          {
+            type: 'function',
+            name: '  read_file  ',
+            description: 'Read a file.',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          },
+        ],
+      },
+      {
+        toolConfig: {
+          tools: [{
+            toolSpec: {
+              name: 'lookup',
+              description: 'Look up a value.',
+              inputSchema: { json: { type: 'object', properties: { key: { type: 'string' } } } },
+            },
+          }],
+        },
+      },
+      {
+        // Hermes 0.19 `_translate_tools_to_gemini()` sends one wrapper with
+        // the native Gemini declarations under `functionDeclarations`.
+        tools: [{
+          functionDeclarations: [{
+            name: 'grep_files',
+            description: 'Search files.',
+            parameters: { type: 'object', properties: { query: { type: 'string' } } },
+          }, {
+            name: 'list_directory',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          }],
+        }],
+      },
+      { tools: [null, {}, { function: {} }] },
+    ));
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(6);
+    expect(requests.map(request => request['gen_ai.tool.definitions'])).toEqual([
+      [{
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object', properties: { command: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'web_search',
+        description: 'Search the web.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'lookup',
+        description: 'Look up a value.',
+        parameters: { type: 'object', properties: { key: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'grep_files',
+        description: 'Search files.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }, {
+        type: 'function',
+        name: 'list_directory',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      }],
+      undefined,
+    ]);
+  });
+
+  it('does not persist tool definitions when message content capture is disabled', () => {
+    const marker = 'private-tool-description-marker';
+    const { records, raw } = replay(toolDefinitionsTurn({
+      tools: [{
+        type: 'function',
+        function: { name: 'private_tool', description: marker, parameters: { type: 'object' } },
+      }],
+    }), { captureMessageContent: false });
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
+    expect(raw).not.toContain(marker);
+  });
+
+  it('normalizes each Hermes provider system prompt shape and ignores blank prompts', () => {
+    // Shapes mirror Hermes 0.19's provider request builders: OpenAI-compatible
+    // system/developer messages, Anthropic/Bedrock top-level "system", and
+    // Gemini's nested systemInstruction. conversation_history never replays the
+    // system prompt, so the request body is the only source.
+    const { records } = replay(toolDefinitionsTurn(
+      {
+        messages: [
+          { role: 'system', content: 'You are a careful assistant.' },
+          { role: 'user', content: 'hi' },
+        ],
+      },
+      { system: 'Follow the house rules.' },
+      { system: [{ text: 'Bedrock block prompt.' }] },
+      { systemInstruction: { parts: [{ text: 'Gemini instruction.' }] } },
+      { messages: [{ role: 'developer', content: [{ type: 'text', text: 'Developer rule.' }] }] },
+      { system: '   ' },
+    ));
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(6);
+    expect(requests.map(request => request['gen_ai.system_instructions'])).toEqual([
+      [{ type: 'text', content: 'You are a careful assistant.' }],
+      [{ type: 'text', content: 'Follow the house rules.' }],
+      [{ type: 'text', content: 'Bedrock block prompt.' }],
+      [{ type: 'text', content: 'Gemini instruction.' }],
+      [{ type: 'text', content: 'Developer rule.' }],
+      undefined,
+    ]);
+    expect(requests.every(request =>
+      !(request['gen_ai.input.messages'] || []).some(message => message.role === 'system')))
+      .toBe(true);
+    expect(requests.every(request =>
+      !(request['gen_ai.input.messages_delta'] || []).some(message => message.role === 'system')))
+      .toBe(true);
+    expect(requests[0]['gen_ai.input.messages_delta'][0]).toEqual({
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    });
+  });
+
+  it('normalizes Hermes Responses API top-level instructions', () => {
+    const instructions = 'Use the Responses API house rules.';
+    const responsesBody = {
+      model: 'gpt-5',
+      messages: undefined,
+      instructions,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: [{
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object' },
+      }],
+      store: false,
+    };
+    const { records } = replay(toolDefinitionsTurn(responsesBody));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const { records: recordsWithoutInstructions } = replay(toolDefinitionsTurn({
+      ...responsesBody,
+      instructions: '   ',
+    }));
+    const requestWithoutInstructions = recordsWithoutInstructions.find(
+      record => record['event.name'] === 'llm.request',
+    );
+
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: instructions },
+    ]);
+    expect(request['gen_ai.input.messages']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
+    expect(request['gen_ai.input.messages_delta']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
+    expect(request['gen_ai.input.messages_hash'])
+      .toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
+    expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
+  });
+
+  it('does not persist the system prompt when message content capture is disabled', () => {
+    const marker = 'private-system-prompt-marker';
+    const { records, raw } = replay(
+      toolDefinitionsTurn({ system: marker }),
+      { captureMessageContent: false },
+    );
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.system_instructions');
+    expect(raw).not.toContain(marker);
   });
 
   it('redacts provider error messages when message content capture is disabled', () => {
@@ -509,6 +785,19 @@ describe('Hermes Agent native plugin', () => {
     expect(records.every(record => record['user.id'] === 'legacy-env-user')).toBe(true);
   });
 
+  it('gives invocation-scoped identity precedence over env and sender identity', () => {
+    const { records } = replay(firstTurn({ senderId: 'sender-user' }), {
+      pilotEnvUser: 'pilot-env-user',
+      spanAttributes: 'gen_ai.user.id=invocation-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(records.every(record => record['user.id'] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
+  });
+
   it('pairs two sequential tools with three unique API steps', () => {
     const { records } = replay(secondTurn(), { configUser: 'config-fallback-user' });
     expect(records.map(record => record['event.name'])).toEqual([
@@ -534,6 +823,10 @@ describe('Hermes Agent native plugin', () => {
   it('keeps message and correlation structure while removing captured content', () => {
     const { records, raw } = replay(firstTurn({ senderId: 'sender-user' }), { captureMessageContent: false });
     expect(records.every(record => record['user.id'] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
     expect(raw).not.toContain('approved files');
     expect(raw).not.toContain('wc -l /etc/hosts');
     expect(raw).not.toContain('17 /etc/hosts');

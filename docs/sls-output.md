@@ -153,6 +153,8 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
+Final `FLUSH_SEND_ALARM` messages include the transport, normalized error category, structured error code, HTTP status, and actual attempt count. Network failures also include a one-line error summary from the error and its `cause` chain, with common credential patterns redacted and the summary limited to 512 UTF-8 bytes. HTTP response bodies are not included. This diagnostic change does not alter retry decisions, attempt limits, or backoff.
+
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
 ```bash

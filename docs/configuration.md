@@ -73,19 +73,101 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 ## Multimodal Object Storage
 
-When Pilot should convert inline images in agent messages from base64 into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; see [Multimodal Collection](multimodal.md).
+> **Experimental.** Multimodal config and event fields may change.
 
-### OSS
+To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, set `multimodal.storage` in `config.json`: `type`, `target`, and `auth`. Whether upload runs is controlled per agent by `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
+
+`type` is one of `sls`, `delegatedOss`, or `oss`. This is separate from the log `sls` flusher. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
+
+`auth` is one complete ApiKey or access-key set. If `mode` is omitted, Pilot infers it from that set.
+
+### `type: sls`
+
+Writes with SLS PutObject. Event URI is `sls://{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
 
 ```json
 {
   "multimodal": {
-    "uploader": "oss",
-    "storageBasePath": "oss://your-bucket/pilot-mm",
-    "oss": {
-      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
+    }
+  }
+}
+```
+
+ApiKey:
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: delegatedOss`
+
+Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. At startup Pilot confirms the current landing bucket with SLS. Optional `target.ossBucket` is checked against that bucket; a mismatch or a failed check leaves image upload off.
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "delegatedOss",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal",
+        "ossBucket": "your-bucket"
+      },
+      "auth": {
+        "mode": "apiKey",
+        "apiKey": "your-sls-project-api-key"
+      }
+    }
+  }
+}
+```
+
+### `type: oss`
+
+Writes directly to OSS. AK only.
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "oss",
+      "target": {
+        "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+        "storageBasePath": "oss://your-bucket/pilot-mm"
+      },
+      "auth": {
+        "mode": "ak",
+        "accessKeyId": "your-access-key-id",
+        "accessKeySecret": "your-access-key-secret"
+      }
     }
   }
 }
@@ -93,38 +175,17 @@ When Pilot should convert inline images in agent messages from base64 into objec
 
 | Setting | Description |
 |---------|-------------|
-| `multimodal.uploader` | `oss` or `sls`. |
-| `multimodal.storageBasePath` | Required for OSS; must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.oss.endpoint` | Standard regional endpoint (accelerate endpoints are not supported). |
-| `multimodal.oss.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
+| `multimodal.storage.type` | `sls`, `delegatedOss`, or `oss`. |
+| `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
+| `multimodal.storage.target.project` | SLS project. Required for `sls` and `delegatedOss`. |
+| `multimodal.storage.target.logstore` | Logstore for multimodal objects; defaults to `logstore-multimodal`. |
+| `multimodal.storage.target.ossBucket` | Optional. `delegatedOss` only; checked against the landing bucket. A mismatch leaves image upload off. |
+| `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
+| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. If omitted, inferred from the configured credentials. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
+| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. Must not be set together with access keys. |
 
-### SLS PutObject
-
-SLS multimodal uses a dedicated PutObject path, separate from the log `sls` flusher block. `storageBasePath` is derived as `sls://{project}/{logstore}` and does not need to be set by hand.
-
-```json
-{
-  "multimodal": {
-    "uploader": "sls",
-    "sls": {
-      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
-      "project": "your-project",
-      "logstore": "logstore-multimodal",
-      "accessKeyId": "your-access-key-id",
-      "accessKeySecret": "your-access-key-secret"
-    }
-  }
-}
-```
-
-| Setting | Description |
-|---------|-------------|
-| `multimodal.sls.endpoint` | SLS endpoint. |
-| `multimodal.sls.project` | SLS project. |
-| `multimodal.sls.logstore` | Logstore used for multimodal objects; defaults to `logstore-multimodal`. |
-| `multimodal.sls.accessKeyId` / `accessKeySecret` | Credentials; optional `securityToken` for STS. |
-
-If global multimodal config is missing or invalid, Pilot fails open: text collection continues, and blob→uri conversion is skipped.
+If `multimodal.storage` is missing or invalid, text collection continues and images are not converted to `uri`.
 
 ## Configuration Topics
 
@@ -149,7 +210,9 @@ Pilot can clean up local runtime logs on a schedule.
     "hookErrorDays": 7,
     "hookDebugDays": 7,
     "outputDays": 7,
-    "slsFailedDays": 7
+    "slsFailedDays": 7,
+    "otlpFailedDays": 7,
+    "metricAlarmDays": 7
   }
 }
 ```
@@ -159,6 +222,17 @@ Pilot can clean up local runtime logs on a schedule.
 | `LOONGSUITE_PILOT_LOG_RETENTION_ENABLED` | Enables or disables retention cleanup. |
 | `LOONGSUITE_PILOT_LOG_RETENTION_DAYS` | Applies one retention period to all log categories. |
 | `LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS` | Cleanup interval. |
+
+`otlpFailedDays` controls managed files under `logs/otlp-failed`; `metricAlarmDays`
+controls managed metrics, alarms, and updater-event files under `logs/metric_alarm`.
+Both default to 7 days. These streams write one file per local calendar day; there
+is no per-file size rotation. During scheduled cleanup, Pilot also tries to reduce
+managed OTLP failure logs to 512 MiB and managed metric/alarm logs to 256 MiB by
+deleting the oldest files while always retaining today and yesterday. These are
+soft cleanup targets: current files can grow beyond them between cleanup runs.
+Legacy undated files use their modification date for cleanup. When scheduled
+retention is disabled, neither age nor size cleanup runs. `token-usage-state.json`
+remains an overwrite state file and is excluded from this policy.
 
 ## Verify Changes
 
