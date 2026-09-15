@@ -73,6 +73,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
+| `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to enabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
 | `--package-url <url>` | Install from a custom URL or local `file://` path. |
 | `--sls-endpoint <url>` | SLS endpoint URL. |
@@ -135,6 +136,14 @@ The page reads `logs/metrics-summary.json` directly and does not run a second
 aggregation pipeline.
 
 ### Start or stop the macOS menu bar app
+
+To keep the menu bar closed from the first collector startup, add the option to the installation command:
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
+```
+
+The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard remain enabled. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
 
 The menu bar app starts with the collector by default. Quitting it leaves collection running, so another `loongsuite-pilot start` does not reopen it. Use:
 

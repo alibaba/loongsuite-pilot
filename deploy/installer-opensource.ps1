@@ -49,6 +49,8 @@ param(
     [string]$Version,
     [string]$CollectLog,
     [string]$CollectTrace,
+    [ValidateSet("true", "false")]
+    [string]$EnableStatusBarApp,
     [string]$CmsLicenseKey,
     [string]$CmsEndpoint,
     [string]$CmsWorkspace,
@@ -105,6 +107,10 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 # ============================================================
 # Validate install options
 # ============================================================
+if ($PSBoundParameters.Keys -contains 'EnableStatusBarApp' -and $Command -ne 'install') {
+    Write-Error "-EnableStatusBarApp is only supported with install"
+    exit 1
+}
 if ($PSBoundParameters.Keys -contains 'DashboardPort') {
     if ($DashboardPort -notmatch '\A[0-9]{1,5}\z' -or [int]$DashboardPort -lt 1 -or [int]$DashboardPort -gt 65535) {
         Write-Error "-DashboardPort must be an integer between 1 and 65535"
@@ -1324,6 +1330,7 @@ function Write-Config {
         userId            = "$($script:UserId)"
         collectLog        = "$CollectLog"
         collectTrace      = "$CollectTrace"
+        enableStatusBarApp = "$EnableStatusBarApp"
         cmsLicenseKey     = "$CmsLicenseKey"
         cmsEndpoint       = "$CmsEndpoint"
         cmsWorkspace      = "$CmsWorkspace"
@@ -1400,6 +1407,7 @@ if (opts.logLevel) config.logLevel = opts.logLevel;
 if (opts.userId) { config.userId = opts.userId; delete config.identity; }
 if (opts.collectLog) config.collectLog = opts.collectLog === 'true';
 if (opts.collectTrace) config.collectTrace = opts.collectTrace === 'true';
+if (opts.enableStatusBarApp) config.enableStatusBarApp = opts.enableStatusBarApp.toLowerCase() === 'true';
 if (opts.cmsLicenseKey || opts.cmsEndpoint || opts.cmsWorkspace) {
   config.cms = config.cms || {};
   if (opts.cmsLicenseKey) config.cms.licenseKey = opts.cmsLicenseKey;
