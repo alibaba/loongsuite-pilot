@@ -264,12 +264,21 @@ export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
 export function getTranscriptLineCount(transcriptPath) {
   try {
     if (!fs.existsSync(transcriptPath)) return 0;
-    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    // Byte scan over the raw Buffer: decoding a multi-MB transcript into a UTF-16
+    // string and walking it per-character costs ~35ms on a 13MB file, paid on the
+    // user's interactive path every event. 0x0A only ever encodes U+000A in UTF-8
+    // (it never appears as a continuation byte), so counting the byte is exactly
+    // equivalent to counting '\n' in the decoded string -- including the +1 for a
+    // final line with no trailing newline, which drives the persisted cursor.
+    const buf = fs.readFileSync(transcriptPath);
+    if (buf.length === 0) return 0;
     let count = 0;
-    for (let i = 0; i < content.length; i++) {
-      if (content[i] === '\n') count++;
+    let idx = buf.indexOf(10);
+    while (idx !== -1) {
+      count++;
+      idx = buf.indexOf(10, idx + 1);
     }
-    if (content.length > 0 && content[content.length - 1] !== '\n') count++;
+    if (buf[buf.length - 1] !== 10) count++;
     return count;
   } catch {
     return 0;
