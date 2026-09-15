@@ -294,6 +294,47 @@ function removeExactTrustSections(content: string, keys: ReadonlySet<string>): s
   return lines.filter((_, i) => keep[i]).join('\n');
 }
 
+function markerLineMembership(content: string, marker: string): boolean[] {
+  const begin = `# BEGIN ${marker} trust`;
+  const end = `# END ${marker} trust`;
+  let inside = false;
+  return configLines(content).map(({ text, editable }) => {
+    const trimmed = text.trim();
+    if (editable && trimmed === begin) {
+      inside = true;
+      return false;
+    }
+    if (editable && trimmed === end) {
+      inside = false;
+      return false;
+    }
+    return inside;
+  });
+}
+
+/**
+ * Remove only exact Pilot-owned trust keys whose table starts inside Pilot's
+ * legacy marker block. The marker is a scope hint, never ownership proof: a
+ * reserializer may move unrelated tables between the comments, so exact keys
+ * derived from the installed hooks.json remain mandatory.
+ */
+function removeMarkedTrustSections(
+  content: string,
+  marker: string,
+  keys: ReadonlySet<string>,
+): string {
+  if (keys.size === 0) return content;
+  const lines = content.split('\n');
+  const inMarker = markerLineMembership(content, marker);
+  const keep = lines.map(() => true);
+  for (const { key, start, end } of trustSectionRanges(content)) {
+    if (!inMarker[start] || !keys.has(key)) continue;
+    validateConfig(lines.slice(start + 1, end).join('\n'));
+    keep.fill(false, start, end);
+  }
+  return lines.filter((_, i) => keep[i]).join('\n');
+}
+
 function removeLegacyTrustMarkers(content: string, marker: string): string {
   return configLines(content).filter(({ text, editable }) => !editable || (
     text.trim() !== `# BEGIN ${marker} trust`
@@ -316,6 +357,25 @@ function validateConfig(content: string): void {
 function writeValidatedConfig(configPath: string, content: string): void {
   validateConfig(content);
   fs.writeFileSync(configPath, content, 'utf-8');
+}
+
+function appendCanonicalTrustSections(
+  content: string,
+  marker: string,
+  entries: ReadonlyMap<string, string>,
+  enabledByKey: ReadonlyMap<string, boolean>,
+): string {
+  if (entries.size === 0) return content;
+  const lines: string[] = [`# BEGIN ${marker} trust`];
+  for (const [key, hash] of entries) {
+    lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
+    const enabled = enabledByKey.get(key);
+    if (enabled !== undefined) lines.push(`enabled = ${enabled}`);
+    lines.push(`trusted_hash = "${hash}"`, '');
+  }
+  lines.push(`# END ${marker} trust`);
+  const separator = !content || content.endsWith('\n') ? '' : '\n';
+  return `${content}${separator}\n${lines.join('\n')}\n`;
 }
 
 export interface InstalledTrustOpts {
@@ -419,13 +479,7 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   const existing = fs.existsSync(opts.configPath)
     ? fs.readFileSync(opts.configPath, 'utf-8')
     : '';
-  // The write-before idempotency check must inspect the same snapshot that will
-  // be reconciled. A parse failure (including duplicate Pilot tables) means the
-  // snapshot is not yet satisfied; owned duplicates remain repairable below.
-  if (verifyTrustContent(existing, opts).valid) return false;
-
-  const begin = `# BEGIN ${opts.marker} trust`;
-  const end = `# END ${opts.marker} trust`;
+  const initialVerification = verifyTrustContent(existing, opts);
   const expected = expectedTrustState(opts);
   // Never infer ownership from marker position: Codex may reserialize TOML and
   // move the END comment past unrelated third-party sections. Only touch exact
@@ -438,19 +492,89 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
     enabledByKey.set(section.key, enabledByKey.get(section.key) === false ? false : section.enabled);
   }
 
+  // Prefer the least-invasive repair first. Pilot's canonical block may have
+  // collided with an equivalent table/dotted-key/inline-table written by Codex
+  // or another tool. Remove only Pilot's exact keys from inside its marker
+  // region, then preserve any remaining semantically-correct representation.
+  // This deliberately avoids needing source ranges for every valid TOML syntax.
+  let minimal = removeMarkedTrustSections(existing, opts.marker, exactKeys);
+  const removedMarkedSections = minimal !== existing;
+  minimal = removeLegacyTrustMarkers(minimal, opts.marker);
+  let minimalState: Record<string, unknown> | undefined;
+  let minimalParses = false;
+  try {
+    const parsed = parseToml(minimal, { integersAsBigInt: true });
+    minimalState = asTable(asTable(parsed.hooks)?.state);
+    minimalParses = true;
+  } catch {
+    // The remaining document is still invalid or ambiguous. Fall through to
+    // the existing deterministic exact-section reconciliation below.
+  }
+
+  if (minimalParses) {
+    const remainingOwnedState = [...exactKeys].some(key => minimalState?.[key] !== undefined);
+    // A healthy canonical Pilot block is already the desired state. Removing it
+    // would only recreate identical text. But if the same key remains after the
+    // marked section is removed, another TOML representation exists even when
+    // smol-toml permissively accepts a redefinition that Codex rejects.
+    if (initialVerification.valid && (!removedMarkedSections || !remainingOwnedState)) {
+      return false;
+    }
+    const missing = new Map<string, string>();
+    let canPreserveRemaining = true;
+
+    for (const retiredKey of opts.retiredKeys ?? []) {
+      if (minimalState?.[retiredKey] !== undefined) {
+        canPreserveRemaining = false;
+        break;
+      }
+    }
+    if (canPreserveRemaining) {
+      for (const [key, hash] of expected) {
+        const rawState = minimalState?.[key];
+        if (rawState === undefined) {
+          missing.set(key, hash);
+          continue;
+        }
+        const remaining = asTable(rawState);
+        if (remaining?.trusted_hash !== hash) {
+          canPreserveRemaining = false;
+          break;
+        }
+        // Never lose an explicit disable from a matching Pilot declaration.
+        // If the retained representation conflicts, fall back to the exact
+        // section reconciler (or fail safely when that syntax is not editable).
+        if (enabledByKey.get(key) === false && remaining.enabled !== false) {
+          canPreserveRemaining = false;
+          break;
+        }
+      }
+    }
+
+    if (canPreserveRemaining) {
+      const output = appendCanonicalTrustSections(minimal, opts.marker, missing, enabledByKey);
+      if (output === existing) return false;
+      writeValidatedConfig(opts.configPath, output);
+      return true;
+    }
+  }
+
   let content = removeLegacyTrustMarkers(existing, opts.marker);
   content = removeExactTrustSections(content, exactKeys);
-
-  const lines: string[] = [begin];
-  for (const [key, hash] of expected) {
-    lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
-    const enabled = enabledByKey.get(key);
-    if (enabled !== undefined) lines.push(`enabled = ${enabled}`);
-    lines.push(`trusted_hash = "${hash}"`, '');
+  try {
+    const parsed = parseToml(content, { integersAsBigInt: true });
+    const remainingState = asTable(asTable(parsed.hooks)?.state);
+    if ([...exactKeys].some(key => remainingState?.[key] !== undefined)) {
+      throw new InvalidCodexConfigError(
+        'Refusing to replace an uneditable Codex hook trust entry; original file left unchanged',
+      );
+    }
+  } catch (err) {
+    if (err instanceof InvalidCodexConfigError) throw err;
+    // Preserve the existing behavior for unrelated invalid TOML: validation of
+    // the final candidate below rejects the write and leaves the source intact.
   }
-  lines.push(end);
-  const separator = !content || content.endsWith('\n') ? '' : '\n';
-  const output = `${content}${separator}\n${lines.join('\n')}\n`;
+  const output = appendCanonicalTrustSections(content, opts.marker, expected, enabledByKey);
   if (output === existing) return false;
   writeValidatedConfig(opts.configPath, output);
   return true;
