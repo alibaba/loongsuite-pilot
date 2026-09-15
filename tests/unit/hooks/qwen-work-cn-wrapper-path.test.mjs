@@ -46,10 +46,10 @@ describe('QwenWorkCN wrapper dataDir propagation', () => {
     expect(commonPowershell).toContain('$script:MIN_NODE_MAJOR = 18');
   });
 
-  it('derives token intercept output from the runtime wrapper location', () => {
+  it('derives diagnostics output from the runtime wrapper location', () => {
     expect(runtime).toContain('const WRAPPER_PATH = fileURLToPath(import.meta.url)');
     expect(runtime).toContain("const PILOT_DATA_DIR = path.dirname(path.dirname(WRAPPER_PATH))");
-    expect(runtime).toContain("const INTERCEPT_DIR = path.join(PILOT_DATA_DIR, 'logs')");
+    expect(runtime).toContain("const LOG_DIR = path.join(PILOT_DATA_DIR, 'logs')");
     expect(runtime).not.toContain('os.homedir()');
   });
 });
