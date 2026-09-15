@@ -41,6 +41,15 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 | CLI | `UserPromptSubmit` | `{"decision":"deny","reason":"..."}` |
 | 两者 | `PreToolUse` | `hookSpecificOutput.hookEventName="PreToolUse"`，`permissionDecision="deny"`，`permissionDecisionReason` |
 
+规则返回的 `reason` 原样保留。CLI 在写给宿主前按事件包装：
+
+| 事件 | 宿主看到的 reason |
+|------|-------------------|
+| `UserPromptSubmit` | `检测到敏感信息：{rule reason}，本轮对话终止` |
+| `PreToolUse` | `检测到非预期行为：{rule reason}，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。` |
+
+规则未给 reason 时省略中间细节，例如 `检测到敏感信息，本轮对话终止`。
+
 正常放行、未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错一律 **fail-open**：`exit 0` 且 stdout 为空。诊断只写 interceptor 日志。
 
 Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` 10 秒。CLI 请求 daemon 的超时是 4 秒。

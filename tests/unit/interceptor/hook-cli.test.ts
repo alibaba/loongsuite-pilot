@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { emitVerdict, runHook } from '../../../src/interceptor/cli/hook.js';
+import { emitVerdict, runHook, wrapHostReason } from '../../../src/interceptor/cli/hook.js';
 import type { EvaluateHookResponse, InterceptorHealth } from '../../../src/interceptor/types.js';
 
 function payload(event = 'UserPromptSubmit'): string {
@@ -141,13 +141,49 @@ describe('interceptor hook CLI', () => {
       }),
     });
     expect(code).toBe(0);
-    expect(stdout.join('')).toBe(`${JSON.stringify({ decision: 'block', reason: 'blocked' })}\n`);
+    expect(stdout.join('')).toBe(`${JSON.stringify({
+      decision: 'block',
+      reason: wrapHostReason('UserPromptSubmit', 'blocked'),
+    })}\n`);
+  });
+
+  it('wraps PreToolUse interceptor reasons for the host', () => {
+    const chunks: string[] = [];
+    emitVerdict(
+      { agent: 'qoder', event: 'PreToolUse', raw: {} },
+      'block',
+      '内容非法',
+      (text) => chunks.push(text),
+    );
+    expect(chunks.join('')).toBe(`${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: wrapHostReason('PreToolUse', '内容非法'),
+      },
+    })}\n`);
   });
 
   it('does not emit stdout for unknown actions', () => {
     const chunks: string[] = [];
     emitVerdict(baseRequest(), 'maybe', 'x', (text) => chunks.push(text));
     expect(chunks).toEqual([]);
+  });
+});
+
+describe('CLI host reason wrapping', () => {
+  it('keeps the interceptor string as the xxx slot', () => {
+    expect(wrapHostReason('UserPromptSubmit', '内容非法'))
+      .toBe('检测到敏感信息：内容非法，本轮对话终止');
+    expect(wrapHostReason('PreToolUse', '内容非法'))
+      .toBe('检测到非预期行为：内容非法，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。');
+  });
+
+  it('omits the detail slot when interceptor reason is missing', () => {
+    expect(wrapHostReason('UserPromptSubmit')).toBe('检测到敏感信息，本轮对话终止');
+    expect(wrapHostReason('PreToolUse', '  ')).toBe(
+      '检测到非预期行为，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。',
+    );
   });
 });
 

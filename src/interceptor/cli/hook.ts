@@ -84,6 +84,18 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
   return 0;
 }
 
+export function wrapHostReason(event: HookRequest['event'], interceptorReason?: string): string {
+  const detail = interceptorReason?.trim() ?? '';
+  if (event === 'UserPromptSubmit') {
+    return detail
+      ? `检测到敏感信息：${detail}，本轮对话终止`
+      : '检测到敏感信息，本轮对话终止';
+  }
+  return detail
+    ? `检测到非预期行为：${detail}，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。`
+    : '检测到非预期行为，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。';
+}
+
 export function emitVerdict(
   request: HookRequest,
   action: string,
@@ -91,7 +103,7 @@ export function emitVerdict(
   writeStdout: (text: string) => void,
 ): void {
   if (action !== 'block') return;
-  writeStdout(renderQoderBlock(request, reason ?? 'Blocked by security policy'));
+  writeStdout(renderQoderBlock(request, wrapHostReason(request.event, reason)));
 }
 
 function flagValue(args: string[], name: string): string | undefined {
