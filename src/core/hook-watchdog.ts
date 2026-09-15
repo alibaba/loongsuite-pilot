@@ -1,5 +1,6 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -261,6 +262,7 @@ export class HookWatchdog {
     this.config = config;
     this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
+    this.captureInitialChangeSignatures();
   }
 
   start(): void {
@@ -464,14 +466,51 @@ export class HookWatchdog {
     return `${target.agentId}\0${target.changeWatchPath}`;
   }
 
-  private async changeSignature(filePath: string): Promise<string> {
+  /**
+   * Deployment reconciles Codex trust before constructing the watchdog. Capture
+   * that exact post-deployment state synchronously so an edit made before the
+   * first delayed check is still observed as a change instead of becoming the
+   * baseline.
+   */
+  private captureInitialChangeSignatures(): void {
+    for (const target of this.targets) {
+      if (!target.changeWatchPath || !target.needsRepairOnChange) continue;
+      try {
+        this.lastChangeSignature.set(
+          this.changeSignatureKey(target),
+          this.changeSignatureSync(target.changeWatchPath),
+        );
+      } catch (err) {
+        logger.warn('hook-watchdog baseline capture failed', {
+          agent: target.agentId,
+          path: target.changeWatchPath,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  private changeSignatureSync(filePath: string): string {
     try {
-      const stat = await fs.stat(filePath);
-      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      return this.formatChangeSignature(statSync(filePath));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
       throw err;
     }
+  }
+
+  private async changeSignature(filePath: string): Promise<string> {
+    try {
+      const stat = await fs.stat(filePath);
+      return this.formatChangeSignature(stat);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private formatChangeSignature(stat: Stats): string {
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   }
 
   private findMissingHooks(

@@ -581,6 +581,29 @@ describe('HookWatchdog', () => {
       expect(repairFn).toHaveBeenCalledTimes(1);
     });
 
+    it('detects a config.toml edit made before the first watchdog check', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn().mockResolvedValue(true);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "post-deploy"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+      await fs.writeFile(configPath, 'model = "changed-before-first-check"\n', 'utf-8');
+
+      const result = await wd.runCheck();
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(result.repaired).toBe(1);
+    });
+
     it('retries a failed changed-config inspection without another file change', async () => {
       const repairFn = vi.fn().mockResolvedValue(true);
       const needsRepairOnChange = vi.fn()
