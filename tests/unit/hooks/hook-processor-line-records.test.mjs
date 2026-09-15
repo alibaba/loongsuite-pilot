@@ -186,7 +186,12 @@ describe('hook processor per-session line records', () => {
   });
 });
 
-const { getTranscriptLineCount } = await import(BASE_MODULE);
+const {
+  getTranscriptLineCount,
+  readTranscriptSnapshotLines,
+  sliceTranscriptLines,
+  readTranscriptLines,
+} = await import(BASE_MODULE);
 
 // The pre-Buffer implementation, kept here as an oracle: decode to a UTF-16
 // string, count '\n', and add 1 when the final line lacks a trailing newline.
@@ -229,6 +234,53 @@ describe('getTranscriptLineCount', () => {
     it(`matches the reference count for ${name}`, () => {
       fs.writeFileSync(file, content, 'utf-8');
       expect(getTranscriptLineCount(file)).toBe(referenceLineCount(content));
+    });
+  }
+});
+
+describe('readTranscriptSnapshotLines / sliceTranscriptLines', () => {
+  let file;
+
+  beforeEach(() => {
+    file = path.join(dataDir, 'transcript.jsonl');
+  });
+
+  it('reports lineCount 0 and no lines for a nonexistent file', () => {
+    const snapshot = readTranscriptSnapshotLines(path.join(dataDir, 'missing.jsonl'));
+    expect(snapshot.lineCount).toBe(0);
+    expect(snapshot.allLines).toEqual([]);
+  });
+
+  it('reports lineCount 0 for an empty file', () => {
+    fs.writeFileSync(file, '');
+    expect(readTranscriptSnapshotLines(file).lineCount).toBe(0);
+  });
+
+  const cases = {
+    'trailing newline': 'a\nb\nc\n',
+    'no trailing newline': 'a\nb\nc',
+    'single line no newline': 'only',
+    'CRLF endings': 'a\r\nb\r\nc\r\n',
+    'CRLF without final newline': 'a\r\nb\r\nc',
+    'blank lines': '\n\n\n',
+    'multibyte utf-8': '中文一行\n第二行没有换行的多字节内容',
+  };
+
+  for (const [name, content] of Object.entries(cases)) {
+    it(`snapshot lineCount agrees with getTranscriptLineCount for ${name}`, () => {
+      fs.writeFileSync(file, content, 'utf-8');
+      expect(readTranscriptSnapshotLines(file).lineCount).toBe(getTranscriptLineCount(file));
+    });
+
+    it(`readTranscriptLines equals sliceTranscriptLines over the snapshot for ${name}`, () => {
+      fs.writeFileSync(file, content, 'utf-8');
+      const snapshot = readTranscriptSnapshotLines(file);
+      for (let start = 0; start <= snapshot.lineCount; start++) {
+        for (let end = start; end <= snapshot.lineCount + 1; end++) {
+          expect(readTranscriptLines(file, start, end))
+            .toEqual(sliceTranscriptLines(snapshot.allLines, start, end));
+        }
+      }
     });
   }
 });
