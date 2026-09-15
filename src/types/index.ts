@@ -197,11 +197,6 @@ export interface MultimodalSlsTarget {
   logstore: string;
 }
 
-export interface MultimodalDelegatedOssTarget extends MultimodalSlsTarget {
-  /** Expected landing bucket. Not provisioned by Pilot. */
-  ossBucket?: string;
-}
-
 export interface MultimodalOssTarget {
   endpoint: string;
   storageBasePath: string;
@@ -209,7 +204,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalDelegatedOssTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**

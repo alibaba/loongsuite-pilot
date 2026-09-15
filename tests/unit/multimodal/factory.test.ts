@@ -49,7 +49,6 @@ describe('createUploader', () => {
           endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
           project: 'proj',
           logstore: 'logstore',
-          ossBucket: 'user-bucket',
         },
         auth: slsAuth,
       },

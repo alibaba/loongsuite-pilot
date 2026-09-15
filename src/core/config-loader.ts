@@ -148,7 +148,6 @@ export interface ConfigFile {
         endpoint?: string;
         project?: string;
         logstore?: string;
-        ossBucket?: string;
         storageBasePath?: string;
       };
       auth?: {
@@ -345,17 +344,13 @@ function buildMultimodalConfig(
 ): MultimodalRuntimeConfig | undefined {
   const slsTarget = findUniqueSlsApiKeyTarget(sls, file);
   const block = file?.multimodal;
-  if (block == null) {
-    return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
-  }
-  if (typeof block !== 'object' || Array.isArray(block)) {
-    logger.error('multimodal config invalid; disabled for process', {
-      error: 'multimodal must be an object',
-    });
-    return undefined;
-  }
-
   try {
+    if (block == null) {
+      return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
+    }
+    if (typeof block !== 'object' || Array.isArray(block)) {
+      throw new Error('multimodal must be an object');
+    }
     if (block.storage === undefined) {
       if (slsTarget) return multimodalFromSlsApiKey(slsTarget);
       throw new Error('multimodal.storage is required');
@@ -371,10 +366,7 @@ function buildMultimodalConfig(
       const type = typeof storageRaw.type === 'string' && storageRaw.type.trim() === 'delegatedOss'
         ? 'delegatedOss'
         : 'sls';
-      const ossBucket = type === 'delegatedOss' && isNonEmptyString(storageRaw.target?.ossBucket)
-        ? storageRaw.target.ossBucket.trim()
-        : undefined;
-      return multimodalFromSlsApiKey({ ...slsTarget, logstore }, type, ossBucket);
+      return multimodalFromSlsApiKey({ ...slsTarget, logstore }, type);
     }
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
@@ -395,7 +387,8 @@ function buildMultimodalConfig(
   }
 }
 
-/** Complete apiKey targets only; AK / WebTracking do not count. */
+/** Complete apiKey targets only; AK / WebTracking do not count.
+ *  Same dest: user overrides inner; reuse follows the resolved flusher list. */
 function findUniqueSlsApiKeyTarget(
   sls: SlsFlusherConfig | undefined,
   file: ConfigFile | null,
@@ -438,25 +431,17 @@ function fileSlsHasConflictingApiKeys(file: ConfigFile | null): boolean {
 function multimodalFromSlsApiKey(
   target: SlsApiKeyTarget,
   type: 'sls' | 'delegatedOss' = 'sls',
-  ossBucket?: string,
 ): MultimodalRuntimeConfig {
+  const storageTarget = {
+    endpoint: regionalizeSlsEndpoint(target.endpoint, target.project),
+    project: target.project,
+    logstore: target.logstore,
+  };
+  const auth = { mode: 'apiKey' as const, apiKey: target.apiKey };
   return {
     storage: type === 'delegatedOss'
-      ? {
-          type: 'delegatedOss',
-          target: {
-            endpoint: target.endpoint,
-            project: target.project,
-            logstore: target.logstore,
-            ...(ossBucket ? { ossBucket } : {}),
-          },
-          auth: { mode: 'apiKey', apiKey: target.apiKey },
-        }
-      : {
-          type: 'sls',
-          target: { endpoint: target.endpoint, project: target.project, logstore: target.logstore },
-          auth: { mode: 'apiKey', apiKey: target.apiKey },
-        },
+      ? { type: 'delegatedOss', target: storageTarget, auth }
+      : { type: 'sls', target: storageTarget, auth },
     storageBasePath: `sls://${target.project}/${target.logstore}`,
   };
 }
@@ -465,23 +450,22 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-/** `{ type?: 'sls'|'delegatedOss', target: { logstore?, ossBucket? } }` */
+/** `{ type?: 'sls'|'delegatedOss', target?: { logstore? } }` — missing/empty target reuses all. */
 function isLogstoreOnlyShorthand(raw: MultimodalStorageRaw): boolean {
   for (const key of Object.keys(raw)) {
     if (key !== 'type' && key !== 'target') return false;
   }
-  let type = 'sls';
   if ('type' in raw) {
     if (typeof raw.type !== 'string') return false;
     const trimmed = raw.type.trim();
     if (trimmed !== 'sls' && trimmed !== 'delegatedOss') return false;
-    type = trimmed;
   }
+  if (!('target' in raw) || raw.target === undefined) return true;
   const target = raw.target;
   if (target == null || typeof target !== 'object' || Array.isArray(target)) return false;
   for (const key of Object.keys(target)) {
-    if (key === 'logstore' || (key === 'ossBucket' && type === 'delegatedOss')) {
-      if (!isNonEmptyString(target[key as keyof typeof target])) return false;
+    if (key === 'logstore') {
+      if (!isNonEmptyString(target.logstore)) return false;
       continue;
     }
     return false;
@@ -520,30 +504,15 @@ function buildMultimodalSlsBackedStorage(
   raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
   sls?: SlsFlusherConfig,
 ): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
-  const endpoint = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
+  const endpointRaw = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
   const logstore = (raw.target?.logstore ?? '').trim();
-  if (!endpoint || !logstore) {
+  if (!endpointRaw || !logstore) {
     throw new Error(`multimodal.storage.target requires endpoint and logstore when type=${type}`);
   }
   const project = resolveMultimodalProject(raw.target!, sls);
+  const endpoint = regionalizeSlsEndpoint(endpointRaw, project);
   const auth = buildMultimodalStorageAuth(raw.auth);
-  const target = {
-    endpoint,
-    project,
-    logstore,
-  };
-  if (type === 'delegatedOss') {
-    const ossBucket = (raw.target?.ossBucket ?? '').trim();
-    return {
-      type,
-      target: {
-        ...target,
-        ...(ossBucket ? { ossBucket } : {}),
-      },
-      auth,
-    };
-  }
-  return { type, target, auth };
+  return { type, target: { endpoint, project, logstore }, auth };
 }
 
 const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
@@ -569,6 +538,27 @@ function resolveMultimodalProject(
   const fromFlusher = uniqueProjectAmongMatchingFlushers(target.endpoint, sls);
   if (fromFlusher) return fromFlusher;
   throw new Error('multimodal.storage.target.project is required');
+}
+
+/** Strip `{project}.` from a public SLS host so request builders can prepend it once. */
+function regionalizeSlsEndpoint(endpoint: string, project: string): string {
+  let url: URL;
+  try {
+    url = new URL(normalizeEndpointUrl(endpoint));
+  } catch {
+    return endpoint;
+  }
+  const host = url.hostname.replace(/\.$/, '');
+  if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return endpoint;
+  const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+  const parts = rest.split('.').filter(Boolean);
+  if (parts.length < 2) return endpoint;
+  if (parts[0] !== project) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  const regionalHost = `${parts.slice(1).join('.')}${SLS_PUBLIC_HOST_SUFFIX}`;
+  const port = url.port ? `:${url.port}` : '';
+  return `${url.protocol}//${regionalHost}${port}`;
 }
 
 /** `{project}.{region}.log.aliyuncs.com` — regional `{region}.log.aliyuncs.com` has no project. */

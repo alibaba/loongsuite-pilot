@@ -685,16 +685,7 @@ describe('Orchestrator', () => {
       });
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
-        multimodal: {
-          ...delegatedOss,
-          storage: {
-            ...delegatedOss.storage,
-            target: {
-              ...delegatedOss.storage.target,
-              ossBucket: 'user-bucket',
-            },
-          },
-        },
+        multimodal: delegatedOss,
       }));
 
       await orch.start();

@@ -81,7 +81,7 @@ Two storage shapes. **Explicit configuration takes precedence**: user-supplied f
 
 1. **Use as written.** A complete `multimodal.storage` block (`sls` / `delegatedOss` / `oss`). Incomplete or invalid storage disables upload; it does not fall back.
 2. **Reuse the SLS flusher.** Missing fields are filled only in these two cases:
-   - **Reuse all.** Exactly one unconflicted SLS `apiKey` target. Omit `storage` to reuse it as a whole, or set only `target.logstore` (`type` may be `sls` / `delegatedOss`; the latter may set `ossBucket`) to change Logstore.
+   - **Reuse all.** Exactly one unconflicted SLS `apiKey` target. Omit `storage`, set `storage: { "type": "sls" }` / `{ "type": "delegatedOss" }`, or use an empty `target` to reuse it as a whole. `type` may be `sls` / `delegatedOss`; only `target.logstore` may be overridden.
    - **Reuse project only.** Independent storage already has auth / endpoint / logstore and omits `project`. Fill it from a project-qualified multimodal endpoint, or from the unique same-region flusher project (typical: WebTracking). Auth remains the user-supplied value. AK/SK and WebTracking credentials are never copied into multimodal.
 
 `type` is one of `sls`, `delegatedOss`, or `oss`. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
@@ -169,7 +169,7 @@ ApiKey:
 
 ### `type: delegatedOss`
 
-Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. At startup Pilot confirms the current landing bucket with SLS. Optional `target.ossBucket` is checked against that bucket; a mismatch or a failed check leaves image upload off.
+Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
 
 ```json
 {
@@ -179,8 +179,7 @@ Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{
       "target": {
         "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
         "project": "your-project",
-        "logstore": "logstore-multimodal",
-        "ossBucket": "your-bucket"
+        "logstore": "logstore-multimodal"
       },
       "auth": {
         "mode": "apiKey",
@@ -220,7 +219,6 @@ Writes directly to OSS. AK only.
 | `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
 | `multimodal.storage.target.project` | SLS project for `sls` / `delegatedOss`. May be omitted when exactly one project exists among flusher SLS targets in the same region. An explicit empty value disables upload. |
 | `multimodal.storage.target.logstore` | Logstore for multimodal objects. Required for independent `sls` / `delegatedOss`. On unique `apiKey` reuse, omit storage to use the flusher Logstore, or set only this field to override it. |
-| `multimodal.storage.target.ossBucket` | Optional. `delegatedOss` only; checked against the landing bucket. A mismatch leaves image upload off. |
 | `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
 | `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. If omitted, inferred from the configured credentials. `type=oss` requires `ak`. |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
