@@ -862,6 +862,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
             GROK_TERMINAL_FINISH_REASONS,
           ));
     }
+    // trae-agent trajectories are polled incrementally, so an intermediate step
+    // can carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run) while trae-agent keeps going to a later task_done step. Only the
+    // converter-stamped gen_ai.turn.end on the finalized last step is the real
+    // turn boundary; flushing on the intermediate 'stop' would split one ReAct
+    // run into two duplicate traces under the same traceId.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'trae-agent') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
