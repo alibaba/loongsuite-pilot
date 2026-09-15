@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -10,6 +12,7 @@ import {
   buildEventsFromBoundaries,
   findIncrementalTurnEndLine,
   findTriggeredTurnWindow,
+  resolveRetryWindowOverlap,
   hasQoderCnTerminalMarker,
   isRetryLockStale,
   readRetryLock,
@@ -1183,5 +1186,224 @@ describe('buildEventsFromBoundaries CLI image source parts', () => {
     expect(JSON.stringify(request['agent.qoder.attachments'])).not.toContain('/tmp/orphan.jpg');
     expect(JSON.stringify(request)).not.toContain('ignore me');
     expect(JSON.stringify(request)).not.toContain('example.invalid');
+  });
+});
+
+
+describe('resolveRetryWindowOverlap (#350 strategy c)', () => {
+  const window = { status: 'complete', startLine: 10, endLine: 20, stopLine: 19, reason: 'stop' };
+
+  it('processes when the cursor is before the window start', () => {
+    expect(resolveRetryWindowOverlap({ startLine: 5, endLine: 30, reason: 'incremental' }, window))
+      .toEqual({ action: 'process', relation: 'before-or-at-start' });
+  });
+
+  it('processes when the cursor sits exactly at the window start', () => {
+    expect(resolveRetryWindowOverlap({ startLine: 10, endLine: 30, reason: 'incremental' }, window))
+      .toEqual({ action: 'process', relation: 'before-or-at-start' });
+  });
+
+  it('skips the mid-window case and asks the caller to advance to the window end', () => {
+    expect(resolveRetryWindowOverlap({ startLine: 15, endLine: 30, reason: 'incremental' }, window))
+      .toEqual({ action: 'skip', relation: 'mid-window', advanceTo: 20 });
+  });
+
+  it('skips when the cursor is already past the window end without regressing', () => {
+    expect(resolveRetryWindowOverlap({ startLine: 20, endLine: 30, reason: 'incremental' }, window))
+      .toEqual({ action: 'skip', relation: 'past-end', advanceTo: null });
+    expect(resolveRetryWindowOverlap({ startLine: 25, endLine: 30, reason: 'incremental' }, window))
+      .toEqual({ action: 'skip', relation: 'past-end', advanceTo: null });
+  });
+
+  it('processes when there is no complete target window (older-wrapper path)', () => {
+    expect(resolveRetryWindowOverlap({ startLine: 15, endLine: 30, reason: 'incremental' }, null))
+      .toEqual({ action: 'process', relation: 'no-window' });
+    expect(resolveRetryWindowOverlap(
+      { startLine: 15, endLine: 30, reason: 'incremental' },
+      { status: 'waiting', startLine: 10, endLine: null },
+    )).toEqual({ action: 'process', relation: 'no-window' });
+  });
+});
+
+
+describe('retry path mid-window overlap (#350)', () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
+  let dataDir;
+  let transcriptPath;
+
+  beforeEach(() => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-retry-mid-window-'));
+    transcriptPath = path.join(dataDir, 'transcript.jsonl');
+  });
+
+  afterEach(() => {
+    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  function progress(hookEvent, ts = '2026-09-10T02:00:00.000Z') {
+    return {
+      type: 'progress',
+      timestamp: ts,
+      data: { hookEvent, hookName: hookEvent },
+    };
+  }
+
+  function seedCursor(sessionId, lastLineCount) {
+    const sessionHash = crypto.createHash('sha256').update(sessionId).digest('hex');
+    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
+    fs.mkdirSync(cursorDir, { recursive: true });
+    const cursorFile = path.join(cursorDir, `${sessionHash}.json`);
+    fs.writeFileSync(cursorFile, JSON.stringify({
+      session_id: sessionId,
+      transcript_path: transcriptPath,
+      last_line_count: lastLineCount,
+      updated_at: '2026-09-10 02:00:00',
+    }));
+    return cursorFile;
+  }
+
+  function readCursor(sessionId) {
+    const sessionHash = crypto.createHash('sha256').update(sessionId).digest('hex');
+    const cursorFile = path.join(dataDir, 'state', 'hooks', 'qoder-line-records', `${sessionHash}.json`);
+    return JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
+  }
+
+  function readHistory() {
+    const historyDir = path.join(dataDir, 'logs', 'qoder', 'history');
+    if (!fs.existsSync(historyDir)) return [];
+    return fs.readdirSync(historyDir)
+      .filter(file => file.endsWith('.jsonl'))
+      .flatMap(file => fs.readFileSync(path.join(historyDir, file), 'utf-8').split('\n'))
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+  }
+
+  function readDebugLog() {
+    const debugDir = path.join(dataDir, 'logs', 'qoder', 'debug');
+    if (!fs.existsSync(debugDir)) return '';
+    return fs.readdirSync(debugDir)
+      .filter(file => file.endsWith('.log'))
+      .map(file => fs.readFileSync(path.join(debugDir, file), 'utf-8'))
+      .join('\n');
+  }
+
+  function runRetry({ triggerEndLine, sessionId = 'session-mid' } = {}) {
+    const args = [
+      PROCESSOR,
+      '--agent-id', 'qoder',
+      '--log-prefix', 'qoder',
+      '--retry',
+      '--transcript', transcriptPath,
+      '--session', sessionId,
+      '--cwd', '/tmp/qoder-project',
+    ];
+    if (triggerEndLine != null) {
+      args.push('--trigger-end-line', String(triggerEndLine));
+    }
+    return spawnSync('node', args, {
+      env: {
+        ...process.env,
+        LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        HOOK_RETRY_DELAY: '0',
+        HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
+      },
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+  }
+
+  it('skips mid-window retry without re-exporting the committed prefix and advances the cursor', () => {
+    const sessionId = 'session-mid';
+    const rows = [
+      progress('UserPromptSubmit', '2026-09-10T02:00:00.000Z'),
+      {
+        type: 'user',
+        uuid: 'user-1',
+        timestamp: '2026-09-10T02:00:01.000Z',
+        sessionId,
+        entrypoint: 'cli',
+        message: { role: 'user', content: 'target prompt' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'assistant-think',
+        timestamp: '2026-09-10T02:00:02.000Z',
+        sessionId,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: 'planning' }],
+        },
+      },
+      {
+        type: 'assistant',
+        uuid: 'assistant-text',
+        timestamp: '2026-09-10T02:00:03.000Z',
+        sessionId,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'target answer' }],
+          stop_reason: 'end_turn',
+        },
+      },
+      progress('Stop', '2026-09-10T02:00:04.000Z'),
+      { type: 'last-prompt', sessionId, lastPrompt: 'target prompt' },
+    ];
+    fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    // Cursor sits after the user+thinking prefix (lines 0..2 committed), inside
+    // the Stop-anchored window that still ends at the last-prompt row.
+    const triggerEndLine = 5; // through Stop
+    seedCursor(sessionId, 3);
+
+    const first = runRetry({ triggerEndLine, sessionId });
+    expect(first.status).toBe(0);
+    expect(readHistory()).toEqual([]);
+    expect(readCursor(sessionId).last_line_count).toBe(rows.length);
+    expect(readDebugLog()).toMatch(/dropping unexported tail/);
+
+    const second = runRetry({ triggerEndLine, sessionId });
+    expect(second.status).toBe(0);
+    expect(readHistory()).toEqual([]);
+  });
+
+  it('older-wrapper retry without trigger-end-line still processes from the cursor', () => {
+    const sessionId = 'session-old-wrapper';
+    const rows = [
+      progress('UserPromptSubmit', '2026-09-10T03:00:00.000Z'),
+      {
+        type: 'user',
+        uuid: 'user-old',
+        timestamp: '2026-09-10T03:00:01.000Z',
+        sessionId,
+        entrypoint: 'cli',
+        message: { role: 'user', content: 'older wrapper prompt' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'assistant-old',
+        timestamp: '2026-09-10T03:00:02.000Z',
+        sessionId,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'older wrapper answer' }],
+          stop_reason: 'end_turn',
+        },
+      },
+      progress('Stop', '2026-09-10T03:00:03.000Z'),
+      { type: 'last-prompt', sessionId, lastPrompt: 'older wrapper prompt' },
+    ];
+    fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+    seedCursor(sessionId, 0);
+
+    const result = runRetry({ sessionId }); // no trigger-end-line
+    expect(result.status).toBe(0);
+    const history = readHistory();
+    expect(history.length).toBeGreaterThan(0);
+    const prompts = history
+      .filter(record => record['event.name'] === 'other' && record['agent.qoder.raw_type'] === 'user')
+      .map(record => record['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content);
+    expect(prompts).toContain('older wrapper prompt');
+    expect(readCursor(sessionId).last_line_count).toBe(rows.length);
   });
 });
