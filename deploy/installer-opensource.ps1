@@ -12,7 +12,8 @@
 #     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
-#     -SlsApiKey "your-api-key"
+#     -SlsApiKey "your-api-key" `
+#     -MultimodalAgents "codex:both,qoder:input"
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -54,6 +55,7 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [string]$MultimodalAgents,
     [string]$MaskMode,
     [string]$MaskTypes,
     [switch]$Purge,
@@ -1329,6 +1331,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        multimodalAgents  = "$MultimodalAgents"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
@@ -1435,6 +1438,22 @@ if (opts.selectedAgents) {
       }
       config.agents[agent.id].cliPath = agent.openclawCliPath;
     }
+  }
+}
+if (opts.multimodalAgents) {
+  config.agents = config.agents || {};
+  for (const raw of String(opts.multimodalAgents).split(',').map(s => s.trim()).filter(Boolean)) {
+    const colon = raw.indexOf(':');
+    const id = colon === -1 ? raw : raw.slice(0, colon).trim();
+    const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
+    if (!id || !mode) {
+      throw new Error('-MultimodalAgents entries must be id or id:mode (got ' + JSON.stringify(raw) + ')');
+    }
+    config.agents[id] = config.agents[id] || {};
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: mode };
   }
 }
 

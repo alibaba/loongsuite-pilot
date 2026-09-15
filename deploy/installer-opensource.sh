@@ -13,7 +13,8 @@
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
-#     --sls-api-key "your-api-key"
+#     --sls-api-key "your-api-key" \
+#     --multimodal-agents "codex:both,qoder:input"
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -70,6 +71,7 @@ CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
+MULTIMODAL_AGENTS=""
 MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
@@ -137,6 +139,8 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --multimodal-agents)  MULTIMODAL_AGENTS="$2"; shift 2 ;;
+        --multimodal-agents=*) MULTIMODAL_AGENTS="${1#*=}"; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
@@ -1005,6 +1009,7 @@ write_config() {
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
+        LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
 const fs = require('fs');
@@ -1084,6 +1089,7 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
+const multimodalAgents = process.env.LP_MULTIMODAL_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 
@@ -1133,6 +1139,23 @@ if (selectedAgents) {
       }
       config.agents[agent.id].cliPath = agent.openclawCliPath;
     }
+  }
+}
+
+if (multimodalAgents) {
+  config.agents = config.agents || {};
+  for (const raw of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
+    const colon = raw.indexOf(':');
+    const id = colon === -1 ? raw : raw.slice(0, colon).trim();
+    const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
+    if (!id || !mode) {
+      throw new Error('--multimodal-agents entries must be id or id:mode (got ' + JSON.stringify(raw) + ')');
+    }
+    config.agents[id] = config.agents[id] || {};
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: mode };
   }
 }
 
