@@ -570,6 +570,12 @@ export class Orchestrator extends EventEmitter {
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        ...(def.id === 'codex' && def.hook.trustToml ? {
+          changeWatchPath: resolveHome(def.hook.trustToml.configPath),
+          // Reuse the deployment strategy's exact hook/trust inspection. The
+          // watchdog only decides when to run it; it owns no TOML logic.
+          needsRepairOnChange: () => this.deploymentManager.needsRedeploy(def),
+        } : {}),
       });
     }
 

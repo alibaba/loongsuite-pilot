@@ -32,6 +32,16 @@ export interface PluginCheckTarget {
   repairFn?: () => Promise<boolean>;
 
   /**
+   * Optional config file whose strategy-level health check is only evaluated
+   * after its filesystem identity changes from the initial baseline.
+   * Codex uses this for config.toml trust reconciliation without reparsing TOML
+   * on every watchdog interval.
+   */
+  changeWatchPath?: string;
+  /** Returns true when the changed config requires the normal repairFn. */
+  needsRepairOnChange?: () => Promise<boolean>;
+
+  /**
    * Whether the owning agent is enabled by the user's selection
    * (config.agents[<id>].enabled). When this returns false the target is
    * neither checked nor repaired — a disabled agent must never have its hook
@@ -236,6 +246,7 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastChangeSignature: Map<string, string> = new Map();
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
@@ -353,6 +364,29 @@ export class HookWatchdog {
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
+    let pendingChangeSignature: { key: string; value: string } | undefined;
+
+    if (
+      missing.length === 0
+      && target.changeWatchPath
+      && target.needsRepairOnChange
+    ) {
+      const signature = await this.changeSignature(target.changeWatchPath);
+      const signatureKey = this.changeSignatureKey(target);
+      if (!this.lastChangeSignature.has(signatureKey)) {
+        // Deployment has already reconciled the startup state. The watchdog
+        // establishes a baseline here and reacts only to later external edits.
+        this.lastChangeSignature.set(signatureKey, signature);
+      } else if (this.lastChangeSignature.get(signatureKey) !== signature) {
+        const needsRepair = await target.needsRepairOnChange();
+        if (needsRepair) {
+          missing.push('codex-trust');
+          pendingChangeSignature = { key: signatureKey, value: signature };
+        } else {
+          this.lastChangeSignature.set(signatureKey, signature);
+        }
+      }
+    }
 
     if (missing.length === 0) {
       logger.info('hook-watchdog.check', {
@@ -397,6 +431,9 @@ export class HookWatchdog {
     if (!ok) {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
+    if (pendingChangeSignature) {
+      this.lastChangeSignature.set(pendingChangeSignature.key, pendingChangeSignature.value);
+    }
     return { agentId: target.agentId, status: 'repaired', missing };
   }
 
@@ -421,6 +458,20 @@ export class HookWatchdog {
 
   private invalidConfigTargetKey(target: PluginCheckTarget): string {
     return `${target.agentId}\0${target.settingsPath}`;
+  }
+
+  private changeSignatureKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.changeWatchPath}`;
+  }
+
+  private async changeSignature(filePath: string): Promise<string> {
+    try {
+      const stat = await fs.stat(filePath);
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
   }
 
   private findMissingHooks(
