@@ -75,9 +75,50 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 > **实验性。** 多模态配置和事件字段可能调整。
 
-把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。在 `config.json` 配置 `multimodal.storage`：`type`、`target`、`auth`。是否上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 决定；本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
+把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。需要对象存储，以及目标 Agent 的 `agents.<id>.multimodal.uploadMode` 不为 `none`。本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-`type` 选一种：`sls`、`delegatedOss` 或 `oss`。这和日志用的 `sls` flusher 不是同一块配置。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
+存储有两种写法。**显式配置优先**：已填写的字段以用户配置为准，不会被 flusher 覆盖。
+
+1. **直接用。** 完整填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。缺字段或类型无效则关闭上传，不回退。
+2. **复用 SLS flusher。** 仅在以下两种情况补齐缺省字段：
+   - **全部复用**：恰好一条无冲突的 SLS `apiKey` 目标。省略 `storage`、只写 `{ "type": "sls" }` / `{ "type": "delegatedOss" }`，或 `target: {}`，都是整段复用。`type` 可为 `sls` / `delegatedOss`；也可以只覆盖 `target.logstore`。
+   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`。可从 project-qualified 的 multimodal endpoint 提取，或复用同 region flusher 中唯一的 project（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
+
+`type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
+
+最小复用（Codex）。SLS flusher 即存储目标，`uploadMode` 打开转换：
+
+```json
+{
+  "sls": {
+    "mode": "apiKey",
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "your-project",
+    "logstore": "your-logstore",
+    "apiKey": "your-sls-project-api-key"
+  },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "captureMessageContent": true,
+      "multimodal": { "uploadMode": "both" }
+    }
+  }
+}
+```
+
+只覆盖 Logstore：
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": { "logstore": "logstore-multimodal" }
+    }
+  }
+}
+```
 
 `auth` 填写一套完整的 ApiKey 或 AK。未填 `mode` 时按这套凭证推断。
 
@@ -128,7 +169,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 ### `type: delegatedOss`
 
-先向 SLS 换预签名，再写入 OSS。事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。启动时会向 SLS 确认当前落地 Bucket。可选填写 `target.ossBucket` 做核对：和当前落地 Bucket 不一致，或确认失败，则不开启图片上传。
+先向 SLS 换预签名，再写入 OSS。事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
 
 ```json
 {
@@ -138,8 +179,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
       "target": {
         "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
         "project": "your-project",
-        "logstore": "logstore-multimodal",
-        "ossBucket": "your-bucket"
+        "logstore": "logstore-multimodal"
       },
       "auth": {
         "mode": "apiKey",
@@ -177,15 +217,14 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 |--------|------|
 | `multimodal.storage.type` | `sls`、`delegatedOss` 或 `oss`。 |
 | `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
-| `multimodal.storage.target.project` | SLS Project。`sls` / `delegatedOss` 必填。 |
-| `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore；缺省 `logstore-multimodal`。 |
-| `multimodal.storage.target.ossBucket` | 可选，仅 `delegatedOss`。用来核对落地 Bucket；不一致则不开启图片上传。 |
+| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。可省略：同 region 的 flusher SLS 目标里恰好一个 project 时复用。显式空值则关闭上传。 |
+| `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore。独立 `sls` / `delegatedOss` 必填。复用唯一 `apiKey` 时：省略 storage 即用 flusher 的 Logstore，或只写此字段覆盖。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
 | `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。未填时按已填写的凭证推断。`type=oss` 必须是 `ak`。 |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
 | `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。不能与 AK 同时写。 |
 
-`multimodal.storage` 缺失或无效时，文本采集照常，图片不会转成 `uri`。
+省略 `multimodal.storage` 且存在唯一 SLS `apiKey` 目标时，复用该目标。没有可复用目标，或 storage 已写但无效时，文本采集照常，图片不会转成 `uri`。
 
 ## 配置主题
 
