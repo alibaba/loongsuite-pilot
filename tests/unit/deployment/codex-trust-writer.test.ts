@@ -541,6 +541,133 @@ describe('Codex TOML reserialization compatibility', () => {
     expect(writeTrustedHashes(opts())).toBe(false);
   });
 
+  test.each([
+    {
+      name: 'fully quoted table',
+      render: () => `["hooks"."state"."${key}"]\ntrusted_hash = "${hash}"\n`,
+    },
+    {
+      name: 'root dotted key',
+      render: () => `hooks.state."${key}".trusted_hash = "${hash}"\n`,
+    },
+    {
+      name: 'relative dotted key under hooks.state',
+      render: () => `[hooks.state]\n"${key}".trusted_hash = "${hash}"\n`,
+    },
+    {
+      name: 'inline table',
+      render: () => `hooks = { state = { "${key}" = { trusted_hash = "${hash}" } } }\n`,
+    },
+  ])('removes marked Pilot duplicate and preserves valid $name representation', ({ render }) => {
+    const retained = render();
+    const markedPilot = [
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${key}"]`,
+      `trusted_hash = "${hash}"`,
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n');
+    fs.writeFileSync(configPath, retained + markedPilot);
+
+    expect(writeTrustedHashes(opts())).toBe(true);
+
+    expect(read()).toContain(retained.trim());
+    expect(read()).not.toContain('# BEGIN otel-codex-hook trust');
+    expect(read()).not.toContain(`[hooks.state."${key}"]`);
+    expect((parseToml(read()) as any).hooks.state[key].trusted_hash).toBe(hash);
+    expect(verifyTrustHashes(opts()).valid).toBe(true);
+    expect(writeTrustedHashes(opts())).toBe(false);
+  });
+
+  test('does not preserve an uneditable duplicate with a stale hash', () => {
+    const original = [
+      `hooks.state."${key}".trusted_hash = "sha256:STALE"`,
+      '',
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${key}"]`,
+      `trusted_hash = "${hash}"`,
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n');
+    fs.writeFileSync(configPath, original);
+
+    expect(() => writeTrustedHashes(opts())).toThrow(/uneditable Codex hook trust entry/);
+    expect(read()).toBe(original);
+  });
+
+  test('does not lose an explicit disable when the retained representation enables the hook', () => {
+    const original = [
+      `hooks.state."${key}".enabled = true`,
+      `hooks.state."${key}".trusted_hash = "${hash}"`,
+      '',
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${key}"]`,
+      'enabled = false',
+      `trusted_hash = "${hash}"`,
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n');
+    fs.writeFileSync(configPath, original);
+
+    expect(() => writeTrustedHashes(opts())).toThrow(/uneditable Codex hook trust entry/);
+    expect(read()).toBe(original);
+  });
+
+  test('preserves an external representation and remains idempotent while rebuilding other current keys', () => {
+    const stopLocation: InstalledCodexHookLocation = {
+      eventName: 'Stop', eventKey: 'stop', groupIndex: 0, handlerIndex: 0,
+      handler: { type: 'command', command: 'pilot stop' },
+    };
+    const stopKey = `${hooksPath}:stop:0:0`;
+    const stopHash = computeInstalledHookTrustHash(stopLocation);
+    const mixedOpts = {
+      configPath,
+      hooksJsonAbsPath: hooksPath,
+      locations: { SessionStart: location, Stop: stopLocation },
+      marker: 'otel-codex-hook',
+    };
+    const external = `hooks.state."${key}".trusted_hash = "${hash}"\n`;
+    fs.writeFileSync(configPath, external + [
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${key}"]`,
+      `trusted_hash = "${hash}"`,
+      '',
+      `[hooks.state."${stopKey}"]`,
+      `trusted_hash = "${stopHash}"`,
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n'));
+
+    expect(writeTrustedHashes(mixedOpts)).toBe(true);
+    const repaired = read();
+    expect(repaired).toContain(external.trim());
+    expect(repaired).toContain(`[hooks.state."${stopKey}"]`);
+    expect(repaired).not.toContain(`[hooks.state."${key}"]`);
+    expect(writeTrustedHashes(mixedOpts)).toBe(false);
+    expect(read()).toBe(repaired);
+  });
+
+  test('does not delete unrelated trust that a reserializer moved inside Pilot markers', () => {
+    const retained = `["hooks"."state"."${key}"]\ntrusted_hash = "${hash}"\n`;
+    fs.writeFileSync(configPath, retained + [
+      '# BEGIN otel-codex-hook trust',
+      `[hooks.state."${key}"]`,
+      `trusted_hash = "${hash}"`,
+      '',
+      '[hooks.state."third-party:stop:0:0"]',
+      'enabled = false',
+      'trusted_hash = "sha256:OTHER"',
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n'));
+
+    expect(writeTrustedHashes(opts())).toBe(true);
+    expect(read()).toContain(retained.trim());
+    expect(read()).toContain('[hooks.state."third-party:stop:0:0"]');
+    expect(read()).toContain('trusted_hash = "sha256:OTHER"');
+    expect((parseToml(read()) as any).hooks.state['third-party:stop:0:0'].enabled).toBe(false);
+  });
+
   test.each(headers)('preserves disabled state during repair of %s', header => {
     fs.writeFileSync(configPath, `bypass_hook_trust = true\n${header}\n'enabled' = false # disabled by user\ntrusted_hash = '${hash}'\n`);
     expect(writeTrustedHashes(opts())).toBe(true);
