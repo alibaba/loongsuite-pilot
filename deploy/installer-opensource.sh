@@ -1171,6 +1171,7 @@ if (selectedAgents) {
 
 if (multimodalAgents) {
   config.agents = config.agents || {};
+  let multimodalEnabled = 0;
   for (const raw of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
     const colon = raw.indexOf(':');
     const id = colon === -1 ? raw : raw.slice(0, colon).trim();
@@ -1182,6 +1183,17 @@ if (multimodalAgents) {
       ? config.agents[id].multimodal
       : {};
     config.agents[id].multimodal = { ...prev, uploadMode: mode };
+    if (mode !== 'none') multimodalEnabled++;
+  }
+  if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
+    config.multimodal = {
+      ...(config.multimodal && typeof config.multimodal === 'object' ? config.multimodal : {}),
+      storage: {
+        type: 'sls',
+        target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+        auth: { mode: 'apiKey', apiKey: slsApiKey },
+      },
+    };
   }
 }
 

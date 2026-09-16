@@ -20,6 +20,9 @@ describe('public installer multimodal agent flags', () => {
     expect(installerSh).toContain('if (!config.agents[id]) continue;');
     expect(installerSh).toContain('select_multimodal_agents()');
     expect(installerSh).toContain('const supported = ["codex", "qoder"];');
+    expect(installerSh).toContain('if (mode !== \'none\') multimodalEnabled++');
+    expect(installerSh).toContain('if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey)');
+    expect(installerSh).toContain("auth: { mode: 'apiKey', apiKey: slsApiKey }");
   });
 
   it('PowerShell installer accepts -MultimodalAgents and writes uploadMode', () => {
@@ -32,10 +35,13 @@ describe('public installer multimodal agent flags', () => {
     expect(installerPs1).toContain('if (!config.agents[id]) continue;');
     expect(installerPs1).toContain('function Select-MultimodalAgents');
     expect(installerPs1).toContain('const supported = ["codex", "qoder"];');
+    expect(installerPs1).toContain('if (mode !== \'none\') multimodalEnabled++');
+    expect(installerPs1).toContain('if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)');
+    expect(installerPs1).toContain("auth: { mode: 'apiKey', apiKey: opts.slsApiKey }");
   });
 });
 
-function extractShWriteConfigJs(configPath, dataDir) {
+function extractShWriteConfigJs(configPath, dataDir, sls = {}) {
   const fn = installerSh.slice(
     installerSh.indexOf('write_config() {'),
     installerSh.indexOf('install_loongsuite_pilot_command() {'),
@@ -48,9 +54,9 @@ function extractShWriteConfigJs(configPath, dataDir) {
     .slice(start, end + "fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\\n');\n".length)
     .replaceAll("'$config_file'", JSON.stringify(configPath))
     .replaceAll("'$DATA_DIR'", JSON.stringify(dataDir))
-    .replaceAll('${SLS_ENDPOINT}', '')
-    .replaceAll('${SLS_PROJECT}', '')
-    .replaceAll('${SLS_LOGSTORE}', '')
+    .replaceAll('${SLS_ENDPOINT}', sls.endpoint ?? '')
+    .replaceAll('${SLS_PROJECT}', sls.project ?? '')
+    .replaceAll('${SLS_LOGSTORE}', sls.logstore ?? '')
     .replaceAll('${SLS_AK_ID}', '')
     .replaceAll('${SLS_AK_SECRET}', '')
     .replaceAll('${LOG_LEVEL}', '')
@@ -86,9 +92,26 @@ const enabledAgents = {
   },
 };
 
+const completeSls = {
+  endpoint: 'cn-hangzhou.log.aliyuncs.com',
+  project: 'agentloop-example',
+  logstore: 'agent-event',
+  apiKey: 'test-sls-api-key',
+};
+
+const handwrittenStorage = {
+  type: 'oss',
+  target: {
+    endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+    storageBasePath: 'oss://bucket/mm',
+  },
+  auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+};
+
 function runWriteConfig(platform, multimodalAgents, existing, {
   selectedAgents = '',
   probeAgents = [],
+  sls = {},
 } = {}) {
   const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-data-'));
   const configPath = resolve(root, 'config.json');
@@ -96,7 +119,7 @@ function runWriteConfig(platform, multimodalAgents, existing, {
   try {
     if (existing !== undefined) writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
     const source = platform === 'bash'
-      ? extractShWriteConfigJs(configPath, root)
+      ? extractShWriteConfigJs(configPath, root, sls)
       : extractPsWriteConfigJs();
     const scriptPath = resolve(root, 'write-config.js');
     writeFileSync(scriptPath, source);
@@ -108,6 +131,10 @@ function runWriteConfig(platform, multimodalAgents, existing, {
         multimodalAgents,
         selectedAgents,
         probeResult: probeJson,
+        slsEndpoint: sls.endpoint ?? '',
+        slsProject: sls.project ?? '',
+        slsLogstore: sls.logstore ?? '',
+        slsApiKey: sls.apiKey ?? '',
       }));
       const result = spawnSync(process.execPath, [scriptPath, optsPath], { encoding: 'utf8' });
       const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : undefined;
@@ -120,7 +147,7 @@ function runWriteConfig(platform, multimodalAgents, existing, {
         ...process.env,
         LP_MULTIMODAL_AGENTS: multimodalAgents,
         LP_SELECTED_AGENTS: selectedAgents,
-        LP_SLS_API_KEY: '',
+        LP_SLS_API_KEY: sls.apiKey ?? '',
         LP_DASHBOARD_PORT: '',
         LP_AGENT_SELECTION_EXPLICIT: selectedAgents ? '1' : '0',
       },
@@ -212,6 +239,86 @@ describe('installer write_config multimodal-agents', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex).toEqual({ enabled: true });
         expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'input' });
+      });
+
+      it('writes multimodal.storage from the four SLS flags when an agent is enabled', () => {
+        const result = runWriteConfig(platform, 'codex:both', enabledAgents, { sls: completeSls });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal).toEqual({
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+            auth: { mode: 'apiKey', apiKey: completeSls.apiKey },
+          },
+        });
+      });
+
+      it('does not write multimodal.storage when apiKey is missing', () => {
+        const result = runWriteConfig(platform, 'codex:both', enabledAgents, {
+          sls: { ...completeSls, apiKey: '' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('does not write multimodal.storage when project is missing', () => {
+        const result = runWriteConfig(platform, 'codex:both', enabledAgents, {
+          sls: { ...completeSls, project: '' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('does not write multimodal.storage when every id is skipped', () => {
+        const result = runWriteConfig(platform, 'foo:both', enabledAgents, { sls: completeSls });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.foo).toBeUndefined();
+        expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('does not write multimodal.storage when the only written mode is none', () => {
+        const result = runWriteConfig(platform, 'codex:none', enabledAgents, { sls: completeSls });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
+        expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('keeps handwritten multimodal.storage when the SLS four-tuple is incomplete', () => {
+        const result = runWriteConfig(platform, 'codex:both', {
+          ...enabledAgents,
+          multimodal: { storage: handwrittenStorage },
+        }, {
+          sls: { ...completeSls, apiKey: '' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.multimodal).toEqual({ storage: handwrittenStorage });
+      });
+
+      it('overwrites handwritten storage and keeps sibling keys when the four-tuple is complete', () => {
+        const result = runWriteConfig(platform, 'codex:both', {
+          ...enabledAgents,
+          multimodal: { extra: true, storage: handwrittenStorage },
+        }, { sls: completeSls });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal).toEqual({
+          extra: true,
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+            auth: { mode: 'apiKey', apiKey: completeSls.apiKey },
+          },
+        });
       });
     });
   }

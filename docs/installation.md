@@ -71,7 +71,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
-| `--multimodal-agents <list>` | Enable multimodal per agent: comma-separated `id` or `id:mode`. Bare ids default to `both` (for example `codex,qoder:input`). Unknown ids or modes are skipped. When omitted, after `--agents` selection, auto-enable detected and selected `codex` / `qoder` as `both`. Install / reinstall only; `upgrade` and `uninstall` reject the flag. Windows: `-MultimodalAgents`. |
+| `--multimodal-agents <list>` | Enable multimodal per agent: comma-separated `id` or `id:mode`. Bare ids default to `both` (for example `codex,qoder:input`). Unknown ids or modes are skipped. When omitted, after `--agents` selection, auto-enable detected and selected `codex` / `qoder` as `both`. When at least one agent is actually enabled and `--sls-endpoint` / `--sls-project` / `--sls-logstore` / `--sls-api-key` are all set, write `multimodal.storage` from those four. Install / reinstall only; `upgrade` and `uninstall` reject the flag. Windows: `-MultimodalAgents`. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |

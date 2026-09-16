@@ -1474,6 +1474,7 @@ if (opts.selectedAgents) {
 }
 if (opts.multimodalAgents) {
   config.agents = config.agents || {};
+  let multimodalEnabled = 0;
   for (const raw of String(opts.multimodalAgents).split(',').map(s => s.trim()).filter(Boolean)) {
     const colon = raw.indexOf(':');
     const id = colon === -1 ? raw : raw.slice(0, colon).trim();
@@ -1485,6 +1486,17 @@ if (opts.multimodalAgents) {
       ? config.agents[id].multimodal
       : {};
     config.agents[id].multimodal = { ...prev, uploadMode: mode };
+    if (mode !== 'none') multimodalEnabled++;
+  }
+  if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
+    config.multimodal = {
+      ...(config.multimodal && typeof config.multimodal === 'object' ? config.multimodal : {}),
+      storage: {
+        type: 'sls',
+        target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+        auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
+      },
+    };
   }
 }
 
