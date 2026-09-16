@@ -16,6 +16,12 @@
 //      content_block_delta (text_delta / thinking_delta / input_json_delta)
 //      arrives, converted to integer nanoseconds.
 //
+// What it forwards:
+//   - traceparent / tracestate — the W3C trace context inherited from the
+//     process that launched Claude Code, injected onto the outgoing
+//     /v1/messages request so a user-operated gateway can join the caller's
+//     trace. See the "W3C trace-context forwarding" section below.
+//
 // Design notes:
 //   - SSE is parsed by splitting the accumulated buffer on `\n\n` event
 //     boundaries. A sliding-window regex was tried first and silently
@@ -39,6 +45,18 @@ const INTERCEPT_BASE = path.join(
 const LLM_URL_RE = /\/v1\/messages(?:\?|$|\/)/;
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const SSE_DELIMITER = '\n\n';
+
+// W3C Trace Context — https://www.w3.org/TR/trace-context/
+// version-format for version 00 is exactly four hyphen-separated fields; a
+// version-00 traceparent carrying trailing fields is invalid per spec.
+const TRACEPARENT_RE = /^([\da-f]{2})-([\da-f]{32})-([\da-f]{16})-([\da-f]{2})$/i;
+const ZERO_TRACE_ID = '0'.repeat(32);
+const ZERO_PARENT_ID = '0'.repeat(16);
+// Spec: tracestate holds at most 32 list-members and implementations may drop
+// one larger than 512 bytes.
+const TRACESTATE_MAX_BYTES = 512;
+const TRACESTATE_MAX_MEMBERS = 32;
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 // ─── system_instructions extraction ──────────────────────────────────────
 
@@ -142,6 +160,116 @@ function parseSseBlock(block) {
   return { event, data: dataLines.join('\n') };
 }
 
+// ─── W3C trace-context forwarding ─────────────────────────────────────────
+// Claude Code's LLM traffic often terminates at a user-operated
+// Anthropic-compatible gateway. When the process that launched Claude Code
+// passed down a trace context, forwarding it as a real `traceparent` header
+// lets that gateway (and anything behind it) attach its spans to the caller's
+// trace instead of starting an orphan one.
+//
+// This is propagation only: we never mint a trace id and never rewrite the
+// parent id, so Claude Code's own spans stay owned by pilot's hook processor.
+
+function validateTraceparent(raw) {
+  if (typeof raw !== 'string') return null;
+  const m = TRACEPARENT_RE.exec(raw.trim());
+  if (!m) return null;
+  const [, version, traceId, parentId, flags] = m.map((v) => v.toLowerCase());
+  // 'ff' is forbidden outright; any other unknown version may carry extra
+  // fields we cannot reason about, so only the format we fully understand is
+  // forwarded.
+  if (version !== '00') return null;
+  if (traceId === ZERO_TRACE_ID || parentId === ZERO_PARENT_ID) return null;
+  return `${version}-${traceId}-${parentId}-${flags}`;
+}
+
+function validateTracestate(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (Buffer.byteLength(trimmed, 'utf8') > TRACESTATE_MAX_BYTES) return null;
+  if (CONTROL_CHAR_RE.test(trimmed)) return null;
+  const members = trimmed.split(',').filter((part) => part.trim() !== '');
+  if (members.length === 0 || members.length > TRACESTATE_MAX_MEMBERS) return null;
+  return trimmed;
+}
+
+function readHeaderValue(source, name) {
+  if (!source) return null;
+  try {
+    if (typeof source.get === 'function') return source.get(name);
+    if (Array.isArray(source)) {
+      for (const pair of source) {
+        if (Array.isArray(pair) && pair.length === 2 && String(pair[0]).toLowerCase() === name) {
+          return String(pair[1]);
+        }
+      }
+      return null;
+    }
+    if (typeof source === 'object') {
+      for (const k of Object.keys(source)) {
+        if (k.toLowerCase() === name) return String(source[k]);
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+// Copy into a Headers instance rather than a plain object: Headers keeps
+// duplicate-name semantics and case normalization that an object copy would
+// silently flatten. Returning null makes the caller fail open.
+function cloneHeaders(source) {
+  if (typeof Headers !== 'function') return null;
+  try {
+    return source ? new Headers(source) : new Headers();
+  } catch (_) {
+    return null;
+  }
+}
+
+// Evaluated after the validators are defined — a top-level const that called a
+// hoisted function would throw at preload time the moment someone converted
+// those declarations to arrow functions, and a throw here would leave fetch
+// completely uninstrumented.
+const UPSTREAM_TRACEPARENT = (() => {
+  try {
+    return validateTraceparent(process.env.TRACEPARENT);
+  } catch (_) {
+    return null;
+  }
+})();
+const UPSTREAM_TRACESTATE = (() => {
+  try {
+    // tracestate is meaningless without the traceparent it annotates.
+    return UPSTREAM_TRACEPARENT ? validateTracestate(process.env.TRACESTATE) : null;
+  } catch (_) {
+    return null;
+  }
+})();
+
+function withUpstreamTraceContext(input, init) {
+  // No usable upstream context: hand back the exact original pair so the
+  // untraced path behaves as if this feature did not exist.
+  if (!UPSTREAM_TRACEPARENT) return { input, init };
+  try {
+    const existing = init?.headers ?? (input && typeof input === 'object' ? input.headers : null);
+    // Someone closer to the request already chose a parent; a propagator must
+    // not overwrite a context it did not create.
+    if (readHeaderValue(existing, 'traceparent') !== null) return { input, init };
+
+    const headers = cloneHeaders(existing);
+    if (!headers) return { input, init };
+    headers.set('traceparent', UPSTREAM_TRACEPARENT);
+    if (UPSTREAM_TRACESTATE) headers.set('tracestate', UPSTREAM_TRACESTATE);
+
+    // Only headers are overridden. When `input` is a Request, fetch still
+    // takes method/body/signal from it, so the body stream is never touched.
+    return { input, init: { ...(init || {}), headers } };
+  } catch (_) {
+    return { input, init };
+  }
+}
+
 // ─── globalThis.fetch monkey-patch ───────────────────────────────────────
 
 const origFetch = globalThis.fetch;
@@ -159,6 +287,11 @@ if (typeof origFetch === 'function') {
     if (!url || !LLM_URL_RE.test(url)) {
       return origFetch.call(this, input, init);
     }
+
+    // Forward the caller's trace context before the session-id gate below:
+    // that gate decides whether *we* can record telemetry, which has no
+    // bearing on the gateway's ability to join the trace.
+    ({ input, init } = withUpstreamTraceContext(input, init));
 
     // Header session_id is required to scope intercept output. Without it
     // we have no way for the hook processor to find this record, so we

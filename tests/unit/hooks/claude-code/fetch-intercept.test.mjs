@@ -32,11 +32,27 @@ afterEach(() => {
  *
  * The preload writes JSON files to <DATA_DIR>/intercept/claude-code/<sid>/...
  */
-function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs = 0 }) {
+function runScenario({
+  url,
+  sessionId,
+  body,
+  rawBody,
+  sseEvents = [],
+  networkDelayMs = 0,
+  env = {},
+  extraRequestHeaders = null,
+  headersAs = 'object',
+  inputAs = 'url',
+}) {
   const chunksJson = JSON.stringify(sseEvents.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
   // rawBody (string) takes precedence — use it verbatim as fetch body so tests
   // can exercise malformed/non-JSON bodies without going through JSON.stringify.
   const bodyJson = rawBody !== undefined ? rawBody : JSON.stringify(body);
+  const observedFile = path.join(DATA_DIR, 'observed-request.json');
+  const requestHeaders = {
+    ...(sessionId ? { 'x-claude-code-session-id': sessionId } : {}),
+    ...(extraRequestHeaders || {}),
+  };
   const script = `
     const { ReadableStream, TransformStream } = require('node:stream/web');
     globalThis.ReadableStream = ReadableStream;
@@ -45,9 +61,33 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
 
     const chunks = ${chunksJson};
     const encoder = new TextEncoder();
+    const observedFile = ${JSON.stringify(observedFile)};
 
     // Stub original fetch — preload will wrap this.
     globalThis.fetch = async function (input, init) {
+      // Record what the wrapper actually handed us. Mirrors real fetch
+      // precedence: init.headers overrides a Request's own headers.
+      try {
+        const carrier = (init && init.headers) || (input && input.headers) || null;
+        const headers = {};
+        if (carrier && typeof carrier.forEach === 'function') {
+          carrier.forEach((v, k) => { headers[String(k).toLowerCase()] = String(v); });
+        } else if (carrier && typeof carrier === 'object') {
+          for (const k of Object.keys(carrier)) headers[k.toLowerCase()] = String(carrier[k]);
+        }
+        // Read the body back so we can prove header injection never consumed
+        // or replaced the request payload.
+        let observedBody = null;
+        if (init && typeof init.body === 'string') observedBody = init.body;
+        else if (input && typeof input.text === 'function') observedBody = await input.text();
+        require('node:fs').writeFileSync(observedFile, JSON.stringify({
+          headers,
+          body: observedBody,
+          method: (init && init.method) || (input && input.method) || null,
+          carrierIsHeaders: !!(carrier && typeof carrier.forEach === 'function' && typeof carrier.get === 'function'),
+        }));
+      } catch (_) {}
+
       // Simulate network latency before response headers arrive.
       if (${networkDelayMs} > 0) await new Promise(r => setTimeout(r, ${networkDelayMs}));
       const stream = new ReadableStream({
@@ -71,11 +111,22 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
       // Node 18 forbids require() of .mjs (ERR_REQUIRE_ESM); use dynamic import.
       await import(${JSON.stringify('file://' + PRELOAD)});
 
-      const res = await globalThis.fetch(${JSON.stringify(url)}, {
-        method: 'POST',
-        headers: ${JSON.stringify(sessionId ? { 'x-claude-code-session-id': sessionId } : {})},
-        body: ${JSON.stringify(bodyJson)},
-      });
+      const rawHeaders = ${JSON.stringify(requestHeaders)};
+      const headersAs = ${JSON.stringify(headersAs)};
+      const headers = headersAs === 'Headers' ? new Headers(rawHeaders)
+        : headersAs === 'entries' ? Object.entries(rawHeaders)
+        : rawHeaders;
+
+      const url = ${JSON.stringify(url)};
+      const bodyText = ${JSON.stringify(bodyJson)};
+      let res;
+      if (${JSON.stringify(inputAs)} === 'Request') {
+        // Exercise the Request-as-input path: method/body must survive our
+        // headers-only override untouched.
+        res = await globalThis.fetch(new Request(url, { method: 'POST', headers, body: bodyText }));
+      } else {
+        res = await globalThis.fetch(url, { method: 'POST', headers, body: bodyText });
+      }
 
       // Drain stream so TransformStream sees every chunk.
       if (res.body) {
@@ -94,11 +145,22 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
       (e) => { console.error(String(e)); process.exit(1); }
     );
   `;
+  // Strip inherited trace context so a TRACEPARENT exported in the test
+  // runner's shell cannot silently satisfy scenarios that assert no injection.
+  const baseEnv = { ...process.env };
+  delete baseEnv.TRACEPARENT;
+  delete baseEnv.TRACESTATE;
   return spawnSync(process.execPath, ['-e', script], {
     encoding: 'utf-8',
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
+    env: { ...baseEnv, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...env },
     timeout: 10_000,
   });
+}
+
+function readObservedRequest() {
+  const p = path.join(DATA_DIR, 'observed-request.json');
+  if (!fs.existsSync(p)) return { headers: {}, body: null };
+  return JSON.parse(fs.readFileSync(p, 'utf-8'));
 }
 
 function readIntercept(sessionId) {
@@ -240,5 +302,199 @@ describe('claude-code-fetch-intercept preload', () => {
     const [{ record }] = readIntercept(SESS);
     expect(record.response_id).toBe(MSG_ID);
     expect(record.system_instructions).toBeNull();
+  });
+
+  // ─── W3C trace-context forwarding ──────────────────────────────────────
+  // https://www.w3.org/TR/trace-context/
+
+  describe('W3C trace-context forwarding', () => {
+    const TP = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+    const TS = 'congo=t61rcWkgMzE,rojo=00f067aa0ba902b7';
+
+    test('forwards a valid inherited traceparent and tracestate to the gateway', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBe(TP);
+      expect(headers.tracestate).toBe(TS);
+    });
+
+    test('forwards traceparent alone when no tracestate is inherited', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP },
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBe(TP);
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test('normalizes an uppercase-hex traceparent to the lowercase spec form', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: '00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01' },
+      });
+      expect(r.status).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBe(TP);
+    });
+
+    test.each([
+      ['garbage', 'not-a-traceparent'],
+      ['all-zero trace-id', '00-00000000000000000000000000000000-00f067aa0ba902b7-01'],
+      ['all-zero parent-id', '00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01'],
+      ['forbidden version ff', 'ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],
+      ['unknown future version', '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],
+      ['missing trace-flags', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7'],
+      ['trailing field on version 00', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra'],
+      ['short trace-id', '00-4bf92f3577b34da6-00f067aa0ba902b7-01'],
+      ['non-hex trace-id', '00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01'],
+      ['empty', ''],
+    ])('rejects an invalid traceparent (%s) and injects nothing', (_label, value) => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: value },
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBeUndefined();
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test.each([
+      ['over the 512-byte budget', `a=${'x'.repeat(520)}`],
+      ['more than 32 list-members', Array.from({ length: 33 }, (_, i) => `k${i}=v`).join(',')],
+      ['containing a control character', 'congo=t61r\nckgMzE'],
+      ['blank', '   '],
+    ])('drops an invalid tracestate (%s) but still forwards traceparent', (_label, value) => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP, TRACESTATE: value },
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBe(TP);
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test('never overwrites a traceparent the caller already set', () => {
+      // A propagator must not replace a context it did not create, even when
+      // the caller's value looks less trustworthy than ours.
+      const callerTp = '00-11111111111111111111111111111111-2222222222222222-00';
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        extraRequestHeaders: { traceparent: callerTp },
+        env: { TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBe(callerTp);
+      // tracestate rides with our traceparent; skipping one skips both.
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test.each(['object', 'Headers', 'entries'])(
+      'injects without dropping existing headers when the carrier is %s',
+      (headersAs) => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          headersAs,
+          extraRequestHeaders: { 'x-custom-marker': 'kept' },
+          env: { TRACEPARENT: TP },
+        });
+        expect(r.status).toBe(0);
+        const { headers } = readObservedRequest();
+        expect(headers.traceparent).toBe(TP);
+        expect(headers['x-claude-code-session-id']).toBe(SESS);
+        expect(headers['x-custom-marker']).toBe('kept');
+      },
+    );
+
+    test('leaves method and body intact when input is a Request object', () => {
+      // Injection rewrites init.headers only. If it ever rebuilt the Request,
+      // the body stream would be consumed and the upload would break.
+      const payload = { system: 'sys', messages: [{ role: 'user', content: 'keep me' }] };
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: payload,
+        sseEvents: sseStream(),
+        inputAs: 'Request',
+        env: { TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status).toBe(0);
+      const observed = readObservedRequest();
+      expect(observed.headers.traceparent).toBe(TP);
+      expect(observed.headers.tracestate).toBe(TS);
+      expect(observed.headers['x-claude-code-session-id']).toBe(SESS);
+      expect(observed.method).toBe('POST');
+      expect(JSON.parse(observed.body)).toEqual(payload);
+    });
+
+    test('hands the gateway a real Headers carrier, not a flattened object', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP },
+      });
+      expect(r.status).toBe(0);
+      expect(readObservedRequest().carrierIsHeaders).toBe(true);
+    });
+
+    test('does not inject on non-/v1/messages URLs', () => {
+      const r = runScenario({
+        url: 'https://api.anthropic.com/v1/some_other_endpoint', sessionId: SESS,
+        body: { system: 'sys' },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP },
+      });
+      expect(r.status).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBeUndefined();
+    });
+
+    test('injects even without a session id, and still records no telemetry', () => {
+      // The session-id gate governs pilot's own capture; the gateway's ability
+      // to join the trace must not depend on it.
+      const r = runScenario({
+        url: LLM_URL, sessionId: null,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { TRACEPARENT: TP },
+      });
+      expect(r.status).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBe(TP);
+      expect(fs.existsSync(INTERCEPT_DIR)).toBe(false);
+    });
+
+    test('leaves the request untouched when no trace context is inherited', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+      });
+      expect(r.status).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBeUndefined();
+      expect(headers.tracestate).toBeUndefined();
+      // Capture still works — forwarding is independent of it.
+      expect(readIntercept(SESS)[0].record.response_id).toBe(MSG_ID);
+    });
   });
 });
