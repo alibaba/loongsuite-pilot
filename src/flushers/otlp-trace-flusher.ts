@@ -46,6 +46,11 @@ const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+// Claude Code marks a failed attempt (mid-turn retry or terminal API failure)
+// with finish_reasons=['error']. 'error' must NOT be a turn boundary on its own,
+// or a mid-turn retry would flush the turn before its later records arrive; the
+// terminal failure is flagged with gen_ai.turn.end===true instead.
+const CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
 const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
 const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',
@@ -863,10 +868,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
           ));
     }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'claude-code') {
-      // A terminal API failure carries no model finish reason under option B;
-      // it is flagged with gen_ai.turn.end===true so the turn still flushes.
-      return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])
-        || entry['gen_ai.turn.end'] === true;
+      // A failed attempt carries finish_reasons=['error']: a mid-turn retry
+      // must not end the turn (its later records still arrive), so 'error' is
+      // excluded here. The terminal API failure is flagged with
+      // gen_ai.turn.end===true; successful turns end with a model stop reason.
+      return entry['gen_ai.turn.end'] === true
+        || hasFinishReason(
+          entry['gen_ai.response.finish_reasons'],
+          CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
+        );
     }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }

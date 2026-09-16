@@ -1241,11 +1241,12 @@ function buildRetryAttemptRecords({
       'gen_ai.provider.name': 'anthropic',
       'gen_ai.request.model': attempt.model || model || 'unknown',
       'gen_ai.response.model': attempt.model || model || 'unknown',
-      // A failed physical attempt never produced a model finish reason, so
-      // finish_reasons is intentionally absent. The failure is carried by
-      // error.type + http.response.status_code; the OTLP flusher sets the LLM
-      // span status to ERROR from error.type, and this attempt does not
-      // terminate the surrounding turn.
+      // A failed physical attempt produced no model output, so it carries the
+      // sentinel finish reason "error" rather than a model stop reason. The
+      // failure detail is still on error.type + http.response.status_code, and
+      // the OTLP flusher sets the LLM span status to ERROR from error.type;
+      // this attempt does not terminate the surrounding turn.
+      'gen_ai.response.finish_reasons': ['error'],
       'gen_ai.output.messages': [],
       'gen_ai.usage.input_tokens': 0,
       'gen_ai.usage.output_tokens': 0,
@@ -1499,11 +1500,13 @@ function buildTurnRecords(
         && transcriptErrorType !== 'unknown'
         && transcriptErrorType !== 'model_error'
       ) ? transcriptErrorType : (finalAttempt?.error_type || transcriptErrorType || 'model_error');
-      // A terminal API failure is not a model-produced finish reason, so no finish_reasons
-      // is emitted. The failure is carried by error.type + http.response.status_code; the
-      // OTLP flusher sets the LLM span status to ERROR from error.type, and gen_ai.turn.end
-      // marks the surrounding turn terminal so the AGENT/ENTRY span also fails.
-      delete respRecord['gen_ai.response.finish_reasons'];
+      // A terminal API failure produced no model output, so it carries the
+      // sentinel finish reason "error" rather than a model stop reason. The
+      // failure detail is on error.type + http.response.status_code; the OTLP
+      // flusher sets the LLM span status to ERROR from error.type, and
+      // gen_ai.turn.end marks the surrounding turn terminal so the AGENT/ENTRY
+      // span also fails.
+      respRecord['gen_ai.response.finish_reasons'] = ['error'];
       respRecord['gen_ai.turn.end'] = true;
       respRecord['gen_ai.output.messages'] = [];
       if (ev.api_error.request_id) {

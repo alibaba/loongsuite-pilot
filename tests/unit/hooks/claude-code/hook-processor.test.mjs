@@ -266,7 +266,7 @@ describe('claude-code-hook-processor v2 端到端', () => {
       'http.response.status_code': 529,
       'error.type': 'server_error',
     });
-    expect(responses[0]).not.toHaveProperty('gen_ai.response.finish_reasons');
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
     expect(responses[0]).not.toHaveProperty('error.message');
     expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
     expect(JSON.stringify(records)).not.toContain('private upstream detail');
@@ -1197,7 +1197,7 @@ describe('claude-code 一级子 Agent 上报', () => {
       'gen_ai.request.id': 'req-child-retry-1',
       'error.type': 'overloaded_error',
     });
-    expect(retry).not.toHaveProperty('gen_ai.response.finish_reasons');
+    expect(retry['gen_ai.response.finish_reasons']).toEqual(['error']);
   });
 
   test('父成功交错在子 retry 与子成功之间时，按 request_hash 分组不丢子 retry', () => {
@@ -1535,7 +1535,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(requests).toHaveLength(3);
     expect(responses).toHaveLength(3);
     expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
-      .toEqual([undefined, undefined, ['stop']]);
+      .toEqual([['error'], ['error'], ['stop']]);
     expect(responses.slice(0, 2).map((record) => record['error.type']))
       .toEqual(['overloaded_error', 'overloaded_error']);
     expect(responses.map((record) => record['gen_ai.request.id']))
@@ -1613,7 +1613,7 @@ describe('hook-processor merges intercept data into llm events', () => {
       .filter((record) => record['event.name'] === 'llm.response');
     expect(responses).toHaveLength(3);
     expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
-      .toEqual([undefined, undefined, undefined]);
+      .toEqual([['error'], ['error'], ['error']]);
     expect(responses[2]['gen_ai.turn.end']).toBe(true);
     expect(responses[2]['gen_ai.request.id']).toBe('req-error-11');
   });
@@ -1673,7 +1673,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     const responses = readJsonlRecords()
       .filter((record) => record['event.name'] === 'llm.response');
     expect(responses).toHaveLength(1);
-    expect(responses[0]).not.toHaveProperty('gen_ai.response.finish_reasons');
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
     expect(responses[0]['gen_ai.turn.end']).toBe(true);
     expect(responses[0]['gen_ai.request.id']).toBe('req-error-11');
     expect(responses[0]['http.response.status_code']).toBe(529);
