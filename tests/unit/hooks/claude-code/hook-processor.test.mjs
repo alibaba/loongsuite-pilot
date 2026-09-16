@@ -1194,10 +1194,91 @@ describe('claude-code 一级子 Agent 上报', () => {
     expect(retry).toMatchObject({
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.id': agentId,
-      'gen_ai.request.id': 'client-child-retry-1',
+      'gen_ai.request.id': 'req-child-retry-1',
       'error.type': 'overloaded_error',
     });
     expect(retry).not.toHaveProperty('gen_ai.response.finish_reasons');
+  });
+
+  test('父成功交错在子 retry 与子成功之间时，按 request_hash 分组不丢子 retry', () => {
+    // Regression for the contiguous walk-back: when a sibling (parent) success
+    // lands between a child call's failed attempt and its own success, the old
+    // walk-back stopped at that success and dropped the child's retry. Grouping
+    // by request_hash skips the different-hash sibling and keeps the retry.
+    const sessionId = 's-subagent-hash-group';
+    const agentId = 'child-hash';
+    const childHash = 'c'.repeat(64);
+    const parentHash = 'p'.repeat(64);
+    const transcriptPath = parentTranscriptWithAgent(sessionId, agentId);
+    writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { content: [{ type: 'text', text: 'child prompt' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.900Z',
+        message: {
+          id: 'msg_child_ok',
+          model: 'claude-test',
+          content: [{ type: 'text', text: 'child answer' }],
+          usage: { input_tokens: 7, output_tokens: 3 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    // Attempt order by start_time: child retry → parent success → child success.
+    writeAttemptFile(sessionId, 'child-retry-1', {
+      start_time_unix_nano: '1780541855200000000',
+      end_time_unix_nano: '1780541855300000000',
+      request_hash: childHash,
+    });
+    writeAttemptFile(sessionId, 'parent-mid', {
+      start_time_unix_nano: '1780541855400000000',
+      end_time_unix_nano: '1780541855500000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      request_hash: parentHash,
+      response_id: 'msg_parent_1', request_id: 'req-parent-1',
+    });
+    writeAttemptFile(sessionId, 'child-success-2', {
+      start_time_unix_nano: '1780541855600000000',
+      end_time_unix_nano: '1780541855900000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      request_hash: childHash,
+      response_id: 'msg_child_ok', request_id: 'req-child-2',
+    });
+    writeAttemptFile(sessionId, 'parent-final', {
+      start_time_unix_nano: '1780541857000000000',
+      end_time_unix_nano: '1780541858000000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      request_hash: parentHash,
+      response_id: 'msg_parent_2', request_id: 'req-parent-2',
+    });
+
+    const result = runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(result.status).toBe(0);
+
+    const childResponses = readJsonlRecords().filter((record) =>
+      record['event.name'] === 'llm.response'
+      && record['gen_ai.agent.scope'] === 'subagent'
+      && record['gen_ai.agent.id'] === agentId);
+    // The child call keeps both physical attempts: the 529 retry and the success.
+    expect(childResponses).toHaveLength(2);
+    const childRetry = childResponses.find((record) => record['error.type']);
+    expect(childRetry).toMatchObject({
+      'error.type': 'overloaded_error',
+      'http.response.status_code': 529,
+      'gen_ai.response.id': 'req-child-retry-1',
+    });
+    const childOk = childResponses.find((record) => record['gen_ai.response.id'] === 'msg_child_ok');
+    expect(childOk).toBeTruthy();
+    expect(childOk).not.toHaveProperty('error.type');
   });
 
   test('损坏的子 transcript 不会中断父会话导出', () => {
@@ -1458,7 +1539,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(responses.slice(0, 2).map((record) => record['error.type']))
       .toEqual(['overloaded_error', 'overloaded_error']);
     expect(responses.map((record) => record['gen_ai.request.id']))
-      .toEqual(['client-retry-1', 'req-retry-2', 'req-success-3']);
+      .toEqual(['req-retry-1', 'req-retry-2', 'req-success-3']);
     expect(responses.slice(0, 2).map((record) => record['http.response.status_code']))
       .toEqual([529, 529]);
     for (const response of responses) {
@@ -1496,7 +1577,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(llmSpans).toHaveLength(3);
     expect(llmSpans.filter((span) => span.status.code === 2)).toHaveLength(2);
     expect(llmSpans.map((span) => span.attributes['gen_ai.request.id']))
-      .toEqual(['client-retry-1', 'req-retry-2', 'req-success-3']);
+      .toEqual(['req-retry-1', 'req-retry-2', 'req-success-3']);
     expect(llmSpans.slice(0, 2).map((span) => span.attributes['http.response.status_code']))
       .toEqual([529, 529]);
     expect(exportedSpans.find((span) => span.attributes['gen_ai.span.kind'] === 'AGENT')?.status.code)
@@ -1752,7 +1833,7 @@ describe('hook-processor merges intercept data into llm events', () => {
       .filter((record) => record['event.name'] === 'llm.response');
     // Only the terminal record, carrying the in-window attempt's request id.
     expect(responses).toHaveLength(1);
-    expect(responses[0]['gen_ai.request.id']).toBe('client-in-turn-1');
+    expect(responses[0]['gen_ai.request.id']).toBe('req-in-turn-1');
     // The pre-prompt straggler was not consumed, so its (fresh) file survives.
     expect(fs.existsSync(prePrompt)).toBe(true);
     expect(fs.existsSync(inTurn)).toBe(false);

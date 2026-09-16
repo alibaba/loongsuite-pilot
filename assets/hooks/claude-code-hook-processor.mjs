@@ -1134,26 +1134,47 @@ function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
 
   if (matchIndex < 0 || consumed.has(matchIndex)) return [];
 
-  // Retry attempts are consecutive and terminated by one successful response
-  // (or the StopFailure request id). Walk backward to the previous success
-  // anchor instead of consuming a global queue, and only over attempts that
-  // share the matched attempt's model and fall inside this turn's window. This
-  // lets parent and subagent transcripts be built in either order without
-  // stealing each other's retry records when their requests were interleaved in
-  // wall-clock time.
-  const anchorModel = attempts[matchIndex].model;
-  let startIndex = matchIndex;
-  while (
-    startIndex > 0
-    && attempts[startIndex - 1].outcome !== 'success'
-    && !consumed.has(startIndex - 1)
-    && withinTurn(attempts[startIndex - 1])
-    && sameModel(attempts[startIndex - 1].model, anchorModel)
-  ) {
-    startIndex--;
+  // Group physical attempts of one logical call by request_hash. A call and all
+  // its retries resend an identical body, so they share one hash; a sibling
+  // agent's call or the next turn's call hashes differently. Grouping by hash —
+  // rather than by contiguous position — is what keeps an interleaved sequence
+  // correct: in parent_429 → child_429 → parent_200 → child_200 the child's
+  // success anchor still collects child_429 even though a parent success sits
+  // between them in wall-clock order. Walk backward from the anchor, skipping
+  // unrelated (different-hash) interleaved attempts, and stop at a same-hash
+  // success or already-consumed attempt (a prior chain's boundary) or one that
+  // falls before this turn. When the hash is unavailable (request body could not
+  // be parsed) we cannot group reliably, so fall back to a conservative
+  // contiguous walk gated on model + turn window that never crosses another
+  // attempt.
+  const anchor = attempts[matchIndex];
+  const anchorHash = anchor.request_hash;
+  const indices = [];
+  if (anchorHash) {
+    for (let i = matchIndex - 1; i >= 0; i--) {
+      const prev = attempts[i];
+      if (prev.request_hash !== anchorHash) continue; // unrelated interleaved call
+      if (consumed.has(i) || prev.outcome === 'success' || !withinTurn(prev)) break;
+      indices.push(i);
+    }
+  } else {
+    const anchorModel = anchor.model;
+    for (let i = matchIndex - 1; i >= 0; i--) {
+      const prev = attempts[i];
+      if (
+        consumed.has(i)
+        || prev.outcome === 'success'
+        || !withinTurn(prev)
+        || !sameModel(prev.model, anchorModel)
+      ) break;
+      indices.push(i);
+    }
   }
+  indices.reverse();
+  indices.push(matchIndex);
+
   const group = [];
-  for (let i = startIndex; i <= matchIndex; i++) {
+  for (const i of indices) {
     if (consumed.has(i)) continue;
     consumed.add(i);
     group.push(attempts[i]);
@@ -1169,7 +1190,13 @@ function attemptResponseId(attempt) {
 
 function applyAttemptAttributes(record, attempt) {
   if (!attempt) return;
-  const requestId = attempt.client_request_id || attempt.request_id;
+  // Prefer the provider/gateway request-id (response `request-id` header) over
+  // the locally-minted client id: gen_ai.request.id exists to correlate a span
+  // with gateway/Provider logs, where the provider's request-id is the value
+  // that appears. This also matches sibling agents (Qoder/Hermes) and keeps this
+  // field consistent with attemptResponseId above. StopFailure's transcript
+  // requestId still overrides it as the terminal authority.
+  const requestId = attempt.request_id || attempt.client_request_id;
   if (requestId && !record['gen_ai.request.id']) {
     record['gen_ai.request.id'] = requestId;
   }

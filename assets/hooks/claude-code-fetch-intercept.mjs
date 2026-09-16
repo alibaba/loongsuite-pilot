@@ -424,49 +424,98 @@ if (typeof origFetch === 'function') {
       }
     };
 
-    let transform;
+    const parseChunk = (chunk) => {
+      if (stopParsing) return;
+      try {
+        pending += decoder.decode(chunk, { stream: true });
+        let idx;
+        while ((idx = pending.indexOf(SSE_DELIMITER)) !== -1) {
+          const block = pending.slice(0, idx);
+          pending = pending.slice(idx + SSE_DELIMITER.length);
+          processBlock(block);
+        }
+        if (responseId && ttftNs !== null) {
+          tryEmit();
+          stopParsing = true;
+          pending = '';
+        }
+      } catch (_) {}
+    };
+
+    let reader;
     try {
-      transform = new TransformStream({
-        transform(chunk, controller) {
-          controller.enqueue(chunk); // pass through first, parsing is best-effort
-          if (stopParsing) return;
+      reader = response.body.getReader();
+    } catch (_) {
+      writeAttempt({
+        outcome: 'success', status_code: response.status, error_type: null,
+        request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
+      });
+      return response;
+    }
+
+    // Explicit ReadableStream wrapper instead of TransformStream. The
+    // transformer's cancel() callback does NOT fire on Node 18 when the
+    // consumer aborts an already-200 response, so a user interrupt would leave
+    // the physical attempt with no telemetry. An explicit ReadableStream's
+    // cancel() fires reliably across Node 18/20/22 and Bun.
+    let canceled = false;
+    let wrappedBody;
+    try {
+      wrappedBody = new ReadableStream({
+        async pull(controller) {
+          let result;
           try {
-            pending += decoder.decode(chunk, { stream: true });
-            let idx;
-            while ((idx = pending.indexOf(SSE_DELIMITER)) !== -1) {
-              const block = pending.slice(0, idx);
-              pending = pending.slice(idx + SSE_DELIMITER.length);
-              processBlock(block);
+            result = await reader.read();
+          } catch (err) {
+            // Upstream body errored mid-stream after a 200: the physical
+            // attempt failed. Record it and propagate the error to the
+            // consumer so interception stays transparent.
+            if (canceled) return;
+            if (!attemptWritten) {
+              writeAttempt({
+                outcome: 'network_error',
+                status_code: response.status,
+                error_type: normalizeNetworkError(err),
+                request_id: responseRequestId(response.headers),
+                response_id: responseId,
+                ttft_ns: ttftNs,
+              });
             }
-            if (responseId && ttftNs !== null) {
-              tryEmit();
-              stopParsing = true;
-              pending = '';
-            }
-          } catch (_) {}
-        },
-        flush() {
-          // Stream ended normally without ever producing a content delta
-          // (e.g. tool-only response that arrived as a single block, or
-          // server returned an error mid-stream). Persist whatever we have.
-          if (!recordWritten && responseId) tryEmit();
-          if (!attemptWritten) {
-            writeAttempt({
-              outcome: 'success',
-              status_code: response.status,
-              error_type: null,
-              request_id: responseRequestId(response.headers),
-              response_id: responseId,
-              ttft_ns: ttftNs,
-            });
+            controller.error(err);
+            return;
           }
+          // cancel() already ran (consumer aborted): the pending read resolves
+          // done, but the attempt is recorded and the controller is closed —
+          // don't emit a spurious success record or touch the controller.
+          if (canceled) return;
+          if (result.done) {
+            // Stream ended normally without ever producing a content delta
+            // (e.g. tool-only response that arrived as a single block, or
+            // server returned an error mid-stream). Persist whatever we have.
+            if (!recordWritten && responseId) tryEmit();
+            if (!attemptWritten) {
+              writeAttempt({
+                outcome: 'success',
+                status_code: response.status,
+                error_type: null,
+                request_id: responseRequestId(response.headers),
+                response_id: responseId,
+                ttft_ns: ttftNs,
+              });
+            }
+            controller.close();
+            return;
+          }
+          controller.enqueue(result.value); // pass through first, parsing is best-effort
+          parseChunk(result.value);
         },
-        cancel() {
+        cancel(reason) {
           // Downstream aborted an already-200 response mid-stream (user
-          // interrupt / turn cancel). cancel() runs instead of flush(), so
-          // without this the physical attempt would leave no telemetry. Not a
-          // success anchor: mark it non-success so retry grouping doesn't treat
-          // it as the terminating success of a retry chain.
+          // interrupt / turn cancel). Cancel the upstream reader and record the
+          // attempt. Not a success anchor: mark it non-success so retry grouping
+          // doesn't treat it as the terminating success of a retry chain.
+          canceled = true;
+          try { reader.cancel(reason); } catch (_) {}
           if (attemptWritten) return;
           writeAttempt({
             outcome: 'network_error',
@@ -479,19 +528,9 @@ if (typeof origFetch === 'function') {
         },
       });
     } catch (_) {
-      // TransformStream construction failed (very old runtime): bail out
-      // and return the original response untouched.
-      writeAttempt({
-        outcome: 'success', status_code: response.status, error_type: null,
-        request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
-      });
-      return response;
-    }
-
-    let wrappedBody;
-    try {
-      wrappedBody = response.body.pipeThrough(transform);
-    } catch (_) {
+      // ReadableStream construction failed (very old runtime): bail out and
+      // return the original response untouched.
+      try { reader.cancel(); } catch (_) {}
       writeAttempt({
         outcome: 'success', status_code: response.status, error_type: null,
         request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
