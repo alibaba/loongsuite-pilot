@@ -78,6 +78,30 @@ function readJsonlRecords() {
   return records;
 }
 
+async function exportRecords(records) {
+  const exportedSpans = [];
+  const flusher = new OtlpTraceFlusher({
+    enabled: true,
+    endpoints: [{ name: 'test', endpoint: 'http://localhost:4318' }],
+    protocol: 'http/protobuf',
+    serviceName: 'test-pilot',
+    dataDir: DATA_DIR,
+  }, undefined, () => ({
+    export: (spans, callback) => {
+      exportedSpans.push(...spans);
+      callback({ code: 0 });
+    },
+    shutdown: async () => {},
+  }));
+  try {
+    await flusher.sendBatch(records);
+    await flusher.flush();
+  } finally {
+    await flusher.shutdown();
+  }
+  return exportedSpans;
+}
+
 function readState(sessionId) {
   const f = path.join(DATA_DIR, 'state', 'claude-code', 'sessions', `${sessionId}.json`);
   if (!fs.existsSync(f)) return null;
@@ -1190,7 +1214,7 @@ describe('claude-code 一级子 Agent 上报', () => {
 
     const retry = readJsonlRecords().find((record) =>
       record['event.name'] === 'llm.response'
-      && record['gen_ai.response.id'] === 'req-child-retry-1');
+      && record['gen_ai.response.id'] === 'attempt:child-retry-1');
     expect(retry).toMatchObject({
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.id': agentId,
@@ -1274,11 +1298,127 @@ describe('claude-code 一级子 Agent 上报', () => {
     expect(childRetry).toMatchObject({
       'error.type': 'overloaded_error',
       'http.response.status_code': 529,
-      'gen_ai.response.id': 'req-child-retry-1',
+      'gen_ai.response.id': 'attempt:child-retry-1',
     });
     const childOk = childResponses.find((record) => record['gen_ai.response.id'] === 'msg_child_ok');
     expect(childOk).toBeTruthy();
     expect(childOk).not.toHaveProperty('error.type');
+  });
+
+  test('background child error owns only its anchored retries when the parent error lacks a request ID', async () => {
+    const sessionId = 's-background-errors';
+    const agentId = 'background-error-child';
+    const parentPath = parentTranscriptWithBackgroundAgent(sessionId, agentId);
+    const parentRecords = fs.readFileSync(parentPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
+    const transcriptPath = writeTranscript(sessionId, [
+      ...parentRecords.slice(0, -1),
+      {
+        type: 'assistant', timestamp: '2026-06-04T02:57:37.000Z',
+        isApiErrorMessage: true, apiErrorStatus: 503, error: 'server_error',
+        message: {
+          id: 'msg_parent_error', model: 'test-model',
+          content: [{ type: 'text', text: 'parent failed' }], stop_reason: 'stop_sequence',
+        },
+      },
+    ]);
+    const childTranscriptPath = writeSubagentTranscript(sessionId, agentId, [
+      { type: 'user', timestamp: '2026-06-04T02:57:35.100Z', message: { content: 'child task' } },
+      {
+        type: 'assistant', timestamp: '2026-06-04T02:57:38.000Z',
+        isApiErrorMessage: true, apiErrorStatus: 429, error: 'rate_limit_error', requestId: 'req-child-terminal',
+        message: {
+          id: 'msg_child_error', model: 'test-model',
+          content: [{ type: 'text', text: 'child failed' }], stop_reason: 'stop_sequence',
+        },
+      },
+    ]);
+    const parentAttempts = [
+      writeAttemptFile(sessionId, 'parent-unanchored-1', {
+        model: 'test-model', request_hash: 'b'.repeat(64), error_type: 'server_error', status_code: 503,
+        start_time_unix_nano: '1780541855150000000', end_time_unix_nano: '1780541855180000000',
+      }),
+      writeAttemptFile(sessionId, 'parent-unanchored-2', {
+        model: 'test-model', request_hash: 'b'.repeat(64), error_type: 'server_error', status_code: 503,
+        start_time_unix_nano: '1780541855400000000', end_time_unix_nano: '1780541855500000000',
+      }),
+    ];
+    const childAttempts = [
+      writeAttemptFile(sessionId, 'child-anchored-retry', {
+        model: 'test-model', request_hash: 'c'.repeat(64), error_type: 'rate_limit_error', status_code: 429,
+        start_time_unix_nano: '1780541855200000000', end_time_unix_nano: '1780541855300000000',
+      }),
+      writeAttemptFile(sessionId, 'child-anchored-final', {
+        model: 'test-model', request_hash: 'c'.repeat(64), error_type: 'rate_limit_error', status_code: 429,
+        request_id: 'req-child-terminal',
+        start_time_unix_nano: '1780541855600000000', end_time_unix_nano: '1780541855800000000',
+      }),
+    ];
+    expect(runHook('stop-failure', {
+      session_id: sessionId, transcript_path: transcriptPath,
+      hook_event_name: 'StopFailure', error: 'server_error',
+    }).status).toBe(0);
+    expect(readJsonlRecords()).toEqual([]);
+    expect(readState(sessionId)?.pending_subagent_turns).toHaveLength(1);
+    for (const file of parentAttempts) expect(fs.existsSync(file)).toBe(true);
+
+    const completion = {
+      session_id: sessionId, transcript_path: transcriptPath, agent_id: agentId,
+      agent_type: 'general-purpose', agent_transcript_path: childTranscriptPath,
+    };
+    expect(runHook('subagent-stop', completion).status).toBe(0);
+    const records = readJsonlRecords();
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    const childResponses = responses.filter((record) => record['gen_ai.agent.scope'] === 'subagent');
+    expect(responses).toHaveLength(4);
+    expect(childResponses.map((record) => record['gen_ai.response.id']))
+      .toEqual(['attempt:child-anchored-retry', 'msg_child_error']);
+    expect(childResponses.map((record) => record['gen_ai.request.id']))
+      .toEqual(['req-child-anchored-retry', 'req-child-terminal']);
+    for (const response of childResponses) {
+      expect(response).toMatchObject({
+        'gen_ai.agent.id': agentId, 'gen_ai.subagent.parent_tool_call.id': 'agent_call_bg_1',
+        'error.type': 'rate_limit_error', 'http.response.status_code': 429,
+        'gen_ai.response.finish_reasons': ['error'],
+      });
+    }
+    const parentError = responses.find((record) => record['gen_ai.response.id'] === 'msg_parent_error');
+    expect(parentError).toMatchObject({
+      'error.type': 'server_error', 'http.response.status_code': 503,
+      time_unix_nano: '1780541857000000000',
+    });
+    expect(parentError).not.toHaveProperty('gen_ai.request.id');
+    for (const file of parentAttempts) expect(fs.existsSync(file)).toBe(true);
+    for (const file of childAttempts) expect(fs.existsSync(file)).toBe(false);
+    expect(runHook('subagent-stop', completion).status).toBe(0);
+    expect(readJsonlRecords()).toEqual(records);
+
+    const spans = await exportRecords(records);
+    const llmSpans = spans.filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(4);
+    const parentSuccess = llmSpans.find((span) => span.attributes['gen_ai.response.id'] === 'msg_parent_bg_1');
+    expect(parentSuccess).toBeDefined();
+    expect(parentSuccess.status.code).not.toBe(2);
+    expect(parentSuccess.attributes).not.toHaveProperty('error.type');
+    const failedParent = llmSpans.find((span) => span.attributes['gen_ai.response.id'] === 'msg_parent_error');
+    expect(failedParent?.attributes['error.type']).toBe('server_error');
+    expect(failedParent?.attributes['http.response.status_code']).toBe(503);
+    expect(failedParent?.status.code).toBe(2);
+    const failedChildren = llmSpans.filter((span) => span.attributes['error.type'] === 'rate_limit_error');
+    expect(failedChildren).toHaveLength(2);
+    for (const span of failedChildren) {
+      expect(span.attributes['gen_ai.agent.scope']).toBe('subagent');
+      expect(span.status.code).toBe(2);
+    }
+    const parentTool = spans.find((span) => span.name === 'execute_tool Agent');
+    const childAgent = spans.find((span) => span.attributes['gen_ai.span.kind'] === 'AGENT'
+      && span.attributes['gen_ai.agent.scope'] === 'subagent');
+    expect(parentTool).toBeDefined();
+    expect(childAgent).toBeDefined();
+    expect(childAgent.parentSpanId).toBe(parentTool.spanContext().spanId);
+    for (const span of spans.filter((span) => span.attributes['gen_ai.span.kind'] !== 'LLM')) {
+      expect(span.status.code).not.toBe(2);
+      expect(span.attributes).not.toHaveProperty('error.type');
+    }
   });
 
   test('损坏的子 transcript 不会中断父会话导出', () => {
@@ -1551,27 +1691,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(fs.existsSync(retry2)).toBe(false);
     expect(fs.existsSync(success)).toBe(false);
 
-    const exportedSpans = [];
-    const flusher = new OtlpTraceFlusher({
-      enabled: true,
-      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318' }],
-      protocol: 'http/protobuf',
-      serviceName: 'test-pilot',
-      dataDir: DATA_DIR,
-    }, undefined, () => ({
-      export: (spans, callback) => {
-        exportedSpans.push(...spans);
-        callback({ code: 0 });
-      },
-      shutdown: async () => {},
-    }));
-    try {
-      await flusher.sendBatch(records);
-      await flusher.flush();
-    } finally {
-      await flusher.shutdown();
-    }
-
+    const exportedSpans = await exportRecords(records);
     const llmSpans = exportedSpans.filter((span) =>
       span.attributes['gen_ai.span.kind'] === 'LLM');
     expect(llmSpans).toHaveLength(3);
@@ -1582,6 +1702,205 @@ describe('hook-processor merges intercept data into llm events', () => {
       .toEqual([529, 529]);
     expect(exportedSpans.find((span) => span.attributes['gen_ai.span.kind'] === 'AGENT')?.status.code)
       .not.toBe(2);
+  });
+
+  test.each(['aborted', 'typeerror'])('partial response with %s exports one failed LLM at the physical end time', async (errorType) => {
+    const sid = `sid-partial-${errorType}`;
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'continue' } },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:34.000Z',
+        message: {
+          id: 'msg_partial_failed', model: 'test-model',
+          content: [{ type: 'text', text: 'partial answer' }],
+          usage: { input_tokens: 10, output_tokens: 2 }, stop_reason: null,
+        },
+      },
+    ]);
+    const attempt = writeAttemptFile(sid, 'partial-failed', {
+      model: 'test-model', outcome: 'network_error', error_type: errorType, status_code: 200,
+      response_id: 'msg_partial_failed',
+      start_time_unix_nano: '1780541853000000000',
+      end_time_unix_nano: '1780541855100000000',
+    });
+    const payload = { session_id: sid, transcript_path: transcriptPath };
+    expect(runHook('stop', payload).status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.filter((record) => record['event.name'] === 'llm.request')).toHaveLength(1);
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      'gen_ai.response.id': 'msg_partial_failed',
+      'gen_ai.request.id': 'req-partial-failed',
+      'error.type': errorType,
+      'http.response.status_code': 200,
+      'gen_ai.response.finish_reasons': ['error'],
+      'gen_ai.turn.end': true,
+      time_unix_nano: '1780541855100000000',
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'partial answer' }] }],
+    });
+    expect(fs.existsSync(attempt)).toBe(false);
+    expect(runHook('stop', payload).status).toBe(0);
+    expect(readJsonlRecords()).toEqual(records);
+
+    const spans = await exportRecords(records);
+    const llmSpans = spans.filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(1);
+    expect(llmSpans[0].status.code).toBe(2);
+    expect(llmSpans[0].attributes).toMatchObject({
+      'gen_ai.response.id': 'msg_partial_failed',
+      'error.type': errorType,
+      'http.response.status_code': 200,
+      'gen_ai.response.finish_reasons': ['error'],
+    });
+    expect(String(llmSpans[0].attributes['gen_ai.output.messages'])).toContain('partial answer');
+    expect(llmSpans[0].startTime).toEqual([1780541853, 0]);
+    expect(llmSpans[0].endTime).toEqual([1780541855, 100000000]);
+    const parents = spans.filter((span) => span.attributes['gen_ai.span.kind'] !== 'LLM');
+    expect(parents.length).toBeGreaterThan(0);
+    for (const parent of parents) {
+      expect(parent.status.code).not.toBe(2);
+      expect(parent.attributes).not.toHaveProperty('error.type');
+    }
+  });
+
+  test('success without request_hash consumes only its exact anchor, not preceding failures', () => {
+    const sid = 'sid-no-hash';
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'try again' } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:36.000Z', message: {
+        id: 'msg_no_hash', model: 'test-model', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn',
+      } },
+    ]);
+    const failures = [
+      writeAttemptFile(sid, 'no-hash-1', { request_hash: null, model: 'test-model' }),
+      writeAttemptFile(sid, 'no-hash-2', {
+        request_hash: null, model: 'test-model',
+        start_time_unix_nano: '1780541853200000000', end_time_unix_nano: '1780541853300000000',
+      }),
+    ];
+    const success = writeAttemptFile(sid, 'no-hash-success', {
+      request_hash: null, model: 'test-model', outcome: 'success', status_code: 200, error_type: null,
+      response_id: 'msg_no_hash',
+      start_time_unix_nano: '1780541853400000000', end_time_unix_nano: '1780541853500000000',
+    });
+    expect(runHook('stop', { session_id: sid, transcript_path: transcriptPath }).status).toBe(0);
+    const responses = readJsonlRecords().filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.request.id']).toBe('req-no-hash-success');
+    expect(responses[0]).not.toHaveProperty('error.type');
+    for (const file of failures) expect(fs.existsSync(file)).toBe(true);
+    expect(fs.existsSync(success)).toBe(false);
+  });
+
+  test.each(['same', 'different'])('repeated request ID with %s hashes skips attempts but exports transcript failure', async (hashes) => {
+    const sid = `sid-ambiguous-${hashes}`;
+    const transcriptPath = apiErrorTranscript(sid);
+    const attempts = [
+      writeAttemptFile(sid, 'ambiguous-1', {
+        model: 'test-model', request_id: 'req-error-11', outcome: 'network_error', error_type: 'aborted', status_code: 200,
+        start_time_unix_nano: '1789530184000000000', end_time_unix_nano: '1789530184100000000',
+      }),
+      writeAttemptFile(sid, 'ambiguous-2', {
+        model: 'test-model', request_id: 'req-error-11', outcome: 'network_error', error_type: 'typeerror', status_code: 200,
+        request_hash: (hashes === 'same' ? 'a' : 'b').repeat(64),
+        start_time_unix_nano: '1789530184200000000', end_time_unix_nano: '1789530184300000000',
+      }),
+    ];
+    expect(runHook('stop-failure', {
+      session_id: sid, transcript_path: transcriptPath, hook_event_name: 'StopFailure', error: 'server_error',
+    }).status).toBe(0);
+    const records = readJsonlRecords();
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      'gen_ai.request.id': 'req-error-11', 'error.type': 'server_error',
+      'http.response.status_code': 529, 'gen_ai.response.finish_reasons': ['error'],
+      time_unix_nano: String(BigInt(Date.parse('2026-09-16T03:46:02.445Z')) * 1000000n),
+    });
+    for (const file of attempts) expect(fs.existsSync(file)).toBe(true);
+    const spans = await exportRecords(records);
+    const llmSpans = spans.filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(1);
+    expect(llmSpans[0].status.code).toBe(2);
+    expect(llmSpans[0].attributes).toMatchObject({ 'error.type': 'server_error', 'http.response.status_code': 529 });
+  });
+
+  test('overlapping same-hash failures reject the preceding retry group', () => {
+    const sid = 'sid-overlapping';
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'run' } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:36.000Z', message: {
+        id: 'msg_overlap_success', model: 'test-model', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn',
+      } },
+    ]);
+    const overlapping = writeAttemptFile(sid, 'overlap-1', {
+      model: 'test-model',
+      start_time_unix_nano: '1780541853000000000', end_time_unix_nano: '1780541854300000000',
+    });
+    const preceding = writeAttemptFile(sid, 'overlap-2', {
+      model: 'test-model',
+      start_time_unix_nano: '1780541854000000000', end_time_unix_nano: '1780541854200000000',
+    });
+    const success = writeAttemptFile(sid, 'overlap-success', {
+      model: 'test-model', outcome: 'success', status_code: 200, error_type: null,
+      response_id: 'msg_overlap_success',
+      start_time_unix_nano: '1780541854400000000', end_time_unix_nano: '1780541855000000000',
+    });
+    expect(runHook('stop', { session_id: sid, transcript_path: transcriptPath }).status).toBe(0);
+    const responses = readJsonlRecords().filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.request.id']).toBe('req-overlap-success');
+    expect(responses[0]).not.toHaveProperty('error.type');
+    expect(fs.existsSync(overlapping)).toBe(true);
+    expect(fs.existsSync(preceding)).toBe(true);
+    expect(fs.existsSync(success)).toBe(false);
+  });
+
+  test('reused provider request ID keeps physical retries as distinct real LLM spans', async () => {
+    const sid = 'sid-reused-request';
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'retry' } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:36.000Z', message: {
+        id: 'msg_reused_success', model: 'test-model', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn',
+      } },
+    ]);
+    const attempts = [
+      writeAttemptFile(sid, 'shared-1', { model: 'test-model', request_id: 'req-shared' }),
+      writeAttemptFile(sid, 'shared-2', {
+        model: 'test-model', request_id: 'req-shared',
+        start_time_unix_nano: '1780541853200000000', end_time_unix_nano: '1780541853300000000',
+      }),
+      writeAttemptFile(sid, 'shared-success', {
+        model: 'test-model', request_id: 'req-shared', outcome: 'success', status_code: 200, error_type: null,
+        response_id: 'msg_reused_success',
+        start_time_unix_nano: '1780541853400000000', end_time_unix_nano: '1780541853500000000',
+      }),
+    ];
+    expect(runHook('stop', { session_id: sid, transcript_path: transcriptPath }).status).toBe(0);
+    const records = readJsonlRecords();
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(requests).toHaveLength(3);
+    expect(responses.map((record) => record['gen_ai.response.id']))
+      .toEqual(['attempt:shared-1', 'attempt:shared-2', 'msg_reused_success']);
+    expect(responses.map((record) => record['gen_ai.request.id']))
+      .toEqual(['req-shared', 'req-shared', 'req-shared']);
+    for (const retry of responses.slice(0, 2)) expect(retry['gen_ai.turn.end']).not.toBe(true);
+    expect(responses[2]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    for (const file of attempts) expect(fs.existsSync(file)).toBe(false);
+    const spans = await exportRecords(records);
+    const llmSpans = spans.filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(3);
+    expect(new Set(llmSpans.map((span) => span.spanContext().spanId)).size).toBe(3);
+    expect(llmSpans.map((span) => span.attributes['gen_ai.response.id']))
+      .toEqual(['attempt:shared-1', 'attempt:shared-2', 'msg_reused_success']);
+    expect(llmSpans.map((span) => span.attributes['gen_ai.request.id']))
+      .toEqual(['req-shared', 'req-shared', 'req-shared']);
+    expect(llmSpans.slice(0, 2).map((span) => span.status.code)).toEqual([2, 2]);
+    expect(llmSpans[2].status.code).not.toBe(2);
+    expect(llmSpans[2].attributes).not.toHaveProperty('error.type');
   });
 
   test('does not duplicate the final failed attempt already represented by StopFailure', () => {
@@ -1614,7 +1933,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(responses).toHaveLength(3);
     expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
       .toEqual([['error'], ['error'], ['error']]);
-    expect(responses[2]['gen_ai.turn.end']).toBe(true);
+    expect(responses.filter((record) => record['gen_ai.turn.end'] === true)).toEqual([responses[2]]);
     expect(responses[2]['gen_ai.request.id']).toBe('req-error-11');
   });
 
@@ -1779,12 +2098,8 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(llmEvents.length).toBeGreaterThan(0);
   });
 
-  test('时间下界: 早于本 turn prompt 的同 model attempt 不被时间兜底匹配窃取', () => {
+  test('no guessing: missing request ID leaves same-model attempts untouched inside and outside the turn', () => {
     const sid = 'sid-prev-turn-bound';
-    // Terminal api_error call WITHOUT a request_id → primary match fails and
-    // attribution falls back to the time-window path. One attempt started before
-    // this turn's prompt (an earlier turn's straggler); it must be excluded so it
-    // is neither merged into the terminal record nor consumed.
     const transcriptPath = writeTranscript(sid, [
       {
         type: 'user',
@@ -1814,7 +2129,7 @@ describe('hook-processor merges intercept data into llm events', () => {
       end_time_unix_nano: '1780541850100000000',
       request_id: 'req-prev-1',
     });
-    // 02:57:33 — inside the window, the only legitimate match.
+    // Even this same-model attempt inside the turn lacks an explicit ID match.
     const inTurn = writeAttemptFile(sid, 'in-turn-1', {
       start_time_unix_nano: '1780541853000000000',
       end_time_unix_nano: '1780541853100000000',
@@ -1831,12 +2146,11 @@ describe('hook-processor merges intercept data into llm events', () => {
 
     const responses = readJsonlRecords()
       .filter((record) => record['event.name'] === 'llm.response');
-    // Only the terminal record, carrying the in-window attempt's request id.
     expect(responses).toHaveLength(1);
-    expect(responses[0]['gen_ai.request.id']).toBe('req-in-turn-1');
-    // The pre-prompt straggler was not consumed, so its (fresh) file survives.
+    expect(responses[0]).not.toHaveProperty('gen_ai.request.id');
+    expect(responses[0]['error.type']).toBe('server_error');
     expect(fs.existsSync(prePrompt)).toBe(true);
-    expect(fs.existsSync(inTurn)).toBe(false);
+    expect(fs.existsSync(inTurn)).toBe(true);
   });
 
   test('跨 session 清理: 其它 session 的过期 attempt 在本次导出时被扫掉', () => {

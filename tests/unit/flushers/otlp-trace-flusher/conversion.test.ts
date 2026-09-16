@@ -390,6 +390,7 @@ describe('OtlpTraceFlusher - conversion', () => {
         'event.name': 'llm.response',
         'gen_ai.response.id': 'retry-response-1',
         'gen_ai.request.id': 'req-1',
+        'gen_ai.response.finish_reasons': ['error'],
         'http.response.status_code': 529,
         'error.type': 'overloaded_error',
       },
@@ -428,7 +429,7 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(entry.status.code).toBe(0);
   });
 
-  it('marks Claude root spans failed only when the final attempt is terminal error', () => {
+  it('limits a Claude terminal error to its LLM span without changing parent or sibling spans', () => {
     const records = [{
       'event.name': 'llm.response',
       'gen_ai.response.id': 'terminal-error',
@@ -440,14 +441,17 @@ describe('OtlpTraceFlusher - conversion', () => {
       status: { code: 0 },
     };
     const agent = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const sibling = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
     const entry = { attributes: { 'gen_ai.span.kind': 'ENTRY' }, status: { code: 0 } };
 
-    (flusher as any).enrichClaudeCodeLlmAttributes(records, [llm, agent, entry]);
+    (flusher as any).enrichClaudeCodeLlmAttributes(records, [llm, agent, sibling, entry]);
 
     expect(llm.status.code).toBe(2);
-    expect(agent.status.code).toBe(2);
-    expect(entry.status.code).toBe(2);
-    expect(agent.attributes['error.type']).toBe('server_error');
+    expect(llm.attributes['error.type']).toBe('server_error');
+    for (const span of [agent, sibling, entry]) {
+      expect(span.status.code).toBe(0);
+      expect(span.attributes).not.toHaveProperty('error.type');
+    }
   });
 
   it('preserves OpenClaw tool failure attributes and OTLP error status', () => {

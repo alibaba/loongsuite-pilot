@@ -1351,52 +1351,34 @@ export class OtlpTraceFlusher extends BaseFlusher {
       errorType?: string;
       statusCode?: number;
       requestId?: string;
-      terminal: boolean;
     }>();
-    let terminalError: { errorType?: string } | undefined;
 
     for (const record of records) {
       if (record['event.name'] !== 'llm.request' && record['event.name'] !== 'llm.response') continue;
       const responseId = record['gen_ai.response.id'];
       if (typeof responseId !== 'string' || responseId.length === 0) continue;
-      const current = byResponseId.get(responseId) ?? { terminal: false };
+      const current = byResponseId.get(responseId) ?? {};
       const errorType = record['error.type'];
       const statusCode = record['http.response.status_code'];
       const requestId = record['gen_ai.request.id'];
-      const turnEnd = record['gen_ai.turn.end'];
       if (typeof errorType === 'string' && errorType) current.errorType = errorType;
       if (typeof statusCode === 'number' && Number.isFinite(statusCode)) current.statusCode = statusCode;
       if (typeof requestId === 'string' && requestId) current.requestId = requestId;
-      if (turnEnd === true && current.errorType) {
-        current.terminal = true;
-        terminalError = { errorType: current.errorType };
-      }
       byResponseId.set(responseId, current);
     }
 
     for (const span of spans) {
-      const kind = span.attributes['gen_ai.span.kind'];
-      if (kind === 'LLM') {
-        const responseId = span.attributes['gen_ai.response.id'];
-        if (typeof responseId !== 'string') continue;
-        const data = byResponseId.get(responseId);
-        if (!data) continue;
-        if (data.requestId) span.attributes['gen_ai.request.id'] = data.requestId;
-        if (data.statusCode !== undefined) {
-          span.attributes['http.response.status_code'] = data.statusCode;
-        }
-        if (data.errorType) {
-          span.attributes['error.type'] = data.errorType;
-          Object.assign(span.status, {
-            code: SpanStatusCode.ERROR,
-            message: 'model request failed',
-          });
-        }
-        continue;
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const responseId = span.attributes['gen_ai.response.id'];
+      if (typeof responseId !== 'string') continue;
+      const data = byResponseId.get(responseId);
+      if (!data) continue;
+      if (data.requestId) span.attributes['gen_ai.request.id'] = data.requestId;
+      if (data.statusCode !== undefined) {
+        span.attributes['http.response.status_code'] = data.statusCode;
       }
-
-      if (terminalError && (kind === 'AGENT' || kind === 'ENTRY')) {
-        span.attributes['error.type'] = terminalError.errorType ?? 'model_error';
+      if (data.errorType) {
+        span.attributes['error.type'] = data.errorType;
         Object.assign(span.status, {
           code: SpanStatusCode.ERROR,
           message: 'model request failed',

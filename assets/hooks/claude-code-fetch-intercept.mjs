@@ -1,6 +1,6 @@
 // BUN_OPTIONS preload script for Claude Code fetch interception.
 // Injected via: BUN_OPTIONS="--preload=<this-file>" claude ...
-// Writes successful-response enrichment to:
+// Writes early response enrichment to:
 //   ~/.loongsuite-pilot/intercept/claude-code/<session_id>/<response_id>.json
 // and one metadata-only record per physical HTTP attempt to:
 //   ~/.loongsuite-pilot/intercept/claude-code/<session_id>/attempts/<attempt_id>.json
@@ -25,10 +25,8 @@
 //   - SSE is parsed by splitting the accumulated buffer on `\n\n` event
 //     boundaries. A sliding-window regex was tried first and silently
 //     corrupted long preambles — do NOT change back.
-//   - Once both response_id and ttft_ns are captured we stop parsing and
-//     transparently pipe the rest of the stream, keeping memory bounded.
-//   - All work is wrapped in try/catch; an exception here must never break
-//     Claude Code's own fetch flow.
+//   - Enrichment is emitted early; parsing continues until message_stop/error.
+//   - Telemetry is best-effort; fetch, read and cancel errors still propagate.
 //   - NOTE: This file uses require() which is Bun-specific in .mjs context.
 //     It only runs under BUN_OPTIONS --preload inside a compiled Bun binary
 //     (Claude Code CLI).
@@ -44,19 +42,18 @@ const INTERCEPT_BASE = path.join(
 );
 const LLM_URL_RE = /\/v1\/messages(?:\?|$|\/)/;
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
-const SSE_DELIMITER = '\n\n';
+// SSE frames a blank line as the event boundary; per spec the line
+// terminator may be LF, CRLF, or a bare CR. Only splitting on `\n\n`
+// misclassifies valid CRLF/CR streams as incomplete (false failures),
+// so match all three forms — longest first so `\r\n\r\n` is not split.
+const SSE_BOUNDARY_RE = /\r\n\r\n|\r\r|\n\n/g;
+const SSE_LINE_RE = /\r\n|\r|\n/;
 const ATTEMPT_SCHEMA_VERSION = 1;
-
-// W3C Trace Context — https://www.w3.org/TR/trace-context/#traceparent-header-field-values
-// Forward the launching process's TRACEPARENT (+ TRACESTATE when valid) into
-// outbound /v1/messages requests so the gateway can join the caller's trace.
-// The env vars are populated by whoever spawned Claude Code (upstream service
-// or the loongsuite-pilot ACP linker); the preload does not mint new context.
-const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
-const ZERO_TRACE_ID = '0'.repeat(32);
-const ZERO_SPAN_ID = '0'.repeat(16);
-const TRACESTATE_MAX_LEN = 512;
-const TRACESTATE_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+const SSE_ERROR_TYPES = new Set([
+  'invalid_request_error', 'authentication_error', 'permission_error',
+  'not_found_error', 'request_too_large', 'rate_limit_error',
+  'api_error', 'overloaded_error',
+]);
 
 // ─── system_instructions extraction ──────────────────────────────────────
 
@@ -94,7 +91,9 @@ function dumpHeaders(h) {
   const out = {};
   if (!h) return out;
   try {
-    if (typeof h.forEach === 'function') {
+    if (Array.isArray(h)) {
+      for (const [k, v] of h) out[String(k).toLowerCase()] = v;
+    } else if (typeof h.forEach === 'function') {
       h.forEach((v, k) => { out[String(k).toLowerCase()] = v; });
     } else if (typeof h === 'object') {
       for (const k of Object.keys(h)) out[k.toLowerCase()] = h[k];
@@ -183,13 +182,14 @@ function normalizeNetworkError(error) {
 // ─── SSE event-block parsing ──────────────────────────────────────────────
 
 /**
- * Parse a single complete SSE event block (text between two `\n\n`).
+ * Parse a single complete SSE event block (text between two event
+ * boundaries). Lines may be terminated by LF, CRLF, or a bare CR.
  * Returns { event, data } or null if malformed.
  */
 function parseSseBlock(block) {
   let event = null;
   const dataLines = [];
-  for (const line of block.split('\n')) {
+  for (const line of block.split(SSE_LINE_RE)) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
     else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
   }
@@ -198,75 +198,6 @@ function parseSseBlock(block) {
 }
 
 // ─── globalThis.fetch monkey-patch ───────────────────────────────────────
-
-// Cache validated upstream context once. Env vars set on the Claude Code
-// process are stable for its lifetime; re-parsing per-request is wasted work.
-const UPSTREAM_TRACEPARENT = validateTraceparent(process.env.TRACEPARENT);
-const UPSTREAM_TRACESTATE = UPSTREAM_TRACEPARENT ? validateTracestate(process.env.TRACESTATE) : null;
-
-function validateTraceparent(raw) {
-  if (typeof raw !== 'string') return null;
-  const m = TRACEPARENT_RE.exec(raw.trim());
-  if (!m) return null;
-  const version = m[1].toLowerCase();
-  const traceId = m[2].toLowerCase();
-  const spanId = m[3].toLowerCase();
-  const flags = m[4].toLowerCase();
-  // Spec: 'ff' is reserved/invalid. Future versions may extend the format;
-  // we only forward known-good '00' so we don't mis-propagate.
-  if (version !== '00') return null;
-  if (traceId === ZERO_TRACE_ID) return null;
-  if (spanId === ZERO_SPAN_ID) return null;
-  return `${version}-${traceId}-${spanId}-${flags}`;
-}
-
-function validateTracestate(raw) {
-  if (typeof raw !== 'string') return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (trimmed.length > TRACESTATE_MAX_LEN) return null;
-  if (TRACESTATE_CONTROL_CHAR_RE.test(trimmed)) return null;
-  return trimmed;
-}
-
-function normalizeHeaders(source) {
-  const out = {};
-  if (!source) return out;
-  try {
-    if (typeof source.forEach === 'function') {
-      source.forEach((v, k) => { out[String(k).toLowerCase()] = String(v); });
-    } else if (Array.isArray(source)) {
-      for (const pair of source) {
-        if (Array.isArray(pair) && pair.length === 2) {
-          out[String(pair[0]).toLowerCase()] = String(pair[1]);
-        }
-      }
-    } else if (typeof source === 'object') {
-      for (const k of Object.keys(source)) out[k.toLowerCase()] = String(source[k]);
-    }
-  } catch (_) {}
-  return out;
-}
-
-// Inject upstream W3C context onto an outbound fetch pair. Preserves existing
-// traceparent so a caller who already set the header (e.g. via a middleware)
-// stays authoritative. When input is a Request instance, init.headers wins
-// over Request.headers per fetch semantics, so we merge Request.headers into
-// our normalized set before overwriting. Fail-open: any error returns the
-// original pair unchanged.
-function injectUpstreamTraceContext(input, init) {
-  try {
-    if (!UPSTREAM_TRACEPARENT) return { input, init };
-    const source = init?.headers ?? (input && typeof input === 'object' ? input.headers : null);
-    const normalized = normalizeHeaders(source);
-    if (normalized.traceparent) return { input, init };
-    normalized.traceparent = UPSTREAM_TRACEPARENT;
-    if (UPSTREAM_TRACESTATE) normalized.tracestate = UPSTREAM_TRACESTATE;
-    return { input, init: { ...(init || {}), headers: normalized } };
-  } catch (_) {
-    return { input, init };
-  }
-}
 
 const origFetch = globalThis.fetch;
 if (typeof origFetch === 'function') {
@@ -283,11 +214,6 @@ if (typeof origFetch === 'function') {
     if (!url || !LLM_URL_RE.test(url)) {
       return origFetch.call(this, input, init);
     }
-
-    // Forward the upstream W3C traceparent to the gateway. Runs before any
-    // early return so the header lands even when we can't extract our own
-    // session id — it's the gateway's concern, not ours.
-    ({ input, init } = injectUpstreamTraceContext(input, init));
 
     // Header session_id is required to scope intercept output. Without it
     // we have no way for the hook processor to find this record, so we
@@ -378,13 +304,15 @@ if (typeof origFetch === 'function') {
       return response;
     }
 
+    const isSse = /^text\/event-stream(?:\s*;|$)/i.test(response.headers.get('content-type') || '');
     let responseId = null;
     let ttftNs = null;
     let recordWritten = false;
-    let stopParsing = false;
+    let stopParsing = !isSse;
     const decoder = new TextDecoder();
     let pending = '';
 
+    // Early enrichment must not finalize an attempt before its protocol terminal.
     const tryEmit = () => {
       if (recordWritten || !responseId) return;
       writeRecord(sessionId, {
@@ -392,14 +320,6 @@ if (typeof origFetch === 'function') {
         response_id: responseId,
         ttft_ns: ttftNs,
         system_instructions: systemInstructions,
-      });
-      writeAttempt({
-        outcome: 'success',
-        status_code: response.status,
-        error_type: null,
-        request_id: responseRequestId(response.headers),
-        response_id: responseId,
-        ttft_ns: ttftNs,
       });
       recordWritten = true;
     };
@@ -421,24 +341,43 @@ if (typeof origFetch === 'function') {
             ttftNs = Math.max(0, Math.round(ms * 1e6));
           }
         } catch (_) {}
+      } else if (parsed.event === 'message_stop' || parsed.event === 'error') {
+        let errorType = null;
+        if (parsed.event === 'error') {
+          errorType = 'api_error';
+          try {
+            const type = JSON.parse(parsed.data)?.error?.type;
+            if (SSE_ERROR_TYPES.has(type)) errorType = type;
+          } catch (_) {}
+        } else {
+          tryEmit();
+        }
+        writeAttempt({
+          outcome: errorType ? 'network_error' : 'success',
+          status_code: response.status,
+          error_type: errorType,
+          request_id: responseRequestId(response.headers),
+          response_id: responseId,
+          ttft_ns: ttftNs,
+        });
+        stopParsing = true;
       }
+      if (responseId && ttftNs !== null) tryEmit();
     };
 
     const parseChunk = (chunk) => {
       if (stopParsing) return;
       try {
         pending += decoder.decode(chunk, { stream: true });
-        let idx;
-        while ((idx = pending.indexOf(SSE_DELIMITER)) !== -1) {
-          const block = pending.slice(0, idx);
-          pending = pending.slice(idx + SSE_DELIMITER.length);
+        let match;
+        SSE_BOUNDARY_RE.lastIndex = 0;
+        while (!stopParsing && (match = SSE_BOUNDARY_RE.exec(pending)) !== null) {
+          const block = pending.slice(0, match.index);
+          pending = pending.slice(match.index + match[0].length);
+          SSE_BOUNDARY_RE.lastIndex = 0;
           processBlock(block);
         }
-        if (responseId && ttftNs !== null) {
-          tryEmit();
-          stopParsing = true;
-          pending = '';
-        }
+        if (stopParsing) pending = '';
       } catch (_) {}
     };
 
@@ -467,9 +406,7 @@ if (typeof origFetch === 'function') {
           try {
             result = await reader.read();
           } catch (err) {
-            // Upstream body errored mid-stream after a 200: the physical
-            // attempt failed. Record it and propagate the error to the
-            // consumer so interception stays transparent.
+            // Propagate read errors without overwriting an observed protocol terminal.
             if (canceled) return;
             if (!attemptWritten) {
               writeAttempt({
@@ -489,15 +426,13 @@ if (typeof origFetch === 'function') {
           // don't emit a spurious success record or touch the controller.
           if (canceled) return;
           if (result.done) {
-            // Stream ended normally without ever producing a content delta
-            // (e.g. tool-only response that arrived as a single block, or
-            // server returned an error mid-stream). Persist whatever we have.
+            // SSE EOF without a protocol terminal is an incomplete attempt.
             if (!recordWritten && responseId) tryEmit();
             if (!attemptWritten) {
               writeAttempt({
-                outcome: 'success',
+                outcome: isSse ? 'network_error' : 'success',
                 status_code: response.status,
-                error_type: null,
+                error_type: isSse ? 'incomplete_stream' : null,
                 request_id: responseRequestId(response.headers),
                 response_id: responseId,
                 ttft_ns: ttftNs,
@@ -506,17 +441,12 @@ if (typeof origFetch === 'function') {
             controller.close();
             return;
           }
-          controller.enqueue(result.value); // pass through first, parsing is best-effort
-          parseChunk(result.value);
+          parseChunk(result.value); // Persist the terminal before exposing it to the consumer.
+          controller.enqueue(result.value);
         },
         cancel(reason) {
-          // Downstream aborted an already-200 response mid-stream (user
-          // interrupt / turn cancel). Cancel the upstream reader and record the
-          // attempt. Not a success anchor: mark it non-success so retry grouping
-          // doesn't treat it as the terminating success of a retry chain.
+          // A protocol terminal wins over any later consumer cancellation.
           canceled = true;
-          try { reader.cancel(reason); } catch (_) {}
-          if (attemptWritten) return;
           writeAttempt({
             outcome: 'network_error',
             status_code: response.status,
@@ -525,6 +455,7 @@ if (typeof origFetch === 'function') {
             response_id: responseId,
             ttft_ns: ttftNs,
           });
+          return reader.cancel(reason);
         },
       });
     } catch (_) {

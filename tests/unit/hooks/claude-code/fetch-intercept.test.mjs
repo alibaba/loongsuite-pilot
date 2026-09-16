@@ -20,74 +20,70 @@ afterEach(() => {
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
 });
 
-/**
- * Build a Node bootstrap script that:
- *  1. Stubs globalThis.fetch to return a fake Response with a synthetic SSE
- *     ReadableStream we drive chunk-by-chunk.
- *  2. require()s the preload script (which overrides globalThis.fetch with
- *     its instrumented version).
- *  3. Awaits the wrapped fetch + drains the returned response.body so the
- *     TransformStream actually processes chunks.
- *  4. Returns success exit code.
- *
- * The preload writes JSON files to <DATA_DIR>/intercept/claude-code/<sid>/...
- */
+// Run the preload in a subprocess with offline fetch/Response streams.
 function runScenario({
   url,
   sessionId,
   body,
   rawBody,
   sseEvents = [],
+  rawChunks,
+  responseText,
   networkDelayMs = 0,
   status = 200,
   responseHeaders = {},
   networkError = null,
   clientRequestId = null,
-  extraRequestHeaders = null,
+  requestHeaders,
   env = {},
   keepStreamOpen = false,
   cancelMidStream = false,
+  cancelAfterReads = 1,
+  rejectCancel = false,
+  streamErrorAfterReads = 0,
+  snapshotAfterReads = 0,
 }) {
-  const chunksJson = JSON.stringify(sseEvents.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
-  // rawBody (string) takes precedence — use it verbatim as fetch body so tests
-  // can exercise malformed/non-JSON bodies without going through JSON.stringify.
+  const chunksJson = JSON.stringify(
+    rawChunks !== undefined ? rawChunks
+    : responseText !== undefined ? [responseText]
+    : sseEvents.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
   const bodyJson = rawBody !== undefined ? rawBody : JSON.stringify(body);
-  const outboundHeadersFile = path.join(DATA_DIR, 'outbound-headers.json');
+  const headers = requestHeaders ?? {
+    ...(sessionId ? { 'x-claude-code-session-id': sessionId } : {}),
+    ...(clientRequestId ? { 'x-client-request-id': clientRequestId } : {}),
+  };
   const script = `
-    const { ReadableStream, TransformStream } = require('node:stream/web');
-    globalThis.ReadableStream = ReadableStream;
-    globalThis.TransformStream = TransformStream;
-    // globalThis.Response is native in Node 18.17+ / 20+ / 22+; no fallback needed.
-
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const assert = require('node:assert/strict');
+    globalThis.ReadableStream = require('node:stream/web').ReadableStream;
     const chunks = ${chunksJson};
     const encoder = new TextEncoder();
-    const outboundHeadersFile = ${JSON.stringify(outboundHeadersFile)};
+    const requestHeaders = ${JSON.stringify(headers)};
+    const cancelFailure = new Error('simulated cancel failure');
+    let failStream;
+    process.exitCode = 1;
 
-    // Stub original fetch — preload will wrap this.
     globalThis.fetch = async function (input, init) {
-      // Record the headers the wrapper handed us so tests can assert on
-      // whatever the preload injected (e.g. W3C traceparent forwarding).
-      try {
-        const headers = {};
-        const h = init && init.headers;
-        if (h && typeof h.forEach === 'function') {
-          h.forEach((v, k) => { headers[String(k).toLowerCase()] = String(v); });
-        } else if (h && typeof h === 'object') {
-          for (const k of Object.keys(h)) headers[k.toLowerCase()] = String(h[k]);
-        }
-        require('node:fs').writeFileSync(outboundHeadersFile, JSON.stringify({ headers }));
-      } catch (_) {}
-      // Simulate network latency before response headers arrive.
+      fs.writeFileSync(${JSON.stringify(path.join(DATA_DIR, 'outbound-headers.json'))}, JSON.stringify({
+        headers: init.headers,
+        sameHeaders: init.headers === requestHeaders,
+      }));
       if (${networkDelayMs} > 0) await new Promise(r => setTimeout(r, ${networkDelayMs}));
       if (${JSON.stringify(networkError)}) throw Object.assign(new Error('simulated network failure'), { name: ${JSON.stringify(networkError)} });
+      let nextChunk = 0;
       const stream = new ReadableStream({
-        async start(controller) {
-          for (const c of chunks) {
-            await new Promise(r => setTimeout(r, 5));
-            controller.enqueue(encoder.encode(c));
-          }
-          if (!${JSON.stringify(keepStreamOpen)}) controller.close();
-        }
+        start(controller) {
+          failStream = () => controller.error(new TypeError('simulated stream failure'));
+        },
+        pull(controller) {
+          if (nextChunk < chunks.length) controller.enqueue(encoder.encode(chunks[nextChunk++]));
+          else if (!${JSON.stringify(keepStreamOpen)}) controller.close();
+        },
+        cancel(reason) {
+          fs.writeFileSync(${JSON.stringify(path.join(DATA_DIR, 'cancel-reason.json'))}, JSON.stringify(reason));
+          if (${JSON.stringify(rejectCancel)}) return Promise.reject(cancelFailure);
+        },
       });
       return new Response(stream, {
         status: ${status},
@@ -98,45 +94,44 @@ function runScenario({
     process.env.LOONGSUITE_PILOT_DATA_DIR = ${JSON.stringify(DATA_DIR)};
 
     (async () => {
-      // Node 18 forbids require() of .mjs (ERR_REQUIRE_ESM); use dynamic import.
       await import(${JSON.stringify('file://' + PRELOAD)});
-
       const res = await globalThis.fetch(${JSON.stringify(url)}, {
         method: 'POST',
-        headers: ${JSON.stringify({
-          ...(sessionId ? { 'x-claude-code-session-id': sessionId } : {}),
-          ...(clientRequestId ? { 'x-client-request-id': clientRequestId } : {}),
-          ...(extraRequestHeaders || {}),
-        })},
+        headers: requestHeaders,
         body: ${JSON.stringify(bodyJson)},
       });
 
-      // Drain stream so TransformStream sees every chunk.
       if (res.body) {
         const reader = res.body.getReader();
-        if (${JSON.stringify(cancelMidStream)}) {
-          // Read one chunk, then abort mid-stream to trigger cancel().
-          await reader.read();
-          await reader.cancel('test-abort');
-        } else {
-          while (true) {
-            const { done } = await reader.read();
-            if (done) break;
+        let reads = 0;
+        while (true) {
+          const { done } = await reader.read();
+          if (done) break;
+          reads++;
+          if (reads === ${snapshotAfterReads}) {
+            const dir = ${JSON.stringify(path.join(INTERCEPT_DIR, sessionId || 'missing'))};
+            const readRecords = (p) => fs.existsSync(p)
+              ? fs.readdirSync(p).filter(n => n.endsWith('.json')).map(n => JSON.parse(fs.readFileSync(path.join(p, n), 'utf8')))
+              : [];
+            fs.writeFileSync(${JSON.stringify(path.join(DATA_DIR, 'observed-records.json'))}, JSON.stringify({
+              enrichment: readRecords(dir), attempts: readRecords(path.join(dir, 'attempts')),
+            }));
+          }
+          if (reads === ${streamErrorAfterReads}) failStream();
+          if (${JSON.stringify(cancelMidStream)} && reads === ${cancelAfterReads}) {
+            const canceled = reader.cancel('test-abort');
+            if (${JSON.stringify(rejectCancel)}) await assert.rejects(canceled, e => e === cancelFailure);
+            else await canceled;
+            break;
           }
         }
       }
-
-      // Tiny grace so writeFileSync inside transform has time to land
-      // (writes themselves are sync, but we want all chunks pumped).
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(setImmediate);
     })().then(
       () => process.exit(0),
       (e) => { console.error(String(e)); process.exit(1); }
     );
   `;
-  // Sanitize parent env so a TRACEPARENT set in the test runner doesn't leak
-  // into subprocess scenarios that expect a clean baseline. Callers opt-in by
-  // passing env: { TRACEPARENT: ... }.
   const baseEnv = { ...process.env };
   delete baseEnv.TRACEPARENT;
   delete baseEnv.TRACESTATE;
@@ -232,11 +227,11 @@ describe('claude-code-fetch-intercept preload', () => {
     expect(record.ttft_ns).toBeLessThan(60_000_000_000); // < 60s
   });
 
-  test('TTFT also captures on thinking_delta and input_json_delta', () => {
+  test.each(['thinking_delta', 'input_json_delta'])('TTFT also captures on %s', (deltaType) => {
     const r = runScenario({
       url: LLM_URL, sessionId: SESS,
       body: { system: 'sys', messages: [] },
-      sseEvents: sseStream({ deltaType: 'thinking_delta' }),
+      sseEvents: sseStream({ deltaType }),
     });
     expect(r.status).toBe(0);
     const [{ record }] = readIntercept(SESS);
@@ -277,7 +272,7 @@ describe('claude-code-fetch-intercept preload', () => {
     expect(fs.existsSync(INTERCEPT_DIR)).toBe(false);
   });
 
-  test('stream without content_block_delta still emits via flush (ttft_ns = null)', () => {
+  test('stream without content_block_delta still emits at message_stop (ttft_ns = null)', () => {
     const r = runScenario({
       url: LLM_URL, sessionId: SESS,
       body: { system: 'sys', messages: [] },
@@ -354,8 +349,7 @@ describe('claude-code-fetch-intercept preload', () => {
       sessionId: SESS,
       clientRequestId: 'client-aborted-1',
       body: { model: 'claude-test', messages: [] },
-      // message_start only, stream kept open, consumer aborts after one chunk:
-      // flush() never runs, so cancel() is the only path that can persist it.
+      // No protocol terminal or EOF: only consumer cancellation ends the attempt.
       sseEvents: [{
         event: 'message_start',
         data: { type: 'message_start', message: { id: MSG_ID, model: 'claude-test', role: 'assistant' } },
@@ -378,110 +372,329 @@ describe('claude-code-fetch-intercept preload', () => {
     });
   });
 
-  // ─── W3C traceparent forwarding ────────────────────────────────────────
-  // https://www.w3.org/TR/trace-context/#traceparent-header-field-values
+  test('an abort AFTER the first content delta is recorded as aborted, not success', () => {
+    // Early enrichment must not latch the attempt as success.
+    const r = runScenario({
+      url: LLM_URL,
+      sessionId: SESS,
+      clientRequestId: 'client-aborted-2',
+      body: { model: 'claude-test', messages: [] },
+      // message_start + one content_block_delta, then the consumer aborts after
+      // reading both chunks — tryEmit fires (response_id + ttft) before cancel.
+      sseEvents: [
+        {
+          event: 'message_start',
+          data: { type: 'message_start', message: { id: MSG_ID, model: 'claude-test', role: 'assistant' } },
+        },
+        {
+          event: 'content_block_delta',
+          data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+        },
+      ],
+      status: 200,
+      responseHeaders: { 'request-id': 'req-aborted-2' },
+      keepStreamOpen: true,
+      cancelMidStream: true,
+      cancelAfterReads: 2,
+    });
+    expect(r.status).toBe(0);
 
-  const VALID_TP = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
-  const VALID_TS = 'vendor=value,other=1';
-  const readOutboundHeaders = () => {
-    const p = path.join(DATA_DIR, 'outbound-headers.json');
-    if (!fs.existsSync(p)) return {};
-    return JSON.parse(fs.readFileSync(p, 'utf-8')).headers ?? {};
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      client_request_id: 'client-aborted-2',
+      outcome: 'network_error',
+      status_code: 200,
+      error_type: 'aborted',
+      request_id: 'req-aborted-2',
+    });
+    // The enrichment record still lands (we did observe the first token).
+    const enrich = readIntercept(SESS).map((e) => e.record);
+    expect(enrich.some((rec) => rec.response_id === MSG_ID)).toBe(true);
+  });
+
+  const readObservedRecords = () => JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-records.json'), 'utf8'));
+
+  test.each(['before message_start', 'before delta', 'after delta'])('records SSE error %s without persisting error content', (phase) => {
+    const prefix = phase === 'before message_start' ? []
+      : sseStream({ includeContentDelta: phase === 'after delta' }).slice(0, -1);
+    const secret = 'private-response-detail';
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      responseHeaders: { 'request-id': 'req-stream-error' },
+      sseEvents: [...prefix, {
+        event: 'error',
+        data: { type: 'error', error: { type: 'overloaded_error', message: secret }, body: secret },
+      }, { event: 'message_stop', data: { type: 'message_stop' } }],
+      snapshotAfterReads: prefix.length + 1,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      outcome: 'network_error', status_code: 200, error_type: 'overloaded_error',
+      request_id: 'req-stream-error', response_id: prefix.length ? MSG_ID : null,
+      ttft_ns: phase === 'after delta' ? expect.any(Number) : null,
+    });
+    expect(readObservedRecords().attempts).toEqual(attempts);
+    expect(JSON.stringify([attempts, readIntercept(SESS)])).not.toContain(secret);
+  });
+
+  test.each([
+    ['unknown', 'private-error-type'],
+    ['oversized', `overloaded_error${'private'.repeat(1000)}`],
+    ['missing', undefined],
+    ['non-string', { message: 'private-error-detail' }],
+  ])('maps %s SSE error types to a bounded safe label', (_, type) => {
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: [{ event: 'error', data: { error: { type, message: 'private-message' } } }],
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ outcome: 'network_error', error_type: 'api_error' });
+    expect(JSON.stringify(attempts)).not.toContain('private');
+    expect(readIntercept(SESS)).toHaveLength(0);
+  });
+
+  test('malformed SSE error data is still a failure', () => {
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      responseText: 'event: error\ndata: not-json-private-message\n\n',
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readAttempts(SESS)).toMatchObject([{ outcome: 'network_error', error_type: 'api_error' }]);
+    expect(JSON.stringify(readAttempts(SESS))).not.toContain('private-message');
+  });
+
+  test.each(['empty', 'before delta', 'after delta'])('SSE EOF %s without message_stop is incomplete', (phase) => {
+    const events = phase === 'empty' ? []
+      : sseStream({ includeContentDelta: phase === 'after delta' }).slice(0, -1);
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: events,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      outcome: 'network_error', error_type: 'incomplete_stream', status_code: 200,
+      response_id: events.length ? MSG_ID : null,
+    });
+  });
+
+  test('non-SSE EOF remains success without a protocol terminal', () => {
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [], stream: true },
+      responseHeaders: { 'content-type': 'application/json' },
+      responseText: JSON.stringify({ id: MSG_ID, content: [] }),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readAttempts(SESS)).toMatchObject([{ outcome: 'success', error_type: null }]);
+    expect(readIntercept(SESS)).toHaveLength(0);
+  });
+
+  test.each(['cancel', 'cancel rejection', 'read error'])('message_stop finalizes before EOF and stays success after %s', (ending) => {
+    const events = sseStream();
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: events,
+      keepStreamOpen: true,
+      snapshotAfterReads: events.length,
+      cancelMidStream: ending !== 'read error',
+      cancelAfterReads: events.length,
+      rejectCancel: ending === 'cancel rejection',
+      streamErrorAfterReads: ending === 'read error' ? events.length : 0,
+    });
+    expect(r.status, r.stderr).toBe(ending === 'read error' ? 1 : 0);
+    if (ending === 'read error') expect(r.stderr).toContain('TypeError: simulated stream failure');
+    const observed = readObservedRecords();
+    expect(observed.attempts).toHaveLength(1);
+    expect(observed.attempts[0]).toMatchObject({
+      outcome: 'success', error_type: null, response_id: MSG_ID, ttft_ns: expect.any(Number),
+    });
+    expect(observed.enrichment).toHaveLength(1);
+    expect(readAttempts(SESS)).toEqual(observed.attempts);
+  });
+
+  test('message_stop without a delta finalizes before EOF', () => {
+    const events = sseStream({ includeContentDelta: false });
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: events,
+      keepStreamOpen: true,
+      snapshotAfterReads: events.length,
+      cancelMidStream: true,
+      cancelAfterReads: events.length,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const observed = readObservedRecords();
+    expect(observed.attempts).toMatchObject([{ outcome: 'success', ttft_ns: null }]);
+    expect(observed.enrichment).toMatchObject([{ response_id: MSG_ID, ttft_ns: null }]);
+    expect(readAttempts(SESS)).toEqual(observed.attempts);
+  });
+
+  test.each([false, true])('transport error before terminal writes one failure (delta=%s)', (includeContentDelta) => {
+    const events = sseStream({ includeContentDelta }).slice(0, -1);
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: events,
+      keepStreamOpen: true,
+      snapshotAfterReads: events.length,
+      streamErrorAfterReads: events.length,
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('TypeError: simulated stream failure');
+    const observed = readObservedRecords();
+    expect(observed.attempts).toHaveLength(0);
+    expect(observed.enrichment).toHaveLength(includeContentDelta ? 1 : 0);
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      outcome: 'network_error', error_type: 'typeerror', status_code: 200,
+      response_id: MSG_ID, ttft_ns: includeContentDelta ? expect.any(Number) : null,
+    });
+    expect(JSON.stringify(attempts)).not.toContain('simulated stream failure');
+  });
+
+  test.each([false, true])('cancel rejection propagates and records one aborted attempt (delta=%s)', (includeContentDelta) => {
+    const events = sseStream({ includeContentDelta }).slice(0, -1);
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: events,
+      keepStreamOpen: true,
+      cancelMidStream: true,
+      cancelAfterReads: events.length,
+      snapshotAfterReads: events.length,
+      rejectCancel: true,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toBe('');
+    expect(readObservedRecords().attempts).toHaveLength(0);
+    expect(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'cancel-reason.json'), 'utf8'))).toBe('test-abort');
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      outcome: 'network_error', error_type: 'aborted', response_id: MSG_ID,
+      ttft_ns: includeContentDelta ? expect.any(Number) : null,
+    });
+  });
+
+  const TRACE_ENV = {
+    TRACEPARENT: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+    TRACESTATE: 'vendor=value,other=1',
   };
+  const readOutboundHeaders = () => JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'outbound-headers.json'), 'utf8'));
 
-  test('forwards a valid TRACEPARENT (+ TRACESTATE) to the gateway', () => {
-    const r = runScenario({
-      url: LLM_URL, sessionId: SESS,
-      body: { system: 'sys', messages: [] },
-      sseEvents: sseStream(),
-      env: { TRACEPARENT: VALID_TP, TRACESTATE: VALID_TS },
-    });
-    expect(r.status).toBe(0);
-    const headers = readOutboundHeaders();
-    expect(headers.traceparent).toBe(VALID_TP);
-    expect(headers.tracestate).toBe(VALID_TS);
-  });
-
-  test('does not overwrite a traceparent the caller already set', () => {
-    const callerTp = '00-11111111111111111111111111111111-2222222222222222-00';
-    const r = runScenario({
-      url: LLM_URL, sessionId: SESS,
-      body: { system: 'sys', messages: [] },
-      sseEvents: sseStream(),
-      extraRequestHeaders: { traceparent: callerTp },
-      env: { TRACEPARENT: VALID_TP, TRACESTATE: VALID_TS },
-    });
-    expect(r.status).toBe(0);
-    const headers = readOutboundHeaders();
-    expect(headers.traceparent).toBe(callerTp);
-    // tracestate is only injected alongside our traceparent — since we skipped
-    // the injection, no upstream tracestate should be added either.
-    expect(headers.tracestate).toBeUndefined();
-  });
-
-  test('skips injection when TRACEPARENT is malformed or all-zero', () => {
-    for (const bad of [
-      'not-a-traceparent',
-      '00-00000000000000000000000000000000-00f067aa0ba902b7-01', // zero trace
-      '00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01', // zero span
-      'ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01', // reserved version
-      '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7', // truncated
-    ]) {
-      const r = runScenario({
-        url: LLM_URL, sessionId: SESS,
-        body: { system: 'sys', messages: [] },
-        sseEvents: sseStream(),
-        env: { TRACEPARENT: bad },
-      });
-      expect(r.status).toBe(0);
-      const headers = readOutboundHeaders();
-      expect(headers.traceparent).toBeUndefined();
-    }
-  });
-
-  test('drops TRACESTATE that violates length/control-char rules but keeps traceparent', () => {
-    const badStates = [
-      'a'.repeat(513),
-      'vendor=va\nlue',
-      '',
+  test.each(['object', 'tuple-array'])('passes %s headers untouched despite trace env vars', (kind) => {
+    const pairs = [
+      ['X-Claude-Code-Session-Id', SESS],
+      ['X-Client-Request-Id', 'client-passthrough'],
+      ['X-Custom', 'caller-value'],
     ];
-    for (const bad of badStates) {
-      const r = runScenario({
-        url: LLM_URL, sessionId: SESS,
-        body: { system: 'sys', messages: [] },
-        sseEvents: sseStream(),
-        env: { TRACEPARENT: VALID_TP, TRACESTATE: bad },
-      });
-      expect(r.status).toBe(0);
-      const headers = readOutboundHeaders();
-      expect(headers.traceparent).toBe(VALID_TP);
-      expect(headers.tracestate).toBeUndefined();
-    }
-  });
-
-  test('does not inject traceparent on non-/v1/messages URLs', () => {
+    const headers = kind === 'object' ? Object.fromEntries(pairs) : [...pairs, ['X-Custom', 'second-value']];
     const r = runScenario({
-      url: 'https://api.anthropic.com/v1/other', sessionId: SESS,
-      body: { system: 'sys' },
-      sseEvents: sseStream(),
-      env: { TRACEPARENT: VALID_TP },
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: sseStream(), requestHeaders: headers, env: TRACE_ENV,
     });
-    expect(r.status).toBe(0);
-    const headers = readOutboundHeaders();
-    expect(headers.traceparent).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    expect(readOutboundHeaders()).toEqual({ headers, sameHeaders: true });
+    expect(readAttempts(SESS)).toMatchObject([{ outcome: 'success', client_request_id: 'client-passthrough' }]);
+    expect(readIntercept(SESS)).toHaveLength(1);
   });
 
-  test('injects traceparent even when session id is missing (gateway concern, not ours)', () => {
+  test.each(['object', 'tuple-array'])('preserves caller trace headers in %s headers', (kind) => {
+    const pairs = [
+      ['X-Claude-Code-Session-Id', SESS],
+      ['Traceparent', '00-11111111111111111111111111111111-2222222222222222-00'],
+      ['Tracestate', 'caller=value'],
+    ];
+    const headers = kind === 'object' ? Object.fromEntries(pairs) : pairs;
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: sseStream(), requestHeaders: headers, env: TRACE_ENV,
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readOutboundHeaders()).toEqual({ headers, sameHeaders: true });
+  });
+
+  test('does not inject trace headers when the session id is missing', () => {
     const r = runScenario({
       url: LLM_URL, sessionId: null,
-      body: { system: 'sys' },
-      sseEvents: sseStream(),
-      env: { TRACEPARENT: VALID_TP },
+      body: { model: 'claude-test', messages: [] },
+      sseEvents: sseStream(), env: TRACE_ENV,
     });
-    expect(r.status).toBe(0);
-    const headers = readOutboundHeaders();
-    expect(headers.traceparent).toBe(VALID_TP);
-    // No intercept file — session-id path is still gated.
+    expect(r.status, r.stderr).toBe(0);
+    expect(readOutboundHeaders()).toEqual({ headers: {}, sameHeaders: true });
     expect(fs.existsSync(INTERCEPT_DIR)).toBe(false);
+  });
+
+  // Regression: SSE event boundaries may use LF, CRLF, or bare CR line
+  // terminators. Splitting only on `\n\n` misclassified valid CRLF/CR
+  // streams as incomplete_stream (false failures). All framings must parse
+  // to the same success outcome and enrichment.
+  const buildSse = (nl) => sseStream()
+    .map((e) => `event: ${e.event}${nl}data: ${JSON.stringify(e.data)}${nl}${nl}`)
+    .join('');
+
+  test.each([
+    ['CRLF', '\r\n'],
+    ['CR', '\r'],
+  ])('%s-terminated message_stop is success, not incomplete', (_, nl) => {
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      rawChunks: [buildSse(nl)],
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readAttempts(SESS)).toMatchObject([{
+      outcome: 'success', error_type: null, status_code: 200, response_id: MSG_ID,
+    }]);
+    expect(readIntercept(SESS)).toMatchObject([{ record: { response_id: MSG_ID } }]);
+  });
+
+  test('a CRLF boundary split across chunk reads still parses to success', () => {
+    // Slice the full CRLF stream mid-boundary so `\r\n\r\n` straddles two
+    // reads — the accumulated buffer must still recognize the boundary.
+    const full = buildSse('\r\n');
+    const cut = full.indexOf('\r\n\r\n') + 2; // between the two CRLFs of the first boundary
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      rawChunks: [full.slice(0, cut), full.slice(cut)],
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readAttempts(SESS)).toMatchObject([{
+      outcome: 'success', error_type: null, response_id: MSG_ID,
+    }]);
+  });
+
+  test('mixed LF and CRLF framing in one stream parses to success', () => {
+    const events = sseStream();
+    const nls = ['\n', '\r\n', '\r'];
+    const raw = events
+      .map((e, i) => `event: ${e.event}${nls[i % 3]}data: ${JSON.stringify(e.data)}${nls[i % 3]}${nls[i % 3]}`)
+      .join('');
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'claude-test', messages: [] },
+      rawChunks: [raw],
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readAttempts(SESS)).toMatchObject([{
+      outcome: 'success', error_type: null, response_id: MSG_ID,
+    }]);
   });
 });

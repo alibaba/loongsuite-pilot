@@ -1088,15 +1088,6 @@ async function exportSession(state, stopReason, stopPromptId = '') {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-// A null/'unknown' model on either side is treated as a wildcard: request-body
-// parsing can fail (attempt.model === null) and the synthetic StopFailure error
-// carries model 'unknown', yet both are still legitimate members of one call's
-// retry chain.
-function sameModel(a, b) {
-  if (!a || a === 'unknown' || !b || b === 'unknown') return true;
-  return a === b;
-}
-
 function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
   const attempts = attemptContext?.records;
   const consumed = attemptContext?.consumed;
@@ -1106,96 +1097,45 @@ function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
   const withinTurn = (attempt) =>
     BigInt(attempt.start_time_unix_nano || '0') >= lowerBound;
 
-  let matchIndex = -1;
-  if (llmCall.api_error?.request_id) {
-    matchIndex = attempts.findIndex((attempt) =>
-      attempt.request_id === llmCall.api_error.request_id);
-  } else if (llmCall.message_id) {
-    matchIndex = attempts.findIndex((attempt) =>
-      attempt.response_id === llmCall.message_id);
+  const matches = [];
+  for (let i = 0; i < attempts.length; i++) {
+    const matchesId = llmCall.api_error?.request_id
+      ? attempts[i].request_id === llmCall.api_error.request_id
+      : llmCall.message_id && attempts[i].response_id === llmCall.message_id;
+    if (matchesId) matches.push(i);
   }
-
-  // Some providers omit request-id on error responses. StopFailure is terminal,
-  // so the last failed HTTP attempt observed before its transcript record is
-  // the only safe order-based fallback. Constrain it to this turn's time window
-  // and the transcript call's model so an interleaved sibling/subagent attempt
-  // in the shared session list is never stolen. Successful calls still require
-  // the provider response id and never consume an unanchored attempt.
-  if (matchIndex < 0 && llmCall.api_error) {
-    const responseTime = BigInt(isoToUnixNanos(llmCall.timestamp));
-    for (let i = 0; i < attempts.length; i++) {
-      const attempt = attempts[i];
-      if (attempt.outcome === 'success') continue;
-      if (!withinTurn(attempt)) continue;
-      if (!sameModel(attempt.model, llmCall.model)) continue;
-      if (BigInt(attempt.end_time_unix_nano || '0') <= responseTime) matchIndex = i;
-    }
-  }
-
-  if (matchIndex < 0 || consumed.has(matchIndex)) return [];
-
-  // Group physical attempts of one logical call by request_hash. A call and all
-  // its retries resend an identical body, so they share one hash; a sibling
-  // agent's call or the next turn's call hashes differently. Grouping by hash —
-  // rather than by contiguous position — is what keeps an interleaved sequence
-  // correct: in parent_429 → child_429 → parent_200 → child_200 the child's
-  // success anchor still collects child_429 even though a parent success sits
-  // between them in wall-clock order. Walk backward from the anchor, skipping
-  // unrelated (different-hash) interleaved attempts, and stop at a same-hash
-  // success or already-consumed attempt (a prior chain's boundary) or one that
-  // falls before this turn. When the hash is unavailable (request body could not
-  // be parsed) we cannot group reliably, so fall back to a conservative
-  // contiguous walk gated on model + turn window that never crosses another
-  // attempt.
+  // Time/model proximity cannot establish ownership in a shared parent/child session.
+  if (matches.length !== 1) return [];
+  const matchIndex = matches[0];
   const anchor = attempts[matchIndex];
-  const anchorHash = anchor.request_hash;
+  if (consumed.has(matchIndex) || !withinTurn(anchor)) return [];
+
   const indices = [];
-  if (anchorHash) {
+  let next = anchor;
+  if (anchor.request_hash) {
     for (let i = matchIndex - 1; i >= 0; i--) {
       const prev = attempts[i];
-      if (prev.request_hash !== anchorHash) continue; // unrelated interleaved call
+      if (prev.request_hash !== anchor.request_hash) continue;
       if (consumed.has(i) || prev.outcome === 'success' || !withinTurn(prev)) break;
+      if (BigInt(prev.end_time_unix_nano) > BigInt(next.start_time_unix_nano)) {
+        indices.length = 0;
+        break;
+      }
       indices.push(i);
-    }
-  } else {
-    const anchorModel = anchor.model;
-    for (let i = matchIndex - 1; i >= 0; i--) {
-      const prev = attempts[i];
-      if (
-        consumed.has(i)
-        || prev.outcome === 'success'
-        || !withinTurn(prev)
-        || !sameModel(prev.model, anchorModel)
-      ) break;
-      indices.push(i);
+      next = prev;
     }
   }
   indices.reverse();
   indices.push(matchIndex);
 
-  const group = [];
-  for (const i of indices) {
-    if (consumed.has(i)) continue;
+  return indices.map((i) => {
     consumed.add(i);
-    group.push(attempts[i]);
-  }
-  return group;
-}
-
-function attemptResponseId(attempt) {
-  return attempt.request_id
-    || attempt.client_request_id
-    || `attempt:${attempt.attempt_id}`;
+    return attempts[i];
+  });
 }
 
 function applyAttemptAttributes(record, attempt) {
   if (!attempt) return;
-  // Prefer the provider/gateway request-id (response `request-id` header) over
-  // the locally-minted client id: gen_ai.request.id exists to correlate a span
-  // with gateway/Provider logs, where the provider's request-id is the value
-  // that appears. This also matches sibling agents (Qoder/Hermes) and keeps this
-  // field consistent with attemptResponseId above. StopFailure's transcript
-  // requestId still overrides it as the terminal authority.
   const requestId = attempt.request_id || attempt.client_request_id;
   if (requestId && !record['gen_ai.request.id']) {
     record['gen_ai.request.id'] = requestId;
@@ -1213,7 +1153,8 @@ function buildRetryAttemptRecords({
   for (const attempt of attempts) {
     if (attempt.outcome === 'success') continue;
     const spanId = generateSpanId();
-    const responseId = attemptResponseId(attempt);
+    // Provider request IDs may be reused across physical retries.
+    const responseId = `attempt:${attempt.attempt_id}`;
     const request = {
       time_unix_nano: attempt.start_time_unix_nano,
       'event.id': crypto.randomUUID(),
@@ -1326,14 +1267,7 @@ function buildTurnRecords(
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
-  // Lower bound for attribution: physical attempts that started before this
-  // turn's prompt belong to an earlier turn (or an interleaved sibling), never
-  // to this turn's calls. Only trust promptTimestamp as that bound when the turn
-  // has a real promptId — then it is the user-prompt time, always before the
-  // model's HTTP attempts. Without a promptId (orphan calls, or an incremental
-  // segment whose user record landed in an earlier chunk) promptTimestamp falls
-  // back to the assistant response time, which is *after* the attempts; using it
-  // would wrongly drop this turn's own retries, so degrade to model-only gating.
+  // Without promptId, promptTimestamp may be the response time rather than a safe lower bound.
   let turnStartNs = 0n;
   if (turn.promptId && turn.promptTimestamp) {
     try { turnStartNs = BigInt(isoToUnixNanos(turn.promptTimestamp)); } catch (_) { turnStartNs = 0n; }
@@ -1493,26 +1427,24 @@ function buildTurnRecords(
         && Number.isFinite(interceptData.ttft_ns) && interceptData.ttft_ns >= 0) {
       respRecord['gen_ai.response.time_to_first_token'] = interceptData.ttft_ns;
     }
-    if (ev.api_error) {
-      const transcriptErrorType = ev.api_error.type;
+    const attemptFailed = finalAttempt && finalAttempt.outcome !== 'success';
+    if (attemptFailed) {
+      respRecord.time_unix_nano = finalAttempt.end_time_unix_nano;
+    }
+    if (ev.api_error || attemptFailed) {
+      const transcriptErrorType = ev.api_error?.type;
       respRecord['error.type'] = (
         transcriptErrorType
         && transcriptErrorType !== 'unknown'
         && transcriptErrorType !== 'model_error'
       ) ? transcriptErrorType : (finalAttempt?.error_type || transcriptErrorType || 'model_error');
-      // A terminal API failure produced no model output, so it carries the
-      // sentinel finish reason "error" rather than a model stop reason. The
-      // failure detail is on error.type + http.response.status_code; the OTLP
-      // flusher sets the LLM span status to ERROR from error.type, and
-      // gen_ai.turn.end marks the surrounding turn terminal so the AGENT/ENTRY
-      // span also fails.
       respRecord['gen_ai.response.finish_reasons'] = ['error'];
-      respRecord['gen_ai.turn.end'] = true;
-      respRecord['gen_ai.output.messages'] = [];
-      if (ev.api_error.request_id) {
+      if (llmIndex === llmCalls.length - 1) respRecord['gen_ai.turn.end'] = true;
+      if (ev.api_error) respRecord['gen_ai.output.messages'] = [];
+      if (ev.api_error?.request_id) {
         respRecord['gen_ai.request.id'] = ev.api_error.request_id;
       }
-      const statusCode = typeof ev.api_error.status_code === 'number'
+      const statusCode = typeof ev.api_error?.status_code === 'number'
         ? ev.api_error.status_code
         : finalAttempt?.status_code;
       if (typeof statusCode === 'number') {
