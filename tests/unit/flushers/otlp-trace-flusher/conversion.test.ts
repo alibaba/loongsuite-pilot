@@ -389,7 +389,6 @@ describe('OtlpTraceFlusher - conversion', () => {
       {
         'event.name': 'llm.response',
         'gen_ai.response.id': 'retry-response-1',
-        'gen_ai.response.finish_reasons': ['retry'],
         'gen_ai.request.id': 'req-1',
         'http.response.status_code': 529,
         'error.type': 'overloaded_error',
@@ -433,7 +432,7 @@ describe('OtlpTraceFlusher - conversion', () => {
     const records = [{
       'event.name': 'llm.response',
       'gen_ai.response.id': 'terminal-error',
-      'gen_ai.response.finish_reasons': ['error'],
+      'gen_ai.turn.end': true,
       'error.type': 'server_error',
     }] as unknown as AgentActivityEntry[];
     const llm = {

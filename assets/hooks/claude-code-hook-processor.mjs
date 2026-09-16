@@ -165,6 +165,11 @@ function collectSubagentLinks(turn) {
 // ─── intercept (BUN_OPTIONS preload) data integration ───
 
 const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
+// Reader-side cap so a runaway session's attempts/ dir cannot grow without
+// bound between exports. Enforced by deleting oldest-by-mtime files first, so
+// the current turn's freshly written attempts always survive.
+const MAX_ATTEMPT_FILES = 500;
+const MAX_ATTEMPT_BYTES = 16 * 1024 * 1024; // 16 MiB
 
 function interceptSessionDir(sessionId) {
   return path.join(pilotDataDir(), 'intercept', AGENT_ID, sessionId);
@@ -254,17 +259,44 @@ function reapAttemptFiles(files) {
 }
 
 /**
- * Opportunistic cleanup: drop files in this session's intercept dir whose
- * mtime is older than STALE_MS (1h). Called once at the end of exportSession
- * — handles orphans from prior turns whose response_ids never showed up in
- * any subsequent transcript. Also rmdir if the dir is empty afterwards.
+ * Enforce the reader-side count/byte cap on one attempts/ dir by deleting the
+ * oldest-by-mtime files first, so the current turn's fresh attempts survive.
  */
-function reapStaleIntercept(sessionId) {
-  const dir = interceptSessionDir(sessionId);
+function capAttemptDir(attemptDir) {
+  let names;
+  try { names = fs.readdirSync(attemptDir); } catch { return; }
+  const files = [];
+  let totalBytes = 0;
+  for (const name of names) {
+    const f = path.join(attemptDir, name);
+    try {
+      const st = fs.statSync(f);
+      if (!st.isFile()) continue;
+      files.push({ f, mtime: st.mtimeMs, size: st.size });
+      totalBytes += st.size;
+    } catch (_) {}
+  }
+  if (files.length <= MAX_ATTEMPT_FILES && totalBytes <= MAX_ATTEMPT_BYTES) return;
+  files.sort((a, b) => a.mtime - b.mtime);
+  let count = files.length;
+  for (const entry of files) {
+    if (count <= MAX_ATTEMPT_FILES && totalBytes <= MAX_ATTEMPT_BYTES) break;
+    try {
+      fs.unlinkSync(entry.f);
+      count--;
+      totalBytes -= entry.size;
+    } catch (_) {}
+  }
+}
+
+/**
+ * Reap one session's intercept dir: drop stale (mtime > 1h) files, enforce the
+ * attempts/ cap, then rmdir anything left empty. Fail-open throughout.
+ */
+function reapSessionDir(dir, now) {
   const attemptDir = path.join(dir, 'attempts');
   let attemptEntries;
   try { attemptEntries = fs.readdirSync(attemptDir); } catch { attemptEntries = []; }
-  const now = Date.now();
   for (const name of attemptEntries) {
     const f = path.join(attemptDir, name);
     try {
@@ -272,6 +304,7 @@ function reapStaleIntercept(sessionId) {
       if (now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
     } catch (_) {}
   }
+  capAttemptDir(attemptDir);
   try { fs.rmdirSync(attemptDir); } catch (_) {}
 
   let entries;
@@ -284,6 +317,28 @@ function reapStaleIntercept(sessionId) {
     } catch (_) {}
   }
   try { fs.rmdirSync(dir); } catch (_) {}
+}
+
+/**
+ * Opportunistic cleanup: drop files in this session's intercept dir whose
+ * mtime is older than STALE_MS (1h) and cap the attempts/ dir. Called on every
+ * exportSession exit — including the early returns — so GC no longer runs only
+ * on the successful path. Also sweeps sibling session dirs, since an abandoned
+ * session's files are orphaned once its host process exits.
+ */
+function reapStaleIntercept(sessionId) {
+  const now = Date.now();
+  reapSessionDir(interceptSessionDir(sessionId), now);
+
+  const root = path.join(pilotDataDir(), 'intercept', AGENT_ID);
+  let sessions;
+  try { sessions = fs.readdirSync(root); } catch { return; }
+  for (const name of sessions) {
+    if (name === sessionId) continue;
+    const dir = path.join(root, name);
+    try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
+    reapSessionDir(dir, now);
+  }
 }
 
 function tryReadStdin() {
@@ -857,21 +912,24 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   const transcriptPath = state.transcript_path;
   const baseOffset = state.transcript_offset || 0;
 
+  // 先等 transcript 写入稳定，再判 EOF。StopFailure 常与 transcript 落盘竞态：
+  // hook 先于 Claude Code flush 合成错误记录时 size 尚未越过 baseOffset，若在等待
+  // 之前就按 size<=offset 短路 return，会丢掉终态的 retry/error span。
+  await waitForTranscriptStable(transcriptPath, baseOffset);
+
   // Duplicate Stop/StopFailure hooks are possible during shutdown or wrapper
-  // retries. If the durable offset is already at EOF, return immediately;
-  // otherwise the empty-parse retry loop below can consume the hook's entire
-  // execution budget even though there is no new transcript data.
+  // retries. If, *after* waiting for stability, the offset is still at EOF, there
+  // is genuinely no new data: skip the empty-parse retry loop below (which would
+  // otherwise consume the hook's entire execution budget).
   try {
     if (fs.statSync(transcriptPath).size <= baseOffset) {
       state._next_transcript_offset = baseOffset;
+      reapStaleIntercept(sessionId);
       return;
     }
   } catch (_) {
     // Keep the existing parser/error path for missing or transient files.
   }
-
-  // 等待 transcript 文件写入稳定
-  await waitForTranscriptStable(transcriptPath, baseOffset);
 
   // 解析 transcript (纯 transcript 驱动,不需要 hook 事件)
   let parseResult;
@@ -892,9 +950,15 @@ async function exportSession(state, stopReason, stopPromptId = '') {
     await waitForTranscriptStable(transcriptPath, baseOffset);
   }
 
-  if (!parseResult) return;
+  if (!parseResult) {
+    reapStaleIntercept(sessionId);
+    return;
+  }
   state._next_transcript_offset = parseResult.nextOffset;
-  if (parseResult.turns.length === 0) return;
+  if (parseResult.turns.length === 0) {
+    reapStaleIntercept(sessionId);
+    return;
+  }
 
   const userId = resolveUserId({}, runtimeConfig);
   const allRecords = [];
@@ -1024,10 +1088,23 @@ async function exportSession(state, stopReason, stopPromptId = '') {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function consumeAttemptsForCall(attemptContext, llmCall) {
+// A null/'unknown' model on either side is treated as a wildcard: request-body
+// parsing can fail (attempt.model === null) and the synthetic StopFailure error
+// carries model 'unknown', yet both are still legitimate members of one call's
+// retry chain.
+function sameModel(a, b) {
+  if (!a || a === 'unknown' || !b || b === 'unknown') return true;
+  return a === b;
+}
+
+function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
   const attempts = attemptContext?.records;
   const consumed = attemptContext?.consumed;
   if (!Array.isArray(attempts) || attempts.length === 0 || !(consumed instanceof Set)) return [];
+
+  const lowerBound = typeof turnStartNs === 'bigint' ? turnStartNs : BigInt(turnStartNs || 0);
+  const withinTurn = (attempt) =>
+    BigInt(attempt.start_time_unix_nano || '0') >= lowerBound;
 
   let matchIndex = -1;
   if (llmCall.api_error?.request_id) {
@@ -1040,13 +1117,18 @@ function consumeAttemptsForCall(attemptContext, llmCall) {
 
   // Some providers omit request-id on error responses. StopFailure is terminal,
   // so the last failed HTTP attempt observed before its transcript record is
-  // the only safe order-based fallback. Successful calls still require the
-  // provider response id and never consume an unanchored attempt.
+  // the only safe order-based fallback. Constrain it to this turn's time window
+  // and the transcript call's model so an interleaved sibling/subagent attempt
+  // in the shared session list is never stolen. Successful calls still require
+  // the provider response id and never consume an unanchored attempt.
   if (matchIndex < 0 && llmCall.api_error) {
     const responseTime = BigInt(isoToUnixNanos(llmCall.timestamp));
     for (let i = 0; i < attempts.length; i++) {
-      const attemptEnd = BigInt(attempts[i].end_time_unix_nano || '0');
-      if (attemptEnd <= responseTime && attempts[i].outcome !== 'success') matchIndex = i;
+      const attempt = attempts[i];
+      if (attempt.outcome === 'success') continue;
+      if (!withinTurn(attempt)) continue;
+      if (!sameModel(attempt.model, llmCall.model)) continue;
+      if (BigInt(attempt.end_time_unix_nano || '0') <= responseTime) matchIndex = i;
     }
   }
 
@@ -1054,14 +1136,19 @@ function consumeAttemptsForCall(attemptContext, llmCall) {
 
   // Retry attempts are consecutive and terminated by one successful response
   // (or the StopFailure request id). Walk backward to the previous success
-  // anchor instead of consuming a global queue. This lets parent and subagent
-  // transcripts be built in either order without stealing each other's retry
-  // records when their requests were interleaved in wall-clock time.
+  // anchor instead of consuming a global queue, and only over attempts that
+  // share the matched attempt's model and fall inside this turn's window. This
+  // lets parent and subagent transcripts be built in either order without
+  // stealing each other's retry records when their requests were interleaved in
+  // wall-clock time.
+  const anchorModel = attempts[matchIndex].model;
   let startIndex = matchIndex;
   while (
     startIndex > 0
     && attempts[startIndex - 1].outcome !== 'success'
     && !consumed.has(startIndex - 1)
+    && withinTurn(attempts[startIndex - 1])
+    && sameModel(attempts[startIndex - 1].model, anchorModel)
   ) {
     startIndex--;
   }
@@ -1127,10 +1214,11 @@ function buildRetryAttemptRecords({
       'gen_ai.provider.name': 'anthropic',
       'gen_ai.request.model': attempt.model || model || 'unknown',
       'gen_ai.response.model': attempt.model || model || 'unknown',
-      // A retry closes this LLM span but not the surrounding turn. Using
-      // "error" here would make the OTLP flusher terminate the turn before
-      // the later successful/final attempt arrives.
-      'gen_ai.response.finish_reasons': ['retry'],
+      // A failed physical attempt never produced a model finish reason, so
+      // finish_reasons is intentionally absent. The failure is carried by
+      // error.type + http.response.status_code; the OTLP flusher sets the LLM
+      // span status to ERROR from error.type, and this attempt does not
+      // terminate the surrounding turn.
       'gen_ai.output.messages': [],
       'gen_ai.usage.input_tokens': 0,
       'gen_ai.usage.output_tokens': 0,
@@ -1210,6 +1298,18 @@ function buildTurnRecords(
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  // Lower bound for attribution: physical attempts that started before this
+  // turn's prompt belong to an earlier turn (or an interleaved sibling), never
+  // to this turn's calls. Only trust promptTimestamp as that bound when the turn
+  // has a real promptId — then it is the user-prompt time, always before the
+  // model's HTTP attempts. Without a promptId (orphan calls, or an incremental
+  // segment whose user record landed in an earlier chunk) promptTimestamp falls
+  // back to the assistant response time, which is *after* the attempts; using it
+  // would wrongly drop this turn's own retries, so degrade to model-only gating.
+  let turnStartNs = 0n;
+  if (turn.promptId && turn.promptTimestamp) {
+    try { turnStartNs = BigInt(isoToUnixNanos(turn.promptTimestamp)); } catch (_) { turnStartNs = 0n; }
+  }
   const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
   const realSkillToolIds = new Set();
   for (const ev of llmCalls) {
@@ -1253,7 +1353,7 @@ function buildTurnRecords(
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
     }
 
-    const callAttempts = consumeAttemptsForCall(attemptContext, ev);
+    const callAttempts = consumeAttemptsForCall(attemptContext, ev, turnStartNs);
     for (const attempt of callAttempts) {
       if (attempt._file) consumedAttemptFiles.add(attempt._file);
     }
@@ -1372,7 +1472,12 @@ function buildTurnRecords(
         && transcriptErrorType !== 'unknown'
         && transcriptErrorType !== 'model_error'
       ) ? transcriptErrorType : (finalAttempt?.error_type || transcriptErrorType || 'model_error');
-      respRecord['gen_ai.response.finish_reasons'] = ['error'];
+      // A terminal API failure is not a model-produced finish reason, so no finish_reasons
+      // is emitted. The failure is carried by error.type + http.response.status_code; the
+      // OTLP flusher sets the LLM span status to ERROR from error.type, and gen_ai.turn.end
+      // marks the surrounding turn terminal so the AGENT/ENTRY span also fails.
+      delete respRecord['gen_ai.response.finish_reasons'];
+      respRecord['gen_ai.turn.end'] = true;
       respRecord['gen_ai.output.messages'] = [];
       if (ev.api_error.request_id) {
         respRecord['gen_ai.request.id'] = ev.api_error.request_id;

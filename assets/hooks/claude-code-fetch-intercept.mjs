@@ -47,6 +47,17 @@ const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const SSE_DELIMITER = '\n\n';
 const ATTEMPT_SCHEMA_VERSION = 1;
 
+// W3C Trace Context — https://www.w3.org/TR/trace-context/#traceparent-header-field-values
+// Forward the launching process's TRACEPARENT (+ TRACESTATE when valid) into
+// outbound /v1/messages requests so the gateway can join the caller's trace.
+// The env vars are populated by whoever spawned Claude Code (upstream service
+// or the loongsuite-pilot ACP linker); the preload does not mint new context.
+const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
+const ZERO_TRACE_ID = '0'.repeat(32);
+const ZERO_SPAN_ID = '0'.repeat(16);
+const TRACESTATE_MAX_LEN = 512;
+const TRACESTATE_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
 // ─── system_instructions extraction ──────────────────────────────────────
 
 function extractSystemInstructions(systemField) {
@@ -188,6 +199,75 @@ function parseSseBlock(block) {
 
 // ─── globalThis.fetch monkey-patch ───────────────────────────────────────
 
+// Cache validated upstream context once. Env vars set on the Claude Code
+// process are stable for its lifetime; re-parsing per-request is wasted work.
+const UPSTREAM_TRACEPARENT = validateTraceparent(process.env.TRACEPARENT);
+const UPSTREAM_TRACESTATE = UPSTREAM_TRACEPARENT ? validateTracestate(process.env.TRACESTATE) : null;
+
+function validateTraceparent(raw) {
+  if (typeof raw !== 'string') return null;
+  const m = TRACEPARENT_RE.exec(raw.trim());
+  if (!m) return null;
+  const version = m[1].toLowerCase();
+  const traceId = m[2].toLowerCase();
+  const spanId = m[3].toLowerCase();
+  const flags = m[4].toLowerCase();
+  // Spec: 'ff' is reserved/invalid. Future versions may extend the format;
+  // we only forward known-good '00' so we don't mis-propagate.
+  if (version !== '00') return null;
+  if (traceId === ZERO_TRACE_ID) return null;
+  if (spanId === ZERO_SPAN_ID) return null;
+  return `${version}-${traceId}-${spanId}-${flags}`;
+}
+
+function validateTracestate(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > TRACESTATE_MAX_LEN) return null;
+  if (TRACESTATE_CONTROL_CHAR_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
+function normalizeHeaders(source) {
+  const out = {};
+  if (!source) return out;
+  try {
+    if (typeof source.forEach === 'function') {
+      source.forEach((v, k) => { out[String(k).toLowerCase()] = String(v); });
+    } else if (Array.isArray(source)) {
+      for (const pair of source) {
+        if (Array.isArray(pair) && pair.length === 2) {
+          out[String(pair[0]).toLowerCase()] = String(pair[1]);
+        }
+      }
+    } else if (typeof source === 'object') {
+      for (const k of Object.keys(source)) out[k.toLowerCase()] = String(source[k]);
+    }
+  } catch (_) {}
+  return out;
+}
+
+// Inject upstream W3C context onto an outbound fetch pair. Preserves existing
+// traceparent so a caller who already set the header (e.g. via a middleware)
+// stays authoritative. When input is a Request instance, init.headers wins
+// over Request.headers per fetch semantics, so we merge Request.headers into
+// our normalized set before overwriting. Fail-open: any error returns the
+// original pair unchanged.
+function injectUpstreamTraceContext(input, init) {
+  try {
+    if (!UPSTREAM_TRACEPARENT) return { input, init };
+    const source = init?.headers ?? (input && typeof input === 'object' ? input.headers : null);
+    const normalized = normalizeHeaders(source);
+    if (normalized.traceparent) return { input, init };
+    normalized.traceparent = UPSTREAM_TRACEPARENT;
+    if (UPSTREAM_TRACESTATE) normalized.tracestate = UPSTREAM_TRACESTATE;
+    return { input, init: { ...(init || {}), headers: normalized } };
+  } catch (_) {
+    return { input, init };
+  }
+}
+
 const origFetch = globalThis.fetch;
 if (typeof origFetch === 'function') {
   globalThis.fetch = async function patchedFetch(input, init) {
@@ -203,6 +283,11 @@ if (typeof origFetch === 'function') {
     if (!url || !LLM_URL_RE.test(url)) {
       return origFetch.call(this, input, init);
     }
+
+    // Forward the upstream W3C traceparent to the gateway. Runs before any
+    // early return so the header lands even when we can't extract our own
+    // session id — it's the gateway's concern, not ours.
+    ({ input, init } = injectUpstreamTraceContext(input, init));
 
     // Header session_id is required to scope intercept output. Without it
     // we have no way for the hook processor to find this record, so we
@@ -375,6 +460,22 @@ if (typeof origFetch === 'function') {
               ttft_ns: ttftNs,
             });
           }
+        },
+        cancel() {
+          // Downstream aborted an already-200 response mid-stream (user
+          // interrupt / turn cancel). cancel() runs instead of flush(), so
+          // without this the physical attempt would leave no telemetry. Not a
+          // success anchor: mark it non-success so retry grouping doesn't treat
+          // it as the terminating success of a retry chain.
+          if (attemptWritten) return;
+          writeAttempt({
+            outcome: 'network_error',
+            status_code: response.status,
+            error_type: 'aborted',
+            request_id: responseRequestId(response.headers),
+            response_id: responseId,
+            ttft_ns: ttftNs,
+          });
         },
       });
     } catch (_) {

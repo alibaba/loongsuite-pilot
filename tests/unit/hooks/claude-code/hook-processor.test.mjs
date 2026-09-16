@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -48,6 +48,18 @@ function runHook(subcommand, payload, extraEnv = {}) {
     timeout: 10_000,
   });
   return r;
+}
+
+function runHookAsync(subcommand, payload, extraEnv = {}) {
+  const child = spawn('node', [PROCESSOR, subcommand], {
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...extraEnv },
+  });
+  child.stdin.write(JSON.stringify(payload));
+  child.stdin.end();
+  const done = new Promise((resolve) => {
+    child.on('close', (code) => resolve(code));
+  });
+  return { child, done };
 }
 
 function readJsonlRecords() {
@@ -249,11 +261,12 @@ describe('claude-code-hook-processor v2 端到端', () => {
     expect(responses[0]).toMatchObject({
       'gen_ai.request.model': 'unknown',
       'gen_ai.response.model': 'unknown',
-      'gen_ai.response.finish_reasons': ['error'],
+      'gen_ai.turn.end': true,
       'gen_ai.request.id': 'req-error-11',
       'http.response.status_code': 529,
       'error.type': 'server_error',
     });
+    expect(responses[0]).not.toHaveProperty('gen_ai.response.finish_reasons');
     expect(responses[0]).not.toHaveProperty('error.message');
     expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
     expect(JSON.stringify(records)).not.toContain('private upstream detail');
@@ -1182,9 +1195,9 @@ describe('claude-code 一级子 Agent 上报', () => {
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.id': agentId,
       'gen_ai.request.id': 'client-child-retry-1',
-      'gen_ai.response.finish_reasons': ['retry'],
       'error.type': 'overloaded_error',
     });
+    expect(retry).not.toHaveProperty('gen_ai.response.finish_reasons');
   });
 
   test('损坏的子 transcript 不会中断父会话导出', () => {
@@ -1441,7 +1454,7 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(requests).toHaveLength(3);
     expect(responses).toHaveLength(3);
     expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
-      .toEqual([['retry'], ['retry'], ['stop']]);
+      .toEqual([undefined, undefined, ['stop']]);
     expect(responses.slice(0, 2).map((record) => record['error.type']))
       .toEqual(['overloaded_error', 'overloaded_error']);
     expect(responses.map((record) => record['gen_ai.request.id']))
@@ -1494,16 +1507,16 @@ describe('hook-processor merges intercept data into llm events', () => {
     const sid = 'sid-retry-failure';
     const transcriptPath = apiErrorTranscript(sid);
     writeAttemptFile(sid, 'failure-1', {
-      start_time_unix_nano: '1789522984000000000',
-      end_time_unix_nano: '1789522984100000000',
+      start_time_unix_nano: '1789530184000000000',
+      end_time_unix_nano: '1789530184100000000',
     });
     writeAttemptFile(sid, 'failure-2', {
-      start_time_unix_nano: '1789522984200000000',
-      end_time_unix_nano: '1789522984300000000',
+      start_time_unix_nano: '1789530184200000000',
+      end_time_unix_nano: '1789530184300000000',
     });
     writeAttemptFile(sid, 'failure-3', {
-      start_time_unix_nano: '1789522984400000000',
-      end_time_unix_nano: '1789522984500000000',
+      start_time_unix_nano: '1789530184400000000',
+      end_time_unix_nano: '1789530184500000000',
       request_id: 'req-error-11',
     });
 
@@ -1519,8 +1532,70 @@ describe('hook-processor merges intercept data into llm events', () => {
       .filter((record) => record['event.name'] === 'llm.response');
     expect(responses).toHaveLength(3);
     expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
-      .toEqual([['retry'], ['retry'], ['error']]);
+      .toEqual([undefined, undefined, undefined]);
+    expect(responses[2]['gen_ai.turn.end']).toBe(true);
     expect(responses[2]['gen_ai.request.id']).toBe('req-error-11');
+  });
+
+  test('StopFailure racing transcript flush still exports the terminal error span', async () => {
+    const sid = 'sid-stopfailure-race';
+    const transcriptPath = path.join(TRANSCRIPT_DIR, `${sid}.jsonl`);
+    // Hook fires before Claude Code flushes the synthetic error record: the file
+    // exists but is still empty at hook start, and the durable offset is 0. The
+    // pre-fix code short-circuited on size <= offset and dropped the error span.
+    fs.writeFileSync(transcriptPath, '', 'utf-8');
+
+    const lines = [
+      {
+        type: 'user',
+        timestamp: '2026-09-16T03:43:03.998Z',
+        promptId: 'prompt-api-error',
+        message: { role: 'user', content: 'trigger error' },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-09-16T03:46:02.445Z',
+        isApiErrorMessage: true,
+        apiErrorStatus: 529,
+        error: 'server_error',
+        requestId: 'req-error-11',
+        message: {
+          id: 'synthetic-error-message',
+          model: '<synthetic>',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'private upstream detail' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: 'stop_sequence',
+        },
+      },
+    ];
+
+    const { done } = runHookAsync('stop-failure', {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      hook_event_name: 'StopFailure',
+      error: 'server_error',
+    });
+
+    // Simulate Claude Code flushing the transcript ~250ms after the hook started,
+    // within waitForTranscriptStable's polling budget.
+    await new Promise((r) => setTimeout(r, 250));
+    fs.writeFileSync(
+      transcriptPath,
+      lines.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf-8',
+    );
+
+    const code = await done;
+    expect(code).toBe(0);
+
+    const responses = readJsonlRecords()
+      .filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).not.toHaveProperty('gen_ai.response.finish_reasons');
+    expect(responses[0]['gen_ai.turn.end']).toBe(true);
+    expect(responses[0]['gen_ai.request.id']).toBe('req-error-11');
+    expect(responses[0]['http.response.status_code']).toBe(529);
   });
 
   test('no intercept directory: records emit without new fields (graceful)', () => {
@@ -1621,5 +1696,99 @@ describe('hook-processor merges intercept data into llm events', () => {
 
     const llmEvents = readJsonlRecords().filter((r) => r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response');
     expect(llmEvents.length).toBeGreaterThan(0);
+  });
+
+  test('时间下界: 早于本 turn prompt 的同 model attempt 不被时间兜底匹配窃取', () => {
+    const sid = 'sid-prev-turn-bound';
+    // Terminal api_error call WITHOUT a request_id → primary match fails and
+    // attribution falls back to the time-window path. One attempt started before
+    // this turn's prompt (an earlier turn's straggler); it must be excluded so it
+    // is neither merged into the terminal record nor consumed.
+    const transcriptPath = writeTranscript(sid, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:32.000Z',
+        promptId: 'p-bound',
+        message: { role: 'user', content: 'trigger error' },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:36.000Z',
+        isApiErrorMessage: true,
+        apiErrorStatus: 529,
+        error: 'server_error',
+        message: {
+          id: 'synthetic-error-message',
+          model: 'claude-test',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'boom' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: 'stop_sequence',
+        },
+      },
+    ]);
+    // 02:57:30 — before the 02:57:32 prompt → out of this turn's window.
+    const prePrompt = writeAttemptFile(sid, 'prev-turn-1', {
+      start_time_unix_nano: '1780541850000000000',
+      end_time_unix_nano: '1780541850100000000',
+      request_id: 'req-prev-1',
+    });
+    // 02:57:33 — inside the window, the only legitimate match.
+    const inTurn = writeAttemptFile(sid, 'in-turn-1', {
+      start_time_unix_nano: '1780541853000000000',
+      end_time_unix_nano: '1780541853100000000',
+      request_id: 'req-in-turn-1',
+    });
+
+    const result = runHook('stop-failure', {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      hook_event_name: 'StopFailure',
+      error: 'server_error',
+    });
+    expect(result.status).toBe(0);
+
+    const responses = readJsonlRecords()
+      .filter((record) => record['event.name'] === 'llm.response');
+    // Only the terminal record, carrying the in-window attempt's request id.
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.request.id']).toBe('client-in-turn-1');
+    // The pre-prompt straggler was not consumed, so its (fresh) file survives.
+    expect(fs.existsSync(prePrompt)).toBe(true);
+    expect(fs.existsSync(inTurn)).toBe(false);
+  });
+
+  test('跨 session 清理: 其它 session 的过期 attempt 在本次导出时被扫掉', () => {
+    const sid = 'sid-active';
+    const transcriptPath = writeBasicTranscript(sid);
+
+    const otherSid = 'sid-abandoned';
+    const staleFile = writeAttemptFile(otherSid, 'stale-1', {});
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(staleFile, twoHoursAgo, twoHoursAgo);
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    expect(fs.existsSync(staleFile)).toBe(false);
+    // The abandoned session dir is rmdir'd once empty.
+    expect(fs.existsSync(path.join(DATA_DIR, 'intercept', 'claude-code', otherSid))).toBe(false);
+  });
+
+  test('提前返回路径: 空 transcript 也会 reap 过期 attempt', () => {
+    const sid = 'sid-empty-earlyreturn';
+    // Empty transcript → exportSession short-circuits before parsing; the reap
+    // must still run on that early-return path.
+    const transcriptPath = path.join(TRANSCRIPT_DIR, `${sid}.jsonl`);
+    fs.writeFileSync(transcriptPath, '', 'utf-8');
+
+    const staleFile = writeAttemptFile(sid, 'stale-early', {});
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(staleFile, twoHoursAgo, twoHoursAgo);
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    expect(fs.existsSync(staleFile)).toBe(false);
   });
 });

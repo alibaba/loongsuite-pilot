@@ -105,6 +105,7 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.skill.version` | string | Recommended when skill metadata is available | Skill version. |
 | `error.type` | string | Conditionally Required when the operation ends with an error | Low-cardinality error type, error code, exception class, or HTTP status. |
 | `error.message` | string | Recommended when `error.type` exists | Human-readable error detail. |
+| `http.response.status_code` | int | Recommended when a model HTTP call fails | HTTP status of a failed model request on `llm.response`; present on both retried and terminal failures. |
 | `agent.channel` | string | Recommended | Request source channel, such as `ide_plugin`, `web`, or `api`. |
 | `git.domain` | string | Recommended | Git hosting domain for the active workspace. |
 | `git.repo` | string | Recommended | Git repository name or URL for the active workspace. |

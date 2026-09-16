@@ -862,6 +862,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
             GROK_TERMINAL_FINISH_REASONS,
           ));
     }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'claude-code') {
+      // A terminal API failure carries no model finish reason under option B;
+      // it is flagged with gen_ai.turn.end===true so the turn still flushes.
+      return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])
+        || entry['gen_ai.turn.end'] === true;
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
@@ -1347,11 +1353,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const errorType = record['error.type'];
       const statusCode = record['http.response.status_code'];
       const requestId = record['gen_ai.request.id'];
-      const finishReasons = record['gen_ai.response.finish_reasons'];
+      const turnEnd = record['gen_ai.turn.end'];
       if (typeof errorType === 'string' && errorType) current.errorType = errorType;
       if (typeof statusCode === 'number' && Number.isFinite(statusCode)) current.statusCode = statusCode;
       if (typeof requestId === 'string' && requestId) current.requestId = requestId;
-      if (Array.isArray(finishReasons) && finishReasons.includes('error')) {
+      if (turnEnd === true && current.errorType) {
         current.terminal = true;
         terminalError = { errorType: current.errorType };
       }
