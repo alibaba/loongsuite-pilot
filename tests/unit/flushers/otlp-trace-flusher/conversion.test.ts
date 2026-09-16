@@ -384,6 +384,73 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it('marks each Claude retry LLM span as failed without failing a recovered root turn', () => {
+    const records = [
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'retry-response-1',
+        'gen_ai.response.finish_reasons': ['retry'],
+        'gen_ai.request.id': 'req-1',
+        'http.response.status_code': 529,
+        'error.type': 'overloaded_error',
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'success-response-2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'gen_ai.request.id': 'req-2',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const retry = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'retry-response-1' },
+      status: { code: 0 },
+    };
+    const success = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'success-response-2' },
+      status: { code: 0 },
+    };
+    const agent = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const entry = { attributes: { 'gen_ai.span.kind': 'ENTRY' }, status: { code: 0 } };
+
+    (flusher as any).enrichClaudeCodeLlmAttributes(records, [retry, success, agent, entry]);
+
+    expect(retry.attributes).toMatchObject({
+      'gen_ai.request.id': 'req-1',
+      'http.response.status_code': 529,
+      'error.type': 'overloaded_error',
+    });
+    expect(retry.attributes).not.toHaveProperty('error.message');
+    expect(retry.status.code).toBe(2);
+    expect(success.attributes).toMatchObject({
+      'gen_ai.request.id': 'req-2',
+    });
+    expect(success.status.code).toBe(0);
+    expect(agent.status.code).toBe(0);
+    expect(entry.status.code).toBe(0);
+  });
+
+  it('marks Claude root spans failed only when the final attempt is terminal error', () => {
+    const records = [{
+      'event.name': 'llm.response',
+      'gen_ai.response.id': 'terminal-error',
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'server_error',
+    }] as unknown as AgentActivityEntry[];
+    const llm = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'terminal-error' },
+      status: { code: 0 },
+    };
+    const agent = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const entry = { attributes: { 'gen_ai.span.kind': 'ENTRY' }, status: { code: 0 } };
+
+    (flusher as any).enrichClaudeCodeLlmAttributes(records, [llm, agent, entry]);
+
+    expect(llm.status.code).toBe(2);
+    expect(agent.status.code).toBe(2);
+    expect(entry.status.code).toBe(2);
+    expect(agent.attributes['error.type']).toBe('server_error');
+  });
+
   it('preserves OpenClaw tool failure attributes and OTLP error status', () => {
     const records = [
       {

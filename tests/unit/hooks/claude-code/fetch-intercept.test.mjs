@@ -32,7 +32,18 @@ afterEach(() => {
  *
  * The preload writes JSON files to <DATA_DIR>/intercept/claude-code/<sid>/...
  */
-function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs = 0 }) {
+function runScenario({
+  url,
+  sessionId,
+  body,
+  rawBody,
+  sseEvents = [],
+  networkDelayMs = 0,
+  status = 200,
+  responseHeaders = {},
+  networkError = null,
+  clientRequestId = null,
+}) {
   const chunksJson = JSON.stringify(sseEvents.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
   // rawBody (string) takes precedence — use it verbatim as fetch body so tests
   // can exercise malformed/non-JSON bodies without going through JSON.stringify.
@@ -50,6 +61,7 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
     globalThis.fetch = async function (input, init) {
       // Simulate network latency before response headers arrive.
       if (${networkDelayMs} > 0) await new Promise(r => setTimeout(r, ${networkDelayMs}));
+      if (${JSON.stringify(networkError)}) throw Object.assign(new Error('simulated network failure'), { name: ${JSON.stringify(networkError)} });
       const stream = new ReadableStream({
         async start(controller) {
           for (const c of chunks) {
@@ -60,8 +72,8 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
         }
       });
       return new Response(stream, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
+        status: ${status},
+        headers: { 'content-type': 'text/event-stream', ...${JSON.stringify(responseHeaders)} },
       });
     };
 
@@ -73,7 +85,10 @@ function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs 
 
       const res = await globalThis.fetch(${JSON.stringify(url)}, {
         method: 'POST',
-        headers: ${JSON.stringify(sessionId ? { 'x-claude-code-session-id': sessionId } : {})},
+        headers: ${JSON.stringify(sessionId ? {
+          'x-claude-code-session-id': sessionId,
+          ...(clientRequestId ? { 'x-client-request-id': clientRequestId } : {}),
+        } : {})},
         body: ${JSON.stringify(bodyJson)},
       });
 
@@ -108,6 +123,13 @@ function readIntercept(sessionId) {
     name: n,
     record: JSON.parse(fs.readFileSync(path.join(dir, n), 'utf-8')),
   }));
+}
+
+function readAttempts(sessionId) {
+  const dir = path.join(INTERCEPT_DIR, sessionId, 'attempts');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((n) => n.endsWith('.json')).map((n) =>
+    JSON.parse(fs.readFileSync(path.join(dir, n), 'utf-8')));
 }
 
 const LLM_URL = 'https://api.anthropic.com/v1/messages';
@@ -154,6 +176,14 @@ describe('claude-code-fetch-intercept preload', () => {
       { type: 'text', content: 'You are a Claude agent.' },
       { type: 'text', content: 'CLAUDE.md content here.' },
     ]);
+    expect(readAttempts(SESS)).toMatchObject([{
+      schema_version: 1,
+      session_id: SESS,
+      outcome: 'success',
+      status_code: 200,
+      response_id: MSG_ID,
+      model: 'claude-opus-4-7',
+    }]);
   });
 
   test('captures TTFT as integer nanoseconds for text_delta', () => {
@@ -240,5 +270,50 @@ describe('claude-code-fetch-intercept preload', () => {
     const [{ record }] = readIntercept(SESS);
     expect(record.response_id).toBe(MSG_ID);
     expect(record.system_instructions).toBeNull();
+  });
+
+  test('records every retryable HTTP failure without storing the request body', () => {
+    const secret = 'must-not-be-written';
+    const r = runScenario({
+      url: LLM_URL,
+      sessionId: SESS,
+      clientRequestId: 'client-attempt-2',
+      body: { model: 'claude-test', messages: [{ role: 'user', content: secret }] },
+      status: 529,
+      responseHeaders: { 'request-id': 'req-attempt-2' },
+    });
+    expect(r.status).toBe(0);
+
+    const [attempt] = readAttempts(SESS);
+    expect(attempt).toMatchObject({
+      client_request_id: 'client-attempt-2',
+      outcome: 'http_error',
+      status_code: 529,
+      error_type: 'overloaded_error',
+      request_id: 'req-attempt-2',
+      model: 'claude-test',
+      response_id: null,
+    });
+    expect(attempt.request_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(attempt.duration_ns).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(attempt)).not.toContain(secret);
+    expect(readIntercept(SESS)).toHaveLength(0);
+  });
+
+  test('records a network-error attempt and rethrows to the host', () => {
+    const r = runScenario({
+      url: LLM_URL,
+      sessionId: SESS,
+      clientRequestId: 'client-network-1',
+      body: { model: 'claude-test', messages: [] },
+      networkError: 'TimeoutError',
+    });
+    expect(r.status).toBe(1);
+    expect(readAttempts(SESS)).toMatchObject([{
+      client_request_id: 'client-network-1',
+      outcome: 'network_error',
+      status_code: null,
+      error_type: 'timeouterror',
+    }]);
   });
 });

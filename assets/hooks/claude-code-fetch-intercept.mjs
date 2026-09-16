@@ -1,7 +1,9 @@
 // BUN_OPTIONS preload script for Claude Code fetch interception.
 // Injected via: BUN_OPTIONS="--preload=<this-file>" claude ...
-// Writes one JSON file per LLM call to:
+// Writes successful-response enrichment to:
 //   ~/.loongsuite-pilot/intercept/claude-code/<session_id>/<response_id>.json
+// and one metadata-only record per physical HTTP attempt to:
+//   ~/.loongsuite-pilot/intercept/claude-code/<session_id>/attempts/<attempt_id>.json
 //
 // What it captures:
 //   1. system_instructions — parsed from the outgoing /v1/messages request
@@ -15,6 +17,9 @@
 //   3. ttft_ns — performance.now() delta (ms) at the moment the first
 //      content_block_delta (text_delta / thinking_delta / input_json_delta)
 //      arrives, converted to integer nanoseconds.
+//   4. every HTTP attempt — start/end time, status/outcome, provider/client
+//      request ids, model, and a SHA-256 request-body hash. Request and response
+//      bodies are never persisted.
 //
 // Design notes:
 //   - SSE is parsed by splitting the accumulated buffer on `\n\n` event
@@ -30,6 +35,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const INTERCEPT_BASE = path.join(
   process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '/tmp', '.loongsuite-pilot'),
@@ -39,6 +45,7 @@ const INTERCEPT_BASE = path.join(
 const LLM_URL_RE = /\/v1\/messages(?:\?|$|\/)/;
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const SSE_DELIMITER = '\n\n';
+const ATTEMPT_SCHEMA_VERSION = 1;
 
 // ─── system_instructions extraction ──────────────────────────────────────
 
@@ -97,14 +104,19 @@ function readBodyAsText(body) {
   return null;
 }
 
-function safeParseRequestSystem(body) {
+function safeParseRequestMetadata(body) {
   const text = readBodyAsText(body);
-  if (!text) return null;
+  if (!text) return { systemInstructions: null, model: null, requestHash: null };
+  const requestHash = crypto.createHash('sha256').update(text).digest('hex');
   try {
     const parsed = JSON.parse(text);
-    return extractSystemInstructions(parsed.system);
+    return {
+      systemInstructions: extractSystemInstructions(parsed.system),
+      model: typeof parsed.model === 'string' ? parsed.model.slice(0, 256) : null,
+      requestHash,
+    };
   } catch (_) {
-    return null;
+    return { systemInstructions: null, model: null, requestHash };
   }
 }
 
@@ -123,6 +135,38 @@ function writeRecord(sessionId, record) {
   } catch (_) {
     // intercept storage failure must not affect the host process
   }
+}
+
+function writeAttemptRecord(sessionId, record) {
+  try {
+    const dir = path.join(INTERCEPT_BASE, sessionId, 'attempts');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${record.attempt_id}.json`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(record));
+    fs.renameSync(tmp, file);
+  } catch (_) {
+    // attempt telemetry is best-effort and must never affect Claude Code
+  }
+}
+
+function responseRequestId(headers) {
+  const values = dumpHeaders(headers);
+  return values['request-id'] || values['x-request-id'] || null;
+}
+
+function httpErrorType(status) {
+  if (status === 429) return 'rate_limit_error';
+  if (status === 529) return 'overloaded_error';
+  if (status === 401 || status === 403) return 'authentication_error';
+  if (status >= 500) return 'server_error';
+  return 'api_error';
+}
+
+function normalizeNetworkError(error) {
+  const name = typeof error?.name === 'string' ? error.name : '';
+  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 64);
+  return normalized || 'network_error';
 }
 
 // ─── SSE event-block parsing ──────────────────────────────────────────────
@@ -165,15 +209,19 @@ if (typeof origFetch === 'function') {
     // skip writing — let the request go through normally.
     let sessionId = null;
     let systemInstructions = null;
+    let model = null;
+    let requestHash = null;
+    let clientRequestId = null;
     try {
       const headers = dumpHeaders(
         init?.headers ?? (input && typeof input === 'object' ? input.headers : null),
       );
       sessionId = headers['x-claude-code-session-id'] || null;
+      clientRequestId = headers['x-client-request-id'] || null;
       if (sessionId) {
         const body = init?.body
           ?? (input && typeof input === 'object' ? input.body : null);
-        systemInstructions = safeParseRequestSystem(body);
+        ({ systemInstructions, model, requestHash } = safeParseRequestMetadata(body));
       }
     } catch (_) {}
 
@@ -181,17 +229,69 @@ if (typeof origFetch === 'function') {
       return origFetch.call(this, input, init);
     }
 
+    const attemptId = crypto.randomUUID();
+    const startedUnixNs = BigInt(Date.now()) * 1_000_000n;
+    const startedMonoNs = process.hrtime.bigint();
+    let attemptWritten = false;
+    const writeAttempt = (fields) => {
+      if (attemptWritten) return;
+      const durationNs = process.hrtime.bigint() - startedMonoNs;
+      writeAttemptRecord(sessionId, {
+        schema_version: ATTEMPT_SCHEMA_VERSION,
+        session_id: sessionId,
+        attempt_id: attemptId,
+        client_request_id: clientRequestId,
+        request_hash: requestHash,
+        model,
+        start_time_unix_nano: String(startedUnixNs),
+        end_time_unix_nano: String(startedUnixNs + durationNs),
+        duration_ns: Number(durationNs <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? durationNs : BigInt(Number.MAX_SAFE_INTEGER)),
+        ...fields,
+      });
+      attemptWritten = true;
+    };
+
     const startMs = performance.now();
     let response;
     try {
       response = await origFetch.call(this, input, init);
     } catch (err) {
-      // Network failure: nothing useful to record; rethrow to host.
+      writeAttempt({
+        outcome: 'network_error',
+        status_code: null,
+        error_type: normalizeNetworkError(err),
+        request_id: null,
+        response_id: null,
+        ttft_ns: null,
+      });
       throw err;
     }
 
+    if (!response.ok) {
+      writeAttempt({
+        outcome: 'http_error',
+        status_code: response.status,
+        error_type: httpErrorType(response.status),
+        request_id: responseRequestId(response.headers),
+        response_id: null,
+        ttft_ns: null,
+      });
+      return response;
+    }
+
     // No body (HEAD-style, 204, etc.) → can't observe stream.
-    if (!response || !response.body) return response;
+    if (!response || !response.body) {
+      writeAttempt({
+        outcome: 'success',
+        status_code: response?.status ?? null,
+        error_type: null,
+        request_id: responseRequestId(response?.headers),
+        response_id: null,
+        ttft_ns: null,
+      });
+      return response;
+    }
 
     let responseId = null;
     let ttftNs = null;
@@ -207,6 +307,14 @@ if (typeof origFetch === 'function') {
         response_id: responseId,
         ttft_ns: ttftNs,
         system_instructions: systemInstructions,
+      });
+      writeAttempt({
+        outcome: 'success',
+        status_code: response.status,
+        error_type: null,
+        request_id: responseRequestId(response.headers),
+        response_id: responseId,
+        ttft_ns: ttftNs,
       });
       recordWritten = true;
     };
@@ -257,11 +365,25 @@ if (typeof origFetch === 'function') {
           // (e.g. tool-only response that arrived as a single block, or
           // server returned an error mid-stream). Persist whatever we have.
           if (!recordWritten && responseId) tryEmit();
+          if (!attemptWritten) {
+            writeAttempt({
+              outcome: 'success',
+              status_code: response.status,
+              error_type: null,
+              request_id: responseRequestId(response.headers),
+              response_id: responseId,
+              ttft_ns: ttftNs,
+            });
+          }
         },
       });
     } catch (_) {
       // TransformStream construction failed (very old runtime): bail out
       // and return the original response untouched.
+      writeAttempt({
+        outcome: 'success', status_code: response.status, error_type: null,
+        request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
+      });
       return response;
     }
 
@@ -269,6 +391,10 @@ if (typeof origFetch === 'function') {
     try {
       wrappedBody = response.body.pipeThrough(transform);
     } catch (_) {
+      writeAttempt({
+        outcome: 'success', status_code: response.status, error_type: null,
+        request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
+      });
       return response;
     }
 
@@ -279,6 +405,10 @@ if (typeof origFetch === 'function') {
         headers: response.headers,
       });
     } catch (_) {
+      writeAttempt({
+        outcome: 'success', status_code: response.status, error_type: null,
+        request_id: responseRequestId(response.headers), response_id: null, ttft_ns: null,
+      });
       return response;
     }
   };

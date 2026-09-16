@@ -130,6 +130,33 @@ function parentTranscriptWithAgent(sessionId, agentId, agentType = 'general-purp
   ]);
 }
 
+function apiErrorTranscript(sessionId) {
+  return writeTranscript(sessionId, [
+    {
+      type: 'user',
+      timestamp: '2026-09-16T03:43:03.998Z',
+      promptId: 'prompt-api-error',
+      message: { role: 'user', content: 'trigger error' },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-09-16T03:46:02.445Z',
+      isApiErrorMessage: true,
+      apiErrorStatus: 529,
+      error: 'server_error',
+      requestId: 'req-error-11',
+      message: {
+        id: 'synthetic-error-message',
+        model: '<synthetic>',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'private upstream detail' }],
+        usage: { input_tokens: 0, output_tokens: 0 },
+        stop_reason: 'stop_sequence',
+      },
+    },
+  ]);
+}
+
 function parentTranscriptWithBackgroundAgent(sessionId, agentId, agentType = 'general-purpose') {
   return parentTranscriptWithBackgroundAgents(sessionId, [{ agentId, agentType }]);
 }
@@ -200,6 +227,44 @@ function enableToolPropagation({ generateTraceWhenMissing = false } = {}) {
 }
 
 describe('claude-code-hook-processor v2 端到端', () => {
+  test('StopFailure 导出带结构化错误的 llm.response，重放不重复', () => {
+    const sessionId = 'session-api-error';
+    const transcriptPath = apiErrorTranscript(sessionId);
+    const payload = {
+      session_id: sessionId,
+      transcript_path: transcriptPath,
+      cwd: '/tmp/api-error-test',
+      hook_event_name: 'StopFailure',
+      error: 'server_error',
+      error_details: 'private upstream detail',
+      last_assistant_message: 'private rendered error',
+    };
+
+    const first = runHook('stop-failure', payload);
+    expect(first.status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.filter((record) => record['event.name'] === 'llm.request')).toHaveLength(1);
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
+      'gen_ai.response.finish_reasons': ['error'],
+      'gen_ai.request.id': 'req-error-11',
+      'http.response.status_code': 529,
+      'error.type': 'server_error',
+    });
+    expect(responses[0]).not.toHaveProperty('error.message');
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(JSON.stringify(records)).not.toContain('private upstream detail');
+    expect(JSON.stringify(records)).not.toContain('private rendered error');
+
+    const replay = runHook('stop-failure', payload);
+    expect(replay.status).toBe(0);
+    expect(readJsonlRecords().filter((record) => record['event.name'] === 'llm.response'))
+      .toHaveLength(1);
+  });
+
   test('accepts invocation-scoped GenAI identity from env', () => {
     const transcriptPath = writeTranscript('native-session', [
       {
@@ -1057,6 +1122,71 @@ describe('claude-code 一级子 Agent 上报', () => {
     }
   });
 
+  test('父子 Agent attempt 交错时，retry span 仍归属子 Agent', () => {
+    const sessionId = 's-subagent-retry';
+    const agentId = 'child-retry';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, agentId);
+    writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { content: [{ type: 'text', text: 'child prompt' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.900Z',
+        message: {
+          id: 'msg_child_retry',
+          model: 'claude-test',
+          content: [{ type: 'text', text: 'child answer' }],
+          usage: { input_tokens: 7, output_tokens: 3 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    writeAttemptFile(sessionId, 'parent-success-1', {
+      start_time_unix_nano: '1780541854000000000',
+      end_time_unix_nano: '1780541855000000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      response_id: 'msg_parent_1', request_id: 'req-parent-1',
+    });
+    writeAttemptFile(sessionId, 'child-retry-1', {
+      start_time_unix_nano: '1780541855200000000',
+      end_time_unix_nano: '1780541855300000000',
+    });
+    writeAttemptFile(sessionId, 'child-success-2', {
+      start_time_unix_nano: '1780541855400000000',
+      end_time_unix_nano: '1780541855900000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      response_id: 'msg_child_retry', request_id: 'req-child-2',
+    });
+    writeAttemptFile(sessionId, 'parent-success-2', {
+      start_time_unix_nano: '1780541857000000000',
+      end_time_unix_nano: '1780541860000000000',
+      outcome: 'success', status_code: 200, error_type: null,
+      response_id: 'msg_parent_2', request_id: 'req-parent-2',
+    });
+
+    const result = runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(result.status).toBe(0);
+
+    const retry = readJsonlRecords().find((record) =>
+      record['event.name'] === 'llm.response'
+      && record['gen_ai.response.id'] === 'req-child-retry-1');
+    expect(retry).toMatchObject({
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.id': agentId,
+      'gen_ai.request.id': 'client-child-retry-1',
+      'gen_ai.response.finish_reasons': ['retry'],
+      'error.type': 'overloaded_error',
+    });
+  });
+
   test('损坏的子 transcript 不会中断父会话导出', () => {
     const sessionId = 's-subagent-malformed';
     const agentId = 'broken-child';
@@ -1181,6 +1311,31 @@ function writeInterceptFile(sessionId, responseId, payload, opts = {}) {
   return file;
 }
 
+function writeAttemptFile(sessionId, attemptId, payload) {
+  const dir = path.join(DATA_DIR, 'intercept', 'claude-code', sessionId, 'attempts');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${attemptId}.json`);
+  fs.writeFileSync(file, JSON.stringify({
+    schema_version: 1,
+    session_id: sessionId,
+    attempt_id: attemptId,
+    client_request_id: `client-${attemptId}`,
+    request_hash: 'a'.repeat(64),
+    model: 'claude-test',
+    start_time_unix_nano: '1780541853000000000',
+    end_time_unix_nano: '1780541853100000000',
+    duration_ns: 100000000,
+    outcome: 'http_error',
+    status_code: 529,
+    error_type: 'overloaded_error',
+    request_id: `req-${attemptId}`,
+    response_id: null,
+    ttft_ns: null,
+    ...payload,
+  }));
+  return file;
+}
+
 describe('hook-processor merges intercept data into llm events', () => {
   // Reuse the simple 2-LLM-call transcript shape from earlier tests.
   function writeBasicTranscript(sessionId, msgId1 = 'msg_1', msgId2 = 'msg_2') {
@@ -1235,6 +1390,137 @@ describe('hook-processor merges intercept data into llm events', () => {
     // itself may be removed (since it's empty after reaping).
     expect(fs.existsSync(fileA)).toBe(false);
     expect(fs.existsSync(fileB)).toBe(false);
+  });
+
+  test('emits every failed retry as an independent LLM span before final success', async () => {
+    const sid = 'sid-retry-success';
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'retry please' } },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:36.000Z',
+        message: {
+          id: 'msg_retry_success',
+          model: 'claude-test',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input_tokens: 10, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+    const retry1 = writeAttemptFile(sid, 'retry-1', {
+      start_time_unix_nano: '1780541853000000000',
+      end_time_unix_nano: '1780541853100000000',
+    });
+    const retry2 = writeAttemptFile(sid, 'retry-2', {
+      start_time_unix_nano: '1780541853200000000',
+      end_time_unix_nano: '1780541853300000000',
+      client_request_id: null,
+    });
+    const success = writeAttemptFile(sid, 'success-3', {
+      start_time_unix_nano: '1780541853400000000',
+      end_time_unix_nano: '1780541853500000000',
+      outcome: 'success',
+      status_code: 200,
+      error_type: null,
+      client_request_id: null,
+      request_id: 'req-success-3',
+      response_id: 'msg_retry_success',
+    });
+
+    const result = runHook('stop', {
+      session_id: sid,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(result.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(requests).toHaveLength(3);
+    expect(responses).toHaveLength(3);
+    expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
+      .toEqual([['retry'], ['retry'], ['stop']]);
+    expect(responses.slice(0, 2).map((record) => record['error.type']))
+      .toEqual(['overloaded_error', 'overloaded_error']);
+    expect(responses.map((record) => record['gen_ai.request.id']))
+      .toEqual(['client-retry-1', 'req-retry-2', 'req-success-3']);
+    expect(responses.slice(0, 2).map((record) => record['http.response.status_code']))
+      .toEqual([529, 529]);
+    for (const response of responses) {
+      expect(response).not.toHaveProperty('gen_ai.request.attempt');
+      expect(response).not.toHaveProperty('agent.client_request_id');
+      expect(response).not.toHaveProperty('error.message');
+    }
+    expect(fs.existsSync(retry1)).toBe(false);
+    expect(fs.existsSync(retry2)).toBe(false);
+    expect(fs.existsSync(success)).toBe(false);
+
+    const exportedSpans = [];
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir: DATA_DIR,
+    }, undefined, () => ({
+      export: (spans, callback) => {
+        exportedSpans.push(...spans);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    }));
+    try {
+      await flusher.sendBatch(records);
+      await flusher.flush();
+    } finally {
+      await flusher.shutdown();
+    }
+
+    const llmSpans = exportedSpans.filter((span) =>
+      span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans).toHaveLength(3);
+    expect(llmSpans.filter((span) => span.status.code === 2)).toHaveLength(2);
+    expect(llmSpans.map((span) => span.attributes['gen_ai.request.id']))
+      .toEqual(['client-retry-1', 'req-retry-2', 'req-success-3']);
+    expect(llmSpans.slice(0, 2).map((span) => span.attributes['http.response.status_code']))
+      .toEqual([529, 529]);
+    expect(exportedSpans.find((span) => span.attributes['gen_ai.span.kind'] === 'AGENT')?.status.code)
+      .not.toBe(2);
+  });
+
+  test('does not duplicate the final failed attempt already represented by StopFailure', () => {
+    const sid = 'sid-retry-failure';
+    const transcriptPath = apiErrorTranscript(sid);
+    writeAttemptFile(sid, 'failure-1', {
+      start_time_unix_nano: '1789522984000000000',
+      end_time_unix_nano: '1789522984100000000',
+    });
+    writeAttemptFile(sid, 'failure-2', {
+      start_time_unix_nano: '1789522984200000000',
+      end_time_unix_nano: '1789522984300000000',
+    });
+    writeAttemptFile(sid, 'failure-3', {
+      start_time_unix_nano: '1789522984400000000',
+      end_time_unix_nano: '1789522984500000000',
+      request_id: 'req-error-11',
+    });
+
+    const result = runHook('stop-failure', {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      hook_event_name: 'StopFailure',
+      error: 'server_error',
+    });
+    expect(result.status).toBe(0);
+
+    const responses = readJsonlRecords()
+      .filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(3);
+    expect(responses.map((record) => record['gen_ai.response.finish_reasons']))
+      .toEqual([['retry'], ['retry'], ['error']]);
+    expect(responses[2]['gen_ai.request.id']).toBe('req-error-11');
   });
 
   test('no intercept directory: records emit without new fields (graceful)', () => {
@@ -1320,6 +1606,15 @@ describe('hook-processor merges intercept data into llm events', () => {
     const dir = path.join(DATA_DIR, 'intercept', 'claude-code', sid);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'broken.json'), '{not json');
+    const attemptDir = path.join(dir, 'attempts');
+    fs.mkdirSync(attemptDir, { recursive: true });
+    fs.writeFileSync(path.join(attemptDir, 'broken.json'), JSON.stringify({
+      schema_version: 1,
+      attempt_id: 'broken',
+      start_time_unix_nano: 'not-a-timestamp',
+      end_time_unix_nano: 'also-invalid',
+      outcome: 'http_error',
+    }));
 
     const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
     expect(r.status).toBe(0);

@@ -9,7 +9,7 @@
  *   $ node claude-code-hook-processor.mjs <subcommand>
  *
  * v2 重构:
- *   - 只处理 4 个 subcommand: pre-tool-use / stop / subagent-start / subagent-stop
+ *   - 只处理 5 个 subcommand: pre-tool-use / stop / stop-failure / subagent-start / subagent-stop
  *   - 纯 transcript 驱动: 时间戳从 transcript record.timestamp 获取
  *   - tool→step 归属: 通过 tool_use_id 从 LLM output_content 匹配到声明方 step
  *   - 不再依赖 alignWithHookEvents / hook 事件累积
@@ -199,6 +199,40 @@ function loadInterceptForSession(sessionId) {
   return out;
 }
 
+function loadAttemptRecordsForSession(sessionId) {
+  const out = [];
+  const dir = path.join(interceptSessionDir(sessionId), 'attempts');
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return out; }
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue;
+    const filePath = path.join(dir, name);
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (_) {
+      continue;
+    }
+    if (
+      raw?.schema_version === 1
+      && typeof raw.attempt_id === 'string'
+      && typeof raw.start_time_unix_nano === 'string'
+      && /^[0-9]+$/.test(raw.start_time_unix_nano)
+      && typeof raw.end_time_unix_nano === 'string'
+      && /^[0-9]+$/.test(raw.end_time_unix_nano)
+      && ['success', 'http_error', 'network_error'].includes(raw.outcome)
+    ) {
+      out.push({ ...raw, _file: filePath });
+    }
+  }
+  out.sort((left, right) => {
+    const a = BigInt(left.start_time_unix_nano);
+    const b = BigInt(right.start_time_unix_nano);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  return out;
+}
+
 /**
  * Delete intercept files corresponding to response_ids that buildTurnRecords
  * actually merged into emitted events. Files whose response_id was not in
@@ -213,6 +247,12 @@ function reapInterceptFiles(intercept, mergedResponseIds) {
   }
 }
 
+function reapAttemptFiles(files) {
+  for (const file of files) {
+    try { fs.unlinkSync(file); } catch (_) {}
+  }
+}
+
 /**
  * Opportunistic cleanup: drop files in this session's intercept dir whose
  * mtime is older than STALE_MS (1h). Called once at the end of exportSession
@@ -221,14 +261,26 @@ function reapInterceptFiles(intercept, mergedResponseIds) {
  */
 function reapStaleIntercept(sessionId) {
   const dir = interceptSessionDir(sessionId);
+  const attemptDir = path.join(dir, 'attempts');
+  let attemptEntries;
+  try { attemptEntries = fs.readdirSync(attemptDir); } catch { attemptEntries = []; }
+  const now = Date.now();
+  for (const name of attemptEntries) {
+    const f = path.join(attemptDir, name);
+    try {
+      const st = fs.statSync(f);
+      if (now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
+    } catch (_) {}
+  }
+  try { fs.rmdirSync(attemptDir); } catch (_) {}
+
   let entries;
   try { entries = fs.readdirSync(dir); } catch { return; }
-  const now = Date.now();
   for (const name of entries) {
     const f = path.join(dir, name);
     try {
       const st = fs.statSync(f);
-      if (now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
+      if (st.isFile() && now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
     } catch (_) {}
   }
   try { fs.rmdirSync(dir); } catch (_) {}
@@ -512,11 +564,12 @@ async function cmdSubagentStop() {
   });
 }
 
-async function cmdStop() {
+async function cmdTerminal(eventKind) {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
+  const isFailure = eventKind === 'stop-failure';
 
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
@@ -540,7 +593,7 @@ async function cmdStop() {
     try {
       await exportSession(
         state,
-        event.stop_reason || 'end_turn',
+        isFailure ? 'error' : (event.stop_reason || 'end_turn'),
         typeof event.prompt_id === 'string' ? event.prompt_id : '',
       );
       if (typeof state._next_transcript_offset === 'number') {
@@ -553,12 +606,20 @@ async function cmdStop() {
     } catch (err) {
       logHookError({
         agentId: AGENT_ID,
-        stage: 'cmd_stop',
+        stage: isFailure ? 'cmd_stop_failure' : 'cmd_stop',
         errorType: 'export_failed',
         errorMessage: err?.message || String(err),
       });
     }
   });
+}
+
+async function cmdStop() {
+  return cmdTerminal('stop');
+}
+
+async function cmdStopFailure() {
+  return cmdTerminal('stop-failure');
 }
 
 // ─── transcript 稳定性等待 ───
@@ -630,10 +691,11 @@ function buildSubagentRecords({
   userId,
   cwd,
   intercept,
+  attemptContext,
 }) {
   const childTranscriptPath = resolveSubagentTranscriptPath(parentTranscriptPath, link.agentId);
   if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) {
-    return { records: [], mergedResponseIds: new Set() };
+    return { records: [], mergedResponseIds: new Set(), consumedAttemptFiles: new Set() };
   }
 
   let childParseResult;
@@ -646,11 +708,12 @@ function buildSubagentRecords({
       errorType: 'parse_failed',
       errorMessage: err?.message || String(err),
     });
-    return { records: [], mergedResponseIds: new Set() };
+    return { records: [], mergedResponseIds: new Set(), consumedAttemptFiles: new Set() };
   }
 
   const childRecords = [];
   const mergedResponseIds = new Set();
+  const consumedAttemptFiles = new Set();
   let childHash = INITIAL_HASH;
   for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
     const childBuild = buildTurnRecords(
@@ -662,9 +725,12 @@ function buildSubagentRecords({
       'end_turn',
       cwd,
       intercept,
+      '',
+      attemptContext,
     );
     childHash = childBuild.hash;
     for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+    for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
 
     for (const childRecord of childBuild.records) {
       // The child prompt is already present in the first llm.request delta.
@@ -685,7 +751,7 @@ function buildSubagentRecords({
     }
   }
 
-  return { records: childRecords, mergedResponseIds };
+  return { records: childRecords, mergedResponseIds, consumedAttemptFiles };
 }
 
 async function finalizePendingSubagentTurns(state) {
@@ -700,6 +766,11 @@ async function finalizePendingSubagentTurns(state) {
   const cwd = state.cwd || undefined;
   const intercept = loadInterceptForSession(sessionId);
   const mergedResponseIds = new Set();
+  const attemptContext = {
+    records: loadAttemptRecordsForSession(sessionId),
+    consumed: new Set(),
+  };
+  const consumedAttemptFiles = new Set();
   const completedSubagents = state.completed_subagents || {};
   const remainingTurns = [];
 
@@ -731,10 +802,12 @@ async function finalizePendingSubagentTurns(state) {
         userId,
         cwd,
         intercept,
+        attemptContext,
       });
       extendBackgroundAgentResult(records, link, childBuild.records);
       records.push(...cleanRecords(childBuild.records, runtimeConfig));
       for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+      for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
       link.completed = true;
       delete completedSubagents[link.agentId];
     }
@@ -761,6 +834,7 @@ async function finalizePendingSubagentTurns(state) {
   state.pending_subagent_turns = remainingTurns;
   state.completed_subagents = completedSubagents;
   reapInterceptFiles(intercept, mergedResponseIds);
+  reapAttemptFiles(consumedAttemptFiles);
   reapStaleIntercept(sessionId);
 }
 
@@ -782,6 +856,19 @@ async function exportSession(state, stopReason, stopPromptId = '') {
 
   const transcriptPath = state.transcript_path;
   const baseOffset = state.transcript_offset || 0;
+
+  // Duplicate Stop/StopFailure hooks are possible during shutdown or wrapper
+  // retries. If the durable offset is already at EOF, return immediately;
+  // otherwise the empty-parse retry loop below can consume the hook's entire
+  // execution budget even though there is no new transcript data.
+  try {
+    if (fs.statSync(transcriptPath).size <= baseOffset) {
+      state._next_transcript_offset = baseOffset;
+      return;
+    }
+  } catch (_) {
+    // Keep the existing parser/error path for missing or transient files.
+  }
 
   // 等待 transcript 文件写入稳定
   await waitForTranscriptStable(transcriptPath, baseOffset);
@@ -839,12 +926,22 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // produce any files — merge logic safely no-ops in that case.
   const intercept = loadInterceptForSession(sessionId);
   const mergedResponseIds = new Set();
+  const attemptContext = {
+    records: loadAttemptRecordsForSession(sessionId),
+    consumed: new Set(),
+  };
+  const consumedAttemptFiles = new Set();
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
-    const { records, hash, mergedResponseIds: turnMerged } = buildTurnRecords(
+    const {
+      records,
+      hash,
+      mergedResponseIds: turnMerged,
+      consumedAttemptFiles: turnAttemptFiles,
+    } = buildTurnRecords(
       turn,
       baseTurnCount + i,
       sessionId,
@@ -854,10 +951,14 @@ async function exportSession(state, stopReason, stopPromptId = '') {
       cwd,
       intercept,
       promptIdFallback,
+      attemptContext,
     );
     logHash = hash;
     if (turnMerged) {
       for (const rid of turnMerged) mergedResponseIds.add(rid);
+    }
+    for (const file of turnAttemptFiles) {
+      consumedAttemptFiles.add(file);
     }
 
     const turnRecords = [...records];
@@ -881,12 +982,14 @@ async function exportSession(state, stopReason, stopPromptId = '') {
           userId,
           cwd,
           intercept,
+          attemptContext,
         });
         if (link.isBackground) {
           extendBackgroundAgentResult(turnRecords, link, childBuild.records);
         }
         turnRecords.push(...childBuild.records);
         for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+        for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
         if (completion) delete state.completed_subagents[link.agentId];
       }
     }
@@ -915,10 +1018,133 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // Cleanup intercept files: delete what we merged + drop stragglers from
   // earlier turns. Failure is silent — host process must not be impacted.
   reapInterceptFiles(intercept, mergedResponseIds);
+  reapAttemptFiles(consumedAttemptFiles);
   reapStaleIntercept(sessionId);
 }
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
+
+function consumeAttemptsForCall(attemptContext, llmCall) {
+  const attempts = attemptContext?.records;
+  const consumed = attemptContext?.consumed;
+  if (!Array.isArray(attempts) || attempts.length === 0 || !(consumed instanceof Set)) return [];
+
+  let matchIndex = -1;
+  if (llmCall.api_error?.request_id) {
+    matchIndex = attempts.findIndex((attempt) =>
+      attempt.request_id === llmCall.api_error.request_id);
+  } else if (llmCall.message_id) {
+    matchIndex = attempts.findIndex((attempt) =>
+      attempt.response_id === llmCall.message_id);
+  }
+
+  // Some providers omit request-id on error responses. StopFailure is terminal,
+  // so the last failed HTTP attempt observed before its transcript record is
+  // the only safe order-based fallback. Successful calls still require the
+  // provider response id and never consume an unanchored attempt.
+  if (matchIndex < 0 && llmCall.api_error) {
+    const responseTime = BigInt(isoToUnixNanos(llmCall.timestamp));
+    for (let i = 0; i < attempts.length; i++) {
+      const attemptEnd = BigInt(attempts[i].end_time_unix_nano || '0');
+      if (attemptEnd <= responseTime && attempts[i].outcome !== 'success') matchIndex = i;
+    }
+  }
+
+  if (matchIndex < 0 || consumed.has(matchIndex)) return [];
+
+  // Retry attempts are consecutive and terminated by one successful response
+  // (or the StopFailure request id). Walk backward to the previous success
+  // anchor instead of consuming a global queue. This lets parent and subagent
+  // transcripts be built in either order without stealing each other's retry
+  // records when their requests were interleaved in wall-clock time.
+  let startIndex = matchIndex;
+  while (
+    startIndex > 0
+    && attempts[startIndex - 1].outcome !== 'success'
+    && !consumed.has(startIndex - 1)
+  ) {
+    startIndex--;
+  }
+  const group = [];
+  for (let i = startIndex; i <= matchIndex; i++) {
+    if (consumed.has(i)) continue;
+    consumed.add(i);
+    group.push(attempts[i]);
+  }
+  return group;
+}
+
+function attemptResponseId(attempt) {
+  return attempt.request_id
+    || attempt.client_request_id
+    || `attempt:${attempt.attempt_id}`;
+}
+
+function applyAttemptAttributes(record, attempt) {
+  if (!attempt) return;
+  const requestId = attempt.client_request_id || attempt.request_id;
+  if (requestId && !record['gen_ai.request.id']) {
+    record['gen_ai.request.id'] = requestId;
+  }
+}
+
+function buildRetryAttemptRecords({
+  attempts,
+  baseFields,
+  currentStepId,
+  currentStepSpanId,
+  model,
+}) {
+  const records = [];
+  for (const attempt of attempts) {
+    if (attempt.outcome === 'success') continue;
+    const spanId = generateSpanId();
+    const responseId = attemptResponseId(attempt);
+    const request = {
+      time_unix_nano: attempt.start_time_unix_nano,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.request',
+      ...baseFields,
+      span_id: spanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': attempt.model || model || 'unknown',
+      'gen_ai.input.messages_delta': [],
+    };
+    applyAttemptAttributes(request, attempt);
+
+    const response = {
+      time_unix_nano: attempt.end_time_unix_nano,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.response',
+      ...baseFields,
+      span_id: spanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': attempt.model || model || 'unknown',
+      'gen_ai.response.model': attempt.model || model || 'unknown',
+      // A retry closes this LLM span but not the surrounding turn. Using
+      // "error" here would make the OTLP flusher terminate the turn before
+      // the later successful/final attempt arrives.
+      'gen_ai.response.finish_reasons': ['retry'],
+      'gen_ai.output.messages': [],
+      'gen_ai.usage.input_tokens': 0,
+      'gen_ai.usage.output_tokens': 0,
+      'gen_ai.usage.total_tokens': 0,
+      'error.type': attempt.error_type || 'model_error',
+    };
+    applyAttemptAttributes(response, attempt);
+    if (typeof attempt.status_code === 'number') {
+      response['http.response.status_code'] = attempt.status_code;
+    }
+    records.push(request, response);
+  }
+  return records;
+}
 
 function buildTurnRecords(
   turn,
@@ -930,6 +1156,7 @@ function buildTurnRecords(
   cwd,
   intercept,
   promptIdFallback = '',
+  attemptContext = null,
 ) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
@@ -940,6 +1167,7 @@ function buildTurnRecords(
   // events. exportSession uses this set to delete the corresponding
   // intercept files after JSONL is flushed.
   const mergedResponseIds = new Set();
+  const consumedAttemptFiles = new Set();
 
   const turnContext = readTurnContext(
     pilotDataDir(),
@@ -1025,6 +1253,13 @@ function buildTurnRecords(
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
     }
 
+    const callAttempts = consumeAttemptsForCall(attemptContext, ev);
+    for (const attempt of callAttempts) {
+      if (attempt._file) consumedAttemptFiles.add(attempt._file);
+    }
+    const finalAttempt = callAttempts.at(-1);
+    const retryAttempts = callAttempts.slice(0, -1);
+
     // 注册该 LLM 声明的所有 tool_use_id → 当前 step
     for (const toolId of (ev.declaredToolIds || [])) {
       toolIdToStep.set(toolId, { stepId: currentStepId, stepSpanId: currentStepSpanId });
@@ -1057,7 +1292,8 @@ function buildTurnRecords(
 
     // llm.request
     const reqRecord = {
-      time_unix_nano: isoToUnixNanos(ev.request_start_time),
+      time_unix_nano: finalAttempt?.start_time_unix_nano
+        || isoToUnixNanos(ev.request_start_time),
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
       ...baseFields,
@@ -1070,6 +1306,17 @@ function buildTurnRecords(
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': delta,
     };
+    records.push(...buildRetryAttemptRecords({
+      attempts: retryAttempts,
+      baseFields,
+      currentStepId,
+      currentStepSpanId,
+      model: ev.model,
+    }));
+    applyAttemptAttributes(reqRecord, finalAttempt);
+    if (ev.api_error?.request_id) {
+      reqRecord['gen_ai.request.id'] = ev.api_error.request_id;
+    }
     if (logFull) {
       reqRecord['gen_ai.input.messages'] = inputMsgs;
     }
@@ -1113,9 +1360,29 @@ function buildTurnRecords(
         )
         : convertOutputMessages(ev.output_content, ev.stop_reason),
     };
+    applyAttemptAttributes(respRecord, finalAttempt);
     if (interceptData && typeof interceptData.ttft_ns === 'number'
         && Number.isFinite(interceptData.ttft_ns) && interceptData.ttft_ns >= 0) {
       respRecord['gen_ai.response.time_to_first_token'] = interceptData.ttft_ns;
+    }
+    if (ev.api_error) {
+      const transcriptErrorType = ev.api_error.type;
+      respRecord['error.type'] = (
+        transcriptErrorType
+        && transcriptErrorType !== 'unknown'
+        && transcriptErrorType !== 'model_error'
+      ) ? transcriptErrorType : (finalAttempt?.error_type || transcriptErrorType || 'model_error');
+      respRecord['gen_ai.response.finish_reasons'] = ['error'];
+      respRecord['gen_ai.output.messages'] = [];
+      if (ev.api_error.request_id) {
+        respRecord['gen_ai.request.id'] = ev.api_error.request_id;
+      }
+      const statusCode = typeof ev.api_error.status_code === 'number'
+        ? ev.api_error.status_code
+        : finalAttempt?.status_code;
+      if (typeof statusCode === 'number') {
+        respRecord['http.response.status_code'] = statusCode;
+      }
     }
     records.push(respRecord);
 
@@ -1252,7 +1519,7 @@ function buildTurnRecords(
     return 0;
   });
 
-  return { records, hash: runningHash, mergedResponseIds };
+  return { records, hash: runningHash, mergedResponseIds, consumedAttemptFiles };
 }
 
 // ─── dispatcher ───
@@ -1260,6 +1527,7 @@ function buildTurnRecords(
 const DISPATCH = {
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
+  'stop-failure': cmdStopFailure,
   'subagent-start': cmdSubagentStart,
   'subagent-stop': cmdSubagentStop,
 };
