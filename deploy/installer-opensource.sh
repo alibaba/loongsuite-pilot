@@ -184,6 +184,10 @@ if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; };
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
 fi
+if [ -n "$MULTIMODAL_AGENTS" ] && [ "$COMMAND" != "install" ]; then
+    echo "❌ --multimodal-agents is only supported with install (got $COMMAND)" >&2
+    exit 1
+fi
 
 # Validate current user and sudo access on Linux
 validate_install_user() {
@@ -729,6 +733,29 @@ process.stdout.write(ids.join(','));
     echo ""
 }
 
+# Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+select_multimodal_agents() {
+    if [ -n "$MULTIMODAL_AGENTS" ]; then
+        msg "    使用指定的多模态 Agent: $MULTIMODAL_AGENTS" \
+            "    Using specified multimodal agents: $MULTIMODAL_AGENTS"
+        echo ""
+        return 0
+    fi
+    MULTIMODAL_AGENTS=$(printf '%s' "$PROBE_RESULT" | LP_SELECTED_AGENTS="$SELECTED_AGENTS" "$NODE_BIN" -e '
+const fs = require("fs");
+const supported = ["codex", "qoder"];
+const selected = new Set((process.env.LP_SELECTED_AGENTS || "").split(",").map(s => s.trim()).filter(Boolean));
+const r = JSON.parse(fs.readFileSync(0, "utf8") || "[]");
+const ids = r.filter(a => a && a.detected && supported.includes(a.id) && selected.has(a.id)).map(a => a.id);
+process.stdout.write(ids.join(","));
+' 2>/dev/null || true)
+    if [ -n "$MULTIMODAL_AGENTS" ]; then
+        msg "    自动开启多模态: $MULTIMODAL_AGENTS" \
+            "    Auto-enabled multimodal: $MULTIMODAL_AGENTS"
+        echo ""
+    fi
+}
+
 # ============================================================
 # Interactive: prompt for userId (skipped when --userId given or non-interactive)
 # ============================================================
@@ -1148,10 +1175,9 @@ if (multimodalAgents) {
     const colon = raw.indexOf(':');
     const id = colon === -1 ? raw : raw.slice(0, colon).trim();
     const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
-    if (!id || !mode) {
-      throw new Error('--multimodal-agents entries must be id or id:mode (got ' + JSON.stringify(raw) + ')');
-    }
-    config.agents[id] = config.agents[id] || {};
+    if (!id || !mode) continue;
+    if (!['none', 'input', 'output', 'tool', 'both'].includes(mode)) continue;
+    if (!config.agents[id]) continue;
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
@@ -2093,6 +2119,7 @@ cmd_install() {
     download_and_extract
     probe_agents
     select_agents
+    select_multimodal_agents
     prompt_user_id
     confirm_config_overwrite
     # set -e would end the install here anyway; saying why beats an exit code on its own.

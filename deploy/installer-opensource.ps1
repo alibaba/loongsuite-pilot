@@ -131,6 +131,11 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
 }
+$script:MultimodalAgents = $MultimodalAgents
+if ($MultimodalAgents -and $Command -ne "install") {
+    Write-Error "-MultimodalAgents is only supported with install (got $Command)"
+    exit 1
+}
 
 # ============================================================
 # Resolve package URL
@@ -965,6 +970,33 @@ process.stdout.write(ids.join(','));
     Write-Host ""
 }
 
+# Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+function Select-MultimodalAgents {
+    if ($script:MultimodalAgents) {
+        Msg "    使用指定的多模态 Agent: $($script:MultimodalAgents)" `
+            "    Using specified multimodal agents: $($script:MultimodalAgents)"
+        Write-Host ""
+        return
+    }
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $env:LP_SELECTED_AGENTS = "$($script:SELECTED_AGENTS)"
+    $script:MultimodalAgents = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const fs = require("fs");
+const supported = ["codex", "qoder"];
+const selected = new Set((process.env.LP_SELECTED_AGENTS || "").split(",").map(s => s.trim()).filter(Boolean));
+const r = JSON.parse(fs.readFileSync(0, "utf8") || "[]");
+const ids = r.filter(a => a && a.detected && supported.includes(a.id) && selected.has(a.id)).map(a => a.id);
+process.stdout.write(ids.join(","));
+'@ 2>$null
+    Remove-Item Env:LP_SELECTED_AGENTS -ErrorAction SilentlyContinue
+    $ErrorActionPreference = $prevEAP
+    if ($script:MultimodalAgents) {
+        Msg "    自动开启多模态: $($script:MultimodalAgents)" `
+            "    Auto-enabled multimodal: $($script:MultimodalAgents)"
+        Write-Host ""
+    }
+}
+
 # ============================================================
 # Prompt for userId
 # ============================================================
@@ -1331,7 +1363,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
-        multimodalAgents  = "$MultimodalAgents"
+        multimodalAgents  = "$($script:MultimodalAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
@@ -1446,10 +1478,9 @@ if (opts.multimodalAgents) {
     const colon = raw.indexOf(':');
     const id = colon === -1 ? raw : raw.slice(0, colon).trim();
     const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
-    if (!id || !mode) {
-      throw new Error('-MultimodalAgents entries must be id or id:mode (got ' + JSON.stringify(raw) + ')');
-    }
-    config.agents[id] = config.agents[id] || {};
+    if (!id || !mode) continue;
+    if (!['none', 'input', 'output', 'tool', 'both'].includes(mode)) continue;
+    if (!config.agents[id]) continue;
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
@@ -2616,6 +2647,7 @@ function Cmd-Install {
         Download-AndExtract
         Probe-Agents
         Select-Agents
+        Select-MultimodalAgents
         Prompt-UserId
         Confirm-ConfigOverwrite
         Deploy-Package $script:INSTALL_SRC
