@@ -195,3 +195,4 @@ If none of the above values apply, use a lowercase dotted provider name such as 
 | `content_filter` | Content safety filtering stopped generation. |
 | `end_turn` | The model ended the turn. |
 | `cancelled` | The user interrupted generation; this is not a provider or agent error. |
+| `error` | A single physical model request failed. For Claude Code an intermediate `error` does not end the turn; a terminal failure additionally carries `gen_ai.turn.end=true`. |
