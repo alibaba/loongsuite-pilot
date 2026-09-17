@@ -11,7 +11,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 - `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`）。
 - `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
 
-开启多模态还需要全局 `config.multimodal` 对象存储基础设施，见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
+开启多模态还需要对象存储（唯一的 SLS `apiKey` flusher，或显式的 `config.multimodal.storage`），见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 
 ## 当前能力范围
 
@@ -25,7 +25,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 两处同时就绪：
 
-1. 全局 `config.multimodal.storage`（`type` / `target` / `auth`）。
+1. 全局对象存储：显式写 `multimodal.storage`，或在特定条件下复用 SLS flusher。规则见 [配置指南](configuration.md#多模态对象存储)。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
 示例（Codex + Qoder IDE）：

@@ -59,6 +59,8 @@ export interface MaskConfig {
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -140,6 +142,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Propagate the linked context to the LLM gateway as a `traceparent` header. */
+  propagateToLlm: boolean;
   /** Generate a per-turn trace context for tools when no upstream context is available. */
   generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
@@ -196,11 +200,6 @@ export interface MultimodalSlsTarget {
   logstore: string;
 }
 
-export interface MultimodalDelegatedOssTarget extends MultimodalSlsTarget {
-  /** Expected landing bucket. Not provisioned by Pilot. */
-  ossBucket?: string;
-}
-
 export interface MultimodalOssTarget {
   endpoint: string;
   storageBasePath: string;
@@ -208,7 +207,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalDelegatedOssTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**
@@ -255,6 +254,8 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];

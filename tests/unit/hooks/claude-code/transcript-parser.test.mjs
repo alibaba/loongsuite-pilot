@@ -133,6 +133,45 @@ describe('parseClaudeTranscript', () => {
     expect(turn.llmCalls[0].request_start_time).toBe('2026-06-04T02:57:32.000Z');
   });
 
+  test('API error synthetic assistant 保留为失败 LLM 调用', () => {
+    const file = path.join(TMP, 'api-error.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-09-16T03:43:03.998Z', promptId: 'p-error', message: { content: 'trigger error' } },
+      {
+        type: 'assistant',
+        timestamp: '2026-09-16T03:46:02.445Z',
+        isApiErrorMessage: true,
+        apiErrorStatus: 529,
+        error: 'server_error',
+        requestId: 'req-error-11',
+        message: {
+          id: 'synthetic-error-message',
+          model: '<synthetic>',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'private upstream detail' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: 'stop_sequence',
+        },
+      },
+    ]);
+
+    const result = parseClaudeTranscript(file, 0);
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0].llmCalls).toHaveLength(1);
+    expect(result.turns[0].llmCalls[0]).toMatchObject({
+      model: 'unknown',
+      message_id: 'synthetic-error-message',
+      output_content: [],
+      stop_reason: 'error',
+      api_error: {
+        type: 'server_error',
+        status_code: 529,
+        request_id: 'req-error-11',
+      },
+    });
+    expect(JSON.stringify(result.turns[0].llmCalls[0])).not.toContain('private upstream detail');
+  });
+
   test('同一 promptId 内 tool_result 不切分 turn', () => {
     const file = path.join(TMP, 't.jsonl');
     writeJsonl(file, [

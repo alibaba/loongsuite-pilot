@@ -1,4 +1,5 @@
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   AgentsConfig,
   AnalyticsConfig,
@@ -24,6 +25,7 @@ import type {
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
   SlsEndpoint,
+  SlsFlusherConfig,
   SlsMode,
   StatusBarConfig,
   UpstreamLinkConfig,
@@ -37,6 +39,7 @@ import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
+import { anyAgentMultimodalEnabled } from '../multimodal/agent-gate.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -135,6 +138,7 @@ export interface ConfigFile {
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
+    propagateToLlm?: boolean;
     generateTraceWhenMissing?: boolean;
     ttlMs?: number;
   };
@@ -146,7 +150,6 @@ export interface ConfigFile {
         endpoint?: string;
         project?: string;
         logstore?: string;
-        ossBucket?: string;
         storageBasePath?: string;
       };
       auth?: {
@@ -172,6 +175,7 @@ export interface ConfigFile {
   };
 
   otlpTrace?: {
+    spanEnrichers?: string[];
     endpoint?: string;
     headers?: Record<string, string>;
     resourceAttributes?: Record<string, string>;
@@ -275,6 +279,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
+  const flushers = buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -297,7 +302,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
+    flushers,
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
@@ -307,7 +312,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
-    multimodal: buildMultimodalConfig(file),
+    multimodal: buildMultimodalConfig(file, flushers.sls),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
 }
@@ -319,6 +324,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     propagateToTools: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,
+    ),
+    propagateToLlm: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM',
+      file?.upstreamLink?.propagateToLlm ?? false,
     ),
     generateTraceWhenMissing: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
@@ -332,15 +341,39 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
 
-/** Parse global multimodal storage config; invalid → undefined. */
-function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig | undefined {
-  const block = file?.multimodal;
-  if (!block || typeof block !== 'object') return undefined;
+type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>;
+type SlsApiKeyTarget = { endpoint: string; project: string; logstore: string; apiKey: string };
 
+/** Unique SLS apiKey target is reused as a whole; only logstore may be overridden. Invalid → undefined. */
+function buildMultimodalConfig(
+  file: ConfigFile | null,
+  sls?: SlsFlusherConfig,
+): MultimodalRuntimeConfig | undefined {
+  const slsTarget = findUniqueSlsApiKeyTarget(sls, file);
+  const block = file?.multimodal;
   try {
-    const storageRaw = block.storage;
-    if (!storageRaw || typeof storageRaw !== 'object') {
+    if (block == null) {
+      return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
+    }
+    if (typeof block !== 'object' || Array.isArray(block)) {
+      throw new Error('multimodal must be an object');
+    }
+    if (block.storage === undefined) {
+      if (slsTarget) return multimodalFromSlsApiKey(slsTarget);
       throw new Error('multimodal.storage is required');
+    }
+    if (typeof block.storage !== 'object' || Array.isArray(block.storage)) {
+      throw new Error('multimodal.storage must be an object');
+    }
+    const storageRaw = block.storage;
+    if (slsTarget && isLogstoreOnlyShorthand(storageRaw)) {
+      const logstore = isNonEmptyString(storageRaw.target?.logstore)
+        ? storageRaw.target.logstore.trim()
+        : slsTarget.logstore;
+      const type = typeof storageRaw.type === 'string' && storageRaw.type.trim() === 'delegatedOss'
+        ? 'delegatedOss'
+        : 'sls';
+      return multimodalFromSlsApiKey({ ...slsTarget, logstore }, type);
     }
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
@@ -348,7 +381,7 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
       return { storage, storageBasePath: storage.target.storageBasePath };
     }
     if (type === 'sls' || type === 'delegatedOss') {
-      const storage = buildMultimodalSlsBackedStorage(type, storageRaw);
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw, sls);
       return {
         storage,
         storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
@@ -359,6 +392,92 @@ function buildMultimodalConfig(file: ConfigFile | null): MultimodalRuntimeConfig
     logger.error('multimodal config invalid; disabled for process', { error: String(err) });
     return undefined;
   }
+}
+
+/** Complete apiKey targets only; AK / WebTracking do not count.
+ *  Same dest: user overrides inner; reuse follows the resolved flusher list. */
+function findUniqueSlsApiKeyTarget(
+  sls: SlsFlusherConfig | undefined,
+  file: ConfigFile | null,
+): SlsApiKeyTarget | undefined {
+  if (fileSlsHasConflictingApiKeys(file)) return undefined;
+  let unique: SlsApiKeyTarget | undefined;
+  for (const ep of sls?.endpoints ?? []) {
+    if (ep.mode !== 'apiKey' || hasAmbiguousSlsCredentials(ep)) continue;
+    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
+    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
+    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
+    if (!apiKey || !endpoint || !project || !logstore) continue;
+    if (unique) return undefined;
+    unique = { endpoint: endpoint.replace(/\/+$/, ''), project, logstore, apiKey };
+  }
+  return unique;
+}
+
+/** Same dest + different apiKeys in raw `file.sls` (before flusher dedup). */
+function fileSlsHasConflictingApiKeys(file: ConfigFile | null): boolean {
+  const raw = file?.sls;
+  if (!Array.isArray(raw)) return false;
+  const byDest = new Map<string, string>();
+  for (const ep of raw) {
+    if (inferSlsMode(ep) !== 'apiKey' || (ep.apiKey && (ep.accessKeyId || ep.accessKeySecret))) continue;
+    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
+    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
+    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
+    if (!apiKey || !endpoint || !project || !logstore) continue;
+    const dest = `${normalizeEndpointUrl(endpoint)}|${project}|${logstore}`;
+    const existing = byDest.get(dest);
+    if (existing !== undefined && existing !== apiKey) return true;
+    byDest.set(dest, apiKey);
+  }
+  return false;
+}
+
+function multimodalFromSlsApiKey(
+  target: SlsApiKeyTarget,
+  type: 'sls' | 'delegatedOss' = 'sls',
+): MultimodalRuntimeConfig {
+  const storageTarget = {
+    endpoint: regionalizeSlsEndpoint(target.endpoint, target.project),
+    project: target.project,
+    logstore: target.logstore,
+  };
+  const auth = { mode: 'apiKey' as const, apiKey: target.apiKey };
+  return {
+    storage: type === 'delegatedOss'
+      ? { type: 'delegatedOss', target: storageTarget, auth }
+      : { type: 'sls', target: storageTarget, auth },
+    storageBasePath: `sls://${target.project}/${target.logstore}`,
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/** `{ type?: 'sls'|'delegatedOss', target?: { logstore? } }` — missing/empty target reuses all. */
+function isLogstoreOnlyShorthand(raw: MultimodalStorageRaw): boolean {
+  for (const key of Object.keys(raw)) {
+    if (key !== 'type' && key !== 'target') return false;
+  }
+  if ('type' in raw) {
+    if (typeof raw.type !== 'string') return false;
+    const trimmed = raw.type.trim();
+    if (trimmed !== 'sls' && trimmed !== 'delegatedOss') return false;
+  }
+  if (!('target' in raw) || raw.target === undefined) return true;
+  const target = raw.target;
+  if (target == null || typeof target !== 'object' || Array.isArray(target)) return false;
+  for (const key of Object.keys(target)) {
+    if (key === 'logstore') {
+      if (!isNonEmptyString(target.logstore)) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function buildMultimodalOssStorage(
@@ -390,31 +509,109 @@ function buildMultimodalOssStorage(
 function buildMultimodalSlsBackedStorage(
   type: 'sls' | 'delegatedOss',
   raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+  sls?: SlsFlusherConfig,
 ): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
-  const endpoint = (raw.target?.endpoint ?? '').trim();
-  const project = (raw.target?.project ?? '').trim();
-  const logstore = (raw.target?.logstore ?? '').trim() || 'logstore-multimodal';
-  if (!endpoint || !project) {
-    throw new Error(`multimodal.storage.target requires endpoint and project when type=${type}`);
+  const endpointRaw = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
+  const logstore = (raw.target?.logstore ?? '').trim();
+  if (!endpointRaw || !logstore) {
+    throw new Error(`multimodal.storage.target requires endpoint and logstore when type=${type}`);
   }
+  const project = resolveMultimodalProject(raw.target!, sls);
+  const endpoint = regionalizeSlsEndpoint(endpointRaw, project);
   const auth = buildMultimodalStorageAuth(raw.auth);
-  const target = {
-    endpoint: endpoint.replace(/\/+$/, ''),
-    project,
-    logstore,
-  };
-  if (type === 'delegatedOss') {
-    const ossBucket = (raw.target?.ossBucket ?? '').trim();
-    return {
-      type,
-      target: {
-        ...target,
-        ...(ossBucket ? { ossBucket } : {}),
-      },
-      auth,
-    };
+  return { type, target: { endpoint, project, logstore }, auth };
+}
+
+const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
+
+/** Explicit project, then project-qualified multimodal host, then matching flusher project. */
+function resolveMultimodalProject(
+  target: NonNullable<MultimodalStorageRaw['target']>,
+  sls?: SlsFlusherConfig,
+): string {
+  let explicit: string | undefined;
+  if ('project' in target) {
+    if (!isNonEmptyString(target.project)) {
+      throw new Error('multimodal.storage.target.project is invalid');
+    }
+    explicit = target.project.trim();
   }
-  return { type, target, auth };
+  const fromHost = projectFromQualifiedSlsHost(target.endpoint);
+  if (explicit && fromHost && explicit !== fromHost) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  if (explicit) return explicit;
+  if (fromHost) return fromHost;
+  const fromFlusher = uniqueProjectAmongMatchingFlushers(target.endpoint, sls);
+  if (fromFlusher) return fromFlusher;
+  throw new Error('multimodal.storage.target.project is required');
+}
+
+/** Strip `{project}.` from a public SLS host so request builders can prepend it once. */
+function regionalizeSlsEndpoint(endpoint: string, project: string): string {
+  let url: URL;
+  try {
+    url = new URL(normalizeEndpointUrl(endpoint));
+  } catch {
+    return endpoint;
+  }
+  const host = url.hostname.replace(/\.$/, '');
+  if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return endpoint;
+  const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+  const parts = rest.split('.').filter(Boolean);
+  if (parts.length < 2) return endpoint;
+  if (parts[0] !== project) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  const regionalHost = `${parts.slice(1).join('.')}${SLS_PUBLIC_HOST_SUFFIX}`;
+  const port = url.port ? `:${url.port}` : '';
+  return `${url.protocol}//${regionalHost}${port}`;
+}
+
+/** `{project}.{region}.log.aliyuncs.com` — regional `{region}.log.aliyuncs.com` has no project. */
+function projectFromQualifiedSlsHost(endpoint: string | undefined): string | undefined {
+  if (!isNonEmptyString(endpoint)) return undefined;
+  try {
+    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
+    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return undefined;
+    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    return parts.length >= 2 ? parts[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function slsEndpointRegionKey(endpoint: string | undefined): string | undefined {
+  if (!isNonEmptyString(endpoint)) return undefined;
+  try {
+    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
+    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return host;
+    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    const region = parts.length >= 2 ? parts.slice(1).join('.') : rest;
+    return region ? `${region}${SLS_PUBLIC_HOST_SUFFIX}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueProjectAmongMatchingFlushers(
+  endpoint: string | undefined,
+  sls?: SlsFlusherConfig,
+): string | undefined {
+  const region = slsEndpointRegionKey(endpoint);
+  if (!region) return undefined;
+  const projects = new Set<string>();
+  for (const ep of sls?.endpoints ?? []) {
+    if (slsEndpointRegionKey(ep.endpoint) !== region) continue;
+    const project = isNonEmptyString(ep.project)
+      ? ep.project.trim()
+      : projectFromQualifiedSlsHost(ep.endpoint);
+    if (project) projects.add(project);
+  }
+  if (projects.size !== 1) return undefined;
+  return [...projects][0];
 }
 
 function buildMultimodalStorageAuth(
@@ -830,8 +1027,33 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
+    spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
   };
+}
+
+/** Resolve explicitly configured modules relative to the configuration file. */
+function resolveSpanEnricherPaths(value: unknown, dataDir: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    logger.warn('otlpTrace.spanEnrichers must be an array; ignoring');
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry.trim() || !entry.trim().endsWith('.mjs')) {
+      logger.warn('Ignoring invalid span enricher path; expected a local .mjs file');
+      continue;
+    }
+    const expanded = entry.trim().replace(/^\$PILOT_DATA(?=[/\\]|$)/, () => path.resolve(resolveHome(dataDir)));
+    const resolved = path.resolve(path.dirname(configJsonPath()), resolveHome(expanded));
+    if (!paths.includes(resolved)) paths.push(resolved);
+    if (paths.length === 16) {
+      logger.warn('At most 16 span enrichers are loaded');
+      break;
+    }
+  }
+  return paths;
 }
 
 /** Expand an ARMS/CMS shorthand entry into an OTLP endpoint with x-arms-* headers. */

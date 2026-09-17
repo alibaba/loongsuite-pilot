@@ -111,6 +111,7 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `gen_ai.skill.version` | string | 技能元数据可用时 Recommended | 技能版本。 |
 | `error.type` | string | 操作以错误结束时 Conditionally Required | 低基数错误类型、错误码、异常类名或 HTTP 状态。 |
 | `error.message` | string | `error.type` 存在时 Recommended | 人类可读错误详情。 |
+| `http.response.status_code` | int | 模型 HTTP 调用失败时 Recommended | `llm.response` 上失败模型请求的 HTTP 状态码；重试失败和终态失败都会带上。 |
 | `agent.channel` | string | Recommended | 请求来源渠道，例如 `ide_plugin`、`web` 或 `api`。 |
 | `git.domain` | string | Recommended | 当前 workspace 的 Git 托管域名。 |
 | `git.repo` | string | Recommended | 当前 workspace 的 Git 仓库名或 URL。 |
@@ -186,3 +187,4 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code
 | `content_filter` | 内容安全过滤停止生成。 |
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
+| `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
