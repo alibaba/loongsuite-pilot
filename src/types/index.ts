@@ -59,6 +59,8 @@ export interface MaskConfig {
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -251,6 +253,8 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];

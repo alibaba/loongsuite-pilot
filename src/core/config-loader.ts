@@ -1,4 +1,5 @@
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   AgentsConfig,
   AnalyticsConfig,
@@ -173,6 +174,7 @@ export interface ConfigFile {
   };
 
   otlpTrace?: {
+    spanEnrichers?: string[];
     endpoint?: string;
     headers?: Record<string, string>;
     resourceAttributes?: Record<string, string>;
@@ -1020,8 +1022,33 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
+    spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
   };
+}
+
+/** Resolve explicitly configured modules relative to the configuration file. */
+function resolveSpanEnricherPaths(value: unknown, dataDir: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    logger.warn('otlpTrace.spanEnrichers must be an array; ignoring');
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry.trim() || !entry.trim().endsWith('.mjs')) {
+      logger.warn('Ignoring invalid span enricher path; expected a local .mjs file');
+      continue;
+    }
+    const expanded = entry.trim().replace(/^\$PILOT_DATA(?=[/\\]|$)/, () => path.resolve(resolveHome(dataDir)));
+    const resolved = path.resolve(path.dirname(configJsonPath()), resolveHome(expanded));
+    if (!paths.includes(resolved)) paths.push(resolved);
+    if (paths.length === 16) {
+      logger.warn('At most 16 span enrichers are loaded');
+      break;
+    }
+  }
+  return paths;
 }
 
 /** Expand an ARMS/CMS shorthand entry into an OTLP endpoint with x-arms-* headers. */
