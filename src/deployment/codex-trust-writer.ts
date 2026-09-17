@@ -434,6 +434,36 @@ function expectedTrustState(opts: InstalledTrustOpts): Map<string, string> {
   return expected;
 }
 
+/**
+ * Check whether a parsed remainder can be preserved and return only current
+ * entries that still need a canonical table. Undefined means an uneditable
+ * retired entry or conflicting current entry remains in the document.
+ */
+function missingPreservableTrustEntries(
+  state: Record<string, unknown> | undefined,
+  expected: ReadonlyMap<string, string>,
+  retiredKeys: ReadonlySet<string>,
+  enabledByKey: ReadonlyMap<string, boolean>,
+): Map<string, string> | undefined {
+  for (const retiredKey of retiredKeys) {
+    if (state?.[retiredKey] !== undefined) return undefined;
+  }
+
+  const missing = new Map<string, string>();
+  for (const [key, hash] of expected) {
+    const rawState = state?.[key];
+    if (rawState === undefined) {
+      missing.set(key, hash);
+      continue;
+    }
+    const remaining = asTable(rawState);
+    if (remaining?.trusted_hash !== hash) return undefined;
+    // Never lose an explicit disable from a matching Pilot declaration.
+    if (enabledByKey.get(key) === false && remaining.enabled !== false) return undefined;
+  }
+  return missing;
+}
+
 function verifyTrustContent(content: string, opts: InstalledTrustOpts): VerifyResult {
   let state: Record<string, unknown> | undefined;
   try {
@@ -484,7 +514,8 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   // Never infer ownership from marker position: Codex may reserialize TOML and
   // move the END comment past unrelated third-party sections. Only touch exact
   // current keys plus retired keys proven from the still-installed Pilot hooks.
-  const exactKeys = new Set([...expected.keys(), ...(opts.retiredKeys ?? [])]);
+  const retiredKeys = new Set(opts.retiredKeys ?? []);
+  const exactKeys = new Set([...expected.keys(), ...retiredKeys]);
   const enabledByKey = new Map<string, boolean>();
   for (const section of parseTrustSections(existing)) {
     if (section.enabled === undefined || expected.get(section.key) !== section.hash) continue;
@@ -500,6 +531,11 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   let minimal = removeMarkedTrustSections(existing, opts.marker, exactKeys);
   const removedMarkedSections = minimal !== existing;
   minimal = removeLegacyTrustMarkers(minimal, opts.marker);
+  // Retired table declarations are safe to remove independently. Doing this
+  // before parsing lets us preserve a semantically-correct dotted/inline
+  // current entry in the same write. A retired dotted/inline entry remains in
+  // the parsed state below and is rejected as uneditable.
+  minimal = removeExactTrustSections(minimal, retiredKeys);
   let minimalState: Record<string, unknown> | undefined;
   let minimalParses = false;
   try {
@@ -520,63 +556,64 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
     if (initialVerification.valid && (!removedMarkedSections || !remainingOwnedState)) {
       return false;
     }
-    const missing = new Map<string, string>();
-    let canPreserveRemaining = true;
-
-    for (const retiredKey of opts.retiredKeys ?? []) {
-      if (minimalState?.[retiredKey] !== undefined) {
-        canPreserveRemaining = false;
-        break;
-      }
-    }
-    if (canPreserveRemaining) {
-      for (const [key, hash] of expected) {
-        const rawState = minimalState?.[key];
-        if (rawState === undefined) {
-          missing.set(key, hash);
-          continue;
-        }
-        const remaining = asTable(rawState);
-        if (remaining?.trusted_hash !== hash) {
-          canPreserveRemaining = false;
-          break;
-        }
-        // Never lose an explicit disable from a matching Pilot declaration.
-        // If the retained representation conflicts, fall back to the exact
-        // section reconciler (or fail safely when that syntax is not editable).
-        if (enabledByKey.get(key) === false && remaining.enabled !== false) {
-          canPreserveRemaining = false;
-          break;
-        }
-      }
-    }
-
-    if (canPreserveRemaining) {
+    const missing = missingPreservableTrustEntries(
+      minimalState,
+      expected,
+      retiredKeys,
+      enabledByKey,
+    );
+    if (missing) {
       const output = appendCanonicalTrustSections(minimal, opts.marker, missing, enabledByKey);
       if (output === existing) return false;
-      writeValidatedConfig(opts.configPath, output);
-      return true;
+      try {
+        writeValidatedConfig(opts.configPath, output);
+        return true;
+      } catch (err) {
+        if (!(err instanceof InvalidCodexConfigError)) throw err;
+        // A valid inline parent table cannot be extended by appending a sibling
+        // table. Fall through so the exact-section path can either reconcile a
+        // replaceable representation or report it as uneditable.
+      }
     }
   }
 
   let content = removeLegacyTrustMarkers(existing, opts.marker);
   content = removeExactTrustSections(content, exactKeys);
+  let missing = expected;
+  let parsedRemainder = false;
   try {
     const parsed = parseToml(content, { integersAsBigInt: true });
     const remainingState = asTable(asTable(parsed.hooks)?.state);
-    if ([...exactKeys].some(key => remainingState?.[key] !== undefined)) {
+    const preservable = missingPreservableTrustEntries(
+      remainingState,
+      expected,
+      retiredKeys,
+      enabledByKey,
+    );
+    if (!preservable) {
       throw new InvalidCodexConfigError(
         'Refusing to replace an uneditable Codex hook trust entry; original file left unchanged',
       );
     }
+    missing = preservable;
+    parsedRemainder = true;
   } catch (err) {
     if (err instanceof InvalidCodexConfigError) throw err;
     // Preserve the existing behavior for unrelated invalid TOML: validation of
     // the final candidate below rejects the write and leaves the source intact.
   }
-  const output = appendCanonicalTrustSections(content, opts.marker, expected, enabledByKey);
+  const output = appendCanonicalTrustSections(content, opts.marker, missing, enabledByKey);
   if (output === existing) return false;
-  writeValidatedConfig(opts.configPath, output);
+  try {
+    writeValidatedConfig(opts.configPath, output);
+  } catch (err) {
+    if (parsedRemainder && err instanceof InvalidCodexConfigError) {
+      throw new InvalidCodexConfigError(
+        'Refusing to extend an uneditable Codex hook trust entry; original file left unchanged',
+      );
+    }
+    throw err;
+  }
   return true;
 }
 
