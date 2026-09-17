@@ -396,22 +396,19 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
-    it('uses the configured dataDir for all QwenWorkCN Hook and intercept paths', async () => {
+    it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));
       await orch.start();
 
       const input = orch.getInputManager().getInput('qwen-work-cn-trace') as any;
       const historyDir = `${dataDir}/logs/qwen-work-cn/history`;
-      const interceptFile = `${dataDir}/logs/qwenworkcn-intercept.jsonl`;
       expect(input.logDir).toBe(historyDir);
-      expect(input.interceptFile).toBe(interceptFile);
 
       const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-trace');
       expect(detection?.watchPaths).toEqual([
         historyDir,
         '/home/test/.qwenworkcn/logs/sessions',
-        interceptFile,
       ]);
 
       await orch.stop();
@@ -685,16 +682,7 @@ describe('Orchestrator', () => {
       });
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
-        multimodal: {
-          ...delegatedOss,
-          storage: {
-            ...delegatedOss.storage,
-            target: {
-              ...delegatedOss.storage.target,
-              ossBucket: 'user-bucket',
-            },
-          },
-        },
+        multimodal: delegatedOss,
       }));
 
       await orch.start();

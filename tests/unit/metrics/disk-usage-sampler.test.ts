@@ -112,18 +112,40 @@ describe('DiskUsageSampler', () => {
   });
 
   it('starts pending and counts ordinary files, hidden files and only the root logs subtree', async () => {
-    const tree = installTree({ '.hidden': 3, 'logs/output/a.jsonl': 7, 'local-workers/logs/b': 11, 'versions/v/a': 13 });
+    const tree = installTree({ '.hidden': 3, 'logs/output/a.jsonl': 7, 'local-workers/logs/b': 11 });
     const onSample = vi.fn();
     const instance = sampler({ onSample });
     expect(instance.getSnapshot()).toEqual({ status: 'pending' });
     await instance.sample();
-    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 34, logsBytes: 7, sampledAt: Date.now() });
+    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 21, logsBytes: 7, sampledAt: Date.now() });
     expect(tree.maxActive()).toBe(1);
     expect(tree.opened.every(dir => dir.closed)).toBe(true);
     expect(fs.opendir).toHaveBeenCalledWith(root, { bufferSize: 1 });
     instance.getSnapshot();
     instance.getSnapshot();
     expect(onSample).toHaveBeenCalledTimes(1);
+  });
+
+  it('prunes only root versions and runtime without opening or counting them', async () => {
+    const tree = installTree({
+      'ordinary': 3,
+      'versions/v1/package.js': 100,
+      'runtime/node/bin/node.exe': 200,
+      'cache/versions/metadata.json': 7,
+      'cache/runtime/metadata.json': 13,
+      'logs/versions/event.jsonl': 11,
+    });
+    const instance = sampler();
+    await instance.sample();
+    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 34, logsBytes: 11 });
+    for (const directory of ['versions', 'runtime']) {
+      const skippedRoot = path.join(root, directory);
+      expect(tree.opened.some(frame => frame.path === skippedRoot)).toBe(false);
+      expect(tree.calls.some(call => call.path.startsWith(skippedRoot + path.sep))).toBe(false);
+    }
+    expect(tree.opened.some(frame => frame.path === path.join(root, 'cache', 'versions'))).toBe(true);
+    expect(tree.opened.some(frame => frame.path === path.join(root, 'cache', 'runtime'))).toBe(true);
+    expect(tree.opened.some(frame => frame.path === path.join(root, 'logs', 'versions'))).toBe(true);
   });
 
   it('reports a valid empty directory as zero and returns a copy of cached state', async () => {
@@ -329,6 +351,19 @@ describe('DiskUsageSampler', () => {
     expect(instance.getSnapshot().status).toBe('timeout');
     expect(tree.opened[0]).toMatchObject({ closed: true, reads: 0 });
     expect(tree.calls.at(-1)?.operation).toBe('close');
+  });
+
+  it('limits a scan to the default 10-second budget', async () => {
+    const tree = installTree({ 'a': 7 });
+    tree.hooks.before = async operation => {
+      if (operation === 'opendir') await new Promise(resolve => setTimeout(resolve, 10_001));
+    };
+    const instance = sampler();
+    const pending = instance.sample();
+    await vi.advanceTimersByTimeAsync(10_001);
+    await pending;
+    expect(instance.getSnapshot().status).toBe('timeout');
+    expect(tree.opened[0]).toMatchObject({ closed: true, reads: 0 });
   });
 
   it('preserves timeout when a slow directory read exceeds the budget', async () => {

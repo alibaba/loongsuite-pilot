@@ -6,6 +6,7 @@ import { CollectionMethod, ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkTraceInput } from '../../../src/inputs/qoder-work-trace/qoder-work-trace-input.js';
 import { applyQoderWorkStepTiming } from '../../../src/flushers/otlp-trace-flusher.js';
+import * as interceptReader from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
@@ -32,10 +33,11 @@ describe('QoderWorkTraceInput', () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });
 
-  function makeInput(opts: { interceptFile?: string; initializeHistory?: boolean } = {}) {
+  function makeInput(opts: { initializeHistory?: boolean } = {}) {
     if (opts.initializeHistory !== false) {
       const current = stateStore.get('qoder-work-trace');
       if (!current.lastFile) {
@@ -51,7 +53,6 @@ describe('QoderWorkTraceInput', () => {
       logDir: hookLogDir,
       segmentsRoot,
       sdkLogDir,
-      interceptFile: opts.interceptFile,
     });
   }
 
@@ -1227,235 +1228,72 @@ describe('QoderWorkTraceInput', () => {
     expect(tcOut.time_unix_nano).toBe(nano('2026-06-16T10:00:05.000Z'));
   });
 
-  // fixture 来源: qoderwork-runtime-wrapper.mjs 写出的 qoderwork-intercept.jsonl
-  // 记录结构（type=token/system_prompt, id=chatcmpl-xxx, ts 毫秒）。
-  it('fills response usage from intercept by chatcmpl response.id when segment tokens are zero', async () => {
-    const sessionId = 'sess-intercept-usage';
-    const turnId = 'turn-intercept-usage';
-    const responseId = 'chatcmpl-intercept-1';
-    const hookFile = path.join(hookLogDir, todayFileName());
+  it.each([true, false])('uses native usage without consulting intercept (cache present: %s)', async hasCache => {
+    const sessionId = 'sess-native-usage';
+    const turnId = 'turn-native-usage';
+    const responseId = 'chatcmpl-native-usage';
+    const readIntercept = vi.spyOn(interceptReader, 'readInterceptFile').mockResolvedValue({
+      tokens: [{
+        id: responseId,
+        ts: Date.now(),
+        promptTokens: 999,
+        completionTokens: 999,
+        cachedTokens: 999,
+        reasoningTokens: 0,
+        totalTokens: 1998,
+      }],
+      systemPrompt: { ts: Date.now(), content: 'Synthetic legacy intercept prompt' },
+    });
     const request = buildHookEntry({
-      'event.id': 'intercept-request',
-      'event.name': 'llm.request' as any,
+      'event.id': 'native-request',
+      'event.name': 'llm.request',
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': `${turnId}:s1`,
       time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
     });
     const response = buildHookEntry({
-      'event.id': 'intercept-response',
+      'event.id': 'native-response',
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': `${turnId}:s1`,
       'gen_ai.response.id': responseId,
       time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
     });
-    await fs.writeFile(hookFile, [request, response].map(e => JSON.stringify(e)).join('\n') + '\n');
-
-    // No segment file → segment pair absent → intercept fallback engages.
-    const interceptFile = path.join(tmpRoot, 'qoderwork-intercept.jsonl');
-    const now = Date.now();
-    const systemPrompt = 'You are QoderWork, an AI coding agent running inside the QoderWork IDE. Follow the user instructions carefully.';
-    await fs.writeFile(interceptFile, [
-      JSON.stringify({ type: 'system_prompt', ts: now, content: systemPrompt }),
-      JSON.stringify({ type: 'token', ts: now, id: responseId, prompt_tokens: 200, completion_tokens: 50, cached_tokens: 30, reasoning_tokens: 0, total_tokens: 250 }),
-    ].join('\n') + '\n');
-
-    const input = makeInput({ interceptFile });
-    const entries = await startAndCollect(input);
-    await input.stop();
-
-    const enriched = entries.find(e => e['event.id'] === 'intercept-response')!;
-    expect(enriched['gen_ai.usage.input_tokens']).toBe(200);
-    expect(enriched['gen_ai.usage.output_tokens']).toBe(50);
-    expect(enriched['gen_ai.usage.total_tokens']).toBe(250);
-    expect(enriched['gen_ai.usage.cache_read.input_tokens']).toBe(30);
-
-    const req = entries.find(e => e['event.id'] === 'intercept-request')!;
-    const sys = req['gen_ai.system_instructions'] as Array<{ type: string; content: string }>;
-    expect(sys).toBeDefined();
-    expect(sys[0].content).toBe(systemPrompt);
-  });
-
-  it('prefers segment usage over intercept when the segment has tokens', async () => {
-    const sessionId = 'sess-segment-priority';
-    const turnId = 'turn-segment-priority';
-    const responseId = 'chatcmpl-priority-1';
-    const hookFile = path.join(hookLogDir, todayFileName());
-    const request = buildHookEntry({
-      'event.id': 'prio-request',
-      'event.name': 'llm.request' as any,
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
-    });
-    const response = buildHookEntry({
-      'event.id': 'prio-response',
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      'gen_ai.response.id': responseId,
-      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
-    });
-    await fs.writeFile(hookFile, [request, response].map(e => JSON.stringify(e)).join('\n') + '\n');
-    await writeSegments(sessionId, 'prio.jsonl', [
-      segModelStart(turnId, 'prio-req', '2026-06-16T10:00:00.000Z'),
-      segModelEnd(turnId, 'prio-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate', {
+    await fs.writeFile(
+      path.join(hookLogDir, todayFileName()),
+      [request, response].map(e => JSON.stringify(e)).join('\n') + '\n',
+    );
+    await writeSegments(sessionId, 'native.jsonl', [
+      segModelStart(turnId, 'native-req', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'native-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate', {
         input_tokens: 120,
         output_tokens: 30,
-        cache_read_input_tokens: 50,
-        cache_creation_input_tokens: 10,
+        ...(hasCache ? { cache_read_input_tokens: 50, cache_creation_input_tokens: 10 } : {}),
       }),
     ]);
+    await writeSdkLog('sdk-session', [
+      sdkMessageStart(sessionId, responseId, '2026-06-16T10:00:00.000Z'),
+      sdkMessageDelta(sessionId, '2026-06-16T10:00:05.000Z', 800, 90),
+    ]);
 
-    const interceptFile = path.join(tmpRoot, 'qoderwork-intercept-priority.jsonl');
-    const now = Date.now();
-    await fs.writeFile(interceptFile, [
-      JSON.stringify({ type: 'token', ts: now, id: responseId, prompt_tokens: 999, completion_tokens: 999, cached_tokens: 0, total_tokens: 1998 }),
-    ].join('\n') + '\n');
-
-    const input = makeInput({ interceptFile });
+    const input = makeInput();
     const entries = await startAndCollect(input);
+    expect(await triggerCycle(input)).toEqual([]);
     await input.stop();
 
-    const enriched = entries.find(e => e['event.id'] === 'prio-response')!;
+    expect(entries).toHaveLength(2);
+    const enriched = entries.find(e => e['event.id'] === 'native-response')!;
     expect(enriched['gen_ai.usage.input_tokens']).toBe(120);
     expect(enriched['gen_ai.usage.output_tokens']).toBe(30);
-  });
-
-  // fixture 来源: qoderwork-runtime-wrapper.mjs 写出的 qoderwork-intercept.jsonl
-  // (type=token, cached_tokens 字段)，segment log 可能不携带 cache_read，
-  // 需要 intercept 补齐 cache_read 字段。
-  it('overlays cache_read from intercept when segment supplied input/output only', async () => {
-    const sessionId = 'sess-intercept-overlay';
-    const turnId = 'turn-intercept-overlay';
-    const responseId = 'chatcmpl-overlay-1';
-    const hookFile = path.join(hookLogDir, todayFileName());
-    const request = buildHookEntry({
-      'event.id': 'overlay-request',
-      'event.name': 'llm.request' as any,
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
-    });
-    const response = buildHookEntry({
-      'event.id': 'overlay-response',
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      'gen_ai.response.id': responseId,
-      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
-    });
-    await fs.writeFile(hookFile, [request, response].map(e => JSON.stringify(e)).join('\n') + '\n');
-    // Segment provides input/output/total but no cache_read.
-    await writeSegments(sessionId, 'overlay.jsonl', [
-      segModelStart(turnId, 'overlay-req', '2026-06-16T10:00:00.000Z'),
-      segModelEnd(turnId, 'overlay-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate', {
-        input_tokens: 36438,
-        output_tokens: 47,
-      }),
-    ]);
-
-    const interceptFile = path.join(tmpRoot, 'qoderwork-intercept-overlay.jsonl');
-    const now = Date.now();
-    await fs.writeFile(interceptFile, [
-      JSON.stringify({ type: 'token', ts: now, id: responseId, prompt_tokens: 36438, completion_tokens: 47, cached_tokens: 36251, reasoning_tokens: 6, total_tokens: 36485 }),
-    ].join('\n') + '\n');
-
-    const input = makeInput({ interceptFile });
-    const entries = await startAndCollect(input);
-    await input.stop();
-
-    const enriched = entries.find(e => e['event.id'] === 'overlay-response')!;
-    // Segment stays authoritative for input/output/total.
-    expect(enriched['gen_ai.usage.input_tokens']).toBe(36438);
-    expect(enriched['gen_ai.usage.output_tokens']).toBe(47);
-    // Intercept supplements cache_read (segment lacked it).
-    expect(enriched['gen_ai.usage.cache_read.input_tokens']).toBe(36251);
-  });
-
-  it('does not let intercept cache_read override segment cache_read', async () => {
-    const sessionId = 'sess-intercept-keepseg';
-    const turnId = 'turn-intercept-keepseg';
-    const responseId = 'chatcmpl-keepseg-1';
-    const hookFile = path.join(hookLogDir, todayFileName());
-    const request = buildHookEntry({
-      'event.id': 'keepseg-request',
-      'event.name': 'llm.request' as any,
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
-    });
-    const response = buildHookEntry({
-      'event.id': 'keepseg-response',
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      'gen_ai.response.id': responseId,
-      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
-    });
-    await fs.writeFile(hookFile, [request, response].map(e => JSON.stringify(e)).join('\n') + '\n');
-    await writeSegments(sessionId, 'keepseg.jsonl', [
-      segModelStart(turnId, 'keepseg-req', '2026-06-16T10:00:00.000Z'),
-      segModelEnd(turnId, 'keepseg-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate', {
-        input_tokens: 100,
-        output_tokens: 20,
-        cache_read_input_tokens: 40,
-      }),
-    ]);
-
-    const interceptFile = path.join(tmpRoot, 'qoderwork-intercept-keepseg.jsonl');
-    const now = Date.now();
-    await fs.writeFile(interceptFile, [
-      JSON.stringify({ type: 'token', ts: now, id: responseId, prompt_tokens: 100, completion_tokens: 20, cached_tokens: 999, reasoning_tokens: 3, total_tokens: 120 }),
-    ].join('\n') + '\n');
-
-    const input = makeInput({ interceptFile });
-    const entries = await startAndCollect(input);
-    await input.stop();
-
-    const enriched = entries.find(e => e['event.id'] === 'keepseg-response')!;
-    // Segment cache_read (40) wins; intercept cache_read (999) does not override.
-    expect(enriched['gen_ai.usage.cache_read.input_tokens']).toBe(40);
-  });
-
-  it('does not apply intercept when response.id has no matching token', async () => {
-    const sessionId = 'sess-intercept-nomatch';
-    const turnId = 'turn-intercept-nomatch';
-    const hookFile = path.join(hookLogDir, todayFileName());
-    const request = buildHookEntry({
-      'event.id': 'nomatch-request',
-      'event.name': 'llm.request' as any,
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
-    });
-    const response = buildHookEntry({
-      'event.id': 'nomatch-response',
-      'gen_ai.session.id': sessionId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.step.id': `${turnId}:s1`,
-      'gen_ai.response.id': 'chatcmpl-unmatched',
-      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
-    });
-    await fs.writeFile(hookFile, [request, response].map(e => JSON.stringify(e)).join('\n') + '\n');
-
-    const interceptFile = path.join(tmpRoot, 'qoderwork-intercept-nomatch.jsonl');
-    const now = Date.now();
-    await fs.writeFile(interceptFile, [
-      JSON.stringify({ type: 'token', ts: now, id: 'chatcmpl-other', prompt_tokens: 200, completion_tokens: 50, total_tokens: 250 }),
-    ].join('\n') + '\n');
-
-    const input = makeInput({ interceptFile });
-    const entries = await startAndCollect(input);
-    await input.stop();
-
-    const enriched = entries.find(e => e['event.id'] === 'nomatch-response')!;
-    expect(enriched['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(enriched['gen_ai.usage.total_tokens']).toBe(150);
+    expect(enriched['gen_ai.usage.cache_read.input_tokens']).toBe(hasCache ? 50 : undefined);
+    expect(enriched['gen_ai.usage.cache_creation.input_tokens']).toBe(hasCache ? 10 : undefined);
+    expect(enriched.time_unix_nano).toBe(response.time_unix_nano);
+    const req = entries.find(e => e['event.id'] === 'native-request')!;
+    expect(req.time_unix_nano).toBe(request.time_unix_nano);
+    expect(req['gen_ai.system_instructions']).toBeUndefined();
+    expect(readIntercept).not.toHaveBeenCalled();
   });
 });
 

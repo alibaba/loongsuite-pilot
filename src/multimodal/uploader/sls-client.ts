@@ -2,6 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 import type { MultimodalRuntimeConfig, MultimodalStorageAuth } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
 import { normalizeOssEndpoint } from '../resolve.js';
+import { DEFAULT_MULTIMODAL_RETRY, withRetries } from './retry.js';
 
 const logger = createLogger('SlsClient');
 
@@ -156,6 +157,30 @@ export function normalizeSlsEndpoint(endpoint: string): SlsEndpoint {
   };
 }
 
+const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
+
+/** `{project}.{regional-host}` unless the host already carries that project. */
+export function slsProjectHost(project: string, endpointHost: string): string {
+  const host = endpointHost.replace(/\.$/, '');
+  const hostLower = host.toLowerCase();
+  const projectLower = project.toLowerCase();
+  if (hostLower.endsWith(SLS_PUBLIC_HOST_SUFFIX)) {
+    const rest = hostLower.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    if (parts.length >= 2) {
+      if (parts[0] === projectLower) return host;
+      const regionalHost = `${parts.slice(1).join('.')}${SLS_PUBLIC_HOST_SUFFIX}`;
+      logger.warn('SLS endpoint host carries a different project; using configured project', {
+        endpointHost: host,
+        hostProject: parts[0],
+        project,
+      });
+      return `${project}.${regionalHost}`;
+    }
+  }
+  return `${project}.${host}`;
+}
+
 export function resolveSlsObjectAuth(params: {
   mode?: 'ak' | 'apiKey';
   accessKeyId?: string;
@@ -267,7 +292,7 @@ export function buildBearerJsonRequest(args: {
   if (!args.apiKey) {
     throw new Error('SLS apiKey is required');
   }
-  const host = `${args.project}.${args.endpoint.host}`;
+  const host = slsProjectHost(args.project, args.endpoint.host);
   const url = `${args.endpoint.scheme}://${host}${args.resource}`;
   const date = formatRfc822Gmt(args.now ?? new Date());
   const bodyLength = args.body?.length ?? args.bodyLength ?? 0;
@@ -307,7 +332,7 @@ export function buildLogV1JsonRequest(args: {
     throw new Error('SLS access key ID and secret are required');
   }
 
-  const host = `${args.project}.${args.endpoint.host}`;
+  const host = slsProjectHost(args.project, args.endpoint.host);
   const url = `${args.endpoint.scheme}://${host}${args.resource}`;
   const date = (args.now ?? new Date()).toUTCString();
   const contentMd5 = args.contentMd5
@@ -630,6 +655,31 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
 const SLS_STARTUP_TIMEOUT_MS = 5_000;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
 
+/** Deterministic capability/auth errors fail closed; timeout/429/5xx use upload retry. */
+async function probeSlsMultimodalCapability(
+  params: SlsRequest,
+): Promise<SlsPresignResult> {
+  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
+  const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
+    const last = await slsGeneratePresignedUrl({
+      ...params,
+      objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+      timeoutMs,
+    });
+    if (last.ok && last.url) {
+      return { ok: true as const, value: last };
+    }
+    return {
+      ok: false as const,
+      retryable: last.retryable === true,
+      error: last.error,
+      statusCode: last.statusCode,
+    };
+  });
+  if (result.ok) return result.value;
+  return { ok: false, error: result.error || 'sls multimodal probe failed', statusCode: result.statusCode };
+}
+
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
   mode: 'ak' | 'apiKey';
   accessKeyId?: string;
@@ -650,14 +700,9 @@ export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
 
 /** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
 export async function sniffSlsHttpEventStorageBasePath(
-  params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'> & { timeoutMs?: number },
+  params: SlsRequest,
 ): Promise<{ ok: true; storageBasePath: string; origin: string } | { ok: false; error: string }> {
-  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
-  const presign = await slsGeneratePresignedUrl({
-    ...params,
-    objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
-    timeoutMs,
-  });
+  const presign = await probeSlsMultimodalCapability(params);
   if (!presign.ok || !presign.url) {
     return { ok: false, error: presign.error || 'presign failed' };
   }
@@ -687,11 +732,7 @@ export async function sniffSlsHttpEventStorageBasePath(
   }
 }
 
-/**
- * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * sls and oss use that prefix as-is. delegatedOss sniffs one presign and pins origin.
- * if target.ossBucket is set, the sniffed bucket must match or multimodal stays off.
- */
+/** Event URI prefix for Processor. */
 export async function resolveMultimodalEventStorageBasePath(
   config: MultimodalRuntimeConfig,
 ): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
@@ -699,6 +740,18 @@ export async function resolveMultimodalEventStorageBasePath(
     const storageBasePath = (config.storageBasePath ?? '').trim();
     if (!storageBasePath) {
       return { ok: false, error: 'multimodal storageBasePath is required' };
+    }
+    if (config.storage.type === 'sls') {
+      const { target, auth } = config.storage;
+      const probe = await probeSlsMultimodalCapability({
+        endpoint: target.endpoint,
+        project: target.project,
+        logstore: target.logstore,
+        ...slsStorageAuthFields(auth),
+      });
+      if (!probe.ok) {
+        return { ok: false, error: probe.error || 'sls multimodal probe failed' };
+      }
     }
     return { ok: true, storageBasePath };
   }
@@ -712,16 +765,5 @@ export async function resolveMultimodalEventStorageBasePath(
     timeoutMs: SLS_STARTUP_TIMEOUT_MS,
   });
   if (!sniffed.ok) return sniffed;
-
-  const configuredBucket = target.ossBucket?.trim() ?? '';
-  if (configuredBucket) {
-    const currentBucket = tryParseOssEventStorageBasePath(sniffed.storageBasePath)?.bucket ?? '';
-    if (currentBucket !== configuredBucket) {
-      return {
-        ok: false,
-        error: `configured ossBucket (${configuredBucket}) does not match current landing bucket (${currentBucket || 'unknown'})`,
-      };
-    }
-  }
   return sniffed;
 }

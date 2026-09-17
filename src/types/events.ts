@@ -62,6 +62,8 @@ export interface AgentActivityEntry {
   'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
+  /** HTTP response status captured at the model transport boundary. */
+  'http.response.status_code'?: number;
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
   'gen_ai.response.finish_reasons'?: string[];
