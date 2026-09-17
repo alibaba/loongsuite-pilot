@@ -52,7 +52,9 @@ export function mergeClaudeHooks(settings: ObjectValue, hook: AgentHookConfig, d
   result.env = env;
   env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
   // Quote the installed path as one shell word, including spaces and apostrophes.
-  const quoted = `'${hook.hookCommand.replace(/'/g, `'"'"'`)}'`;
+  const quoted = /^[a-zA-Z0-9_./:-]+$/.test(hook.hookCommand)
+    ? hook.hookCommand
+    : `'${hook.hookCommand.replace(/'/g, `'"'"'`)}'`;
   const commands = new Map(hook.events.map(event => [event,
     `${quoted} ${event.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()}`]));
   const expected = new Set(commands.values());
