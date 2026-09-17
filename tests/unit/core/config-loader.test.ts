@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const { mockReadJsonFile, mockLogger } = vi.hoisted(() => ({
+  mockReadJsonFile: vi.fn().mockResolvedValue(null),
+  mockLogger: {
+    info: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -8,12 +16,10 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  }),
+  createLogger: () => mockLogger,
 }));
 
-import { loadConfig, buildOtlpTraceConfig } from '../../../src/core/config-loader.js';
+import { loadConfig, buildOtlpTraceConfig, redactConfigForLog } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
@@ -65,6 +71,172 @@ describe('ConfigLoader', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  describe('loaded config file logging', () => {
+    const secretFile = {
+      enabled: true,
+      sls: {
+        enabled: true,
+        project: 'my-project',
+        logstore: 'my-logstore',
+        accessKeyId: 'AKIATALK',
+        accessKeySecret: 'super-secret-sk',
+        apiKey: 'sls-api-key-plain',
+      },
+      cms: {
+        licenseKey: 'cms-license-plain',
+        endpoint: 'https://cms.example.com',
+        workspace: 'ws1',
+      },
+      http: {
+        enabled: true,
+        url: 'https://http.example.com',
+        headers: { Authorization: 'Bearer http-token-plain' },
+      },
+      otlpTrace: {
+        endpoint: 'http://localhost:4318',
+        headers: { 'x-arms-license-key': 'otlp-license-plain' },
+      },
+      multimodal: {
+        storage: {
+          type: 'oss',
+          target: { endpoint: 'https://oss.example.com', storageBasePath: 'oss://bucket/mm' },
+          auth: {
+            mode: 'ak',
+            accessKeyId: 'mm-ak',
+            accessKeySecret: 'mm-sk-plain',
+            securityToken: 'mm-sts-plain',
+            apiKey: 'mm-api-key-plain',
+          },
+        },
+      },
+    };
+
+    it('logs the redacted config.json object on info, not the merged AnalyticsConfig', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(secretFile);
+
+      await loadConfig();
+
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        'loaded config file',
+        expect.objectContaining({
+          path: expect.any(String),
+          config: expect.any(Object),
+        }),
+      );
+
+      const payload = mockLogger.info.mock.calls.find(
+        (call) => call[0] === 'loaded config file',
+      )?.[1] as { path: string; config: Record<string, unknown> };
+      expect(payload.config).toMatchObject({
+        enabled: true,
+        sls: {
+          enabled: true,
+          project: 'my-project',
+          logstore: 'my-logstore',
+          accessKeyId: '<redacted>',
+          accessKeySecret: '<redacted>',
+          apiKey: '<redacted>',
+        },
+        cms: {
+          licenseKey: '<redacted>',
+          endpoint: 'https://cms.example.com',
+          workspace: 'ws1',
+        },
+        http: {
+          enabled: true,
+          url: 'https://http.example.com',
+          headers: { Authorization: '<redacted>' },
+        },
+        otlpTrace: {
+          endpoint: 'http://localhost:4318',
+          headers: { 'x-arms-license-key': '<redacted>' },
+        },
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: { endpoint: 'https://oss.example.com', storageBasePath: 'oss://bucket/mm' },
+            auth: {
+              mode: 'ak',
+              accessKeyId: '<redacted>',
+              accessKeySecret: '<redacted>',
+              securityToken: '<redacted>',
+              apiKey: '<redacted>',
+            },
+          },
+        },
+      });
+
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain('super-secret-sk');
+      expect(serialized).not.toContain('sls-api-key-plain');
+      expect(serialized).not.toContain('cms-license-plain');
+      expect(serialized).not.toContain('http-token-plain');
+      expect(serialized).not.toContain('otlp-license-plain');
+      expect(serialized).not.toContain('mm-sk-plain');
+      expect(serialized).not.toContain('mm-sts-plain');
+      expect(serialized).not.toContain('mm-api-key-plain');
+      expect(payload.config).not.toHaveProperty('flushers');
+      expect(payload.config).not.toHaveProperty('userId');
+    });
+
+    it('redacts secrets inside an sls endpoint array', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          {
+            name: 'primary',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'arr-project',
+            logstore: 'arr-logstore',
+            accessKeySecret: 'array-sk-plain',
+            apiKey: 'array-api-plain',
+          },
+        ],
+      });
+
+      await loadConfig();
+
+      const payload = mockLogger.info.mock.calls.find(
+        (call) => call[0] === 'loaded config file',
+      )?.[1] as { config: { sls: Array<Record<string, unknown>> } };
+      expect(payload.config.sls[0]).toMatchObject({
+        name: 'primary',
+        project: 'arr-project',
+        logstore: 'arr-logstore',
+        accessKeySecret: '<redacted>',
+        apiKey: '<redacted>',
+      });
+      expect(JSON.stringify(payload)).not.toContain('array-sk-plain');
+      expect(JSON.stringify(payload)).not.toContain('array-api-plain');
+    });
+
+    it('does not log a config payload when config.json is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      await loadConfig();
+
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'no config file found, using env + defaults',
+        expect.objectContaining({ path: expect.any(String) }),
+      );
+      const infoWithConfig = mockLogger.info.mock.calls.filter(
+        (call) => call[0] === 'loaded config file',
+      );
+      expect(infoWithConfig).toHaveLength(0);
+    });
+
+    it('redactConfigForLog leaves non-sensitive scalars unchanged', () => {
+      expect(redactConfigForLog({
+        enabled: false,
+        project: 'keep-me',
+        nested: [{ logstore: 'also-keep', apiKey: 'hide-me' }],
+      })).toEqual({
+        enabled: false,
+        project: 'keep-me',
+        nested: [{ logstore: 'also-keep', apiKey: '<redacted>' }],
+      });
+    });
   });
 
   describe('three-layer priority (T025)', () => {

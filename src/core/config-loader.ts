@@ -43,6 +43,34 @@ import { anyAgentMultimodalEnabled } from '../multimodal/agent-gate.js';
 
 const logger = createLogger('ConfigLoader');
 
+/** Keys whose string values must not appear in logs (case-insensitive substring). */
+const SENSITIVE_CONFIG_KEY = /secret|token|password|accessKey|apiKey|ak|sk|license/i;
+
+/**
+ * Recursively clone `value` with sensitive string fields replaced by `'<redacted>'`.
+ * Matches e2e redact: only string leaves whose key matches SENSITIVE_CONFIG_KEY.
+ * All string values under a `headers` object are also redacted (OTLP/HTTP auth).
+ */
+export function redactConfigForLog(value: unknown, key = ''): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactConfigForLog(item, key));
+  }
+  if (value !== null && typeof value === 'object') {
+    const redactAllStrings = /^headers$/i.test(key);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = redactAllStrings && typeof v === 'string'
+        ? '<redacted>'
+        : redactConfigForLog(v, k);
+    }
+    return out;
+  }
+  if (typeof value === 'string' && SENSITIVE_CONFIG_KEY.test(key)) {
+    return '<redacted>';
+  }
+  return value;
+}
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -265,7 +293,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {
-    logger.info('loaded config file', { path: configPath });
+    logger.info('loaded config file', { path: configPath, config: redactConfigForLog(file) });
   } else {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
