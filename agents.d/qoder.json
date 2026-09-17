@@ -15,12 +15,13 @@
     "winShell": "powershell",
     "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"],
     "interceptor": {
-      "events": ["UserPromptSubmit", "PreToolUse"],
+      "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
       "hookCommand": "$PILOT_DATA/hooks/interceptor-hook.sh",
       "matcher": "*",
       "timeout": {
         "UserPromptSubmit": 15,
-        "PreToolUse": 10
+        "PreToolUse": 10,
+        "PostToolUse": 10
       },
       "insert": "head"
     }

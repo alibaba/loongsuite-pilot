@@ -3,6 +3,7 @@ import { createLogger } from '../utils/logger.js';
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import { DaemonClient } from './cli/daemon-client.js';
 import { runHook } from './cli/hook.js';
+import { writeInterceptorAccessLog } from './access-log.js';
 import { defaultPilotDataDir, interceptorRuntimePath } from './paths.js';
 
 const logger = createLogger('InterceptorCli');
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
       readStdin: readStdin,
       writeStdout: (text) => process.stdout.write(text),
       log: (message, extra) => logger.warn(message, extra),
+      writeAccessLog: writeInterceptorAccessLog,
     });
     process.exitCode = code;
     return;

@@ -1126,10 +1126,10 @@ describe('HookStrategy', () => {
           format: 'nested',
           matcher: '*',
           interceptor: {
-            events: ['UserPromptSubmit', 'PreToolUse'],
+            events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
             hookCommand: '/opt/pilot/hooks/interceptor-hook.sh',
             matcher: '*',
-            timeout: { UserPromptSubmit: 15, PreToolUse: 10 },
+            timeout: { UserPromptSubmit: 15, PreToolUse: 10, PostToolUse: 10 },
             insert: 'head',
           },
         },
@@ -1146,6 +1146,7 @@ describe('HookStrategy', () => {
       expect(commands).toEqual([
         '/opt/pilot/hooks/interceptor-hook.sh',
         '/opt/pilot/hooks/interceptor-hook.sh',
+        '/opt/pilot/hooks/interceptor-hook.sh',
         '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
       ]);
       expect(mockHookManager.installHook.mock.calls[0][0]).toMatchObject({
@@ -1155,6 +1156,11 @@ describe('HookStrategy', () => {
       });
       expect(mockHookManager.installHook.mock.calls[1][0]).toMatchObject({
         hookJsonPath: ['hooks', 'PreToolUse'],
+        timeout: 10,
+        insert: 'head',
+      });
+      expect(mockHookManager.installHook.mock.calls[2][0]).toMatchObject({
+        hookJsonPath: ['hooks', 'PostToolUse'],
         timeout: 10,
         insert: 'head',
       });

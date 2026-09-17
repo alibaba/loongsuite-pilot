@@ -1,4 +1,5 @@
-export type HookEventName = 'UserPromptSubmit' | 'PreToolUse';
+export const SUPPORTED_HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'] as const;
+export type HookEventName = (typeof SUPPORTED_HOOK_EVENTS)[number];
 export type QoderSurface = 'qoder' | 'qodercli';
 export type VerdictAction = 'allow' | 'block';
 
@@ -10,6 +11,7 @@ export interface HookRequest {
   cwd?: string;
   toolName?: string;
   toolInput?: unknown;
+  toolResponse?: unknown;
   toolUseId?: string;
   prompt?: string;
   raw: Record<string, unknown>;
@@ -60,4 +62,5 @@ export const INTERCEPTOR_HOOK_TIMEOUT_MS = 4_000;
 export const INTERCEPTOR_EVENT_TIMEOUT_SEC: Record<HookEventName, number> = {
   UserPromptSubmit: 15,
   PreToolUse: 10,
+  PostToolUse: 10,
 };

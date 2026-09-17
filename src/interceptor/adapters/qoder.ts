@@ -9,6 +9,10 @@ const EVENT_ALIASES: Record<string, HookEventName> = {
   pre_tool_use: 'PreToolUse',
   'pre-tool-use': 'PreToolUse',
   preToolUse: 'PreToolUse',
+  PostToolUse: 'PostToolUse',
+  post_tool_use: 'PostToolUse',
+  'post-tool-use': 'PostToolUse',
+  postToolUse: 'PostToolUse',
 };
 
 export function canonicalizeHookEvent(raw: unknown): HookEventName | null {
@@ -44,6 +48,7 @@ export function parseHookRequest(
     prompt,
     toolName,
     toolInput: payload.tool_input,
+    toolResponse: payload.tool_response ?? payload.tool_output,
     toolUseId,
     raw: payload,
   };
@@ -54,6 +59,18 @@ export function renderQoderBlock(request: HookRequest, reason: string): string {
   if (request.event === 'UserPromptSubmit') {
     const decision = request.agent === 'qoder' ? 'block' : 'deny';
     return `${JSON.stringify({ decision, reason: text })}\n`;
+  }
+  if (request.event === 'PostToolUse') {
+    // PostToolUse cannot deny a tool that already ran. Replace the result
+    // shown to the model and ask the host to stop subsequent execution.
+    return `${JSON.stringify({
+      continue: false,
+      stopReason: text,
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: text,
+      },
+    })}\n`;
   }
   return `${JSON.stringify({
     hookSpecificOutput: {

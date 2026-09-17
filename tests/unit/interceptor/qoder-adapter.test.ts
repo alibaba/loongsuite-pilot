@@ -18,6 +18,8 @@ describe('Qoder adapter', () => {
       .toBe('UserPromptSubmit');
     expect(parseHookRequest({ hook_event_name: 'pre-tool-use', tool_name: 'Bash' }, 'qodercli')?.event)
       .toBe('PreToolUse');
+    expect(parseHookRequest({ hook_event_name: 'post_tool_use', tool_response: { ok: true } }, 'qoder')?.event)
+      .toBe('PostToolUse');
     expect(parseHookRequest({ hook_event_name: 'Stop' }, 'qoder')).toBeNull();
   });
 
@@ -43,5 +45,26 @@ describe('Qoder adapter', () => {
     })}\n`;
     expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qoder' }), 'denied')).toBe(expected);
     expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qodercli' }), 'denied')).toBe(expected);
+  });
+
+  it('renders PostToolUse by replacing output and requesting stop', () => {
+    const expected = `${JSON.stringify({
+      continue: false,
+      stopReason: 'denied',
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: 'denied',
+      },
+    })}\n`;
+    expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qoder' }), 'denied')).toBe(expected);
+    expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qodercli' }), 'denied')).toBe(expected);
+  });
+
+  it('keeps tool_response on parsed PostToolUse requests', () => {
+    expect(parseHookRequest({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_response: { stdout: 'secret' },
+    }, 'qodercli')?.toolResponse).toEqual({ stdout: 'secret' });
   });
 });

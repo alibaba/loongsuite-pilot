@@ -465,7 +465,7 @@ export class HookStrategy implements DeployStrategy {
   private interceptorTimeout(event: string, timeout?: number | Record<string, number>): number | undefined {
     if (typeof timeout === 'number') return timeout;
     if (timeout && typeof timeout[event] === 'number') return timeout[event];
-    if (event === 'UserPromptSubmit' || event === 'PreToolUse') {
+    if (event === 'UserPromptSubmit' || event === 'PreToolUse' || event === 'PostToolUse') {
       return INTERCEPTOR_EVENT_TIMEOUT_SEC[event];
     }
     return undefined;

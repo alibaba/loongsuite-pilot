@@ -64,6 +64,44 @@ describe('sensitive-type interceptor rules', () => {
     });
   });
 
+  it('blocks secrets in tool response', async () => {
+    const engine = new RuleEngine(builtinRules(), { apiKey: true });
+    await expect(engine.evaluate(request({
+      event: 'PostToolUse',
+      toolName: 'Bash',
+      toolResponse: { stdout: 'openai=sk-1234567890abcdefghijklmnop' },
+    }))).resolves.toEqual({
+      action: 'block',
+      reason: '[APIKEY_MASKED]',
+      ruleId: 'apiKey',
+      evaluatedRules: ['apiKey'],
+    });
+  });
+
+  it('blocks secrets in nested Read file content after a newline', async () => {
+    const engine = new RuleEngine(builtinRules(), { databaseUrl: true });
+    await expect(engine.evaluate(request({
+      event: 'PostToolUse',
+      toolName: 'Read',
+      toolInput: { file_path: '/Users/henryzhang/Desktop/tmp' },
+      toolResponse: {
+        type: 'text',
+        file: {
+          filePath: '../../../../Desktop/tmp',
+          content: '我的一些mysql常用配置：\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot\npostgres://agent:PostgresPass123@127.0.0.1:5432/pilot\n',
+          numLines: 6,
+          startLine: 1,
+          totalLines: 6,
+        },
+      },
+    }))).resolves.toEqual({
+      action: 'block',
+      reason: '[DATABASEURL_MASKED]',
+      ruleId: 'databaseUrl',
+      evaluatedRules: ['databaseUrl'],
+    });
+  });
+
   it('allows non-matching text when the switch is on', async () => {
     const cloud = createSensitiveTypeRule('cloudAccessKey');
     await expect(cloud.evaluate(request({ prompt: 'short_aliyun=LTAI123' }))).resolves.toEqual({
@@ -76,11 +114,22 @@ describe('sensitive-type interceptor rules', () => {
 });
 
 describe('collectHookText', () => {
-  it('joins prompt, tool name, and serialized tool input', () => {
+  it('joins prompt, tool name, and nested string leaves', () => {
     expect(collectHookText(request({
       prompt: 'hello',
       toolName: 'Bash',
       toolInput: { command: 'ls' },
-    }))).toBe('hello\nBash\n{"command":"ls"}');
+      toolResponse: { stdout: 'ok' },
+    }))).toBe('hello\nBash\nls\nok');
+  });
+
+  it('keeps real newlines inside nested file content', () => {
+    expect(collectHookText(request({
+      toolName: 'Read',
+      toolResponse: {
+        type: 'text',
+        file: { content: 'intro\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },
+      },
+    }))).toBe('Read\ntext\nintro\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot');
   });
 });

@@ -20,6 +20,10 @@ export function interceptorLogPath(dataDir?: string): string {
   return path.join(interceptorDataDir(dataDir), 'logs', 'interceptor.log');
 }
 
+export function interceptorAccessLogPath(dataDir?: string): string {
+  return path.join(interceptorDataDir(dataDir), 'logs', 'access.log');
+}
+
 export function interceptorLockPath(dataDir?: string): string {
   return path.join(interceptorDataDir(dataDir), 'interceptor.lock');
 }

@@ -3,7 +3,13 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { emitVerdict, runHook, wrapHostReason } from '../../../src/interceptor/cli/hook.js';
+import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import type { EvaluateHookResponse, InterceptorHealth } from '../../../src/interceptor/types.js';
+
+function collectAccess(): { entries: InterceptorAccessLogEntry[]; writeAccessLog: (entry: InterceptorAccessLogEntry) => void } {
+  const entries: InterceptorAccessLogEntry[] = [];
+  return { entries, writeAccessLog: (entry) => { entries.push(entry); } };
+}
 
 function payload(event = 'UserPromptSubmit'): string {
   return JSON.stringify({ hook_event_name: event, prompt: 'hello', session_id: 's1' });
@@ -29,37 +35,53 @@ describe('interceptor hook CLI', () => {
   it('fail-opens on illegal stdin', async () => {
     const logs: string[] = [];
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder-auto'], {
       readStdin: async () => '{',
       writeStdout: (text) => stdout.push(text),
       log: (message) => logs.push(message),
       resolveSurface: () => 'qoder',
+      writeAccessLog: access.writeAccessLog,
     });
     expect(code).toBe(0);
     expect(stdout).toEqual([]);
     expect(logs.some((line) => line.includes('parse'))).toBe(true);
+    expect(access.entries[0]).toMatchObject({
+      event: 'unknown',
+      input: { rawText: '{' },
+      result: { action: 'fail-open', error: 'failed to parse host stdin' },
+    });
   });
 
   it('fail-opens when runtime is missing', async () => {
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder'], {
       readStdin: async () => payload(),
       writeStdout: (text) => stdout.push(text),
       log: () => undefined,
       runtimePath: join(tmpdir(), 'missing-interceptor-runtime.json'),
+      writeAccessLog: access.writeAccessLog,
     });
     expect(code).toBe(0);
     expect(stdout).toEqual([]);
+    expect(access.entries[0]).toMatchObject({
+      event: 'UserPromptSubmit',
+      input: { prompt: 'hello' },
+      result: { action: 'fail-open', error: 'interceptor runtime missing' },
+    });
   });
 
   it('fail-opens when health identity does not match runtime', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder'], {
       readStdin: async () => payload(),
       writeStdout: (text) => stdout.push(text),
       log: () => undefined,
       runtimePath,
+      writeAccessLog: access.writeAccessLog,
       createClient: () => ({
         health: async (): Promise<InterceptorHealth> => ({
           service: 'loongsuite-pilot-interceptor',
@@ -73,16 +95,22 @@ describe('interceptor hook CLI', () => {
     });
     expect(code).toBe(0);
     expect(stdout).toEqual([]);
+    expect(access.entries[0]).toMatchObject({
+      event: 'UserPromptSubmit',
+      result: { action: 'fail-open', error: 'daemon identity mismatch' },
+    });
   });
 
   it('fail-opens when the daemon request throws', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder'], {
       readStdin: async () => payload(),
       writeStdout: (text) => stdout.push(text),
       log: () => undefined,
       runtimePath,
+      writeAccessLog: access.writeAccessLog,
       createClient: () => ({
         health: async () => {
           throw new Error('timeout');
@@ -92,16 +120,22 @@ describe('interceptor hook CLI', () => {
     });
     expect(code).toBe(0);
     expect(stdout).toEqual([]);
+    expect(access.entries[0]).toMatchObject({
+      event: 'UserPromptSubmit',
+      result: { action: 'fail-open', error: 'timeout' },
+    });
   });
 
   it('keeps stdout empty on allow', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder'], {
       readStdin: async () => payload(),
       writeStdout: (text) => stdout.push(text),
       log: () => undefined,
       runtimePath,
+      writeAccessLog: access.writeAccessLog,
       createClient: () => ({
         health: async (): Promise<InterceptorHealth> => ({
           service: 'loongsuite-pilot-interceptor',
@@ -115,16 +149,19 @@ describe('interceptor hook CLI', () => {
     });
     expect(code).toBe(0);
     expect(stdout).toEqual([]);
+    expect(access.entries).toEqual([]);
   });
 
   it('writes the Desktop block JSON on a blocking verdict', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
+    const access = collectAccess();
     const code = await runHook(['--agent', 'qoder'], {
       readStdin: async () => payload(),
       writeStdout: (text) => stdout.push(text),
       log: () => undefined,
       runtimePath,
+      writeAccessLog: access.writeAccessLog,
       createClient: () => ({
         health: async (): Promise<InterceptorHealth> => ({
           service: 'loongsuite-pilot-interceptor',
@@ -145,6 +182,7 @@ describe('interceptor hook CLI', () => {
       decision: 'block',
       reason: wrapHostReason('UserPromptSubmit', 'blocked'),
     })}\n`);
+    expect(access.entries).toEqual([]);
   });
 
   it('wraps PreToolUse interceptor reasons for the host', () => {
@@ -164,6 +202,24 @@ describe('interceptor hook CLI', () => {
     })}\n`);
   });
 
+  it('wraps PostToolUse interceptor reasons for the host', () => {
+    const chunks: string[] = [];
+    emitVerdict(
+      { agent: 'qoder', event: 'PostToolUse', raw: {} },
+      'block',
+      '内容非法',
+      (text) => chunks.push(text),
+    );
+    expect(chunks.join('')).toBe(`${JSON.stringify({
+      continue: false,
+      stopReason: wrapHostReason('PostToolUse', '内容非法'),
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: wrapHostReason('PostToolUse', '内容非法'),
+      },
+    })}\n`);
+  });
+
   it('does not emit stdout for unknown actions', () => {
     const chunks: string[] = [];
     emitVerdict(baseRequest(), 'maybe', 'x', (text) => chunks.push(text));
@@ -177,12 +233,17 @@ describe('CLI host reason wrapping', () => {
       .toBe('检测到敏感信息：内容非法，本轮对话终止');
     expect(wrapHostReason('PreToolUse', '内容非法'))
       .toBe('检测到非预期行为：内容非法，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。');
+    expect(wrapHostReason('PostToolUse', '内容非法'))
+      .toBe('检测到非预期行为：内容非法，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。');
   });
 
   it('omits the detail slot when interceptor reason is missing', () => {
     expect(wrapHostReason('UserPromptSubmit')).toBe('检测到敏感信息，本轮对话终止');
     expect(wrapHostReason('PreToolUse', '  ')).toBe(
       '检测到非预期行为，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。',
+    );
+    expect(wrapHostReason('PostToolUse')).toBe(
+      '检测到非预期行为，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。',
     );
   });
 });
