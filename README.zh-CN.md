@@ -161,7 +161,7 @@ loongsuite-pilot info
 
 对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
 
-同时开启 `upstreamLink.enabled` 和 `propagateToLlm` 后，同一条 Trace 会延伸到 **LLM 网关**：Claude Code 的 fetch preload 会在发往网关的 `/v1/messages` 请求上注入 `traceparent`，trace-id 和 flags 原样透传，parent-id 替换为该次 LLM 调用的 span id，使网关侧 span 挂在这个 LLM span 之下。调用方自己已设置的 `traceparent` 绝不会被覆盖，整条路径 fail-open。
+同时开启 `upstreamLink.enabled` 和 `propagateToLlm` 后，同一条 Trace 会延伸到 **LLM 网关**：Claude Code 的 fetch preload 会在发往网关的 `/v1/messages` 请求上注入 `traceparent`，trace-id 和 flags 原样透传，parent-id 替换为该次物理请求的 span id，使网关侧 span 挂在它之下。发生重试的调用会按 attempt 各自产生一个 LLM span，每个 attempt 通告自己的 span id，网关 span 因此挂在真正发出该请求的 attempt 之下。调用方自己已设置的 `traceparent` 绝不会被覆盖，整条路径 fail-open。
 
 ## 输出数据
 
