@@ -14,7 +14,7 @@
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
 #     --sls-api-key "your-api-key" \
-#     --multimodal-agents "codex:both,qoder:input"
+#     --multimodal-mode both
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -71,6 +71,7 @@ CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
+MULTIMODAL_MODE=""
 MULTIMODAL_AGENTS=""
 MASK_MODE=""
 MASK_TYPES=""
@@ -139,8 +140,8 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
-        --multimodal-agents)  MULTIMODAL_AGENTS="$2"; shift 2 ;;
-        --multimodal-agents=*) MULTIMODAL_AGENTS="${1#*=}"; shift ;;
+        --multimodal-mode)    MULTIMODAL_MODE="$2"; shift 2 ;;
+        --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
@@ -184,8 +185,16 @@ if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; };
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
 fi
-if [ -n "$MULTIMODAL_AGENTS" ] && [ "$COMMAND" != "install" ]; then
-    echo "❌ --multimodal-agents is only supported with install (got $COMMAND)" >&2
+if [ -n "$MULTIMODAL_MODE" ]; then
+    case "$MULTIMODAL_MODE" in
+        none|input|output|tool|both) ;;
+        *)
+            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', 'tool', or 'both')" >&2
+            exit 1 ;;
+    esac
+fi
+if [ -n "$MULTIMODAL_MODE" ] && [ "$COMMAND" != "install" ]; then
+    echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
     exit 1
 fi
 
@@ -735,12 +744,7 @@ process.stdout.write(ids.join(','));
 
 # Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 select_multimodal_agents() {
-    if [ -n "$MULTIMODAL_AGENTS" ]; then
-        msg "    使用指定的多模态 Agent: $MULTIMODAL_AGENTS" \
-            "    Using specified multimodal agents: $MULTIMODAL_AGENTS"
-        echo ""
-        return 0
-    fi
+    if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi
     MULTIMODAL_AGENTS=$(printf '%s' "$PROBE_RESULT" | LP_SELECTED_AGENTS="$SELECTED_AGENTS" "$NODE_BIN" -e '
 const fs = require("fs");
 const supported = ["codex", "qoder"];
@@ -750,8 +754,8 @@ const ids = r.filter(a => a && a.detected && supported.includes(a.id) && selecte
 process.stdout.write(ids.join(","));
 ' 2>/dev/null || true)
     if [ -n "$MULTIMODAL_AGENTS" ]; then
-        msg "    自动开启多模态: $MULTIMODAL_AGENTS" \
-            "    Auto-enabled multimodal: $MULTIMODAL_AGENTS"
+        msg "    多模态 ($MULTIMODAL_MODE): $MULTIMODAL_AGENTS" \
+            "    Multimodal ($MULTIMODAL_MODE): $MULTIMODAL_AGENTS"
         echo ""
     fi
 }
@@ -1036,6 +1040,7 @@ write_config() {
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
+        LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" \
         LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
@@ -1116,6 +1121,7 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
+const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const multimodalAgents = process.env.LP_MULTIMODAL_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
@@ -1169,21 +1175,16 @@ if (selectedAgents) {
   }
 }
 
-if (multimodalAgents) {
+if (multimodalMode) {
   config.agents = config.agents || {};
-  let multimodalEnabled = 0;
-  for (const raw of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
-    const colon = raw.indexOf(':');
-    const id = colon === -1 ? raw : raw.slice(0, colon).trim();
-    const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
-    if (!id || !mode) continue;
-    if (!['none', 'input', 'output', 'tool', 'both'].includes(mode)) continue;
+  let multimodalEnabled = false;
+  for (const id of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
     if (!config.agents[id]) continue;
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: mode };
-    if (mode !== 'none') multimodalEnabled++;
+    config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
+    if (multimodalMode !== 'none') multimodalEnabled = true;
   }
   if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
     config.multimodal = {

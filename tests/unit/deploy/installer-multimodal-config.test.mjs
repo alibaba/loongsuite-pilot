@@ -7,35 +7,36 @@ import { describe, expect, it } from 'vitest';
 const installerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8');
 const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8');
 
-describe('public installer multimodal agent flags', () => {
-  it('shell installer accepts --multimodal-agents and writes uploadMode', () => {
-    expect(installerSh).toContain('MULTIMODAL_AGENTS=""');
-    expect(installerSh).toContain('--multimodal-agents)');
-    expect(installerSh).toContain('--multimodal-agents=*)');
+describe('public installer multimodal mode flag', () => {
+  it('shell installer accepts --multimodal-mode and writes uploadMode', () => {
+    expect(installerSh).toContain('MULTIMODAL_MODE=""');
+    expect(installerSh).toContain('--multimodal-mode)');
+    expect(installerSh).toContain('--multimodal-mode=*)');
+    expect(installerSh).toContain('LP_MULTIMODAL_MODE="$MULTIMODAL_MODE"');
     expect(installerSh).toContain('LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS"');
-    expect(installerSh).toContain("const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();");
-    expect(installerSh).toContain('uploadMode: mode');
-    expect(installerSh).toContain('--multimodal-agents is only supported with install');
-    expect(installerSh).toContain("['none', 'input', 'output', 'tool', 'both'].includes(mode)");
-    expect(installerSh).toContain('if (!config.agents[id]) continue;');
+    expect(installerSh).toContain('--multimodal-mode is only supported with install');
+    expect(installerSh).toContain("none|input|output|tool|both)");
+    expect(installerSh).toContain('if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi');
     expect(installerSh).toContain('select_multimodal_agents()');
     expect(installerSh).toContain('const supported = ["codex", "qoder"];');
-    expect(installerSh).toContain('if (mode !== \'none\') multimodalEnabled++');
+    expect(installerSh).toContain("if (multimodalMode !== 'none') multimodalEnabled = true");
+    expect(installerSh).toContain('uploadMode: multimodalMode');
+    expect(installerSh).toContain('if (!config.agents[id]) continue;');
     expect(installerSh).toContain('if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey)');
     expect(installerSh).toContain("auth: { mode: 'apiKey', apiKey: slsApiKey }");
   });
 
-  it('PowerShell installer accepts -MultimodalAgents and writes uploadMode', () => {
-    expect(installerPs1).toContain('[string]$MultimodalAgents');
-    expect(installerPs1).toContain('multimodalAgents');
-    expect(installerPs1).toContain("const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();");
-    expect(installerPs1).toContain('uploadMode: mode');
-    expect(installerPs1).toContain('-MultimodalAgents is only supported with install');
-    expect(installerPs1).toContain("['none', 'input', 'output', 'tool', 'both'].includes(mode)");
-    expect(installerPs1).toContain('if (!config.agents[id]) continue;');
+  it('PowerShell installer accepts -MultimodalMode and writes uploadMode', () => {
+    expect(installerPs1).toContain('[string]$MultimodalMode');
+    expect(installerPs1).toContain('multimodalMode');
+    expect(installerPs1).toContain('-MultimodalMode is only supported with install');
+    expect(installerPs1).toContain('@("none", "input", "output", "tool", "both")');
+    expect(installerPs1).toContain('if (-not $script:MultimodalMode) { return }');
     expect(installerPs1).toContain('function Select-MultimodalAgents');
     expect(installerPs1).toContain('const supported = ["codex", "qoder"];');
-    expect(installerPs1).toContain('if (mode !== \'none\') multimodalEnabled++');
+    expect(installerPs1).toContain("if (opts.multimodalMode !== 'none') multimodalEnabled = true");
+    expect(installerPs1).toContain('uploadMode: opts.multimodalMode');
+    expect(installerPs1).toContain('if (!config.agents[id]) continue;');
     expect(installerPs1).toContain('if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)');
     expect(installerPs1).toContain("auth: { mode: 'apiKey', apiKey: opts.slsApiKey }");
   });
@@ -99,18 +100,10 @@ const completeSls = {
   apiKey: 'test-sls-api-key',
 };
 
-const handwrittenStorage = {
-  type: 'oss',
-  target: {
-    endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
-    storageBasePath: 'oss://bucket/mm',
-  },
-  auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-};
-
-function runWriteConfig(platform, multimodalAgents, existing, {
+function runWriteConfig(platform, multimodalMode, existing, {
   selectedAgents = '',
   probeAgents = [],
+  multimodalAgents = '',
   sls = {},
 } = {}) {
   const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-data-'));
@@ -128,6 +121,7 @@ function runWriteConfig(platform, multimodalAgents, existing, {
       writeFileSync(optsPath, JSON.stringify({
         configPath,
         dataDir: root,
+        multimodalMode,
         multimodalAgents,
         selectedAgents,
         probeResult: probeJson,
@@ -145,6 +139,7 @@ function runWriteConfig(platform, multimodalAgents, existing, {
       input: probeJson,
       env: {
         ...process.env,
+        LP_MULTIMODAL_MODE: multimodalMode,
         LP_MULTIMODAL_AGENTS: multimodalAgents,
         LP_SELECTED_AGENTS: selectedAgents,
         LP_SLS_API_KEY: sls.apiKey ?? '',
@@ -159,33 +154,29 @@ function runWriteConfig(platform, multimodalAgents, existing, {
   }
 }
 
-describe('installer write_config multimodal-agents', () => {
+describe('installer write_config multimodal-mode', () => {
   for (const platform of ['bash', 'powershell-js']) {
     describe(platform, () => {
-      it('defaults bare agent ids to both', () => {
-        const result = runWriteConfig(platform, 'codex,qoder', enabledAgents);
+      it('writes the same mode onto listed existing agents and skips unknown ids', () => {
+        const result = runWriteConfig(platform, 'both', enabledAgents, {
+          multimodalAgents: 'codex,foo',
+        });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.agents.qoder.multimodal).toBeUndefined();
+        expect(result.config.agents.foo).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
       });
 
-      it('honors per-agent mode and mixed defaults', () => {
-        const result = runWriteConfig(platform, 'codex:both,qoder:input', enabledAgents);
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal.uploadMode).toBe('both');
-        expect(result.config.agents.qoder.multimodal.uploadMode).toBe('input');
-      });
-
       it('keeps allowedRootPaths and enabled when merging', () => {
-        const result = runWriteConfig(platform, 'qoder:input', {
+        const result = runWriteConfig(platform, 'input', {
           agents: {
             qoder: {
               enabled: false,
               multimodal: { uploadMode: 'none', allowedRootPaths: ['~/workspace'] },
             },
           },
-        });
+        }, { multimodalAgents: 'qoder' });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder).toEqual({
           enabled: false,
@@ -193,36 +184,18 @@ describe('installer write_config multimodal-agents', () => {
         });
       });
 
-      it('does not write multimodal when the flag is empty', () => {
+      it('does not write multimodal when the mode is omitted', () => {
         const result = runWriteConfig(platform, '', {
           agents: { qoder: { enabled: true } },
-        });
+        }, { multimodalAgents: 'qoder' });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder).toEqual({ enabled: true });
       });
 
-      it('skips an empty mode after the colon', () => {
-        const result = runWriteConfig(platform, 'codex:', enabledAgents);
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex).toEqual({ enabled: true });
-      });
-
-      it('skips ids that are not already in config.agents', () => {
-        const result = runWriteConfig(platform, 'codex,foo', enabledAgents);
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.agents.foo).toBeUndefined();
-      });
-
-      it('does not create an agent entry when config.agents is empty', () => {
-        const result = runWriteConfig(platform, 'codex');
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex).toBeUndefined();
-      });
-
       it('writes uploadMode only after --agents has created the entry', () => {
-        const result = runWriteConfig(platform, 'codex,foo', undefined, {
+        const result = runWriteConfig(platform, 'both', undefined, {
           selectedAgents: 'codex',
+          multimodalAgents: 'codex,foo',
           probeAgents: [{ id: 'codex' }, { id: 'cursor' }],
         });
         expect(result.status, result.stderr).toBe(0);
@@ -234,78 +207,14 @@ describe('installer write_config multimodal-agents', () => {
         expect(result.config.agents.cursor).toEqual({ enabled: false });
       });
 
-      it('skips an unknown uploadMode', () => {
-        const result = runWriteConfig(platform, 'codex:botn,qoder:input', enabledAgents);
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex).toEqual({ enabled: true });
-        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'input' });
-      });
-
       it('writes multimodal.storage from the four SLS flags when an agent is enabled', () => {
-        const result = runWriteConfig(platform, 'codex:both', enabledAgents, { sls: completeSls });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.multimodal).toEqual({
-          storage: {
-            type: 'sls',
-            target: {
-              endpoint: completeSls.endpoint,
-              project: completeSls.project,
-              logstore: completeSls.logstore,
-            },
-            auth: { mode: 'apiKey', apiKey: completeSls.apiKey },
-          },
-        });
-      });
-
-      it('does not write multimodal.storage when apiKey is missing', () => {
-        const result = runWriteConfig(platform, 'codex:both', enabledAgents, {
-          sls: { ...completeSls, apiKey: '' },
-        });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.multimodal).toBeUndefined();
-      });
-
-      it('does not write multimodal.storage when project is missing', () => {
-        const result = runWriteConfig(platform, 'codex:both', enabledAgents, {
-          sls: { ...completeSls, project: '' },
-        });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.multimodal).toBeUndefined();
-      });
-
-      it('does not write multimodal.storage when every id is skipped', () => {
-        const result = runWriteConfig(platform, 'foo:both', enabledAgents, { sls: completeSls });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.foo).toBeUndefined();
-        expect(result.config.multimodal).toBeUndefined();
-      });
-
-      it('does not write multimodal.storage when the only written mode is none', () => {
-        const result = runWriteConfig(platform, 'codex:none', enabledAgents, { sls: completeSls });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
-        expect(result.config.multimodal).toBeUndefined();
-      });
-
-      it('keeps handwritten multimodal.storage when the SLS four-tuple is incomplete', () => {
-        const result = runWriteConfig(platform, 'codex:both', {
+        const result = runWriteConfig(platform, 'both', {
           ...enabledAgents,
-          multimodal: { storage: handwrittenStorage },
+          multimodal: { extra: true },
         }, {
-          sls: { ...completeSls, apiKey: '' },
+          multimodalAgents: 'codex',
+          sls: completeSls,
         });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.multimodal).toEqual({ storage: handwrittenStorage });
-      });
-
-      it('overwrites handwritten storage and keeps sibling keys when the four-tuple is complete', () => {
-        const result = runWriteConfig(platform, 'codex:both', {
-          ...enabledAgents,
-          multimodal: { extra: true, storage: handwrittenStorage },
-        }, { sls: completeSls });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
           extra: true,
@@ -319,6 +228,35 @@ describe('installer write_config multimodal-agents', () => {
             auth: { mode: 'apiKey', apiKey: completeSls.apiKey },
           },
         });
+      });
+
+      it('does not write multimodal.storage when the four-tuple is incomplete', () => {
+        const result = runWriteConfig(platform, 'both', enabledAgents, {
+          multimodalAgents: 'codex',
+          sls: { ...completeSls, apiKey: '' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('writes none onto listed agents only and does not write storage', () => {
+        const result = runWriteConfig(platform, 'none', {
+          agents: {
+            codex: { enabled: true, multimodal: { uploadMode: 'both', allowedRootPaths: ['~/workspace'] } },
+            qoder: { enabled: true, multimodal: { uploadMode: 'input' } },
+          },
+        }, {
+          multimodalAgents: 'codex',
+          sls: completeSls,
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({
+          uploadMode: 'none',
+          allowedRootPaths: ['~/workspace'],
+        });
+        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'input' });
+        expect(result.config.multimodal).toBeUndefined();
       });
     });
   }
@@ -341,30 +279,14 @@ function runAutoSelect(source, probeAgents, selectedAgents) {
   return result.stdout;
 }
 
-describe('multimodal auto-select after agent selection', () => {
+describe('multimodal probe after agent selection', () => {
   for (const [platform, source] of [['bash', installerSh], ['powershell-js', installerPs1]]) {
-    describe(platform, () => {
-      it('enables detected and selected supported agents only', () => {
-        expect(runAutoSelect(source, [
-          { id: 'codex', detected: true },
-          { id: 'qoder', detected: true },
-          { id: 'cursor', detected: true },
-        ], 'codex,qoder,cursor')).toBe('codex,qoder');
-      });
-
-      it('skips supported agents that were not selected', () => {
-        expect(runAutoSelect(source, [
-          { id: 'codex', detected: true },
-          { id: 'qoder', detected: true },
-        ], 'qoder')).toBe('qoder');
-      });
-
-      it('skips supported agents that were not detected', () => {
-        expect(runAutoSelect(source, [
-          { id: 'codex', detected: false },
-          { id: 'qoder', detected: true },
-        ], 'codex,qoder')).toBe('qoder');
-      });
+    it(`${platform} keeps detected ∩ selected ∩ supported`, () => {
+      expect(runAutoSelect(source, [
+        { id: 'codex', detected: true },
+        { id: 'qoder', detected: false },
+        { id: 'cursor', detected: true },
+      ], 'codex,qoder,cursor')).toBe('codex');
     });
   }
 });

@@ -13,7 +13,7 @@
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
 #     -SlsApiKey "your-api-key" `
-#     -MultimodalAgents "codex:both,qoder:input"
+#     -MultimodalMode both
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -55,7 +55,7 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
-    [string]$MultimodalAgents,
+    [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
     [switch]$Purge,
@@ -131,9 +131,16 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
 }
-$script:MultimodalAgents = $MultimodalAgents
-if ($MultimodalAgents -and $Command -ne "install") {
-    Write-Error "-MultimodalAgents is only supported with install (got $Command)"
+$script:MultimodalMode = $MultimodalMode
+$script:MultimodalAgents = ""
+if ($MultimodalMode) {
+    if ($MultimodalMode -notin @("none", "input", "output", "tool", "both")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', 'tool', or 'both')"
+        exit 1
+    }
+}
+if ($MultimodalMode -and $Command -ne "install") {
+    Write-Error "-MultimodalMode is only supported with install (got $Command)"
     exit 1
 }
 
@@ -972,12 +979,7 @@ process.stdout.write(ids.join(','));
 
 # Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 function Select-MultimodalAgents {
-    if ($script:MultimodalAgents) {
-        Msg "    使用指定的多模态 Agent: $($script:MultimodalAgents)" `
-            "    Using specified multimodal agents: $($script:MultimodalAgents)"
-        Write-Host ""
-        return
-    }
+    if (-not $script:MultimodalMode) { return }
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $env:LP_SELECTED_AGENTS = "$($script:SELECTED_AGENTS)"
     $script:MultimodalAgents = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
@@ -991,8 +993,8 @@ process.stdout.write(ids.join(","));
     Remove-Item Env:LP_SELECTED_AGENTS -ErrorAction SilentlyContinue
     $ErrorActionPreference = $prevEAP
     if ($script:MultimodalAgents) {
-        Msg "    自动开启多模态: $($script:MultimodalAgents)" `
-            "    Auto-enabled multimodal: $($script:MultimodalAgents)"
+        Msg "    多模态 ($($script:MultimodalMode)): $($script:MultimodalAgents)" `
+            "    Multimodal ($($script:MultimodalMode)): $($script:MultimodalAgents)"
         Write-Host ""
     }
 }
@@ -1363,6 +1365,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        multimodalMode    = "$($script:MultimodalMode)"
         multimodalAgents  = "$($script:MultimodalAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
@@ -1472,21 +1475,16 @@ if (opts.selectedAgents) {
     }
   }
 }
-if (opts.multimodalAgents) {
+if (opts.multimodalMode) {
   config.agents = config.agents || {};
-  let multimodalEnabled = 0;
-  for (const raw of String(opts.multimodalAgents).split(',').map(s => s.trim()).filter(Boolean)) {
-    const colon = raw.indexOf(':');
-    const id = colon === -1 ? raw : raw.slice(0, colon).trim();
-    const mode = colon === -1 ? 'both' : raw.slice(colon + 1).trim();
-    if (!id || !mode) continue;
-    if (!['none', 'input', 'output', 'tool', 'both'].includes(mode)) continue;
+  let multimodalEnabled = false;
+  for (const id of String(opts.multimodalAgents || '').split(',').map(s => s.trim()).filter(Boolean)) {
     if (!config.agents[id]) continue;
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: mode };
-    if (mode !== 'none') multimodalEnabled++;
+    config.agents[id].multimodal = { ...prev, uploadMode: opts.multimodalMode };
+    if (opts.multimodalMode !== 'none') multimodalEnabled = true;
   }
   if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
     config.multimodal = {
