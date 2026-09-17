@@ -508,6 +508,89 @@ describe('DeploymentManager', () => {
       expect(state).toBeDefined();
     });
 
+    it('persists Grok hookSettingsPath and undeploys that file after env drift', async () => {
+      const customHome = path.join(tmpDir, 'workspace-grok');
+      const settingsPath = path.join(customHome, 'hooks', 'loongsuite-pilot.json');
+      const defaultSettingsPath = path.join(tmpDir, 'default-grok', 'hooks', 'loongsuite-pilot.json');
+      const def: AgentDefinition = {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: [customHome], commands: [] },
+        hook: {
+          settingsPath,
+          events: ['stop'],
+          hookCommand: path.join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh'),
+          format: 'nested',
+          matcher: '',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      expect((await mgr.deployAll())[0].success).toBe(true);
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'))['grok-build'])
+        .toMatchObject({ hookSettingsPath: path.resolve(settingsPath) });
+      expect(JSON.parse(await fs.readFile(settingsPath, 'utf-8')).hooks.stop).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            matcher: '',
+            hooks: expect.arrayContaining([
+              expect.objectContaining({
+                command: expect.stringContaining('grok-build-loongsuite-pilot-hook'),
+              }),
+            ]),
+          }),
+        ]),
+      );
+
+      await mgr.undeployAgent({
+        ...def,
+        detection: { paths: [path.dirname(defaultSettingsPath)], commands: [] },
+        hook: { ...def.hook!, settingsPath: defaultSettingsPath },
+      });
+      const remaining = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(remaining.hooks?.stop).toBeUndefined();
+    });
+
+    it('persists Pi pluginInjectConfigPath and undeploys that file after env drift', async () => {
+      const customDir = path.join(tmpDir, 'pi-agent');
+      const configPath = path.join(customDir, 'settings.json');
+      const defaultConfigPath = path.join(tmpDir, 'default-pi', 'settings.json');
+      const pluginSpec = path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+      const def: AgentDefinition = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: [customDir], commands: ['pi'] },
+        pluginInject: {
+          configPaths: [configPath],
+          pluginSpec,
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+          createIfMissing: true,
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      expect((await mgr.deployAll())[0].success).toBe(true);
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'))['pi-coding-agent'])
+        .toMatchObject({ pluginInjectConfigPath: path.resolve(configPath) });
+      expect(JSON.parse(await fs.readFile(configPath, 'utf-8')).extensions).toEqual(
+        expect.arrayContaining([pluginSpec]),
+      );
+
+      await mgr.undeployAgent({
+        ...def,
+        detection: { paths: [path.dirname(defaultConfigPath)], commands: ['pi'] },
+        pluginInject: { ...def.pluginInject!, configPaths: [defaultConfigPath] },
+      });
+      expect(JSON.parse(await fs.readFile(configPath, 'utf-8')).extensions ?? []).not.toContain(pluginSpec);
+    });
+
     it('handles empty agents directory', async () => {
       const mgr = makeManager();
       const results = await mgr.deployAll();

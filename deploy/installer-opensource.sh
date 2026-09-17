@@ -2228,6 +2228,20 @@ try {
 remove_grok_build_hook_config() {
     local grok_home="${GROK_HOME:-$HOME/.grok}"
     local cfg="$grok_home/hooks/loongsuite-pilot.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["grok-build"]?.hookSettingsPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     [ -f "$cfg" ] || return 0
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
@@ -2503,6 +2517,20 @@ try {
 # ============================================================
 remove_pi_coding_agent_extension() {
     local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"

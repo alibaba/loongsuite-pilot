@@ -1975,6 +1975,25 @@ try {
 function Remove-GrokBuildHookConfig {
     $grokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $env:USERPROFILE ".grok" }
     $cfg = Join-Path $grokHome "hooks\loongsuite-pilot.json"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if ($script:NODE_BIN -and (Test-Path -LiteralPath $stateFile)) {
+        $prevEAP = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $persisted = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["grok-build"]?.hookSettingsPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+'@ $stateFile 2>$null
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($persisted) { $cfg = [string]$persisted }
+    }
     if (-not (Test-Path -LiteralPath $cfg)) { return }
     if (-not $script:NODE_BIN) {
         Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" `
@@ -2145,6 +2164,25 @@ function Remove-HermesPlugin {
 function Remove-PiCodingAgentExtension {
     $piAgentDir = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $env:USERPROFILE ".pi\agent" }
     $cfg = Join-Path $piAgentDir "settings.json"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if ($script:NODE_BIN -and (Test-Path -LiteralPath $stateFile)) {
+        $prevEAP = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $persisted = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+'@ $stateFile 2>$null
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($persisted) { $cfg = [string]$persisted }
+    }
     $short = $cfg.Replace($env:USERPROFILE, "~")
 
     if (-not $script:NODE_BIN) {
