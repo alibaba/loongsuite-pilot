@@ -1668,6 +1668,16 @@ cmd_agent() {
     esac
 }
 
+cmd_inject() {
+    local node_bin version_dir
+    node_bin=$(resolve_node) || return 1
+    version_dir=$(resolve_current_version) || return 1
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$version_dir/dist/index.js" inject "$@"
+}
+
 cmd_deploy() {
     ensure_dirs
     sync_bootstrap_scripts
@@ -2838,6 +2848,8 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  inject --agents=claude-code [--config-dir PATH] [--json]"
+    echo "                  Prepare session hooks once (Linux/macOS)"
     echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
     echo "                    --require <ids>  comma-separated agent ids that must deploy"
     echo "                    --json           machine-readable result"
@@ -2863,6 +2875,7 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    inject)      shift; cmd_inject "$@" ;;
     deploy)      shift; cmd_deploy "$@" ;;
     dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;

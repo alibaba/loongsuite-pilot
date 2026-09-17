@@ -2518,6 +2518,7 @@ switch ($Command.ToLower()) {
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
+    "inject"             { Write-Error "Session hook injection currently supports Linux and macOS only"; exit 1 }
     "deploy"             { Cmd-Deploy }
     "token-usage"        { Cmd-TokenUsage }
     "tokens"             { Cmd-TokenUsage }
