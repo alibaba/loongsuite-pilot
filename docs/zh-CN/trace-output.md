@@ -48,6 +48,60 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP Trace endpoint。 |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | OTLP 请求头 JSON 字符串。 |
 
+## 自定义 Span 属性补齐
+
+`otlpTrace.spanEnrichers` 显式指定可信本地 `.mjs` 插件，可根据完整的
+`gen_ai.tool.*` 属性推导 `gen_ai.skill.*`。它也适用于 CMS/ARMS 或托管 Trace
+目标，无需额外配置通用 OTLP endpoint。
+
+```json
+{
+  "otlpTrace": {
+    "spanEnrichers": ["$PILOT_DATA/span-enrichers/tool-skill.mjs"]
+  }
+}
+```
+
+插件默认导出包含同步 `enrich(span, context)` 方法的对象。例如：
+
+```js
+export default {
+  enrich(span, context) {
+    const attrs = span.attributes;
+    if (attrs['gen_ai.span.kind'] !== 'TOOL') return;
+    if (attrs['gen_ai.tool.name'] !== 'exec') return;
+    const raw = attrs['gen_ai.tool.call.arguments'];
+    if (typeof raw !== 'string') return;
+    const args = JSON.parse(raw);
+    if (typeof args.command !== 'string' || !args.command.startsWith('npm test')) return;
+    return {
+      'gen_ai.skill.name': 'run-tests',
+      'gen_ai.skill.id': 'run-tests',
+      'gen_ai.skill.version': '1.0',
+    };
+  },
+};
+```
+
+执行顺序：`事件转换 → 内置属性补齐 → 自定义 enrichers → debug/失败记录和 OTLP 导出`。
+此接口是 Pilot 的导出前转换接口，不是 OpenTelemetry `SpanProcessor.onEnd`；
+Pilot 创建新的导出视图，不通过插件修改已结束的 SDK Span。
+
+- `span` 提供只读的 `name`、`traceId`、`spanId`、`attributes`；属性数组也只读。
+  `context` 提供只读的 `agentType` 和最终 `serviceName`。不提供原始事件、SDK Span 或 resource 修改接口。
+- 返回属性对象或 `undefined`。支持字符串、有限数值、布尔值及同类型数组；
+  数组可包含 `null`/`undefined`。不支持嵌套对象、删除属性和异步回调。
+  无效补丁整体忽略。多个插件按配置顺序执行，后者能读取前者的结果，同名属性后者覆盖前者（包括内置属性）。
+- 支持绝对路径、`~/`、`$PILOT_DATA/`（实际数据目录），相对路径以 `config.json`
+  所在目录为基准。最多 16 个插件，真实路径去重，不自动扫描目录。
+- 首次转换时加载一次，修改插件后需要重启 Pilot。模块加载等待上限为 5 秒；
+  加载失败、无效导出或回调抛错不会阻止正常 trace 导出。回调错误每个插件仅告警一次，
+  不记录可能含敏感参数的异常文本。`forceFlush`/`shutdown` 等 SDK 生命周期方法不调用。
+- 插件仅能读取采集和隐私配置允许保留的属性，无法恢复缺失或已脱敏内容。
+  不同服务名的后端可能分别转换同一轮次，插件应使用无副作用、快速的属性映射。
+- 插件与 Pilot 同进程运行，只加载可信代码。超时不取消模块执行，也无法打断同步死循环；
+  只读快照和异常捕获不是安全沙箱。新增属性不会再经过输入侧脱敏，请勿重新引入敏感内容。
+
 ## ARMS/CMS 兼容 Trace 输出
 
 Pilot 也支持 CMS 风格的 Trace 配置：

@@ -18,6 +18,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
+import { SpanEnricherRunner } from './span-enricher.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -47,6 +48,11 @@ const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+// Claude Code marks a failed attempt (mid-turn retry or terminal API failure)
+// with finish_reasons=['error']. 'error' must NOT be a turn boundary on its own,
+// or a mid-turn retry would flush the turn before its later records arrive; the
+// terminal failure is flagged with gen_ai.turn.end===true instead.
+const CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
 const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
 const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',
@@ -511,6 +517,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   readonly name = 'otlp-trace';
 
   private readonly cfg: OtlpTraceFlusherConfig;
+  private readonly spanEnrichers: SpanEnricherRunner;
   private readonly turnBuffers = new Map<string, TurnBuffer>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
@@ -549,6 +556,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    this.spanEnrichers = new SpanEnricherRunner(cfg.spanEnricherPaths ?? []);
     this.globalAttributesProvider = globalAttributesProvider;
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
     this.endpoints = cfg.endpoints.map((ep, i) => ({
@@ -864,6 +872,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
             GROK_TERMINAL_FINISH_REASONS,
           ));
     }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'claude-code') {
+      // A failed attempt carries finish_reasons=['error']: a mid-turn retry
+      // must not end the turn (its later records still arrive), so 'error' is
+      // excluded here. The terminal API failure is flagged with
+      // gen_ai.turn.end===true; successful turns end with a model stop reason.
+      return entry['gen_ai.turn.end'] === true
+        || hasFinishReason(
+          entry['gen_ai.response.finish_reasons'],
+          CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
+        );
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
@@ -1090,7 +1109,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
 
       await provider.forceFlush();
-      const spans = inMem.getFinishedSpans();
+      let spans = inMem.getFinishedSpans();
       inMem.reset();
 
       if (spans.length === 0) return;
@@ -1102,10 +1121,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
       }
+      if (agentType === 'claude-code') {
+        this.enrichClaudeCodeLlmAttributes(records, spans);
+      }
       if (agentType === 'grok-build') {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
 
+      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
@@ -1325,6 +1348,50 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (span.attributes['gen_ai.span.kind'] === 'AGENT') {
           span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
         }
+      }
+    }
+  }
+
+  private enrichClaudeCodeLlmAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const byResponseId = new Map<string, {
+      errorType?: string;
+      statusCode?: number;
+      requestId?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.request' && record['event.name'] !== 'llm.response') continue;
+      const responseId = record['gen_ai.response.id'];
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const current = byResponseId.get(responseId) ?? {};
+      const errorType = record['error.type'];
+      const statusCode = record['http.response.status_code'];
+      const requestId = record['gen_ai.request.id'];
+      if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+      if (typeof statusCode === 'number' && Number.isFinite(statusCode)) current.statusCode = statusCode;
+      if (typeof requestId === 'string' && requestId) current.requestId = requestId;
+      byResponseId.set(responseId, current);
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const responseId = span.attributes['gen_ai.response.id'];
+      if (typeof responseId !== 'string') continue;
+      const data = byResponseId.get(responseId);
+      if (!data) continue;
+      if (data.requestId) span.attributes['gen_ai.request.id'] = data.requestId;
+      if (data.statusCode !== undefined) {
+        span.attributes['http.response.status_code'] = data.statusCode;
+      }
+      if (data.errorType) {
+        span.attributes['error.type'] = data.errorType;
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: 'model request failed',
+        });
       }
     }
   }

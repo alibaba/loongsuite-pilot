@@ -7,7 +7,7 @@ set -euo pipefail
 #   $PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh <subcommand>
 #
 # Subcommand:
-#   pre-tool-use / stop / subagent-start / subagent-stop
+#   pre-tool-use / stop / stop-failure / subagent-start / subagent-stop
 #
 # Fail-open 原则: 任何错误都输出 "{}" 并 exit 0,不阻塞宿主 agent。
 
@@ -18,7 +18,7 @@ SUBCOMMAND="${1:-unknown}"
 
 # Only process registered subcommands; early-return for legacy/unregistered ones.
 case "$SUBCOMMAND" in
-  pre-tool-use|stop|subagent-start|subagent-stop)
+  pre-tool-use|stop|stop-failure|subagent-start|subagent-stop)
     ;;
   *)
     printf '%s\n' "$EMPTY_RESULT"

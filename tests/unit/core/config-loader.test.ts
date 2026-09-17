@@ -26,6 +26,37 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
+    mockReadJsonFile.mockResolvedValueOnce({
+      dataDir: '/data/pilot', collectTrace: true,
+      otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: [
+        './skill.mjs', '/custom/skill.mjs', '~/home.mjs', '$PILOT_DATA/plugins/skill.mjs', 42, 'bad.ts',
+      ] },
+    });
+    const config = await loadConfig();
+    expect(buildOtlpTraceConfig(config)?.spanEnricherPaths).toEqual([
+      '/custom/skill.mjs', '/home/test/home.mjs', '/data/pilot/plugins/skill.mjs',
+    ]);
+  });
+
+  it('ignores malformed span enricher config without disabling trace export', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true, otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: 'bad.mjs' },
+    });
+    expect(buildOtlpTraceConfig(await loadConfig())?.spanEnricherPaths).toEqual([]);
+  });
+
+  it('limits plugin count and supports CMS-only trace destinations', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true,
+      cms: { licenseKey: 'test', endpoint: 'http://localhost:4318' },
+      otlpTrace: { spanEnrichers: Array.from({ length: 20 }, (_, i) => `/plugins/${i}.mjs`) },
+    });
+    const config = buildOtlpTraceConfig(await loadConfig());
+    expect(config?.spanEnricherPaths).toHaveLength(16);
+    expect(config?.endpoints).toHaveLength(1);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
