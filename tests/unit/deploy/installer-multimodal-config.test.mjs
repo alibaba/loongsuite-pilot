@@ -19,8 +19,10 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain('if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi');
     expect(installerSh).toContain('select_multimodal_agents()');
     expect(installerSh).toContain('const supported = ["codex", "qoder"];');
-    expect(installerSh).toContain('uploadMode: multimodalMode');
-    expect(installerSh).toContain('if (!config.agents[id]) continue;');
+    expect(installerSh).toContain("const supported = ['codex', 'qoder'];");
+    expect(installerSh).toContain("if (multimodalMode === 'none')");
+    expect(installerSh).toContain('delete config.agents[id].multimodal');
+    expect(installerSh).toContain("listed.has(id) ? multimodalMode : 'none'");
     expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
     expect(installerSh).toContain('storage: { type: \'sls\' }');
     expect(installerSh).toContain("label: 'multimodal.storage.type'");
@@ -35,8 +37,10 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('if (-not $script:MultimodalMode) { return }');
     expect(installerPs1).toContain('function Select-MultimodalAgents');
     expect(installerPs1).toContain('const supported = ["codex", "qoder"];');
-    expect(installerPs1).toContain('uploadMode: opts.multimodalMode');
-    expect(installerPs1).toContain('if (!config.agents[id]) continue;');
+    expect(installerPs1).toContain("const supported = ['codex', 'qoder'];");
+    expect(installerPs1).toContain("if (opts.multimodalMode === 'none')");
+    expect(installerPs1).toContain('delete config.agents[id].multimodal');
+    expect(installerPs1).toContain("listed.has(id) ? opts.multimodalMode : 'none'");
     expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
     expect(installerPs1).toContain('storage: { type: \'sls\' }');
     expect(installerPs1).toContain("label: 'multimodal.storage.type'");
@@ -176,12 +180,18 @@ describe('installer write_config multimodal-mode', () => {
   for (const platform of ['bash', 'powershell-js']) {
     describe(platform, () => {
       it('writes the same mode onto listed existing agents and skips unknown ids', () => {
-        const result = runWriteConfig(platform, 'both', enabledAgents, {
-          multimodalAgents: 'codex,foo',
+        const result = runWriteConfig(platform, 'both', {
+          agents: {
+            ...enabledAgents.agents,
+            cursor: { enabled: true },
+          },
+        }, {
+          multimodalAgents: 'codex,cursor,foo',
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.agents.qoder.multimodal).toBeUndefined();
+        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
+        expect(result.config.agents.cursor.multimodal).toBeUndefined();
         expect(result.config.agents.foo).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
       });
@@ -235,7 +245,6 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          extra: true,
           storage: { type: 'sls' },
         });
       });
@@ -267,12 +276,11 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          extra: true,
           storage: { type: 'sls' },
         });
       });
 
-      it('writes none onto listed agents only and does not rewrite storage', () => {
+      it('deletes existing supported multimodal blocks when mode is none', () => {
         const existing = {
           type: 'oss',
           target: { endpoint: 'oss.example.com', storageBasePath: 'oss://bucket/prefix' },
@@ -282,6 +290,7 @@ describe('installer write_config multimodal-mode', () => {
           agents: {
             codex: { enabled: true, multimodal: { uploadMode: 'both', allowedRootPaths: ['~/workspace'] } },
             qoder: { enabled: true, multimodal: { uploadMode: 'input' } },
+            cursor: { enabled: true, multimodal: { uploadMode: 'both' } },
           },
           multimodal: { storage: existing },
         }, {
@@ -289,11 +298,9 @@ describe('installer write_config multimodal-mode', () => {
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.config.agents.codex.multimodal).toEqual({
-          uploadMode: 'none',
-          allowedRootPaths: ['~/workspace'],
-        });
-        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'input' });
+        expect(result.config.agents.codex).toEqual({ enabled: true });
+        expect(result.config.agents.qoder).toEqual({ enabled: true });
+        expect(result.config.agents.cursor.multimodal).toEqual({ uploadMode: 'both' });
         expect(result.config.multimodal.storage).toEqual(existing);
       });
 

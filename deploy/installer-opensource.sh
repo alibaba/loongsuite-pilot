@@ -1178,21 +1178,23 @@ if (selectedAgents) {
 
 if (multimodalMode) {
   config.agents = config.agents || {};
-  for (const id of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
+  const supported = ['codex', 'qoder'];
+  const listed = new Set(multimodalAgents.split(',').map(s => s.trim()).filter(Boolean));
+  for (const id of supported) {
     if (!config.agents[id]) continue;
+    if (multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
+    config.agents[id].multimodal = { ...prev, uploadMode: listed.has(id) ? multimodalMode : 'none' };
   }
 }
 
-const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
 if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-  config.multimodal = {
-    ...prevMm,
-    storage: { type: 'sls' },
-  };
+  config.multimodal = { storage: { type: 'sls' } };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
