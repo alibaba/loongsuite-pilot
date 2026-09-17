@@ -59,14 +59,17 @@ Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` 10 秒。CLI 请�
 ```json
 {
   "interceptor": {
-    "rule-id": true
+    "cloudAccessKey": true,
+    "apiKey": true,
+    "privateKey": true,
+    "databaseUrl": true
   }
 }
 ```
 
 - 只有 `interceptor[rule.id] === true` 的已注册规则会执行
 - 缺失、`false` 或未知 key 均 bypass
-- 首版注册表为空，因此默认全部放行
+- 敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`，开关按 **type** 打开（不是子规则 id）。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask.types` 独立，默认关闭，打开后需重启 interceptor
 - 按注册顺序执行，首个拦截立即短路
 - 规则抛错视为该次判定 fail-open
 

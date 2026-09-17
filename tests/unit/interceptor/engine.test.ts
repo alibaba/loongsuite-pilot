@@ -33,9 +33,13 @@ function rule(
 }
 
 describe('RuleEngine', () => {
-  it('allows when the builtin registry is empty', async () => {
+  it('allows builtin rules when their switches are off', async () => {
     const engine = new RuleEngine(builtinRules(), { anything: true });
-    await expect(engine.evaluate(request())).resolves.toEqual({
+    await expect(engine.evaluate(request({ prompt: 'testing' }))).resolves.toEqual({
+      action: 'allow',
+      evaluatedRules: [],
+    });
+    await expect(engine.evaluate(request({ prompt: 'LTAI1234567890ABCD' }))).resolves.toEqual({
       action: 'allow',
       evaluatedRules: [],
     });

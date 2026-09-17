@@ -1,6 +1,7 @@
 import type { LocalRule } from '../types.js';
+import { createSensitiveTypeRule, SENSITIVE_INTERCEPT_TYPES } from './sensitive-type.js';
 
-/** First-wave registry is empty; later waves register LocalRule implementations here. */
+/** Local rules run only when `interceptor[rule.id] === true`. */
 export function builtinRules(): LocalRule[] {
-  return [];
+  return SENSITIVE_INTERCEPT_TYPES.map(createSensitiveTypeRule);
 }
