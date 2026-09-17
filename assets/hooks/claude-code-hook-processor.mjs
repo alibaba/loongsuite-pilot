@@ -170,6 +170,12 @@ const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
 // the current turn's freshly written attempts always survive.
 const MAX_ATTEMPT_FILES = 500;
 const MAX_ATTEMPT_BYTES = 16 * 1024 * 1024; // 16 MiB
+const SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const ZERO_SPAN_ID = '0'.repeat(16);
+
+function isSpanId(value) {
+  return typeof value === 'string' && SPAN_ID_RE.test(value) && value !== ZERO_SPAN_ID;
+}
 
 function interceptSessionDir(sessionId) {
   return path.join(pilotDataDir(), 'intercept', AGENT_ID, sessionId);
@@ -177,7 +183,7 @@ function interceptSessionDir(sessionId) {
 
 /**
  * Read per-LLM-call intercept records dropped by claude-code-fetch-intercept.mjs.
- * Returns Map<response_id, { ttft_ns, system_instructions, _file }>.
+ * Returns Map<response_id, { ttft_ns, system_instructions, llm_span_id, _file }>.
  * Tracks `_file` so reapInterceptFiles can delete merged records after
  * buildTurnRecords consumes them.
  */
@@ -1152,7 +1158,10 @@ function buildRetryAttemptRecords({
   const records = [];
   for (const attempt of attempts) {
     if (attempt.outcome === 'success') continue;
-    const spanId = generateSpanId();
+    // Reuse the id the preload advertised to the gateway on this physical
+    // request; each attempt minted its own, so a retry's gateway spans nest
+    // under the attempt that issued it.
+    const spanId = isSpanId(attempt.llm_span_id) ? attempt.llm_span_id : generateSpanId();
     // Provider request IDs may be reused across physical retries.
     const responseId = `attempt:${attempt.attempt_id}`;
     const request = {
@@ -1309,7 +1318,6 @@ function buildTurnRecords(
     stepRound++;
     const currentStepId = `${turnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
-    const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
     if (!firstStepOwner) {
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
@@ -1321,6 +1329,22 @@ function buildTurnRecords(
     }
     const finalAttempt = callAttempts.at(-1);
     const retryAttempts = callAttempts.slice(0, -1);
+
+    // Look up preload-captured data once per LLM call. ev.message_id matches
+    // the SSE message_start `message.id` the preload script extracted.
+    const interceptData = intercept && ev.message_id
+      ? intercept.get(ev.message_id)
+      : undefined;
+    if (interceptData) mergedResponseIds.add(ev.message_id);
+
+    // The preload already advertised its minted span id to the LLM gateway as
+    // traceparent parent-id, so this span has to claim the same id — otherwise
+    // the gateway's spans parent to something pilot never emits. A call that
+    // never reached message_start (terminal API failure) has no enrichment
+    // record, but its last physical attempt still carries the id.
+    const llmSpanId = isSpanId(interceptData?.llm_span_id) ? interceptData.llm_span_id
+      : isSpanId(finalAttempt?.llm_span_id) ? finalAttempt.llm_span_id
+      : generateSpanId();
 
     // 注册该 LLM 声明的所有 tool_use_id → 当前 step
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -1344,13 +1368,6 @@ function buildTurnRecords(
       delta = inputMsgs.slice(prevInputMsgs.length);
       logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
     }
-
-    // Look up preload-captured data once per LLM call. ev.message_id matches
-    // the SSE message_start `message.id` the preload script extracted.
-    const interceptData = intercept && ev.message_id
-      ? intercept.get(ev.message_id)
-      : undefined;
-    if (interceptData) mergedResponseIds.add(ev.message_id);
 
     // llm.request
     const reqRecord = {

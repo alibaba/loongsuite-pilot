@@ -1531,6 +1531,8 @@ describe('claude-code 一级子 Agent 上报', () => {
 // (written by claude-code-fetch-intercept.mjs) and merges:
 //   gen_ai.system_instructions → llm.request events
 //   gen_ai.response.time_to_first_token → llm.response events
+//   llm_span_id → span_id on both llm events (the preload already advertised it
+//     to the LLM gateway as traceparent parent-id)
 // joined by message_id == response_id == file basename.
 
 function writeInterceptFile(sessionId, responseId, payload, opts = {}) {
@@ -1624,6 +1626,112 @@ describe('hook-processor merges intercept data into llm events', () => {
     // itself may be removed (since it's empty after reaping).
     expect(fs.existsSync(fileA)).toBe(false);
     expect(fs.existsSync(fileB)).toBe(false);
+  });
+
+  test('adopts the preload-minted llm_span_id as the LLM span id', () => {
+    // The preload already told the gateway this id is the parent of its spans,
+    // so pilot's own LLM span has to claim it.
+    const sid = 'sid-merge-spanid';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_span_a', 'msg_span_b');
+    const spanA = 'aaaaaaaaaaaaaaa1';
+    const spanB = 'bbbbbbbbbbbbbbb2';
+
+    writeInterceptFile(sid, 'msg_span_a', { session_id: sid, response_id: 'msg_span_a', ttft_ns: 1, llm_span_id: spanA });
+    writeInterceptFile(sid, 'msg_span_b', { session_id: sid, response_id: 'msg_span_b', ttft_ns: 2, llm_span_id: spanB });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const llmEvents = records.filter((rec) => rec['event.name'] === 'llm.request' || rec['event.name'] === 'llm.response');
+    expect(llmEvents).toHaveLength(4);
+
+    for (const ev of llmEvents) {
+      const expected = ev['gen_ai.response.id'] === 'msg_span_a' ? spanA : spanB;
+      expect(ev.span_id).toBe(expected);
+      expect(ev.parent_span_id).not.toBe(expected);
+    }
+  });
+
+  test('rejects an invalid llm_span_id and generates one locally', () => {
+    const sid = 'sid-merge-spanid-bad';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_bad_a', 'msg_bad_b');
+
+    writeInterceptFile(sid, 'msg_bad_a', { session_id: sid, response_id: 'msg_bad_a', ttft_ns: 1, llm_span_id: 'not-a-span-id' });
+    writeInterceptFile(sid, 'msg_bad_b', { session_id: sid, response_id: 'msg_bad_b', ttft_ns: 2, llm_span_id: '0'.repeat(16) });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const llmEvents = records.filter((rec) => rec['event.name'] === 'llm.request' || rec['event.name'] === 'llm.response');
+    expect(llmEvents).toHaveLength(4);
+
+    for (const ev of llmEvents) {
+      expect(ev.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(ev.span_id).not.toBe('0'.repeat(16));
+      expect(ev.span_id).not.toBe(ev.parent_span_id);
+    }
+    // Both events of one call still share a span, and the two calls differ.
+    const byResponse = new Map(llmEvents.map((ev) => [ev['gen_ai.response.id'], ev.span_id]));
+    expect(byResponse.size).toBe(2);
+    expect(byResponse.get('msg_bad_a')).not.toBe(byResponse.get('msg_bad_b'));
+  });
+
+  test('each retry attempt span claims the id its own physical request advertised', () => {
+    // The preload mints per attempt, so the gateway spans of a retried call must
+    // nest under the attempt that actually issued them — not an arbitrary one.
+    const sid = 'sid-retry-spanid';
+    const transcriptPath = writeTranscript(sid, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'retry please' } },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:36.000Z',
+        message: {
+          id: 'msg_retry_spanid',
+          model: 'claude-test',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input_tokens: 10, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+    const retrySpan = 'ccccccccccccccc3';
+    const successSpan = 'ddddddddddddddd4';
+    writeAttemptFile(sid, 'retry-1', {
+      start_time_unix_nano: '1780541853000000000',
+      end_time_unix_nano: '1780541853100000000',
+      llm_span_id: retrySpan,
+    });
+    // No usable id on this attempt: the processor must fall back locally.
+    writeAttemptFile(sid, 'retry-2', {
+      start_time_unix_nano: '1780541853200000000',
+      end_time_unix_nano: '1780541853300000000',
+      llm_span_id: 'zzzz',
+    });
+    writeAttemptFile(sid, 'success-3', {
+      start_time_unix_nano: '1780541853400000000',
+      end_time_unix_nano: '1780541853500000000',
+      outcome: 'success',
+      status_code: 200,
+      error_type: null,
+      request_id: 'req-success-3',
+      response_id: 'msg_retry_spanid',
+      llm_span_id: successSpan,
+    });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const responses = readJsonlRecords().filter((rec) => rec['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(3);
+    const spanByResponse = new Map(responses.map((rec) => [rec['gen_ai.response.id'], rec.span_id]));
+    expect(spanByResponse.get('attempt:retry-1')).toBe(retrySpan);
+    expect(spanByResponse.get('attempt:retry-2')).toMatch(/^[0-9a-f]{16}$/);
+    expect(spanByResponse.get('attempt:retry-2')).not.toBe(retrySpan);
+    // The successful attempt has no enrichment record here, so its id comes
+    // from the attempt file — the terminal-failure fallback path.
+    expect(spanByResponse.get('msg_retry_spanid')).toBe(successSpan);
   });
 
   test('emits every failed retry as an independent LLM span before final success', async () => {

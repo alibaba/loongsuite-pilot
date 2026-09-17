@@ -2191,10 +2191,12 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '');
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
       expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.propagateToLlm).toBe(false);
       expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
@@ -2218,6 +2220,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
       config = await loadConfig();
       expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables LLM gateway propagation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, propagateToLlm: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
     });
 
     it('enables local trace generation from config or env', async () => {

@@ -35,6 +35,9 @@ function runScenario({
   networkError = null,
   clientRequestId = null,
   requestHeaders,
+  extraRequestHeaders = null,
+  headersAs = 'object',
+  inputAs = 'url',
   env = {},
   keepStreamOpen = false,
   cancelMidStream = false,
@@ -51,6 +54,7 @@ function runScenario({
   const headers = requestHeaders ?? {
     ...(sessionId ? { 'x-claude-code-session-id': sessionId } : {}),
     ...(clientRequestId ? { 'x-client-request-id': clientRequestId } : {}),
+    ...(extraRequestHeaders || {}),
   };
   const script = `
     const fs = require('node:fs');
@@ -66,9 +70,33 @@ function runScenario({
 
     globalThis.fetch = async function (input, init) {
       fs.writeFileSync(${JSON.stringify(path.join(DATA_DIR, 'outbound-headers.json'))}, JSON.stringify({
-        headers: init.headers,
-        sameHeaders: init.headers === requestHeaders,
+        headers: init && init.headers,
+        sameHeaders: !!init && init.headers === requestHeaders,
       }));
+      // Normalized view for the trace-forwarding assertions. Mirrors real fetch
+      // precedence: init.headers overrides a Request's own headers.
+      try {
+        const carrier = (init && init.headers) || (input && input.headers) || null;
+        const observedHeaders = {};
+        if (carrier && typeof carrier.forEach === 'function' && typeof carrier.get === 'function') {
+          carrier.forEach((v, k) => { observedHeaders[String(k).toLowerCase()] = String(v); });
+        } else if (Array.isArray(carrier)) {
+          for (const [k, v] of carrier) observedHeaders[String(k).toLowerCase()] = String(v);
+        } else if (carrier && typeof carrier === 'object') {
+          for (const k of Object.keys(carrier)) observedHeaders[k.toLowerCase()] = String(carrier[k]);
+        }
+        // Read the body back so we can prove header injection never consumed
+        // or replaced the request payload.
+        let observedBody = null;
+        if (init && typeof init.body === 'string') observedBody = init.body;
+        else if (input && typeof input.text === 'function') observedBody = await input.text();
+        fs.writeFileSync(${JSON.stringify(path.join(DATA_DIR, 'observed-request.json'))}, JSON.stringify({
+          headers: observedHeaders,
+          body: observedBody,
+          method: (init && init.method) || (input && input.method) || null,
+          carrierIsHeaders: !!(carrier && typeof carrier.forEach === 'function' && typeof carrier.get === 'function'),
+        }));
+      } catch (_) {}
       if (${networkDelayMs} > 0) await new Promise(r => setTimeout(r, ${networkDelayMs}));
       if (${JSON.stringify(networkError)}) throw Object.assign(new Error('simulated network failure'), { name: ${JSON.stringify(networkError)} });
       let nextChunk = 0;
@@ -95,11 +123,18 @@ function runScenario({
 
     (async () => {
       await import(${JSON.stringify('file://' + PRELOAD)});
-      const res = await globalThis.fetch(${JSON.stringify(url)}, {
-        method: 'POST',
-        headers: requestHeaders,
-        body: ${JSON.stringify(bodyJson)},
-      });
+      const rawHeaders = requestHeaders;
+      const headersAs = ${JSON.stringify(headersAs)};
+      const headers = headersAs === 'Headers' ? new Headers(rawHeaders)
+        : headersAs === 'entries' ? Object.entries(rawHeaders)
+        : rawHeaders;
+      const url = ${JSON.stringify(url)};
+      const bodyText = ${JSON.stringify(bodyJson)};
+      const res = ${JSON.stringify(inputAs)} === 'Request'
+        // Exercise the Request-as-input path: method/body must survive our
+        // headers-only override untouched.
+        ? await globalThis.fetch(new Request(url, { method: 'POST', headers, body: bodyText }))
+        : await globalThis.fetch(url, { method: 'POST', headers, body: bodyText });
 
       if (res.body) {
         const reader = res.body.getReader();
@@ -135,6 +170,9 @@ function runScenario({
   const baseEnv = { ...process.env };
   delete baseEnv.TRACEPARENT;
   delete baseEnv.TRACESTATE;
+  delete baseEnv.AGENT_DATA_COLLECTION_CONFIG;
+  delete baseEnv.LOONGSUITE_PILOT_UPSTREAM_LINK;
+  delete baseEnv.LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM;
   return spawnSync(process.execPath, ['-e', script], {
     encoding: 'utf-8',
     env: { ...baseEnv, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...env },
@@ -639,6 +677,311 @@ describe('claude-code-fetch-intercept preload', () => {
     expect(r.status, r.stderr).toBe(0);
     expect(readOutboundHeaders()).toEqual({ headers: {}, sameHeaders: true });
     expect(fs.existsSync(INTERCEPT_DIR)).toBe(false);
+  });
+
+  // ─── W3C trace-context forwarding (upstreamLink.propagateToLlm) ──────────
+  // The guards above cover the default-off behavior; every case here turns the
+  // switch on explicitly.
+  describe('W3C trace-context forwarding', () => {
+    const TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const UPSTREAM_PARENT_ID = '00f067aa0ba902b7';
+    const FLAGS = '01';
+    const TP = `00-${TRACE_ID}-${UPSTREAM_PARENT_ID}-${FLAGS}`;
+    const TS = 'congo=t61rcWkgMzE,rojo=00f067aa0ba902b7';
+    const ON = {
+      LOONGSUITE_PILOT_UPSTREAM_LINK: '1',
+      LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM: '1',
+    };
+    const readObservedRequest = () =>
+      JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-request.json'), 'utf8'));
+
+    /**
+     * parent-id is replaced with the span id minted for this physical attempt,
+     * so the expected header value is only knowable from what the preload wrote.
+     * Both record kinds must agree: the enrichment record feeds the successful
+     * call's LLM span, the attempt record feeds a retry attempt's own span.
+     */
+    function expectSubstitutedParent(observedTraceparent, sessionId = SESS) {
+      const records = readIntercept(sessionId).map((e) => e.record);
+      expect(records).toHaveLength(1);
+      const spanId = records[0].llm_span_id;
+      expect(spanId).toMatch(/^[0-9a-f]{16}$/);
+      expect(spanId).not.toBe(UPSTREAM_PARENT_ID);
+      expect(spanId).not.toBe('0'.repeat(16));
+      expect(readAttempts(sessionId).map((a) => a.llm_span_id)).toEqual([spanId]);
+      expect(observedTraceparent).toBe(`00-${TRACE_ID}-${spanId}-${FLAGS}`);
+    }
+
+    test('forwards the inherited trace but substitutes this attempt\'s span id', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expectSubstitutedParent(headers.traceparent);
+      // tracestate is opaque to us and passes through byte for byte.
+      expect(headers.tracestate).toBe(TS);
+    });
+
+    test('forwards traceparent alone when no tracestate is inherited', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expectSubstitutedParent(headers.traceparent);
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test('normalizes an uppercase-hex traceparent to the lowercase spec form', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: '00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01' },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expectSubstitutedParent(readObservedRequest().headers.traceparent);
+    });
+
+    test.each([
+      ['garbage', 'not-a-traceparent'],
+      ['all-zero trace-id', '00-00000000000000000000000000000000-00f067aa0ba902b7-01'],
+      ['all-zero parent-id', '00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01'],
+      ['forbidden version ff', 'ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],
+      ['unknown future version', '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],
+      ['missing trace-flags', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7'],
+      ['trailing field on version 00', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra'],
+      ['short trace-id', '00-4bf92f3577b34da6-00f067aa0ba902b7-01'],
+      ['non-hex trace-id', '00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01'],
+      ['empty', ''],
+    ])('rejects an invalid traceparent (%s) and injects nothing', (_label, value) => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: value },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBeUndefined();
+      expect(headers.tracestate).toBeUndefined();
+      // Nothing was advertised, so nothing may be minted either.
+      expect(readIntercept(SESS)[0].record.llm_span_id).toBeUndefined();
+      expect(readAttempts(SESS)[0].llm_span_id).toBeUndefined();
+    });
+
+    test.each([
+      ['over the 512-byte budget', `a=${'x'.repeat(520)}`],
+      ['more than 32 list-members', Array.from({ length: 33 }, (_, i) => `k${i}=v`).join(',')],
+      ['containing a control character', 'congo=t61r\nckgMzE'],
+      ['blank', '   '],
+    ])('drops an invalid tracestate (%s) but still forwards traceparent', (_label, value) => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP, TRACESTATE: value },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expectSubstitutedParent(headers.traceparent);
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test('never overwrites a traceparent the caller already set', () => {
+      // A propagator must not replace a context it did not create, even when
+      // the caller's value looks less trustworthy than ours.
+      const callerTp = '00-11111111111111111111111111111111-2222222222222222-00';
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        extraRequestHeaders: { traceparent: callerTp },
+        env: { ...ON, TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBe(callerTp);
+      // tracestate rides with our traceparent; skipping one skips both.
+      expect(headers.tracestate).toBeUndefined();
+    });
+
+    test.each(['object', 'Headers', 'entries'])(
+      'injects without dropping existing headers when the carrier is %s',
+      (headersAs) => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          headersAs,
+          extraRequestHeaders: { 'x-custom-marker': 'kept' },
+          env: { ...ON, TRACEPARENT: TP },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        const { headers } = readObservedRequest();
+        expectSubstitutedParent(headers.traceparent);
+        expect(headers['x-claude-code-session-id']).toBe(SESS);
+        expect(headers['x-custom-marker']).toBe('kept');
+      },
+    );
+
+    test('leaves method and body intact when input is a Request object', () => {
+      // Injection rewrites init.headers only. If it ever rebuilt the Request,
+      // the body stream would be consumed and the upload would break.
+      const payload = { system: 'sys', messages: [{ role: 'user', content: 'keep me' }] };
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: payload,
+        sseEvents: sseStream(),
+        inputAs: 'Request',
+        env: { ...ON, TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const observed = readObservedRequest();
+      expectSubstitutedParent(observed.headers.traceparent);
+      expect(observed.headers.tracestate).toBe(TS);
+      expect(observed.headers['x-claude-code-session-id']).toBe(SESS);
+      expect(observed.method).toBe('POST');
+      expect(JSON.parse(observed.body)).toEqual(payload);
+    });
+
+    test('hands the gateway a real Headers carrier, not a flattened object', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readObservedRequest().carrierIsHeaders).toBe(true);
+    });
+
+    test('does not inject on non-/v1/messages URLs', () => {
+      const r = runScenario({
+        url: 'https://api.anthropic.com/v1/some_other_endpoint', sessionId: SESS,
+        body: { system: 'sys' },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBeUndefined();
+    });
+
+    test('injects the upstream parent verbatim when there is no session id', () => {
+      // The session-id gate governs pilot's own capture; the gateway's ability
+      // to join the trace must not depend on it. But without a record to write,
+      // a minted parent-id would name a span pilot never emits, so the upstream
+      // parent is the better answer here.
+      const r = runScenario({
+        url: LLM_URL, sessionId: null,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, TRACEPARENT: TP },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBe(TP);
+      expect(fs.existsSync(INTERCEPT_DIR)).toBe(false);
+    });
+
+    test('leaves the request untouched when no trace context is inherited', () => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS,
+        body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: ON,
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const { headers } = readObservedRequest();
+      expect(headers.traceparent).toBeUndefined();
+      expect(headers.tracestate).toBeUndefined();
+      // Capture still works — forwarding is independent of it.
+      const [{ record }] = readIntercept(SESS);
+      expect(record.response_id).toBe(MSG_ID);
+      expect(record.llm_span_id).toBeUndefined();
+    });
+
+    describe('opt-in switch', () => {
+      function writeConfig(upstreamLink) {
+        const p = path.join(DATA_DIR, 'config.json');
+        fs.writeFileSync(p, JSON.stringify({ upstreamLink }), 'utf-8');
+        return p;
+      }
+
+      test('forwards nothing while the switch is off', () => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { TRACEPARENT: TP, TRACESTATE: TS },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        const { headers } = readObservedRequest();
+        expect(headers.traceparent).toBeUndefined();
+        expect(headers.tracestate).toBeUndefined();
+        // Capture keeps working; only forwarding is gated.
+        const [{ record }] = readIntercept(SESS);
+        expect(record.response_id).toBe(MSG_ID);
+        expect(record.llm_span_id).toBeUndefined();
+      });
+
+      test('needs propagateToLlm too, not just upstreamLink.enabled', () => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { LOONGSUITE_PILOT_UPSTREAM_LINK: '1', TRACEPARENT: TP },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      });
+
+      test('reads both halves from config.json when no env override is set', () => {
+        const configPath = writeConfig({ enabled: true, propagateToLlm: true });
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT: TP },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        expectSubstitutedParent(readObservedRequest().headers.traceparent);
+      });
+
+      test('honours a config.json that enables linking but not LLM forwarding', () => {
+        const configPath = writeConfig({ enabled: true });
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT: TP },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      });
+
+      test('an env override of 0 beats a config.json that enables forwarding', () => {
+        const configPath = writeConfig({ enabled: true, propagateToLlm: true });
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: {
+            AGENT_DATA_COLLECTION_CONFIG: configPath,
+            LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM: '0',
+            TRACEPARENT: TP,
+          },
+        });
+        expect(r.status, r.stderr).toBe(0);
+        expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      });
+    });
   });
 
   // Regression: SSE event boundaries may use LF, CRLF, or bare CR line

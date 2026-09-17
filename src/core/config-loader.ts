@@ -138,6 +138,7 @@ export interface ConfigFile {
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
+    propagateToLlm?: boolean;
     generateTraceWhenMissing?: boolean;
     ttlMs?: number;
   };
@@ -323,6 +324,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     propagateToTools: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,
+    ),
+    propagateToLlm: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM',
+      file?.upstreamLink?.propagateToLlm ?? false,
     ),
     generateTraceWhenMissing: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
