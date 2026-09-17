@@ -92,6 +92,24 @@ function installTree(files: Record<string, number> = {}, directories: string[] =
   return { nodes, opened, calls, hooks, maxActive: () => maxActive, maxHandles: () => maxHandles };
 }
 
+function directoriesOpenedByGithubMain(nodes: ReadonlyMap<string, Stats>): Set<string> {
+  const opened = new Set<string>();
+  for (const [directory, stat] of nodes) {
+    if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+    const relative = path.relative(root, directory);
+    if (!relative) {
+      opened.add(directory);
+      continue;
+    }
+    const [rootEntry] = relative.split(path.sep);
+    // github/main prunes only these two exact, root-level names. Every other
+    // root directory and every nested directory is traversed.
+    if (rootEntry === 'versions' || rootEntry === 'runtime') continue;
+    opened.add(directory);
+  }
+  return opened;
+}
+
 describe('DiskUsageSampler', () => {
   const samplers: DiskUsageSampler[] = [];
   function sampler(options: Partial<DiskUsageSamplerOptions> = {}): DiskUsageSampler {
@@ -126,26 +144,156 @@ describe('DiskUsageSampler', () => {
     expect(onSample).toHaveBeenCalledTimes(1);
   });
 
-  it('prunes only root versions and runtime without opening or counting them', async () => {
-    const tree = installTree({
+  it('recurses only into mutable root data directories while retaining root files', async () => {
+    const mutableFiles: Record<string, number> = {
       'ordinary': 3,
-      'versions/v1/package.js': 100,
-      'runtime/node/bin/node.exe': 200,
-      'cache/versions/metadata.json': 7,
-      'cache/runtime/metadata.json': 13,
-      'logs/versions/event.jsonl': 11,
+      'Logs/output/event.jsonl': 5,
+      'state/checkpoint.json': 7,
+      'cache/versions/metadata.json': 11,
+      'configs/inner/data_config.json': 13,
+      'agents.d.local/custom.json': 17,
+      'acp-correlate/session.json': 19,
+      'sls-failed-logs/failed.jsonl': 23,
+      'sls-failed-logs.delete-pending/old.jsonl': 29,
+      'local-workers/lw_1/state/runtime/metadata.json': 31,
+    };
+    const managedRoots = [
+      'versions', 'runtime', 'package', 'download-tmp', 'plugins', 'hooks',
+      'skills', 'apps', 'bin', 'local-worker-template-cache', '.tmp', 'tmp',
+      'future-managed-directory',
+    ];
+    const tree = installTree({
+      ...mutableFiles,
+      ...Object.fromEntries(managedRoots.map((directory, index) => [
+        `${directory}/nested/payload.bin`,
+        1_000 + index,
+      ])),
     });
     const instance = sampler();
     await instance.sample();
-    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 34, logsBytes: 11 });
-    for (const directory of ['versions', 'runtime']) {
+    expect(instance.getSnapshot()).toMatchObject({
+      status: 'ok',
+      dataBytes: Object.values(mutableFiles).reduce((sum, size) => sum + size, 0),
+      logsBytes: 5,
+    });
+    for (const directory of managedRoots) {
       const skippedRoot = path.join(root, directory);
       expect(tree.opened.some(frame => frame.path === skippedRoot)).toBe(false);
       expect(tree.calls.some(call => call.path.startsWith(skippedRoot + path.sep))).toBe(false);
     }
     expect(tree.opened.some(frame => frame.path === path.join(root, 'cache', 'versions'))).toBe(true);
-    expect(tree.opened.some(frame => frame.path === path.join(root, 'cache', 'runtime'))).toBe(true);
-    expect(tree.opened.some(frame => frame.path === path.join(root, 'logs', 'versions'))).toBe(true);
+    expect(tree.opened.some(frame => frame.path === path.join(root, 'local-workers', 'lw_1', 'state', 'runtime')))
+      .toBe(true);
+  });
+
+  it('opens a strict subset of the directories opened by github/main', async () => {
+    const fixtureCases = [
+      { kind: 'allowed root', directory: 'logs/output/day', openedNow: true },
+      { kind: 'allowed root case variant', directory: 'STATE/checkpoints/active', openedNow: true },
+      { kind: 'ordinary nested directories', directory: 'cache/nested/versions/runtime', openedNow: true },
+      { kind: 'old exact root exclusion', directory: 'versions/v1/node_modules', openedNow: false },
+      { kind: 'old exact root exclusion', directory: 'runtime/node/bin', openedNow: false },
+      { kind: 'managed root', directory: 'download-tmp/extract/node_modules', openedNow: false },
+      { kind: 'managed root', directory: 'package/node_modules/pkg', openedNow: false },
+      { kind: 'case variant of old exclusion', directory: 'Versions/v2/node_modules', openedNow: false },
+      { kind: 'unknown future root', directory: 'future-managed-directory/nested', openedNow: false },
+      { kind: 'local worker bundle', directory: 'local-workers/lw_1/bundle/node_modules/pkg', openedNow: false },
+      {
+        kind: 'local worker staging bundle',
+        directory: 'local-workers/lw_1/.BUNDLE.STAGING-123/node_modules/pkg',
+        openedNow: false,
+      },
+      {
+        kind: 'ordinary local worker nesting',
+        directory: 'local-workers/lw_1/state/bundle/node_modules/pkg',
+        openedNow: true,
+      },
+    ];
+    const tree = installTree({}, fixtureCases.map(testCase => testCase.directory));
+    const instance = sampler();
+    await instance.sample();
+    expect(instance.getSnapshot().status).toBe('ok');
+
+    const currentlyOpened = new Set(tree.opened.map(frame => frame.path));
+    const githubMainOpened = directoriesOpenedByGithubMain(tree.nodes);
+    const newlyIntroduced = [...currentlyOpened]
+      .filter(directory => !githubMainOpened.has(directory))
+      .map(directory => path.relative(root, directory));
+
+    // The oracle above encodes only the old traversal rule; it deliberately
+    // does not repeat the new mutable-directory allowlist.
+    expect(newlyIntroduced).toEqual([]);
+    expect(currentlyOpened.size).toBeLessThan(githubMainOpened.size);
+
+    for (const testCase of fixtureCases) {
+      const absolute = path.join(root, testCase.directory);
+      expect(
+        currentlyOpened.has(absolute),
+        `${testCase.kind}: ${testCase.directory}`,
+      ).toBe(testCase.openedNow);
+    }
+
+    const strictSubsetWitnesses = [
+      'download-tmp',
+      'Versions',
+      'future-managed-directory',
+      'local-workers/lw_1/bundle',
+      'local-workers/lw_1/.BUNDLE.STAGING-123',
+    ];
+    for (const directory of strictSubsetWitnesses) {
+      const absolute = path.join(root, directory);
+      expect(githubMainOpened.has(absolute), `github/main should open ${directory}`).toBe(true);
+      expect(currentlyOpened.has(absolute), `current scanner should skip ${directory}`).toBe(false);
+    }
+  });
+
+  it('prunes local worker runtime bundles but keeps each instance mutable data', async () => {
+    const tree = installTree({
+      'local-workers/lw_1/instance.json': 2,
+      'local-workers/lw_1/credentials/token.json': 3,
+      'local-workers/lw_1/state/checkpoint.json': 5,
+      'local-workers/lw_1/logs/worker.log': 7,
+      'local-workers/lw_1/state/bundle/metadata.json': 11,
+      'local-workers/lw_1/Bundle/node_modules/pkg/index.js': 101,
+      'local-workers/lw_1/.BUNDLE.STAGING-123/node_modules/pkg/index.js': 103,
+      'local-workers/lw_1/.Bundle.Backup-456/node_modules/pkg/index.js': 107,
+      'local-workers/arbitrary-instance/bundle/runtime.js': 109,
+      'local-workers/arbitrary-instance/state/metadata.json': 13,
+    });
+    const instance = sampler();
+    await instance.sample();
+    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 41, logsBytes: 0 });
+
+    const skipped = [
+      'local-workers/lw_1/Bundle',
+      'local-workers/lw_1/.BUNDLE.STAGING-123',
+      'local-workers/lw_1/.Bundle.Backup-456',
+      'local-workers/arbitrary-instance/bundle',
+    ];
+    for (const directory of skipped) {
+      const skippedPath = path.join(root, directory);
+      expect(tree.opened.some(frame => frame.path === skippedPath)).toBe(false);
+      expect(tree.calls.some(call => call.path.startsWith(skippedPath + path.sep))).toBe(false);
+    }
+    expect(tree.opened.some(frame => frame.path
+      === path.join(root, 'local-workers', 'lw_1', 'state', 'bundle'))).toBe(true);
+  });
+
+  it('does not descend into a large worker bundle tree', async () => {
+    const bundleFiles = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [
+      `local-workers/lw_large/bundle/node_modules/pkg-${index}/index.js`,
+      1,
+    ]));
+    const tree = installTree({
+      'local-workers/lw_large/state/checkpoint.json': 7,
+      ...bundleFiles,
+    });
+    const instance = sampler({ maxEntries: 20 });
+    await instance.sample();
+    expect(instance.getSnapshot()).toMatchObject({ status: 'ok', dataBytes: 7, logsBytes: 0 });
+    expect(tree.opened.some(frame => frame.path
+      === path.join(root, 'local-workers', 'lw_large', 'bundle'))).toBe(false);
+    expect(tree.calls.length).toBeLessThan(100);
   });
 
   it('reports a valid empty directory as zero and returns a copy of cached state', async () => {
@@ -174,8 +322,8 @@ describe('DiskUsageSampler', () => {
   });
 
   it('rejects a directory replaced by a link while opening before reading its entries', async () => {
-    const tree = installTree({ 'child/a': 99 });
-    const child = path.join(root, 'child');
+    const tree = installTree({ 'cache/child/a': 99 });
+    const child = path.join(root, 'cache', 'child');
     tree.hooks.before = (operation, filePath) => {
       if (operation === 'opendir' && filePath === child) tree.nodes.set(child, metadata('link'));
     };
@@ -188,8 +336,8 @@ describe('DiskUsageSampler', () => {
   });
 
   it('rejects ancestor replacement detected at a nested open boundary', async () => {
-    const tree = installTree({ 'parent/child/a': 99 });
-    const child = path.join(root, 'parent', 'child');
+    const tree = installTree({ 'cache/parent/child/a': 99 });
+    const child = path.join(root, 'cache', 'parent', 'child');
     const original = vi.mocked(fs.realpath).getMockImplementation()!;
     vi.mocked(fs.realpath).mockImplementation(async file => String(file) === child
       ? path.resolve(root, '..', 'outside', 'child')
@@ -304,7 +452,9 @@ describe('DiskUsageSampler', () => {
   });
 
   it('never opens more than 32 directory layers', async () => {
-    const tree = installTree({ [`${Array.from({ length: 35 }, (_, i) => `d${i}`).join('/')}/file`]: 9 });
+    const tree = installTree({
+      [`state/${Array.from({ length: 35 }, (_, i) => `d${i}`).join('/')}/file`]: 9,
+    });
     const instance = sampler();
     await instance.sample();
     expect(instance.getSnapshot().status).toBe('partial');
