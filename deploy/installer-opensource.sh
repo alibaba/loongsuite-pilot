@@ -804,7 +804,7 @@ confirm_config_overwrite() {
     if [ ! -f "$config_file" ]; then return 0; fi
 
     local diffs
-    diffs=$("$NODE_BIN" -e "
+    diffs=$(LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
 const fs = require('fs');
 let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
@@ -818,6 +818,31 @@ const slsModeOf = sls => {
   if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
   return '';
 };
+const prevStorage = (old.multimodal && old.multimodal.storage && typeof old.multimodal.storage === 'object')
+  ? old.multimodal.storage : undefined;
+const hasMmTarget = Boolean(newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore);
+const willWriteMmTarget = Boolean(hasMmTarget && (prevStorage || newVals.slsMode === 'apiKey'));
+const mmTargetJson = target => (target && typeof target === 'object') ? JSON.stringify(target) : '';
+const maskSecret = value => {
+  const s = String(value || '');
+  if (!s) return '';
+  if (s.length <= 8) return '****';
+  return s.slice(0, 4) + '****' + s.slice(-4);
+};
+const mmAuthModeOf = auth => {
+  if (!auth || typeof auth !== 'object') return '';
+  if (auth.mode) return auth.mode;
+  if (auth.apiKey) return 'apiKey';
+  if (auth.accessKeyId || auth.accessKeySecret) return 'ak';
+  return '';
+};
+const oldMmAuth = (prevStorage && prevStorage.auth) || undefined;
+const oldMmAuthMode = mmAuthModeOf(oldMmAuth);
+const oldMmKey = (oldMmAuth && oldMmAuth.apiKey) || '';
+const newMmKey = process.env.LP_SLS_API_KEY || '';
+const willWriteMmAuth = Boolean(newMmKey && (prevStorage || hasMmTarget));
+const willWriteMmAuthMode = Boolean(willWriteMmAuth && oldMmAuthMode && oldMmAuthMode !== 'apiKey');
+const willWriteMmApiKey = Boolean(willWriteMmAuth && oldMmAuthMode === 'apiKey' && oldMmKey && oldMmKey !== newMmKey);
 const checks = [
   { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
   { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
@@ -830,6 +855,10 @@ const checks = [
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
   { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: (hasMmTarget && newVals.slsMode === 'apiKey') ? 'sls' : '' },
+  { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willWriteMmTarget ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
+  { label: 'multimodal.storage.auth.mode', oldVal: willWriteMmAuthMode ? oldMmAuthMode : '', newVal: willWriteMmAuthMode ? 'apiKey' : '' },
+  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? maskSecret(oldMmKey) : '', newVal: willWriteMmApiKey ? maskSecret(newMmKey) : '' },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -838,8 +867,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1177,46 +1206,43 @@ if (selectedAgents) {
 
 if (multimodalMode) {
   config.agents = config.agents || {};
-  let multimodalEnabled = false;
   for (const id of multimodalAgents.split(',').map(s => s.trim()).filter(Boolean)) {
     if (!config.agents[id]) continue;
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
     config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
-    if (multimodalMode !== 'none') multimodalEnabled = true;
   }
-  if (multimodalEnabled) {
-    const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
-    const prevStorage = (prevMm.storage && typeof prevMm.storage === 'object') ? prevMm.storage : undefined;
-    const hasTarget = !!(slsEndpoint && slsProject && slsLogstore);
-    if (hasTarget && slsApiKey) {
-      config.multimodal = {
-        ...prevMm,
-        storage: {
-          type: 'sls',
-          target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
-          auth: { mode: 'apiKey', apiKey: slsApiKey },
-        },
-      };
-    } else if (prevStorage && hasTarget) {
-      config.multimodal = {
-        ...prevMm,
-        storage: {
-          ...prevStorage,
-          target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
-        },
-      };
-    } else if (prevStorage && slsApiKey) {
-      config.multimodal = {
-        ...prevMm,
-        storage: {
-          ...prevStorage,
-          auth: { mode: 'apiKey', apiKey: slsApiKey },
-        },
-      };
-    }
-  }
+}
+
+const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
+const prevStorage = (prevMm.storage && typeof prevMm.storage === 'object') ? prevMm.storage : undefined;
+const hasTarget = !!(slsEndpoint && slsProject && slsLogstore);
+if (hasTarget && slsApiKey) {
+  config.multimodal = {
+    ...prevMm,
+    storage: {
+      type: 'sls',
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+      auth: { mode: 'apiKey', apiKey: slsApiKey },
+    },
+  };
+} else if (prevStorage && hasTarget) {
+  config.multimodal = {
+    ...prevMm,
+    storage: {
+      ...prevStorage,
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+    },
+  };
+} else if (prevStorage && slsApiKey) {
+  config.multimodal = {
+    ...prevMm,
+    storage: {
+      ...prevStorage,
+      auth: { mode: 'apiKey', apiKey: slsApiKey },
+    },
+  };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
