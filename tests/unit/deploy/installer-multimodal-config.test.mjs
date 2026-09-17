@@ -21,8 +21,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain('const supported = ["codex", "qoder"];');
     expect(installerSh).toContain('uploadMode: multimodalMode');
     expect(installerSh).toContain('if (!config.agents[id]) continue;');
-    expect(installerSh).toContain('const hasTarget = !!(slsEndpoint && slsProject && slsLogstore);');
-    expect(installerSh).toContain('} else if (prevStorage && slsApiKey) {');
+    expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
     expect(installerSh).toContain("label: 'multimodal.storage.type'");
     expect(installerSh).toContain("label: 'multimodal.storage.target'");
     expect(installerSh).toContain("label: 'multimodal.storage.auth.mode'");
@@ -43,8 +42,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('const supported = ["codex", "qoder"];');
     expect(installerPs1).toContain('uploadMode: opts.multimodalMode');
     expect(installerPs1).toContain('if (!config.agents[id]) continue;');
-    expect(installerPs1).toContain('const hasTarget = !!(opts.slsEndpoint && opts.slsProject && opts.slsLogstore);');
-    expect(installerPs1).toContain('} else if (prevStorage && opts.slsApiKey) {');
+    expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
     expect(installerPs1).toContain("label: 'multimodal.storage.type'");
     expect(installerPs1).toContain("label: 'multimodal.storage.target'");
     expect(installerPs1).toContain("label: 'multimodal.storage.auth.mode'");
@@ -272,27 +270,8 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.multimodal).toBeUndefined();
       });
 
-      it('updates only auth when existing storage is present and only apiKey is passed', () => {
-        const result = runWriteConfig(platform, 'both', {
-          ...enabledAgents,
-          multimodal: {
-            extra: true,
-            storage: {
-              type: 'sls',
-              target: {
-                endpoint: 'old.example.com',
-                project: 'old-project',
-                logstore: 'old-logstore',
-              },
-              auth: { mode: 'apiKey', apiKey: 'old-key' },
-            },
-          },
-        }, {
-          multimodalAgents: 'codex',
-          sls: { apiKey: 'new-key' },
-        });
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.config.multimodal).toEqual({
+      it('does not rewrite storage when only apiKey is passed', () => {
+        const existing = {
           extra: true,
           storage: {
             type: 'sls',
@@ -301,25 +280,33 @@ describe('installer write_config multimodal-mode', () => {
               project: 'old-project',
               logstore: 'old-logstore',
             },
-            auth: { mode: 'apiKey', apiKey: 'new-key' },
+            auth: { mode: 'apiKey', apiKey: 'old-key' },
           },
-        });
-      });
-
-      it('replaces only target when existing storage is present and the three dest flags are set', () => {
+        };
         const result = runWriteConfig(platform, 'both', {
           ...enabledAgents,
-          multimodal: {
-            storage: {
-              type: 'sls',
-              target: {
-                endpoint: 'old.example.com',
-                project: 'old-project',
-                logstore: 'old-logstore',
-              },
-              auth: { mode: 'apiKey', apiKey: 'keep-key' },
-            },
+          multimodal: existing,
+        }, {
+          multimodalAgents: 'codex',
+          sls: { apiKey: 'new-key' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal).toEqual(existing);
+      });
+
+      it('does not rewrite storage when only the three dest flags are set', () => {
+        const existing = {
+          type: 'sls',
+          target: {
+            endpoint: 'old.example.com',
+            project: 'old-project',
+            logstore: 'old-logstore',
           },
+          auth: { mode: 'apiKey', apiKey: 'keep-key' },
+        };
+        const result = runWriteConfig(platform, 'both', {
+          ...enabledAgents,
+          multimodal: { storage: existing },
         }, {
           multimodalAgents: 'codex',
           sls: {
@@ -329,15 +316,7 @@ describe('installer write_config multimodal-mode', () => {
           },
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.config.multimodal.storage).toEqual({
-          type: 'sls',
-          target: {
-            endpoint: completeSls.endpoint,
-            project: completeSls.project,
-            logstore: completeSls.logstore,
-          },
-          auth: { mode: 'apiKey', apiKey: 'keep-key' },
-        });
+        expect(result.config.multimodal.storage).toEqual(existing);
       });
 
       it('ignores a lone dest flag and leaves existing storage unchanged', () => {
@@ -361,12 +340,18 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.multimodal.storage).toEqual(existing);
       });
 
-      it('writes none onto listed agents only and still writes storage from SLS flags', () => {
+      it('writes none onto listed agents only and does not rewrite storage', () => {
+        const existing = {
+          type: 'oss',
+          target: { endpoint: 'oss.example.com', storageBasePath: 'oss://bucket/prefix' },
+          auth: { mode: 'ak', accessKeyId: 'id', accessKeySecret: 'secret' },
+        };
         const result = runWriteConfig(platform, 'none', {
           agents: {
             codex: { enabled: true, multimodal: { uploadMode: 'both', allowedRootPaths: ['~/workspace'] } },
             qoder: { enabled: true, multimodal: { uploadMode: 'input' } },
           },
+          multimodal: { storage: existing },
         }, {
           multimodalAgents: 'codex',
           sls: completeSls,
@@ -377,24 +362,16 @@ describe('installer write_config multimodal-mode', () => {
           allowedRootPaths: ['~/workspace'],
         });
         expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'input' });
-        expect(result.config.multimodal.storage).toEqual({
-          type: 'sls',
-          target: {
-            endpoint: completeSls.endpoint,
-            project: completeSls.project,
-            logstore: completeSls.logstore,
-          },
-          auth: { mode: 'apiKey', apiKey: completeSls.apiKey },
-        });
+        expect(result.config.multimodal.storage).toEqual(existing);
       });
 
-      it('writes storage from SLS flags when multimodal-mode is omitted', () => {
+      it('does not write storage when multimodal-mode is omitted', () => {
         const result = runWriteConfig(platform, '', enabledAgents, {
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toBeUndefined();
-        expect(result.config.multimodal.storage.auth.apiKey).toBe(completeSls.apiKey);
+        expect(result.config.multimodal).toBeUndefined();
       });
     });
   }
@@ -513,17 +490,21 @@ describe('confirm_config_overwrite multimodal.storage', () => {
             storage: {
               type: 'sls',
               target: {
-                endpoint: 'old.example.com',
-                project: 'old-project',
-                logstore: 'old-logstore',
+                endpoint: completeSls.endpoint,
+                project: completeSls.project,
+                logstore: completeSls.logstore,
               },
               auth: { mode: 'ak', accessKeyId: 'LTAIxxxx', accessKeySecret: 'secret-ak' },
             },
           },
         }, {
           ...confirmNewVals,
+          slsEndpoint: completeSls.endpoint,
+          slsProject: completeSls.project,
+          slsLogstore: completeSls.logstore,
           slsMode: 'apiKey',
           slsApiKey: 'newkey34token',
+          multimodalMode: 'both',
         });
         expect(lines).toEqual(['multimodal.storage.auth.mode: ak -> apiKey']);
         expect(lines.join('\n')).not.toContain('secret-ak');
@@ -538,15 +519,18 @@ describe('confirm_config_overwrite multimodal.storage', () => {
             storage: {
               type: 'sls',
               target: {
-                endpoint: 'old.example.com',
-                project: 'old-project',
-                logstore: 'old-logstore',
+                endpoint: completeSls.endpoint,
+                project: completeSls.project,
+                logstore: completeSls.logstore,
               },
               auth: { mode: 'apiKey', apiKey: oldKey },
             },
           },
         }, {
           ...confirmNewVals,
+          slsEndpoint: completeSls.endpoint,
+          slsProject: completeSls.project,
+          slsLogstore: completeSls.logstore,
           slsMode: 'apiKey',
           multimodalMode: 'both',
           slsApiKey: newKey,
@@ -562,16 +546,20 @@ describe('confirm_config_overwrite multimodal.storage', () => {
             storage: {
               type: 'sls',
               target: {
-                endpoint: 'old.example.com',
-                project: 'old-project',
-                logstore: 'old-logstore',
+                endpoint: completeSls.endpoint,
+                project: completeSls.project,
+                logstore: completeSls.logstore,
               },
               auth: { mode: 'apiKey', apiKey: 'oldshort' },
             },
           },
         }, {
           ...confirmNewVals,
+          slsEndpoint: completeSls.endpoint,
+          slsProject: completeSls.project,
+          slsLogstore: completeSls.logstore,
           slsMode: 'apiKey',
+          multimodalMode: 'both',
           slsApiKey: 'newshort',
         });
         expect(lines).toContain('multimodal.storage.auth.apiKey: **** -> ****');
@@ -600,7 +588,7 @@ describe('confirm_config_overwrite multimodal.storage', () => {
         }).filter(line => line.startsWith('multimodal.'))).toEqual([]);
       });
 
-      it('shows storage diffs when multimodal-mode is omitted', () => {
+      it('does not show storage diffs when multimodal-mode is omitted', () => {
         const lines = runConfirmDiff(source, fnMarker, { multimodal: { storage: ossStorage } }, {
           ...confirmNewVals,
           slsEndpoint: completeSls.endpoint,
@@ -609,8 +597,7 @@ describe('confirm_config_overwrite multimodal.storage', () => {
           slsMode: 'apiKey',
           slsApiKey: completeSls.apiKey,
         });
-        expect(lines).toContain('multimodal.storage.type: oss -> sls');
-        expect(lines).toContain('multimodal.storage.auth.mode: ak -> apiKey');
+        expect(lines.filter(line => line.startsWith('multimodal.'))).toEqual([]);
       });
     });
   }

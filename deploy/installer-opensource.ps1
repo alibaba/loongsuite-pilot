@@ -1095,8 +1095,6 @@ const slsModeOf = sls => {
 };
 const prevStorage = (old.multimodal && old.multimodal.storage && typeof old.multimodal.storage === 'object')
   ? old.multimodal.storage : undefined;
-const hasMmTarget = Boolean(newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore);
-const willWriteMmTarget = Boolean(hasMmTarget && (prevStorage || newVals.slsMode === 'apiKey'));
 const mmTargetJson = target => (target && typeof target === 'object') ? JSON.stringify(target) : '';
 const maskSecret = value => {
   const s = String(value || '');
@@ -1115,9 +1113,16 @@ const oldMmAuth = (prevStorage && prevStorage.auth) || undefined;
 const oldMmAuthMode = mmAuthModeOf(oldMmAuth);
 const oldMmKey = (oldMmAuth && oldMmAuth.apiKey) || '';
 const newMmKey = process.env.LP_SLS_API_KEY || '';
-const willWriteMmAuth = Boolean(newMmKey && (prevStorage || hasMmTarget));
-const willWriteMmAuthMode = Boolean(willWriteMmAuth && oldMmAuthMode && oldMmAuthMode !== 'apiKey');
-const willWriteMmApiKey = Boolean(willWriteMmAuth && oldMmAuthMode === 'apiKey' && oldMmKey && oldMmKey !== newMmKey);
+const willRewriteMm = Boolean(
+  newVals.multimodalMode &&
+  newVals.multimodalMode !== 'none' &&
+  newVals.slsEndpoint &&
+  newVals.slsProject &&
+  newVals.slsLogstore &&
+  newMmKey
+);
+const willWriteMmAuthMode = Boolean(willRewriteMm && oldMmAuthMode && oldMmAuthMode !== 'apiKey');
+const willWriteMmApiKey = Boolean(willRewriteMm && oldMmAuthMode === 'apiKey' && oldMmKey && oldMmKey !== newMmKey);
 const checks = [
   { label: 'sls.endpoint',      oldVal: (old.sls||{}).endpoint||'',      newVal: newVals.slsEndpoint },
   { label: 'sls.project',       oldVal: (old.sls||{}).project||'',       newVal: newVals.slsProject },
@@ -1130,8 +1135,8 @@ const checks = [
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
-  { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: (hasMmTarget && newVals.slsMode === 'apiKey') ? 'sls' : '' },
-  { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willWriteMmTarget ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
+  { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: willRewriteMm ? 'sls' : '' },
+  { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willRewriteMm ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
   { label: 'multimodal.storage.auth.mode', oldVal: willWriteMmAuthMode ? oldMmAuthMode : '', newVal: willWriteMmAuthMode ? 'apiKey' : '' },
   { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? oldMmKey : '', newVal: willWriteMmApiKey ? newMmKey : '' },
 ];
@@ -1538,30 +1543,12 @@ if (opts.multimodalMode) {
 }
 
 const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
-const prevStorage = (prevMm.storage && typeof prevMm.storage === 'object') ? prevMm.storage : undefined;
-const hasTarget = !!(opts.slsEndpoint && opts.slsProject && opts.slsLogstore);
-if (hasTarget && opts.slsApiKey) {
+if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
   config.multimodal = {
     ...prevMm,
     storage: {
       type: 'sls',
       target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
-      auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
-    },
-  };
-} else if (prevStorage && hasTarget) {
-  config.multimodal = {
-    ...prevMm,
-    storage: {
-      ...prevStorage,
-      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
-    },
-  };
-} else if (prevStorage && opts.slsApiKey) {
-  config.multimodal = {
-    ...prevMm,
-    storage: {
-      ...prevStorage,
       auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
     },
   };
