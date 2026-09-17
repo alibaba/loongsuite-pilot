@@ -220,7 +220,13 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
     // acp-correlate store so agent spans reparent under the upstream span.

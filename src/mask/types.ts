@@ -1,4 +1,8 @@
-import type { MaskType, PiiMaskType } from '../types/index.js';
+import type {
+  MaskReplacementMode,
+  MaskType,
+  PiiMaskType,
+} from '../types/index.js';
 
 export type { PiiMaskType } from '../types/index.js';
 
@@ -40,6 +44,7 @@ export interface MaskRange {
 export interface MaskPlan {
   rules: readonly CompiledMaskRule[];
   piiTypes: ReadonlySet<PiiMaskType>;
+  replacementMode: MaskReplacementMode;
 }
 
 export interface StringMaskOptions {
@@ -62,3 +67,6 @@ export const DEFAULT_STRING_MASK_OPTIONS: ResolvedStringMaskOptions = {
 
 export const MASKED_TOKEN_PATTERN =
   /^\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHONE|EMAIL|IPADDRESS|BANKCARD)_MASKED\]$/;
+
+export const MASKED_PREVIEW_TOKEN_PATTERN =
+  /\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHONE|EMAIL|IPADDRESS|BANKCARD)_MASKED\]\{[^{}\r\n]{1,512}\}/g;

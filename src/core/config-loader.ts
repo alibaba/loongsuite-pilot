@@ -12,6 +12,7 @@ import type {
   HookWatchdogConfig,
   LogRetentionConfig,
   MaskConfig,
+  MaskReplacementMode,
   MaskType,
   AgentMultimodalConfig,
   MultimodalRuntimeConfig,
@@ -164,6 +165,7 @@ export interface ConfigFile {
   mask?: {
     mode?: string;
     types?: string[];
+    replacementMode?: string;
   };
 
   cms?: {
@@ -737,6 +739,10 @@ function buildAgentMultimodalConfig(
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
+const SUPPORTED_MASK_REPLACEMENT_MODES = new Set<MaskReplacementMode>([
+  'placeholder',
+  'preview',
+]);
 
 function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
   const rawTypes = Array.isArray(value)
@@ -750,18 +756,31 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const rawReplacementMode =
+    env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE') ?? file?.mask?.replacementMode;
+  const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
+    rawReplacementMode as MaskReplacementMode,
+  )
+    ? (rawReplacementMode as MaskReplacementMode)
+    : 'placeholder';
+  if (rawReplacementMode && rawReplacementMode !== replacementMode) {
+    logger.warn('invalid mask replacement mode, using placeholder', {
+      replacementMode: rawReplacementMode,
+    });
+  }
+
   const mode = env('LOONGSUITE_PILOT_MASK_MODE') ?? file?.mask?.mode;
   if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
-    return { mode: 'none', types: [] };
+    return { mode: 'none', types: [], replacementMode };
   }
 
   if (mode === 'all' || mode === 'none') {
-    return { mode, types: [] };
+    return { mode, types: [], replacementMode };
   }
 
   const types = parseMaskTypes(env('LOONGSUITE_PILOT_MASK_TYPES') ?? file?.mask?.types);
 
-  return { mode: 'custom', types };
+  return { mode: 'custom', types, replacementMode };
 }
 
 function buildListenersConfig(
