@@ -1419,8 +1419,13 @@ function Write-Config {
     # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
     $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
     Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $script:NODE_BIN -e @'
+    # Native node does not throw; read $LASTEXITCODE on the next line so a JSON
+    # or write failure cannot print "Config written" and keep installing.
+    $cfgExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e @'
 const fs = require('fs');
 let raw = fs.readFileSync(process.argv[1], 'utf-8');
 if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
@@ -1555,8 +1560,15 @@ if (hasTarget && opts.slsApiKey) {
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
-    $ErrorActionPreference = $prevEAP
-    Remove-PilotPathQuietly $cfgTmp
+        $cfgExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-PilotPathQuietly $cfgTmp
+    }
+    if ($cfgExit -ne 0) {
+        Msg "❌ 配置写入失败 (exit=$cfgExit)" "❌ Failed to write config (exit=$cfgExit)"
+        exit 1
+    }
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""

@@ -50,6 +50,20 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('return s.slice(0, 4) + \'****\' + s.slice(-4);');
     expect(installerPs1).toContain('multimodalMode = $script:MultimodalMode');
   });
+
+  it('PowerShell Write-Config aborts on a nonzero node exit', () => {
+    const fn = installerPs1.slice(
+      installerPs1.indexOf('function Write-Config {'),
+      installerPs1.indexOf('# QoderWork-family runtime wrapper:'),
+    );
+    const lines = fn.split('\n');
+    const nodeEnd = lines.indexOf("'@ $cfgTmp");
+    expect(nodeEnd).toBeGreaterThan(0);
+    expect(lines[nodeEnd + 1].trim()).toBe('$cfgExit = $LASTEXITCODE');
+    expect(fn).toMatch(/if \(\$cfgExit -ne 0\) \{/);
+    expect(fn).toContain('Failed to write config');
+    expect(fn).toContain('Remove-PilotPathQuietly $cfgTmp');
+  });
 });
 
 function extractShWriteConfigJs(configPath, dataDir, sls = {}) {
