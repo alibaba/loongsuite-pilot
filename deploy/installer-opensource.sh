@@ -1186,15 +1186,36 @@ if (multimodalMode) {
     config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
     if (multimodalMode !== 'none') multimodalEnabled = true;
   }
-  if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-    config.multimodal = {
-      ...(config.multimodal && typeof config.multimodal === 'object' ? config.multimodal : {}),
-      storage: {
-        type: 'sls',
-        target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
-        auth: { mode: 'apiKey', apiKey: slsApiKey },
-      },
-    };
+  if (multimodalEnabled) {
+    const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
+    const prevStorage = (prevMm.storage && typeof prevMm.storage === 'object') ? prevMm.storage : undefined;
+    const hasTarget = !!(slsEndpoint && slsProject && slsLogstore);
+    if (hasTarget && slsApiKey) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          type: 'sls',
+          target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+          auth: { mode: 'apiKey', apiKey: slsApiKey },
+        },
+      };
+    } else if (prevStorage && hasTarget) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          ...prevStorage,
+          target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+        },
+      };
+    } else if (prevStorage && slsApiKey) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          ...prevStorage,
+          auth: { mode: 'apiKey', apiKey: slsApiKey },
+        },
+      };
+    }
   }
 }
 

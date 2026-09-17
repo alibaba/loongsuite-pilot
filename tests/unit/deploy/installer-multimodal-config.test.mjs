@@ -22,8 +22,8 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain("if (multimodalMode !== 'none') multimodalEnabled = true");
     expect(installerSh).toContain('uploadMode: multimodalMode');
     expect(installerSh).toContain('if (!config.agents[id]) continue;');
-    expect(installerSh).toContain('if (multimodalEnabled && slsEndpoint && slsProject && slsLogstore && slsApiKey)');
-    expect(installerSh).toContain("auth: { mode: 'apiKey', apiKey: slsApiKey }");
+    expect(installerSh).toContain('const hasTarget = !!(slsEndpoint && slsProject && slsLogstore);');
+    expect(installerSh).toContain('} else if (prevStorage && slsApiKey) {');
   });
 
   it('PowerShell installer accepts -MultimodalMode and writes uploadMode', () => {
@@ -37,8 +37,8 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain("if (opts.multimodalMode !== 'none') multimodalEnabled = true");
     expect(installerPs1).toContain('uploadMode: opts.multimodalMode');
     expect(installerPs1).toContain('if (!config.agents[id]) continue;');
-    expect(installerPs1).toContain('if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)');
-    expect(installerPs1).toContain("auth: { mode: 'apiKey', apiKey: opts.slsApiKey }");
+    expect(installerPs1).toContain('const hasTarget = !!(opts.slsEndpoint && opts.slsProject && opts.slsLogstore);');
+    expect(installerPs1).toContain('} else if (prevStorage && opts.slsApiKey) {');
   });
 });
 
@@ -230,7 +230,7 @@ describe('installer write_config multimodal-mode', () => {
         });
       });
 
-      it('does not write multimodal.storage when the four-tuple is incomplete', () => {
+      it('does not write multimodal.storage when there is no existing storage and the four-tuple is incomplete', () => {
         const result = runWriteConfig(platform, 'both', enabledAgents, {
           multimodalAgents: 'codex',
           sls: { ...completeSls, apiKey: '' },
@@ -238,6 +238,95 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
         expect(result.config.multimodal).toBeUndefined();
+      });
+
+      it('updates only auth when existing storage is present and only apiKey is passed', () => {
+        const result = runWriteConfig(platform, 'both', {
+          ...enabledAgents,
+          multimodal: {
+            extra: true,
+            storage: {
+              type: 'sls',
+              target: {
+                endpoint: 'old.example.com',
+                project: 'old-project',
+                logstore: 'old-logstore',
+              },
+              auth: { mode: 'apiKey', apiKey: 'old-key' },
+            },
+          },
+        }, {
+          multimodalAgents: 'codex',
+          sls: { apiKey: 'new-key' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal).toEqual({
+          extra: true,
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'old.example.com',
+              project: 'old-project',
+              logstore: 'old-logstore',
+            },
+            auth: { mode: 'apiKey', apiKey: 'new-key' },
+          },
+        });
+      });
+
+      it('replaces only target when existing storage is present and the three dest flags are set', () => {
+        const result = runWriteConfig(platform, 'both', {
+          ...enabledAgents,
+          multimodal: {
+            storage: {
+              type: 'sls',
+              target: {
+                endpoint: 'old.example.com',
+                project: 'old-project',
+                logstore: 'old-logstore',
+              },
+              auth: { mode: 'apiKey', apiKey: 'keep-key' },
+            },
+          },
+        }, {
+          multimodalAgents: 'codex',
+          sls: {
+            endpoint: completeSls.endpoint,
+            project: completeSls.project,
+            logstore: completeSls.logstore,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal.storage).toEqual({
+          type: 'sls',
+          target: {
+            endpoint: completeSls.endpoint,
+            project: completeSls.project,
+            logstore: completeSls.logstore,
+          },
+          auth: { mode: 'apiKey', apiKey: 'keep-key' },
+        });
+      });
+
+      it('ignores a lone dest flag and leaves existing storage unchanged', () => {
+        const existing = {
+          type: 'sls',
+          target: {
+            endpoint: 'old.example.com',
+            project: 'old-project',
+            logstore: 'old-logstore',
+          },
+          auth: { mode: 'apiKey', apiKey: 'keep-key' },
+        };
+        const result = runWriteConfig(platform, 'both', {
+          ...enabledAgents,
+          multimodal: { storage: existing },
+        }, {
+          multimodalAgents: 'codex',
+          sls: { endpoint: completeSls.endpoint },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.multimodal.storage).toEqual(existing);
       });
 
       it('writes none onto listed agents only and does not write storage', () => {

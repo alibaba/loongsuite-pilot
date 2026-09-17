@@ -1486,15 +1486,36 @@ if (opts.multimodalMode) {
     config.agents[id].multimodal = { ...prev, uploadMode: opts.multimodalMode };
     if (opts.multimodalMode !== 'none') multimodalEnabled = true;
   }
-  if (multimodalEnabled && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
-    config.multimodal = {
-      ...(config.multimodal && typeof config.multimodal === 'object' ? config.multimodal : {}),
-      storage: {
-        type: 'sls',
-        target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
-        auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
-      },
-    };
+  if (multimodalEnabled) {
+    const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? config.multimodal : {};
+    const prevStorage = (prevMm.storage && typeof prevMm.storage === 'object') ? prevMm.storage : undefined;
+    const hasTarget = !!(opts.slsEndpoint && opts.slsProject && opts.slsLogstore);
+    if (hasTarget && opts.slsApiKey) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          type: 'sls',
+          target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+          auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
+        },
+      };
+    } else if (prevStorage && hasTarget) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          ...prevStorage,
+          target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+        },
+      };
+    } else if (prevStorage && opts.slsApiKey) {
+      config.multimodal = {
+        ...prevMm,
+        storage: {
+          ...prevStorage,
+          auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
+        },
+      };
+    }
   }
 }
 
