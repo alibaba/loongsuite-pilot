@@ -150,6 +150,19 @@ describe('the CLM-safe rewrites stay in place', () => {
     expect(cli).not.toMatch(/Select-Object -ExcludeProperty/);
   });
 
+  it('the public installer confirm path uses $env: for LP_SLS_API_KEY', () => {
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    const confirm = installer.slice(
+      installer.indexOf('function Confirm-ConfigOverwrite {'),
+      installer.indexOf('function Write-Config {'),
+    );
+    expect(confirm).toContain('$env:LP_SLS_API_KEY = "$SlsApiKey"');
+    expect(confirm).toContain('Remove-Item Env:LP_SLS_API_KEY -ErrorAction SilentlyContinue');
+    expect(confirm).toMatch(/try \{[\s\S]*finally \{/);
+    expect(confirm).not.toMatch(/\[Environment\]::GetEnvironmentVariable\(/);
+    expect(confirm).not.toMatch(/\[Environment\]::SetEnvironmentVariable\(/);
+  });
+
   it('the public installer checks bound parameters without ContainsKey', () => {
     // installer-opensource.ps1 is still in KNOWN_CLM_UNSAFE for older violations,
     // so pin this top-level check separately: it runs for every subcommand.

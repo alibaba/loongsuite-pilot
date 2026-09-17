@@ -27,6 +27,8 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain("label: 'multimodal.storage.target'");
     expect(installerSh).toContain("label: 'multimodal.storage.auth.mode'");
     expect(installerSh).toContain("label: 'multimodal.storage.auth.apiKey'");
+    expect(installerSh).toContain("oldVal: willWriteMmApiKey ? oldMmKey : ''");
+    expect(installerSh).toContain("c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.oldVal)");
     expect(installerSh).toContain('return s.slice(0, 4) + \'****\' + s.slice(-4);');
     expect(installerSh).toContain('"multimodalMode":"%s"');
   });
@@ -47,6 +49,12 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain("label: 'multimodal.storage.target'");
     expect(installerPs1).toContain("label: 'multimodal.storage.auth.mode'");
     expect(installerPs1).toContain("label: 'multimodal.storage.auth.apiKey'");
+    expect(installerPs1).toContain("oldVal: willWriteMmApiKey ? oldMmKey : ''");
+    expect(installerPs1).toContain("c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.oldVal)");
+    expect(installerPs1).toContain('$env:LP_SLS_API_KEY = "$SlsApiKey"');
+    expect(installerPs1).toContain('Remove-Item Env:LP_SLS_API_KEY -ErrorAction SilentlyContinue');
+    expect(installerPs1).not.toMatch(/\[Environment\]::GetEnvironmentVariable\("LP_SLS_API_KEY"\)/);
+    expect(installerPs1).not.toMatch(/\[Environment\]::SetEnvironmentVariable\("LP_SLS_API_KEY"/);
     expect(installerPs1).toContain('return s.slice(0, 4) + \'****\' + s.slice(-4);');
     expect(installerPs1).toContain('multimodalMode = $script:MultimodalMode');
   });
@@ -424,7 +432,7 @@ describe('multimodal probe after agent selection', () => {
 function extractConfirmJs(source, fnMarker) {
   const fn = source.slice(source.indexOf(fnMarker));
   const start = fn.indexOf("const fs = require('fs');\n");
-  const log = "console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);";
+  const log = "console.log(c.label + ': ' + oldOut + ' -> ' + newOut);";
   const logAt = fn.indexOf(log);
   expect(start).toBeGreaterThanOrEqual(0);
   expect(logAt).toBeGreaterThan(start);
@@ -546,6 +554,29 @@ describe('confirm_config_overwrite multimodal.storage', () => {
         expect(lines).toContain('multimodal.storage.auth.apiKey: oldk****cret -> newk****oken');
         expect(lines.join('\n')).not.toContain(oldKey);
         expect(lines.join('\n')).not.toContain(newKey);
+      });
+
+      it('still shows an apiKey row when two short keys mask to the same stars', () => {
+        const lines = runConfirmDiff(source, fnMarker, {
+          multimodal: {
+            storage: {
+              type: 'sls',
+              target: {
+                endpoint: 'old.example.com',
+                project: 'old-project',
+                logstore: 'old-logstore',
+              },
+              auth: { mode: 'apiKey', apiKey: 'oldshort' },
+            },
+          },
+        }, {
+          ...confirmNewVals,
+          slsMode: 'apiKey',
+          slsApiKey: 'newshort',
+        });
+        expect(lines).toContain('multimodal.storage.auth.apiKey: **** -> ****');
+        expect(lines.join('\n')).not.toContain('oldshort');
+        expect(lines.join('\n')).not.toContain('newshort');
       });
 
       it('does not show multimodal rows when dest is incomplete and no new key is passed', () => {

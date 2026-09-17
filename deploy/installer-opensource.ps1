@@ -1074,10 +1074,13 @@ function Confirm-ConfigOverwrite {
         multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $prevApiKey = [Environment]::GetEnvironmentVariable("LP_SLS_API_KEY")
-    [Environment]::SetEnvironmentVariable("LP_SLS_API_KEY", "$SlsApiKey")
-    $diffs = & $script:NODE_BIN -e @'
+    $prevEAP = $ErrorActionPreference
+    $hadApiKey = Test-Path Env:LP_SLS_API_KEY
+    $prevApiKey = if ($hadApiKey) { $env:LP_SLS_API_KEY } else { $null }
+    try {
+        $ErrorActionPreference = "Continue"
+        $env:LP_SLS_API_KEY = "$SlsApiKey"
+        $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
@@ -1130,18 +1133,24 @@ const checks = [
   { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: (hasMmTarget && newVals.slsMode === 'apiKey') ? 'sls' : '' },
   { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willWriteMmTarget ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
   { label: 'multimodal.storage.auth.mode', oldVal: willWriteMmAuthMode ? oldMmAuthMode : '', newVal: willWriteMmAuthMode ? 'apiKey' : '' },
-  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? maskSecret(oldMmKey) : '', newVal: willWriteMmApiKey ? maskSecret(newMmKey) : '' },
+  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? oldMmKey : '', newVal: willWriteMmApiKey ? newMmKey : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
-for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
+for (const c of changed) {
+  const oldOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.oldVal) : c.oldVal;
+  const newOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.newVal) : c.newVal;
+  console.log(c.label + ': ' + oldOut + ' -> ' + newOut);
+}
 '@ $configFile $jsonArg 2>$null
-    if ($null -eq $prevApiKey) {
-        [Environment]::SetEnvironmentVariable("LP_SLS_API_KEY", $null)
-    } else {
-        [Environment]::SetEnvironmentVariable("LP_SLS_API_KEY", $prevApiKey)
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        if ($hadApiKey) {
+            $env:LP_SLS_API_KEY = $prevApiKey
+        } else {
+            Remove-Item Env:LP_SLS_API_KEY -ErrorAction SilentlyContinue
+        }
     }
-    $ErrorActionPreference = $prevEAP
 
     if (-not $diffs) { return }
 

@@ -858,14 +858,16 @@ const checks = [
   { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: (hasMmTarget && newVals.slsMode === 'apiKey') ? 'sls' : '' },
   { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willWriteMmTarget ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
   { label: 'multimodal.storage.auth.mode', oldVal: willWriteMmAuthMode ? oldMmAuthMode : '', newVal: willWriteMmAuthMode ? 'apiKey' : '' },
-  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? maskSecret(oldMmKey) : '', newVal: willWriteMmApiKey ? maskSecret(newMmKey) : '' },
+  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? oldMmKey : '', newVal: willWriteMmApiKey ? newMmKey : '' },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
 
 for (const c of changed) {
-  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
+  const oldOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.oldVal) : c.oldVal;
+  const newOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.newVal) : c.newVal;
+  console.log(c.label + ': ' + oldOut + ' -> ' + newOut);
 }
 " -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","multimodalMode":"%s"}' \
         "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
