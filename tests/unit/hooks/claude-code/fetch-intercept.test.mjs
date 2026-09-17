@@ -150,9 +150,22 @@ function runScenario({
   const baseEnv = { ...process.env };
   delete baseEnv.TRACEPARENT;
   delete baseEnv.TRACESTATE;
+  // Same for the forwarding switch and the config path it would otherwise read
+  // from the developer's machine.
+  delete baseEnv.AGENT_DATA_COLLECTION_CONFIG;
+  delete baseEnv.LOONGSUITE_PILOT_UPSTREAM_LINK;
+  delete baseEnv.LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM;
   return spawnSync(process.execPath, ['-e', script], {
     encoding: 'utf-8',
-    env: { ...baseEnv, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...env },
+    env: {
+      ...baseEnv,
+      LOONGSUITE_PILOT_DATA_DIR: DATA_DIR,
+      // Forwarding is opt-in; most scenarios exercise the enabled path, and a
+      // case can switch it back off by passing an empty string.
+      LOONGSUITE_PILOT_UPSTREAM_LINK: '1',
+      LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM: '1',
+      ...env,
+    },
     timeout: 10_000,
   });
 }
@@ -308,10 +321,27 @@ describe('claude-code-fetch-intercept preload', () => {
   // https://www.w3.org/TR/trace-context/
 
   describe('W3C trace-context forwarding', () => {
-    const TP = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+    const TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const UPSTREAM_PARENT_ID = '00f067aa0ba902b7';
+    const FLAGS = '01';
+    const TP = `00-${TRACE_ID}-${UPSTREAM_PARENT_ID}-${FLAGS}`;
     const TS = 'congo=t61rcWkgMzE,rojo=00f067aa0ba902b7';
 
-    test('forwards a valid inherited traceparent and tracestate to the gateway', () => {
+    /**
+     * parent-id is replaced with the span id minted for this LLM call, so the
+     * expected header value is only knowable from the record the preload wrote.
+     */
+    function expectSubstitutedParent(observedTraceparent, sessionId = SESS) {
+      const records = readIntercept(sessionId).map((e) => e.record);
+      expect(records).toHaveLength(1);
+      const spanId = records[0].llm_span_id;
+      expect(spanId).toMatch(/^[0-9a-f]{16}$/);
+      expect(spanId).not.toBe(UPSTREAM_PARENT_ID);
+      expect(spanId).not.toBe('0'.repeat(16));
+      expect(observedTraceparent).toBe(`00-${TRACE_ID}-${spanId}-${FLAGS}`);
+    }
+
+    test('forwards the inherited trace but substitutes this call\'s span id', () => {
       const r = runScenario({
         url: LLM_URL, sessionId: SESS,
         body: { system: 'sys', messages: [] },
@@ -320,7 +350,8 @@ describe('claude-code-fetch-intercept preload', () => {
       });
       expect(r.status).toBe(0);
       const { headers } = readObservedRequest();
-      expect(headers.traceparent).toBe(TP);
+      expectSubstitutedParent(headers.traceparent);
+      // tracestate is opaque to us and passes through byte for byte.
       expect(headers.tracestate).toBe(TS);
     });
 
@@ -333,7 +364,7 @@ describe('claude-code-fetch-intercept preload', () => {
       });
       expect(r.status).toBe(0);
       const { headers } = readObservedRequest();
-      expect(headers.traceparent).toBe(TP);
+      expectSubstitutedParent(headers.traceparent);
       expect(headers.tracestate).toBeUndefined();
     });
 
@@ -345,7 +376,7 @@ describe('claude-code-fetch-intercept preload', () => {
         env: { TRACEPARENT: '00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01' },
       });
       expect(r.status).toBe(0);
-      expect(readObservedRequest().headers.traceparent).toBe(TP);
+      expectSubstitutedParent(readObservedRequest().headers.traceparent);
     });
 
     test.each([
@@ -370,6 +401,8 @@ describe('claude-code-fetch-intercept preload', () => {
       const { headers } = readObservedRequest();
       expect(headers.traceparent).toBeUndefined();
       expect(headers.tracestate).toBeUndefined();
+      // Nothing was advertised, so nothing may be minted either.
+      expect(readIntercept(SESS)[0].record.llm_span_id).toBeUndefined();
     });
 
     test.each([
@@ -386,7 +419,7 @@ describe('claude-code-fetch-intercept preload', () => {
       });
       expect(r.status).toBe(0);
       const { headers } = readObservedRequest();
-      expect(headers.traceparent).toBe(TP);
+      expectSubstitutedParent(headers.traceparent);
       expect(headers.tracestate).toBeUndefined();
     });
 
@@ -421,7 +454,7 @@ describe('claude-code-fetch-intercept preload', () => {
         });
         expect(r.status).toBe(0);
         const { headers } = readObservedRequest();
-        expect(headers.traceparent).toBe(TP);
+        expectSubstitutedParent(headers.traceparent);
         expect(headers['x-claude-code-session-id']).toBe(SESS);
         expect(headers['x-custom-marker']).toBe('kept');
       },
@@ -440,7 +473,7 @@ describe('claude-code-fetch-intercept preload', () => {
       });
       expect(r.status).toBe(0);
       const observed = readObservedRequest();
-      expect(observed.headers.traceparent).toBe(TP);
+      expectSubstitutedParent(observed.headers.traceparent);
       expect(observed.headers.tracestate).toBe(TS);
       expect(observed.headers['x-claude-code-session-id']).toBe(SESS);
       expect(observed.method).toBe('POST');
@@ -469,9 +502,11 @@ describe('claude-code-fetch-intercept preload', () => {
       expect(readObservedRequest().headers.traceparent).toBeUndefined();
     });
 
-    test('injects even without a session id, and still records no telemetry', () => {
+    test('injects the upstream parent verbatim when there is no session id', () => {
       // The session-id gate governs pilot's own capture; the gateway's ability
-      // to join the trace must not depend on it.
+      // to join the trace must not depend on it. But without a record to write,
+      // a minted parent-id would name a span pilot never emits, so the upstream
+      // parent is the better answer here.
       const r = runScenario({
         url: LLM_URL, sessionId: null,
         body: { system: 'sys', messages: [] },
@@ -494,7 +529,77 @@ describe('claude-code-fetch-intercept preload', () => {
       expect(headers.traceparent).toBeUndefined();
       expect(headers.tracestate).toBeUndefined();
       // Capture still works — forwarding is independent of it.
-      expect(readIntercept(SESS)[0].record.response_id).toBe(MSG_ID);
+      const [{ record }] = readIntercept(SESS);
+      expect(record.response_id).toBe(MSG_ID);
+      expect(record.llm_span_id).toBeUndefined();
+    });
+
+    // ─── forwarding switch (upstreamLink.propagateToLlm) ──────────────────
+    // Passing an empty string unsets the env override, so the preload falls
+    // back to config.json — absent unless a case writes one.
+    describe('opt-in switch', () => {
+      const OFF = {
+        LOONGSUITE_PILOT_UPSTREAM_LINK: '',
+        LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM: '',
+      };
+
+      function writeConfig(upstreamLink) {
+        const p = path.join(DATA_DIR, 'config.json');
+        fs.writeFileSync(p, JSON.stringify({ upstreamLink }), 'utf-8');
+        return p;
+      }
+
+      test('forwards nothing while the switch is off', () => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { ...OFF, TRACEPARENT: TP, TRACESTATE: TS },
+        });
+        expect(r.status).toBe(0);
+        const { headers } = readObservedRequest();
+        expect(headers.traceparent).toBeUndefined();
+        expect(headers.tracestate).toBeUndefined();
+        // Capture keeps working; only forwarding is gated.
+        const [{ record }] = readIntercept(SESS);
+        expect(record.response_id).toBe(MSG_ID);
+        expect(record.llm_span_id).toBeUndefined();
+      });
+
+      test('needs propagateToLlm too, not just upstreamLink.enabled', () => {
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { ...OFF, LOONGSUITE_PILOT_UPSTREAM_LINK: '1', TRACEPARENT: TP },
+        });
+        expect(r.status).toBe(0);
+        expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      });
+
+      test('reads both halves from config.json when no env override is set', () => {
+        const configPath = writeConfig({ enabled: true, propagateToLlm: true });
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { ...OFF, AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT: TP },
+        });
+        expect(r.status).toBe(0);
+        expectSubstitutedParent(readObservedRequest().headers.traceparent);
+      });
+
+      test('honours a config.json that enables linking but not LLM forwarding', () => {
+        const configPath = writeConfig({ enabled: true });
+        const r = runScenario({
+          url: LLM_URL, sessionId: SESS,
+          body: { system: 'sys', messages: [] },
+          sseEvents: sseStream(),
+          env: { ...OFF, AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT: TP },
+        });
+        expect(r.status).toBe(0);
+        expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      });
     });
   });
 });

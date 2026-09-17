@@ -33,10 +33,11 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  attachReservedLlmSpanIds,
   attachReservedToolSpanIds,
-  ReservedToolSpanIdGenerator,
-  type ToolSpanIdReservations,
-} from './tool-span-id-reservation.js';
+  ReservedSpanIdGenerator,
+  type SpanIdReservations,
+} from './span-id-reservation.js';
 
 import {
   OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
@@ -113,7 +114,8 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
-  toolSpanIds: ToolSpanIdReservations;
+  toolSpanIds: SpanIdReservations;
+  llmSpanIds: SpanIdReservations;
   active: number;
 }
 
@@ -976,7 +978,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resourceIdentity,
       convertKey,
     );
-    const { handler, provider, inMem, toolSpanIds } = convertState;
+    const { handler, provider, inMem, toolSpanIds, llmSpanIds } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
@@ -1051,6 +1053,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
+        llmSpanIds.prepare(sanitized);
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
@@ -1063,6 +1066,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           succeeded = true;
         } finally {
           toolSpanIds.clear();
+          llmSpanIds.clear();
           if (counters) {
             counters.converter_calls_total++;
             counters.converter_duration_ms_total += performance.now() - convertStarted;
@@ -1226,7 +1230,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
     const inMem = new InMemorySpanExporter();
-    const idGenerator = new ReservedToolSpanIdGenerator();
+    const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
       idGenerator,
@@ -1234,8 +1238,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
+    const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;

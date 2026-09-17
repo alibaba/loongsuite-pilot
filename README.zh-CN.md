@@ -150,6 +150,7 @@ loongsuite-pilot info
 | ------ | ---- | ---- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将 Trace 上下文和可选资源属性传给受支持的下游 CLI 工具调用 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM`(环境变量)· `upstreamLink.propagateToLlm`(config.json) | 以 `traceparent` 请求头把 Trace 上下文转发给 LLM 网关(Claude Code) | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING`(环境变量)· `upstreamLink.generateTraceWhenMissing`(config.json) | 没有有效上游上下文时，为每个 turn 生成本地 Trace 上下文并继续传播 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
 
@@ -158,7 +159,9 @@ loongsuite-pilot info
 - **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
 - **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
 
-对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把三个 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
+对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
+
+同时开启 `upstreamLink.enabled` 和 `propagateToLlm` 后，同一条 Trace 会延伸到 **LLM 网关**：Claude Code 的 fetch preload 会在发往网关的 `/v1/messages` 请求上注入 `traceparent`，trace-id 和 flags 原样透传，parent-id 替换为该次 LLM 调用的 span id，使网关侧 span 挂在这个 LLM span 之下。调用方自己已设置的 `traceparent` 绝不会被覆盖，整条路径 fail-open。
 
 ## 输出数据
 

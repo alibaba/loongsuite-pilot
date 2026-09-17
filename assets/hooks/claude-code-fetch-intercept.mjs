@@ -15,12 +15,18 @@
 //   3. ttft_ns — performance.now() delta (ms) at the moment the first
 //      content_block_delta (text_delta / thinking_delta / input_json_delta)
 //      arrives, converted to integer nanoseconds.
+//   4. llm_span_id — the span id minted here and advertised to the gateway as
+//      traceparent parent-id, so the hook processor can reuse it for this
+//      call's LLM span.
 //
 // What it forwards:
 //   - traceparent / tracestate — the W3C trace context inherited from the
 //     process that launched Claude Code, injected onto the outgoing
 //     /v1/messages request so a user-operated gateway can join the caller's
-//     trace. See the "W3C trace-context forwarding" section below.
+//     trace. trace-id/flags pass through untouched; parent-id is replaced with
+//     llm_span_id. Off unless both `upstreamLink.enabled` and
+//     `upstreamLink.propagateToLlm` are set. See the "W3C trace-context
+//     forwarding" section below.
 //
 // Design notes:
 //   - SSE is parsed by splitting the accumulated buffer on `\n\n` event
@@ -36,12 +42,12 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+// Named to avoid shadowing the WebCrypto `crypto` global inside this module.
+const nodeCrypto = require('node:crypto');
 
-const INTERCEPT_BASE = path.join(
-  process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '/tmp', '.loongsuite-pilot'),
-  'intercept',
-  'claude-code',
-);
+const PILOT_DATA_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR
+  || path.join(process.env.HOME || '/tmp', '.loongsuite-pilot');
+const INTERCEPT_BASE = path.join(PILOT_DATA_DIR, 'intercept', 'claude-code');
 const LLM_URL_RE = /\/v1\/messages(?:\?|$|\/)/;
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const SSE_DELIMITER = '\n\n';
@@ -52,6 +58,7 @@ const SSE_DELIMITER = '\n\n';
 const TRACEPARENT_RE = /^([\da-f]{2})-([\da-f]{32})-([\da-f]{16})-([\da-f]{2})$/i;
 const ZERO_TRACE_ID = '0'.repeat(32);
 const ZERO_PARENT_ID = '0'.repeat(16);
+const SPAN_ID_RE = /^[\da-f]{16}$/;
 // Spec: tracestate holds at most 32 list-members and implementations may drop
 // one larger than 512 bytes.
 const TRACESTATE_MAX_BYTES = 512;
@@ -94,7 +101,14 @@ function dumpHeaders(h) {
   const out = {};
   if (!h) return out;
   try {
-    if (typeof h.forEach === 'function') {
+    // Arrays must be handled before the forEach branch: Array.prototype.forEach
+    // yields (element, index), which would key every header by its position and
+    // silently lose the session id.
+    if (Array.isArray(h)) {
+      for (const pair of h) {
+        if (Array.isArray(pair) && pair.length === 2) out[String(pair[0]).toLowerCase()] = pair[1];
+      }
+    } else if (typeof h.forEach === 'function') {
       h.forEach((v, k) => { out[String(k).toLowerCase()] = v; });
     } else if (typeof h === 'object') {
       for (const k of Object.keys(h)) out[k.toLowerCase()] = h[k];
@@ -167,10 +181,13 @@ function parseSseBlock(block) {
 // lets that gateway (and anything behind it) attach its spans to the caller's
 // trace instead of starting an orphan one.
 //
-// This is propagation only: we never mint a trace id and never rewrite the
-// parent id, so Claude Code's own spans stay owned by pilot's hook processor.
+// We never mint a trace id, so the trace stays the caller's. parent-id is a
+// different matter: per spec it is "the ID of this request as known by the
+// caller", so forwarding the upstream value verbatim would make the gateway's
+// spans siblings of Claude Code's ENTRY span. Substituting the span id minted
+// for this LLM call nests them under that call instead.
 
-function validateTraceparent(raw) {
+function parseTraceparent(raw) {
   if (typeof raw !== 'string') return null;
   const m = TRACEPARENT_RE.exec(raw.trim());
   if (!m) return null;
@@ -180,7 +197,22 @@ function validateTraceparent(raw) {
   // forwarded.
   if (version !== '00') return null;
   if (traceId === ZERO_TRACE_ID || parentId === ZERO_PARENT_ID) return null;
-  return `${version}-${traceId}-${parentId}-${flags}`;
+  return { version, traceId, parentId, flags };
+}
+
+function formatTraceparent(parts, spanId) {
+  const parentId = SPAN_ID_RE.test(spanId || '') && spanId !== ZERO_PARENT_ID
+    ? spanId
+    : parts.parentId;
+  return `${parts.version}-${parts.traceId}-${parentId}-${parts.flags}`;
+}
+
+function mintSpanId() {
+  try {
+    return nodeCrypto.randomBytes(8).toString('hex');
+  } catch (_) {
+    return null;
+  }
 }
 
 function validateTracestate(raw) {
@@ -227,13 +259,40 @@ function cloneHeaders(source) {
   }
 }
 
+// Reads the same `upstreamLink` block the collector and the hook processor read,
+// duplicated here because this file runs through require() inside Bun and cannot
+// import the ESM helper in agent-event-normalizer.mjs.
+function llmPropagationEnabled() {
+  const envBool = (name) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return null;
+    return raw === '1' || raw.toLowerCase() === 'true';
+  };
+  let file = {};
+  try {
+    const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG
+      || path.join(PILOT_DATA_DIR, 'config.json');
+    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8')) || {};
+  } catch (_) {
+    file = {};
+  }
+  const link = file.upstreamLink && typeof file.upstreamLink === 'object' ? file.upstreamLink : {};
+  const enabled = envBool('LOONGSUITE_PILOT_UPSTREAM_LINK') ?? link.enabled === true;
+  const toLlm = envBool('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM')
+    ?? link.propagateToLlm === true;
+  // Both halves: forwarding a context the collector is not linking would point
+  // the gateway at a span that only exists inside pilot's private trace.
+  return enabled && toLlm;
+}
+
 // Evaluated after the validators are defined — a top-level const that called a
 // hoisted function would throw at preload time the moment someone converted
 // those declarations to arrow functions, and a throw here would leave fetch
 // completely uninstrumented.
-const UPSTREAM_TRACEPARENT = (() => {
+const UPSTREAM_TRACE_PARTS = (() => {
   try {
-    return validateTraceparent(process.env.TRACEPARENT);
+    if (!llmPropagationEnabled()) return null;
+    return parseTraceparent(process.env.TRACEPARENT);
   } catch (_) {
     return null;
   }
@@ -241,16 +300,16 @@ const UPSTREAM_TRACEPARENT = (() => {
 const UPSTREAM_TRACESTATE = (() => {
   try {
     // tracestate is meaningless without the traceparent it annotates.
-    return UPSTREAM_TRACEPARENT ? validateTracestate(process.env.TRACESTATE) : null;
+    return UPSTREAM_TRACE_PARTS ? validateTracestate(process.env.TRACESTATE) : null;
   } catch (_) {
     return null;
   }
 })();
 
-function withUpstreamTraceContext(input, init) {
+function withUpstreamTraceContext(input, init, llmSpanId) {
   // No usable upstream context: hand back the exact original pair so the
   // untraced path behaves as if this feature did not exist.
-  if (!UPSTREAM_TRACEPARENT) return { input, init };
+  if (!UPSTREAM_TRACE_PARTS) return { input, init };
   try {
     const existing = init?.headers ?? (input && typeof input === 'object' ? input.headers : null);
     // Someone closer to the request already chose a parent; a propagator must
@@ -259,7 +318,7 @@ function withUpstreamTraceContext(input, init) {
 
     const headers = cloneHeaders(existing);
     if (!headers) return { input, init };
-    headers.set('traceparent', UPSTREAM_TRACEPARENT);
+    headers.set('traceparent', formatTraceparent(UPSTREAM_TRACE_PARTS, llmSpanId));
     if (UPSTREAM_TRACESTATE) headers.set('tracestate', UPSTREAM_TRACESTATE);
 
     // Only headers are overridden. When `input` is a Request, fetch still
@@ -288,16 +347,12 @@ if (typeof origFetch === 'function') {
       return origFetch.call(this, input, init);
     }
 
-    // Forward the caller's trace context before the session-id gate below:
-    // that gate decides whether *we* can record telemetry, which has no
-    // bearing on the gateway's ability to join the trace.
-    ({ input, init } = withUpstreamTraceContext(input, init));
-
     // Header session_id is required to scope intercept output. Without it
     // we have no way for the hook processor to find this record, so we
     // skip writing — let the request go through normally.
     let sessionId = null;
     let systemInstructions = null;
+    let llmSpanId = null;
     try {
       const headers = dumpHeaders(
         init?.headers ?? (input && typeof input === 'object' ? input.headers : null),
@@ -307,8 +362,17 @@ if (typeof origFetch === 'function') {
         const body = init?.body
           ?? (input && typeof input === 'object' ? input.body : null);
         systemInstructions = safeParseRequestSystem(body);
+        // Only mint when the record can be written: a parent-id nobody records
+        // would point the gateway at a span pilot never emits, which is worse
+        // than forwarding the upstream parent verbatim.
+        if (UPSTREAM_TRACE_PARTS) llmSpanId = mintSpanId();
       }
     } catch (_) {}
+
+    // Forward the caller's trace context before the session-id gate below:
+    // that gate decides whether *we* can record telemetry, which has no
+    // bearing on the gateway's ability to join the trace.
+    ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
 
     if (!sessionId) {
       return origFetch.call(this, input, init);
@@ -340,6 +404,7 @@ if (typeof origFetch === 'function') {
         response_id: responseId,
         ttft_ns: ttftNs,
         system_instructions: systemInstructions,
+        ...(llmSpanId ? { llm_span_id: llmSpanId } : {}),
       });
       recordWritten = true;
     };

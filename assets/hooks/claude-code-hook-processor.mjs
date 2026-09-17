@@ -165,6 +165,12 @@ function collectSubagentLinks(turn) {
 // ─── intercept (BUN_OPTIONS preload) data integration ───
 
 const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
+const SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const ZERO_SPAN_ID = '0'.repeat(16);
+
+function isSpanId(value) {
+  return typeof value === 'string' && SPAN_ID_RE.test(value) && value !== ZERO_SPAN_ID;
+}
 
 function interceptSessionDir(sessionId) {
   return path.join(pilotDataDir(), 'intercept', AGENT_ID, sessionId);
@@ -172,7 +178,7 @@ function interceptSessionDir(sessionId) {
 
 /**
  * Read per-LLM-call intercept records dropped by claude-code-fetch-intercept.mjs.
- * Returns Map<response_id, { ttft_ns, system_instructions, _file }>.
+ * Returns Map<response_id, { ttft_ns, system_instructions, llm_span_id, _file }>.
  * Tracks `_file` so reapInterceptFiles can delete merged records after
  * buildTurnRecords consumes them.
  */
@@ -1019,8 +1025,21 @@ function buildTurnRecords(
     stepRound++;
     const currentStepId = `${turnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
-    const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
+
+    // Look up preload-captured data once per LLM call. ev.message_id matches
+    // the SSE message_start `message.id` the preload script extracted.
+    const interceptData = intercept && ev.message_id
+      ? intercept.get(ev.message_id)
+      : undefined;
+    if (interceptData) mergedResponseIds.add(ev.message_id);
+
+    // The preload already advertised its minted span id to the LLM gateway as
+    // traceparent parent-id, so this span has to claim the same id — otherwise
+    // the gateway's spans parent to something pilot never emits.
+    const llmSpanId = isSpanId(interceptData?.llm_span_id)
+      ? interceptData.llm_span_id
+      : generateSpanId();
     if (!firstStepOwner) {
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
     }
@@ -1047,13 +1066,6 @@ function buildTurnRecords(
       delta = inputMsgs.slice(prevInputMsgs.length);
       logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
     }
-
-    // Look up preload-captured data once per LLM call. ev.message_id matches
-    // the SSE message_start `message.id` the preload script extracted.
-    const interceptData = intercept && ev.message_id
-      ? intercept.get(ev.message_id)
-      : undefined;
-    if (interceptData) mergedResponseIds.add(ev.message_id);
 
     // llm.request
     const reqRecord = {

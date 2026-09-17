@@ -1167,6 +1167,8 @@ describe('claude-code 一级子 Agent 上报', () => {
 // (written by claude-code-fetch-intercept.mjs) and merges:
 //   gen_ai.system_instructions → llm.request events
 //   gen_ai.response.time_to_first_token → llm.response events
+//   llm_span_id → span_id on both llm events (the preload already advertised it
+//     to the LLM gateway as traceparent parent-id)
 // joined by message_id == response_id == file basename.
 
 function writeInterceptFile(sessionId, responseId, payload, opts = {}) {
@@ -1235,6 +1237,56 @@ describe('hook-processor merges intercept data into llm events', () => {
     // itself may be removed (since it's empty after reaping).
     expect(fs.existsSync(fileA)).toBe(false);
     expect(fs.existsSync(fileB)).toBe(false);
+  });
+
+  test('adopts the preload-minted llm_span_id as the LLM span id', () => {
+    // The preload already told the gateway this id is the parent of its spans,
+    // so pilot's own LLM span has to claim it.
+    const sid = 'sid-merge-spanid';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_span_a', 'msg_span_b');
+    const spanA = 'aaaaaaaaaaaaaaa1';
+    const spanB = 'bbbbbbbbbbbbbbb2';
+
+    writeInterceptFile(sid, 'msg_span_a', { session_id: sid, response_id: 'msg_span_a', ttft_ns: 1, llm_span_id: spanA });
+    writeInterceptFile(sid, 'msg_span_b', { session_id: sid, response_id: 'msg_span_b', ttft_ns: 2, llm_span_id: spanB });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const llmEvents = records.filter((rec) => rec['event.name'] === 'llm.request' || rec['event.name'] === 'llm.response');
+    expect(llmEvents).toHaveLength(4);
+
+    for (const ev of llmEvents) {
+      const expected = ev['gen_ai.response.id'] === 'msg_span_a' ? spanA : spanB;
+      expect(ev.span_id).toBe(expected);
+      expect(ev.parent_span_id).not.toBe(expected);
+    }
+  });
+
+  test('rejects an invalid llm_span_id and generates one locally', () => {
+    const sid = 'sid-merge-spanid-bad';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_bad_a', 'msg_bad_b');
+
+    writeInterceptFile(sid, 'msg_bad_a', { session_id: sid, response_id: 'msg_bad_a', ttft_ns: 1, llm_span_id: 'not-a-span-id' });
+    writeInterceptFile(sid, 'msg_bad_b', { session_id: sid, response_id: 'msg_bad_b', ttft_ns: 2, llm_span_id: '0'.repeat(16) });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const llmEvents = records.filter((rec) => rec['event.name'] === 'llm.request' || rec['event.name'] === 'llm.response');
+    expect(llmEvents).toHaveLength(4);
+
+    for (const ev of llmEvents) {
+      expect(ev.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(ev.span_id).not.toBe('0'.repeat(16));
+      expect(ev.span_id).not.toBe(ev.parent_span_id);
+    }
+    // Both events of one call still share a span, and the two calls differ.
+    const byResponse = new Map(llmEvents.map((ev) => [ev['gen_ai.response.id'], ev.span_id]));
+    expect(byResponse.size).toBe(2);
+    expect(byResponse.get('msg_bad_a')).not.toBe(byResponse.get('msg_bad_b'));
   });
 
   test('no intercept directory: records emit without new fields (graceful)', () => {
