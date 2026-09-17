@@ -1973,7 +1973,8 @@ try {
 # entries that may have been added to it. Stable script-name matching also
 # works when Pilot was installed with a custom data directory.
 function Remove-GrokBuildHookConfig {
-    $cfg = Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json"
+    $grokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $env:USERPROFILE ".grok" }
+    $cfg = Join-Path $grokHome "hooks\loongsuite-pilot.json"
     if (-not (Test-Path -LiteralPath $cfg)) { return }
     if (-not $script:NODE_BIN) {
         Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" `
@@ -2142,7 +2143,8 @@ function Remove-HermesPlugin {
 # Remove Pi Coding Agent extension injection
 # ============================================================
 function Remove-PiCodingAgentExtension {
-    $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
+    $piAgentDir = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $env:USERPROFILE ".pi\agent" }
+    $cfg = Join-Path $piAgentDir "settings.json"
     $short = $cfg.Replace($env:USERPROFILE, "~")
 
     if (-not $script:NODE_BIN) {

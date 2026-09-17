@@ -3,7 +3,7 @@
   "displayName": "DeepSeek Harness",
   "deployMode": "dsh-yaml-patch",
   "detection": {
-    "paths": ["~/.dsh"],
+    "paths": ["$DSH_HOME"],
     "commands": ["dsh"]
   },
   "dshYamlPatch": {

@@ -163,6 +163,8 @@ const HOOK_CONFIG_FILES = [...new Set(
     .filter(name => name.endsWith('.json'))
     .map(name => JSON.parse(readFileSync(resolve('agents.d', name), 'utf-8')))
     .filter(agent => agent.deployMode === 'hook' && agent.hook?.settingsPath)
+    // Env-overridable homes (e.g. $GROK_HOME) have dedicated uninstallers.
+    .filter(agent => !String(agent.hook.settingsPath).includes('$'))
     .map(agent => agent.hook.settingsPath.replace(/^~\//, '')),
 )].sort();
 
@@ -278,8 +280,10 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
   });
 
   it('targets Pi settings and matches only the Pilot extension', () => {
-    expect(sh).toContain('.pi/agent/settings.json');
-    expect(ps1).toContain('.pi\\agent\\settings.json');
+    expect(sh).toContain('PI_CODING_AGENT_DIR');
+    expect(sh).toContain('$HOME/.pi/agent');
+    expect(ps1).toContain('PI_CODING_AGENT_DIR');
+    expect(ps1).toContain('.pi\\agent');
     expect(sh).toContain('loongsuite-pilot-pi-coding-agent');
     expect(sh).toContain('plugins/pi-coding-agent/index.mjs');
     expect(ps1).toContain('loongsuite-pilot-pi-coding-agent');
@@ -603,7 +607,21 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
   });
 });
 
+describe('DSH uninstall smoke', () => {
+  it('honours DSH_HOME when cleaning the YAML patch', () => {
+    expect(sh).toContain('DSH_HOME:-$HOME/.dsh');
+    expect(ps1).toContain('DSH_HOME');
+    expect(ps1).toContain('.dsh');
+  });
+});
+
 describe('Grok Build uninstall smoke', () => {
+  it('honours GROK_HOME when cleaning the hook file', () => {
+    expect(sh).toContain('GROK_HOME:-$HOME/.grok');
+    expect(ps1).toContain('GROK_HOME');
+    expect(ps1).toContain('.grok');
+  });
+
   it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
@@ -654,14 +672,18 @@ describe('Grok Build uninstall smoke', () => {
         'en',
       ], {
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          HOME: root,
-          USERPROFILE: root,
-          // Exclude a developer-machine Pilot binary while retaining Node and
-          // standard system tools. The uninstall must stay inside this HOME.
-          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
-        },
+        env: (() => {
+          const env = {
+            ...process.env,
+            HOME: root,
+            USERPROFILE: root,
+            // Exclude a developer-machine Pilot binary while retaining Node and
+            // standard system tools. The uninstall must stay inside this HOME.
+            PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+          };
+          delete env.GROK_HOME;
+          return env;
+        })(),
       });
 
       expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
