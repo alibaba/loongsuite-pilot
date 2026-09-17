@@ -205,12 +205,24 @@ export class CodexTranscriptInput extends BaseInput {
     this.multimodalProcessor = includeMultimodal ? processor : null;
   }
 
-  static getWatchPaths(): string[] {
-    return [resolveHome(DEFAULT_SESSION_DIR)];
+  static getWatchPaths(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): string[] {
+    return [sessionDir, wakeupDir];
   }
 
-  static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome(DEFAULT_SESSION_DIR));
+  static async checkAvailability(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): Promise<boolean> {
+    if (await directoryExists(sessionDir)) return true;
+    try {
+      const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
+      return entries.some(entry => entry.isFile() && entry.name.endsWith('.json'));
+    } catch {
+      return false;
+    }
   }
 
   protected override async onStart(): Promise<void> {
@@ -2080,26 +2092,42 @@ export class CodexTranscriptInput extends BaseInput {
 
       const configuredSessionDir = stringValue(marker.session_dir);
       const configuredCodexHome = stringValue(marker.codex_home);
+      const transcriptPath = stringValue(marker.transcript_path);
       if (configuredSessionDir && !path.isAbsolute(configuredSessionDir)) continue;
       if (configuredCodexHome && !path.isAbsolute(configuredCodexHome)) continue;
 
-      let sessionDir = configuredSessionDir;
+      const candidates = new Set<string>();
       if (configuredCodexHome) {
-        const codexHomeSessionDir = path.resolve(configuredCodexHome, 'sessions');
-        if (configuredSessionDir && path.resolve(configuredSessionDir) !== codexHomeSessionDir) continue;
-        sessionDir = codexHomeSessionDir;
+        candidates.add(path.resolve(configuredCodexHome, 'sessions'));
       }
-      if (!sessionDir || !path.isAbsolute(sessionDir)) continue;
+      if (
+        configuredSessionDir
+        && (!configuredCodexHome || isCodexSessionDirForHome(configuredSessionDir, configuredCodexHome))
+      ) {
+        candidates.add(path.resolve(configuredSessionDir));
+      }
+      const transcriptSessionDir = transcriptPath
+        ? sessionDirFromTranscriptPath(transcriptPath)
+        : undefined;
+      if (
+        transcriptSessionDir
+        && (!configuredCodexHome || isCodexSessionDirForHome(transcriptSessionDir, configuredCodexHome))
+      ) {
+        candidates.add(transcriptSessionDir);
+      }
 
-      let canonicalSessionDir: string;
-      try {
-        canonicalSessionDir = await fs.realpath(sessionDir);
-        if (!(await fs.stat(canonicalSessionDir)).isDirectory()) continue;
-      } catch {
-        continue;
+      for (const sessionDir of candidates) {
+        let canonicalSessionDir: string;
+        try {
+          canonicalSessionDir = await fs.realpath(sessionDir);
+          if (!(await fs.stat(canonicalSessionDir)).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        if (canonicalSessionDir === canonicalDefaultSessionDir) continue;
+        sessionDirs.add(canonicalSessionDir);
+        if (sessionDirs.size >= MAX_DYNAMIC_SESSION_DIRS) break;
       }
-      if (canonicalSessionDir === canonicalDefaultSessionDir) continue;
-      sessionDirs.add(canonicalSessionDir);
       if (sessionDirs.size >= MAX_DYNAMIC_SESSION_DIRS) break;
     }
 
@@ -2439,6 +2467,38 @@ function isCodexSessionDateDirectory(name: string, depth: number): boolean {
   if (depth === 1) return /^(0[1-9]|1[0-2])$/.test(name);
   if (depth === 2) return /^(0[1-9]|[12]\d|3[01])$/.test(name);
   return false;
+}
+
+function sessionDirFromTranscriptPath(transcriptPath: string): string | undefined {
+  if (!path.isAbsolute(transcriptPath)) return undefined;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return undefined;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !isCodexSessionDateDirectory(path.basename(yearDir), 0)
+    || !isCodexSessionDateDirectory(path.basename(monthDir), 1)
+    || !isCodexSessionDateDirectory(path.basename(dayDir), 2)
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return undefined;
+  }
+  return path.resolve(sessionDir);
+}
+
+function isCodexSessionDirForHome(sessionDir: string, codexHome: string): boolean {
+  const relative = path.relative(path.resolve(codexHome), path.resolve(sessionDir));
+  if (relative === 'sessions') return true;
+  const parts = relative.split(path.sep);
+  return parts.length === 3
+    && parts[0] === 'u'
+    && parts[1].length > 0
+    && parts[1] !== '.'
+    && parts[1] !== '..'
+    && parts[2] === 'sessions';
 }
 
 async function canonicalDirectoryPath(directoryPath: string): Promise<string> {

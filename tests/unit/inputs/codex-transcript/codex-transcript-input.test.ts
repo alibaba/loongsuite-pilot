@@ -414,6 +414,25 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('becomes available from a wakeup marker when the default session root is absent', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-availability-'));
+    tempDirs.push(root);
+    const wakeupDir = path.join(root, 'wakeups');
+    const absentSessionDir = path.join(root, 'absent-sessions');
+    await fs.mkdir(wakeupDir, { recursive: true });
+
+    expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(false);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      received_at: new Date().toISOString(),
+    });
+    expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(true);
+    expect(CodexTranscriptInput.getWatchPaths(wakeupDir, absentSessionDir)).toEqual([
+      absentSessionDir,
+      wakeupDir,
+    ]);
+  });
+
   it('reuses cached owner metadata on an unchanged idle collection cycle', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-idle-'));
     tempDirs.push(root);
@@ -1965,6 +1984,34 @@ describe('CodexTranscriptInput', () => {
     const canonicalTranscript = await fs.realpath(transcript);
     expect(entries.some(entry => entry['event.name'] === 'llm.response')).toBe(true);
     expect(entries.some(entry => entry['agent.codex.transcript_turn_id'] === 'turn-1')).toBe(true);
+    expect(transcriptCheckpoint(stateStore, canonicalTranscript).scanOffset)
+      .toBe(Buffer.byteLength(transcriptText));
+  });
+
+  it('discovers a CODEX_HOME user-isolated session directory from transcript_path', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-user-home-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const codexHome = path.join(root, 'codex-home');
+    const isolatedSessionDir = path.join(codexHome, 'u', 'd4bb12dfd37d67c70484b62e0ed31509', 'sessions');
+    const transcriptText = completedTurn();
+    const transcript = await writeTranscript(isolatedSessionDir, transcriptText);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      codex_home: codexHome,
+      // Older hook versions still record the legacy root; transcript_path is authoritative.
+      session_dir: path.join(codexHome, 'sessions'),
+      transcript_path: transcript,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    const canonicalTranscript = await fs.realpath(transcript);
+    expect(entries.some(entry => entry['gen_ai.session.id'] === 'session-1')).toBe(true);
     expect(transcriptCheckpoint(stateStore, canonicalTranscript).scanOffset)
       .toBe(Buffer.byteLength(transcriptText));
   });
