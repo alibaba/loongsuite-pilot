@@ -1,5 +1,6 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -30,6 +31,16 @@ export interface PluginCheckTarget {
   installArgs?: string[];
   /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
   repairFn?: () => Promise<boolean>;
+
+  /**
+   * Optional config file whose strategy-level health check is only evaluated
+   * after its filesystem identity changes from the initial baseline.
+   * Codex uses this for config.toml trust reconciliation without reparsing TOML
+   * on every watchdog interval.
+   */
+  changeWatchPath?: string;
+  /** Returns true when the changed config requires the normal repairFn. */
+  needsRepairOnChange?: () => Promise<boolean>;
 
   /**
    * Whether the owning agent is enabled by the user's selection
@@ -236,6 +247,7 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastChangeSignature: Map<string, string> = new Map();
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
@@ -250,6 +262,7 @@ export class HookWatchdog {
     this.config = config;
     this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
+    this.captureInitialChangeSignatures();
   }
 
   start(): void {
@@ -353,6 +366,29 @@ export class HookWatchdog {
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
+    let pendingChangeSignature: { key: string; value: string } | undefined;
+
+    if (
+      missing.length === 0
+      && target.changeWatchPath
+      && target.needsRepairOnChange
+    ) {
+      const signature = await this.changeSignature(target.changeWatchPath);
+      const signatureKey = this.changeSignatureKey(target);
+      if (!this.lastChangeSignature.has(signatureKey)) {
+        // Deployment has already reconciled the startup state. The watchdog
+        // establishes a baseline here and reacts only to later external edits.
+        this.lastChangeSignature.set(signatureKey, signature);
+      } else if (this.lastChangeSignature.get(signatureKey) !== signature) {
+        const needsRepair = await target.needsRepairOnChange();
+        if (needsRepair) {
+          missing.push('codex-trust');
+          pendingChangeSignature = { key: signatureKey, value: signature };
+        } else {
+          this.lastChangeSignature.set(signatureKey, signature);
+        }
+      }
+    }
 
     if (missing.length === 0) {
       logger.info('hook-watchdog.check', {
@@ -397,6 +433,9 @@ export class HookWatchdog {
     if (!ok) {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
+    if (pendingChangeSignature) {
+      this.lastChangeSignature.set(pendingChangeSignature.key, pendingChangeSignature.value);
+    }
     return { agentId: target.agentId, status: 'repaired', missing };
   }
 
@@ -421,6 +460,57 @@ export class HookWatchdog {
 
   private invalidConfigTargetKey(target: PluginCheckTarget): string {
     return `${target.agentId}\0${target.settingsPath}`;
+  }
+
+  private changeSignatureKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.changeWatchPath}`;
+  }
+
+  /**
+   * Deployment reconciles Codex trust before constructing the watchdog. Capture
+   * that exact post-deployment state synchronously so an edit made before the
+   * first delayed check is still observed as a change instead of becoming the
+   * baseline.
+   */
+  private captureInitialChangeSignatures(): void {
+    for (const target of this.targets) {
+      if (!target.changeWatchPath || !target.needsRepairOnChange) continue;
+      try {
+        this.lastChangeSignature.set(
+          this.changeSignatureKey(target),
+          this.changeSignatureSync(target.changeWatchPath),
+        );
+      } catch (err) {
+        logger.warn('hook-watchdog baseline capture failed', {
+          agent: target.agentId,
+          path: target.changeWatchPath,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  private changeSignatureSync(filePath: string): string {
+    try {
+      return this.formatChangeSignature(statSync(filePath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private async changeSignature(filePath: string): Promise<string> {
+    try {
+      const stat = await fs.stat(filePath);
+      return this.formatChangeSignature(stat);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private formatChangeSignature(stat: Stats): string {
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   }
 
   private findMissingHooks(
