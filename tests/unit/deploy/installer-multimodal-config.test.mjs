@@ -23,7 +23,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain('if (!config.agents[id]) continue;');
     expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
     expect(installerSh).toContain('storage: { type: \'sls\' }');
-    expect(installerSh).not.toContain("label: 'multimodal.storage.type'");
+    expect(installerSh).toContain("label: 'multimodal.storage.type'");
     expect(installerSh).toContain('"multimodalMode":"%s"');
   });
 
@@ -39,7 +39,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('if (!config.agents[id]) continue;');
     expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
     expect(installerPs1).toContain('storage: { type: \'sls\' }');
-    expect(installerPs1).not.toContain("label: 'multimodal.storage.type'");
+    expect(installerPs1).toContain("label: 'multimodal.storage.type'");
     expect(installerPs1).toContain('multimodalMode = $script:MultimodalMode');
   });
 
@@ -392,7 +392,7 @@ describe('confirm_config_overwrite multimodal.storage', () => {
     ['bash', installerSh, 'confirm_config_overwrite() {'],
     ['powershell-js', installerPs1, 'function Confirm-ConfigOverwrite {'],
   ]) {
-    it(`${platform} does not confirm multimodal.storage`, () => {
+    it(`${platform} shows storage.type when multimodal would rewrite it`, () => {
       const lines = runConfirmDiff(source, fnMarker, { multimodal: { storage: ossStorage } }, {
         ...confirmNewVals,
         slsEndpoint: completeSls.endpoint,
@@ -402,7 +402,7 @@ describe('confirm_config_overwrite multimodal.storage', () => {
         slsApiKey: completeSls.apiKey,
         multimodalMode: 'both',
       });
-      expect(lines.filter(line => line.startsWith('multimodal.'))).toEqual([]);
+      expect(lines).toContain('multimodal.storage.type: oss -> sls');
     });
   }
 });
