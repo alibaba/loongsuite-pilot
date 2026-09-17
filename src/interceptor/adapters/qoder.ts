@@ -62,10 +62,8 @@ export function renderQoderBlock(request: HookRequest, reason: string): string {
   }
   if (request.event === 'PostToolUse') {
     // PostToolUse cannot deny a tool that already ran. Replace the result
-    // shown to the model and ask the host to stop subsequent execution.
+    // shown to the model; exit 0 plus this JSON is the only host signal.
     return `${JSON.stringify({
-      continue: false,
-      stopReason: text,
       hookSpecificOutput: {
         hookEventName: 'PostToolUse',
         updatedToolOutput: text,

@@ -41,7 +41,7 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 | Desktop | `UserPromptSubmit` | `{"decision":"block","reason":"..."}` |
 | CLI | `UserPromptSubmit` | `{"decision":"deny","reason":"..."}` |
 | 两者 | `PreToolUse` | `hookSpecificOutput.hookEventName="PreToolUse"`，`permissionDecision="deny"`，`permissionDecisionReason` |
-| 两者 | `PostToolUse` | `continue=false`，`stopReason`，`hookSpecificOutput.hookEventName="PostToolUse"`，`updatedToolOutput` |
+| 两者 | `PostToolUse` | `hookSpecificOutput.hookEventName="PostToolUse"`，`updatedToolOutput` |
 
 规则返回的 `reason` 原样保留。CLI 在写给宿主前按事件包装：
 
@@ -53,7 +53,7 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 
 规则未给 reason 时省略中间细节，例如 `检测到敏感信息，本轮对话终止`。
 
-`PostToolUse` 发生在工具已经执行之后，拦不住已发生的副作用；拦截是替换回给模型的工具结果，并请求宿主停止后续执行。Desktop 对 PostToolUse 的强制力弱于 CLI。
+`PostToolUse` 发生在工具已经执行之后，拦不住已发生的副作用；拦截是替换回给模型的工具结果。Desktop 对 PostToolUse 的强制力弱于 CLI。
 
 正常放行、未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错一律 **fail-open**：`exit 0` 且 stdout 为空。每次判定（拦截 / 放行 / fail-open）写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，至少包含 `event`（hook 类型）、`input`（请求输入）、`result`（判定结果）。运维日志仍在 `interceptor/logs/interceptor.log`。
 

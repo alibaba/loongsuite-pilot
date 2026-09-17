@@ -47,10 +47,8 @@ describe('Qoder adapter', () => {
     expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qodercli' }), 'denied')).toBe(expected);
   });
 
-  it('renders PostToolUse by replacing output and requesting stop', () => {
+  it('renders PostToolUse by replacing the tool output', () => {
     const expected = `${JSON.stringify({
-      continue: false,
-      stopReason: 'denied',
       hookSpecificOutput: {
         hookEventName: 'PostToolUse',
         updatedToolOutput: 'denied',

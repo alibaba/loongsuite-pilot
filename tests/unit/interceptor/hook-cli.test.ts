@@ -211,8 +211,6 @@ describe('interceptor hook CLI', () => {
       (text) => chunks.push(text),
     );
     expect(chunks.join('')).toBe(`${JSON.stringify({
-      continue: false,
-      stopReason: wrapHostReason('PostToolUse', '内容非法'),
       hookSpecificOutput: {
         hookEventName: 'PostToolUse',
         updatedToolOutput: wrapHostReason('PostToolUse', '内容非法'),
