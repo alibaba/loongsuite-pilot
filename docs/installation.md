@@ -71,7 +71,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
-| `--multimodal-mode <mode>` | Global multimodal upload mode: `none`, `input`, `output`, `tool`, or `both`. Written to detected ∩ selected ∩ {`codex`, `qoder`}. Omit to leave existing config unchanged. Install / reinstall only. Windows: `-MultimodalMode`. |
+| `--multimodal-mode <mode>` | Global multimodal upload mode: `none`, `input`, `output`, or `both`. Written to detected ∩ selected ∩ {`codex`, `qoder`}. Omit to leave existing config unchanged. Install / reinstall only. Windows: `-MultimodalMode`. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |

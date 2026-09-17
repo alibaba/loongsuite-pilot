@@ -134,8 +134,8 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
 $script:MultimodalMode = $MultimodalMode
 $script:MultimodalAgents = ""
 if ($MultimodalMode) {
-    if ($MultimodalMode -notin @("none", "input", "output", "tool", "both")) {
-        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', 'tool', or 'both')"
+    if ($MultimodalMode -notin @("none", "input", "output", "both")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'both')"
         exit 1
     }
 }

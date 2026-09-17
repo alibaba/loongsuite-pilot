@@ -15,7 +15,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain('LP_MULTIMODAL_MODE="$MULTIMODAL_MODE"');
     expect(installerSh).toContain('LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS"');
     expect(installerSh).toContain('--multimodal-mode is only supported with install');
-    expect(installerSh).toContain("none|input|output|tool|both)");
+    expect(installerSh).toContain("none|input|output|both)");
     expect(installerSh).toContain('if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi');
     expect(installerSh).toContain('select_multimodal_agents()');
     expect(installerSh).toContain('const supported = ["codex", "qoder"];');
@@ -35,7 +35,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('[string]$MultimodalMode');
     expect(installerPs1).toContain('multimodalMode');
     expect(installerPs1).toContain('-MultimodalMode is only supported with install');
-    expect(installerPs1).toContain('@("none", "input", "output", "tool", "both")');
+    expect(installerPs1).toContain('@("none", "input", "output", "both")');
     expect(installerPs1).toContain('if (-not $script:MultimodalMode) { return }');
     expect(installerPs1).toContain('function Select-MultimodalAgents');
     expect(installerPs1).toContain('const supported = ["codex", "qoder"];');

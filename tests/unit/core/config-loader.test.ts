@@ -1065,7 +1065,7 @@ describe('ConfigLoader', () => {
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
     });
 
-    it('accepts input, output, and tool uploadMode values', async () => {
+    it('accepts input, output, and both uploadMode values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           codex: {
@@ -1074,7 +1074,7 @@ describe('ConfigLoader', () => {
           },
           cursor: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'tool' },
+            multimodal: { uploadMode: 'both' },
           },
           'claude-code': {
             captureMessageContent: true,
@@ -1084,7 +1084,7 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
-      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'tool' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'both' });
       expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
     });
   });

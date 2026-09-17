@@ -187,9 +187,9 @@ if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; };
 fi
 if [ -n "$MULTIMODAL_MODE" ]; then
     case "$MULTIMODAL_MODE" in
-        none|input|output|tool|both) ;;
+        none|input|output|both) ;;
         *)
-            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', 'tool', or 'both')" >&2
+            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'both')" >&2
             exit 1 ;;
     esac
 fi
