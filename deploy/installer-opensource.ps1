@@ -1075,11 +1075,8 @@ function Confirm-ConfigOverwrite {
     } | ConvertTo-Json -Compress
 
     $prevEAP = $ErrorActionPreference
-    $hadApiKey = Test-Path Env:LP_SLS_API_KEY
-    $prevApiKey = if ($hadApiKey) { $env:LP_SLS_API_KEY } else { $null }
     try {
         $ErrorActionPreference = "Continue"
-        $env:LP_SLS_API_KEY = "$SlsApiKey"
         $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
@@ -1093,36 +1090,6 @@ const slsModeOf = sls => {
   if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
   return '';
 };
-const prevStorage = (old.multimodal && old.multimodal.storage && typeof old.multimodal.storage === 'object')
-  ? old.multimodal.storage : undefined;
-const mmTargetJson = target => (target && typeof target === 'object') ? JSON.stringify(target) : '';
-const maskSecret = value => {
-  const s = String(value || '');
-  if (!s) return '';
-  if (s.length <= 8) return '****';
-  return s.slice(0, 4) + '****' + s.slice(-4);
-};
-const mmAuthModeOf = auth => {
-  if (!auth || typeof auth !== 'object') return '';
-  if (auth.mode) return auth.mode;
-  if (auth.apiKey) return 'apiKey';
-  if (auth.accessKeyId || auth.accessKeySecret) return 'ak';
-  return '';
-};
-const oldMmAuth = (prevStorage && prevStorage.auth) || undefined;
-const oldMmAuthMode = mmAuthModeOf(oldMmAuth);
-const oldMmKey = (oldMmAuth && oldMmAuth.apiKey) || '';
-const newMmKey = process.env.LP_SLS_API_KEY || '';
-const willRewriteMm = Boolean(
-  newVals.multimodalMode &&
-  newVals.multimodalMode !== 'none' &&
-  newVals.slsEndpoint &&
-  newVals.slsProject &&
-  newVals.slsLogstore &&
-  newMmKey
-);
-const willWriteMmAuthMode = Boolean(willRewriteMm && oldMmAuthMode && oldMmAuthMode !== 'apiKey');
-const willWriteMmApiKey = Boolean(willRewriteMm && oldMmAuthMode === 'apiKey' && oldMmKey && oldMmKey !== newMmKey);
 const checks = [
   { label: 'sls.endpoint',      oldVal: (old.sls||{}).endpoint||'',      newVal: newVals.slsEndpoint },
   { label: 'sls.project',       oldVal: (old.sls||{}).project||'',       newVal: newVals.slsProject },
@@ -1135,26 +1102,15 @@ const checks = [
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
-  { label: 'multimodal.storage.type', oldVal: (prevStorage && prevStorage.type) || '', newVal: willRewriteMm ? 'sls' : '' },
-  { label: 'multimodal.storage.target', oldVal: mmTargetJson(prevStorage && prevStorage.target), newVal: willRewriteMm ? mmTargetJson({ endpoint: newVals.slsEndpoint, project: newVals.slsProject, logstore: newVals.slsLogstore }) : '' },
-  { label: 'multimodal.storage.auth.mode', oldVal: willWriteMmAuthMode ? oldMmAuthMode : '', newVal: willWriteMmAuthMode ? 'apiKey' : '' },
-  { label: 'multimodal.storage.auth.apiKey', oldVal: willWriteMmApiKey ? oldMmKey : '', newVal: willWriteMmApiKey ? newMmKey : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
 for (const c of changed) {
-  const oldOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.oldVal) : c.oldVal;
-  const newOut = c.label === 'multimodal.storage.auth.apiKey' ? maskSecret(c.newVal) : c.newVal;
-  console.log(c.label + ': ' + oldOut + ' -> ' + newOut);
+  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
 '@ $configFile $jsonArg 2>$null
     } finally {
         $ErrorActionPreference = $prevEAP
-        if ($hadApiKey) {
-            $env:LP_SLS_API_KEY = $prevApiKey
-        } else {
-            Remove-Item Env:LP_SLS_API_KEY -ErrorAction SilentlyContinue
-        }
     }
 
     if (-not $diffs) { return }
@@ -1546,11 +1502,7 @@ const prevMm = (config.multimodal && typeof config.multimodal === 'object') ? co
 if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
   config.multimodal = {
     ...prevMm,
-    storage: {
-      type: 'sls',
-      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
-      auth: { mode: 'apiKey', apiKey: opts.slsApiKey },
-    },
+    storage: { type: 'sls' },
   };
 }
 
