@@ -71,6 +71,32 @@ export function redactConfigForLog(value: unknown, key = ''): unknown {
   return value;
 }
 
+type LoadedConfigFileLog =
+  | { found: true; path: string; config: unknown }
+  | { found: false; path: string };
+
+/** Last on-disk config.json snapshot from loadConfig(), already redacted. */
+let lastLoadedConfigFileLog: LoadedConfigFileLog | null = null;
+
+/**
+ * Re-emit the last loadConfig() on-disk dump. Collector main calls this again
+ * after initFileLogging() because that path truncates the launchd stdout file
+ * and replaces the root logger — the first dump would otherwise vanish from
+ * ~/.loongsuite-pilot/logs/. CLI/deploy skip file logging and keep the dump
+ * from loadConfig() itself. Never logs inner data_config.json.
+ */
+export function logLoadedConfigFile(): void {
+  if (!lastLoadedConfigFileLog) return;
+  if (lastLoadedConfigFileLog.found) {
+    logger.info('loaded config file', {
+      path: lastLoadedConfigFileLog.path,
+      config: lastLoadedConfigFileLog.config,
+    });
+    return;
+  }
+  logger.debug('no config file found, using env + defaults', { path: lastLoadedConfigFileLog.path });
+}
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -292,11 +318,10 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
-  if (file) {
-    logger.info('loaded config file', { path: configPath, config: redactConfigForLog(file) });
-  } else {
-    logger.debug('no config file found, using env + defaults', { path: configPath });
-  }
+  lastLoadedConfigFileLog = file
+    ? { found: true, path: configPath, config: redactConfigForLog(file) }
+    : { found: false, path: configPath };
+  logLoadedConfigFile();
 
   const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 

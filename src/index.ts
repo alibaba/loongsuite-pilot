@@ -2,7 +2,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { Orchestrator } from './core/orchestrator.js';
-import { loadConfig } from './core/config-loader.js';
+import { loadConfig, logLoadedConfigFile } from './core/config-loader.js';
 import { createLogger, initFileLogging, flushLogsSync } from './utils/logger.js';
 import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
 import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
@@ -54,6 +54,10 @@ async function main(): Promise<void> {
   const dataDir = resolveHome(config.dataDir);
   const logDir = path.join(dataDir, 'logs');
   await initFileLogging(path.join(logDir, 'loongsuite-pilot-service.log'));
+  // loadConfig() logs before this; daemon initFileLogging() truncates the
+  // launchd stdout file and swaps the root logger, so replay the redacted
+  // on-disk dump into the dated service log.
+  logLoadedConfigFile();
 
   if (!config.enabled) {
     // A deliberate, non-crash exit: drop any stale breadcrumb so it is not later

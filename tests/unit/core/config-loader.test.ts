@@ -19,7 +19,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => mockLogger,
 }));
 
-import { loadConfig, buildOtlpTraceConfig, redactConfigForLog } from '../../../src/core/config-loader.js';
+import { loadConfig, buildOtlpTraceConfig, redactConfigForLog, logLoadedConfigFile } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
@@ -236,6 +236,72 @@ describe('ConfigLoader', () => {
         project: 'keep-me',
         nested: [{ logstore: 'also-keep', apiKey: '<redacted>' }],
       });
+    });
+
+    it('replays the same redacted snapshot after file logging would truncate', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(secretFile);
+
+      await loadConfig();
+      mockLogger.info.mockClear();
+      mockLogger.debug.mockClear();
+
+      logLoadedConfigFile();
+
+      const infoCalls = mockLogger.info.mock.calls.filter((call) => call[0] === 'loaded config file');
+      expect(infoCalls).toHaveLength(1);
+      const payload = infoCalls[0]![1] as { path: string; config: Record<string, unknown> };
+      expect(payload.path).toEqual(expect.any(String));
+      expect(payload.config).toMatchObject({
+        enabled: true,
+        sls: {
+          enabled: true,
+          project: 'my-project',
+          logstore: 'my-logstore',
+          accessKeySecret: '<redacted>',
+          apiKey: '<redacted>',
+        },
+        cms: { licenseKey: '<redacted>', endpoint: 'https://cms.example.com' },
+      });
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain('super-secret-sk');
+      expect(serialized).not.toContain('sls-api-key-plain');
+      expect(serialized).not.toContain('cms-license-plain');
+      expect(serialized).not.toContain('http-token-plain');
+      expect(payload.config).not.toHaveProperty('flushers');
+    });
+
+    it('replay does not pick up later mutations of the raw file object', async () => {
+      const file = {
+        sls: { project: 'p', logstore: 'l', accessKeySecret: 'super-secret-sk' },
+      };
+      mockReadJsonFile.mockResolvedValueOnce(file);
+
+      await loadConfig();
+      file.sls.accessKeySecret = 'mutated-plain-secret';
+      mockLogger.info.mockClear();
+
+      logLoadedConfigFile();
+
+      const serialized = JSON.stringify(mockLogger.info.mock.calls);
+      expect(serialized).not.toContain('super-secret-sk');
+      expect(serialized).not.toContain('mutated-plain-secret');
+      expect(serialized).toContain('<redacted>');
+    });
+
+    it('replays the missing-file debug log and still does not invent a config payload', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      await loadConfig();
+      mockLogger.info.mockClear();
+      mockLogger.debug.mockClear();
+
+      logLoadedConfigFile();
+
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'no config file found, using env + defaults',
+        expect.objectContaining({ path: expect.any(String) }),
+      );
+      expect(mockLogger.info.mock.calls.filter((call) => call[0] === 'loaded config file')).toHaveLength(0);
     });
   });
 
