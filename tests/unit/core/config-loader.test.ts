@@ -576,7 +576,7 @@ describe('ConfigLoader', () => {
         agents: {
           codex: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
           cursor: { captureMessageContent: true },
         },
@@ -585,7 +585,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.codex).toEqual({
         captureMessageContent: true,
-        multimodal: { uploadMode: 'both' },
+        multimodal: { uploadMode: 'all' },
       });
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
@@ -596,7 +596,7 @@ describe('ConfigLoader', () => {
           qoder: {
             captureMessageContent: true,
             multimodal: {
-              uploadMode: 'both',
+              uploadMode: 'all',
               allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
             },
           },
@@ -604,7 +604,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.qoder.multimodal?.uploadMode).toBe('both');
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('all');
       expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
         '/home/test/workspace/loongsuite-pilot',
         '/tmp/extra',
@@ -632,21 +632,21 @@ describe('ConfigLoader', () => {
         agents: {
           cursor: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
           codex: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
         },
       });
 
       const config = await loadConfig();
       expect(config.agents.cursor.multimodal).toEqual({
-        uploadMode: 'both',
+        uploadMode: 'all',
       });
       expect(config.agents.codex.multimodal).toEqual({
-        uploadMode: 'both',
+        uploadMode: 'all',
       });
     });
   });
@@ -1033,7 +1033,7 @@ describe('ConfigLoader', () => {
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
     });
 
-    it('accepts input, output, and both uploadMode values', async () => {
+    it('accepts input, output, and all uploadMode values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           codex: {
@@ -1042,7 +1042,7 @@ describe('ConfigLoader', () => {
           },
           cursor: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
           'claude-code': {
             captureMessageContent: true,
@@ -1052,7 +1052,7 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
-      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'both' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'all' });
       expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
     });
   });

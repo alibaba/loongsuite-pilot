@@ -14,7 +14,7 @@
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
 #     --sls-api-key "your-api-key" \
-#     --multimodal-mode both
+#     --multimodal-mode all
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -198,13 +198,13 @@ if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; };
 fi
 if [ "$MULTIMODAL_MODE_SET" -eq 1 ]; then
     if [ -z "$MULTIMODAL_MODE" ]; then
-        echo "❌ --multimodal-mode requires 'none', 'input', 'output', or 'both'" >&2
+        echo "❌ --multimodal-mode requires 'none', 'input', 'output', or 'all'" >&2
         exit 1
     fi
     case "$MULTIMODAL_MODE" in
-        none|input|output|both) ;;
-        *)
-            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'both')" >&2
+        none|input|output|all) ;;
+            *)
+            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'all')" >&2
             exit 1 ;;
     esac
     if [ "$COMMAND" != "install" ]; then

@@ -303,7 +303,7 @@ describe('enrichCliMultimodal', () => {
     expect(readParts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/read-img')).toBe(true);
 
     const genEntry = makeGen();
-    await enrichCliMultimodal([genEntry], { uploadMode: 'both', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([genEntry], { uploadMode: 'all', pathToUri: fakePathToUri });
     expect((genEntry['gen_ai.tool.call.result'] as any[]).some(
       (p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img',
     )).toBe(true);

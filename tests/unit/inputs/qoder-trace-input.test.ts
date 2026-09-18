@@ -1736,7 +1736,7 @@ describe('QoderTraceInput multimodal', () => {
         ]);
       });
 
-      it('uploadMode gates input attach: output skips; both enriches', async () => {
+      it('uploadMode gates input attach: output skips; all enriches', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'in-gate.png', 'in-gate');
         const makeRequest = () => mmEntry({
@@ -1757,7 +1757,7 @@ describe('QoderTraceInput multimodal', () => {
 
         clearAttachedImagePathsCache();
         const both = makeRequest();
-        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+        await enrichIdeMultimodal([both], { uploadMode: 'all', pathToUri: fakePathToUri });
         expect((both['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
           p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
       });
@@ -1867,7 +1867,7 @@ describe('QoderTraceInput multimodal', () => {
         mockReadAttachedImagePaths.mockRejectedValue(new Error('sqlite down'));
 
         await enrichIdeMultimodal([request, tool], {
-          uploadMode: 'both',
+          uploadMode: 'all',
           pathToUri,
         });
 
@@ -2287,7 +2287,7 @@ describe('QoderTraceInput multimodal', () => {
       expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
     });
 
-    it('uploadMode gates output markdown: input skips; both enriches', async () => {
+    it('uploadMode gates output markdown: input skips; all enriches', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'out-gate.png', 'out-gate');
       const makeResponse = () => mmEntry({
@@ -2304,7 +2304,7 @@ describe('QoderTraceInput multimodal', () => {
       expect(inputParts[0].type).toBe('text');
 
       const both = makeResponse();
-      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      await enrichIdeMultimodal([both], { uploadMode: 'all', pathToUri: fakePathToUri });
       expect((both['gen_ai.output.messages'] as any[])[0].parts.some((p: any) =>
         p.type === 'uri' && p.uri === 'oss://test/out-gate')).toBe(true);
     });
@@ -2324,7 +2324,7 @@ describe('QoderTraceInput multimodal', () => {
         ],
       });
 
-      await enrichIdeMultimodal([tool, response], { uploadMode: 'both', pathToUri });
+      await enrichIdeMultimodal([tool, response], { uploadMode: 'all', pathToUri });
       expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
       const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
       expect(parts.some((p: any) => p.type === 'uri')).toBe(true);

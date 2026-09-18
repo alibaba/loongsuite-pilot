@@ -156,23 +156,23 @@ export const MULTIMODAL_UPLOAD_MODES = [
   'none',
   'input',
   'output',
-  'both',
+  'all',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
 /** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'both';
+  return mode === 'input' || mode === 'all';
 }
 
 /** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
-  return mode === 'output' || mode === 'both';
+  return mode === 'output' || mode === 'all';
 }
 
 /** uploadMode covers tool results (included by every non-none mode). */
 export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'output' || mode === 'both';
+  return mode === 'input' || mode === 'output' || mode === 'all';
 }
 
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;

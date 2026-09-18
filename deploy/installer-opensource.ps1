@@ -13,7 +13,7 @@
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
 #     -SlsApiKey "your-api-key" `
-#     -MultimodalMode both
+#     -MultimodalMode all
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -139,15 +139,15 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     exit 1
 }
 if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode) {
-    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'both'"
+    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'all'"
     exit 1
 }
 $script:MultimodalMode = $MultimodalMode
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 $script:MultimodalSupportedAgents = "codex,qoder"
 if ($MultimodalMode) {
-    if ($MultimodalMode -notin @("none", "input", "output", "both")) {
-        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'both')"
+    if ($MultimodalMode -notin @("none", "input", "output", "all")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
         exit 1
     }
 }
