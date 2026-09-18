@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
 
@@ -589,6 +591,121 @@ describe('DeploymentManager', () => {
         pluginInject: { ...def.pluginInject!, configPaths: [defaultConfigPath] },
       });
       expect(JSON.parse(await fs.readFile(configPath, 'utf-8')).extensions ?? []).not.toContain(pluginSpec);
+    });
+
+    it('persists the Pi config PluginInjectStrategy selected when the recorded path is gone', async () => {
+      const staleConfigPath = path.join(tmpDir, 'stale-pi', 'settings.json');
+      const currentDir = path.join(tmpDir, 'current-pi');
+      const currentConfigPath = path.join(currentDir, 'settings.json');
+      const pluginSpec = path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+      const def: AgentDefinition = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: [currentDir], commands: ['pi'] },
+        pluginInject: {
+          configPaths: [currentConfigPath],
+          pluginSpec,
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+          createIfMissing: true,
+        },
+      };
+      await writeAgentDef(def);
+      await fs.mkdir(currentDir, { recursive: true });
+      await fs.writeFile(currentConfigPath, JSON.stringify({
+        extensions: ['/opt/third-party/extension.mjs'],
+      }));
+      await fs.writeFile(path.join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'pi-coding-agent': {
+          deployMode: 'plugin-inject',
+          deployedAt: '2026-01-01T00:00:00.000Z',
+          pluginInjectConfigPath: staleConfigPath,
+        },
+      }));
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      const [deployed] = await mgr.deployAll();
+      expect(deployed.success).toBe(true);
+      expect(deployed.skipped).toBeFalsy();
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'))['pi-coding-agent'])
+        .toMatchObject({ pluginInjectConfigPath: path.resolve(currentConfigPath) });
+      expect(JSON.parse(await fs.readFile(currentConfigPath, 'utf-8')).extensions).toEqual(
+        expect.arrayContaining([pluginSpec, '/opt/third-party/extension.mjs']),
+      );
+      await expect(fs.access(staleConfigPath)).rejects.toThrow();
+
+      const run = spawnSync('/bin/bash', [
+        path.resolve('deploy', 'installer-opensource.sh'),
+        'uninstall',
+        '--data-dir',
+        dataDir,
+        '--lang',
+        'en',
+      ], {
+        encoding: 'utf8',
+        env: (() => {
+          const env = {
+            ...process.env,
+            HOME: tmpDir,
+            USERPROFILE: tmpDir,
+            PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+          };
+          delete env.PI_CODING_AGENT_DIR;
+          return env;
+        })(),
+      });
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(readFileSync(currentConfigPath, 'utf8'))).toEqual({
+        extensions: ['/opt/third-party/extension.mjs'],
+      });
+    }, 20_000);
+
+    it('rewrites a stale Pi pluginInjectConfigPath when the live config is already injected', async () => {
+      const staleConfigPath = path.join(tmpDir, 'stale-pi', 'settings.json');
+      const currentDir = path.join(tmpDir, 'current-pi');
+      const currentConfigPath = path.join(currentDir, 'settings.json');
+      const pluginSpec = path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+      const def: AgentDefinition = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: [currentDir], commands: ['pi'] },
+        pluginInject: {
+          configPaths: [currentConfigPath],
+          pluginSpec,
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+          createIfMissing: true,
+        },
+      };
+      await writeAgentDef(def);
+      await fs.mkdir(currentDir, { recursive: true });
+      await fs.writeFile(currentConfigPath, JSON.stringify({ extensions: [pluginSpec] }));
+      await fs.writeFile(path.join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'pi-coding-agent': {
+          deployMode: 'plugin-inject',
+          deployedAt: '2026-01-01T00:00:00.000Z',
+          pluginInjectConfigPath: staleConfigPath,
+        },
+      }));
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      expect((await mgr.deployAll())[0]).toMatchObject({ success: true, skipped: true, reason: 'up-to-date' });
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf-8'))['pi-coding-agent'])
+        .toMatchObject({ pluginInjectConfigPath: path.resolve(currentConfigPath) });
+
+      await mgr.undeployAgent({
+        ...def,
+        detection: { paths: [path.join(tmpDir, 'default-pi')], commands: ['pi'] },
+        pluginInject: {
+          ...def.pluginInject!,
+          configPaths: [path.join(tmpDir, 'default-pi', 'settings.json')],
+        },
+      });
+      expect(JSON.parse(await fs.readFile(currentConfigPath, 'utf-8')).extensions ?? []).not.toContain(pluginSpec);
     });
 
     it('handles empty agents directory', async () => {

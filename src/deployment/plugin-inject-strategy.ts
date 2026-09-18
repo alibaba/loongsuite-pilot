@@ -186,7 +186,12 @@ export class PluginInjectStrategy implements DeployStrategy {
       } else {
         logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
       }
-      return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
+      return {
+        success: true,
+        agentId: def.id,
+        deployMode: 'plugin-inject',
+        pluginInjectConfigPath: path.resolve(configPath),
+      };
     } catch (err) {
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
@@ -234,6 +239,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       logger.error('undeploy failed', { agentId: def.id, error: String(err) });
       return false;
     }
+  }
+
+  /** First existing config path the inject/undeploy loop will actually touch. */
+  async resolveExistingConfigPath(config: PluginInjectConfig): Promise<string | null> {
+    return this.findConfigFile(config, false);
   }
 
   private async findConfigFile(

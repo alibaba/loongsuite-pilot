@@ -283,7 +283,7 @@ async function main(): Promise<number> {
         newRecords[def.id] = {
           deployMode: def.deployMode,
           deployedAt: new Date().toISOString(),
-          ...lifecycleFieldsForDeploy(def),
+          ...lifecycleFieldsForDeploy(def, result),
         };
       } else {
         failed++;

@@ -284,7 +284,13 @@ export class DeploymentManager {
       if (def.deployMode === 'dsh-yaml-patch' && record && !record.dshPatchPath) {
         record.dshPatchPath = dshTarget?.patchPath;
       }
-      if (record) backfillLifecycleFields(record, def);
+      if (record) {
+        backfillLifecycleFields(record, def);
+        if (def.id === 'pi-coding-agent' && def.pluginInject) {
+          const selected = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
+          if (selected) record.pluginInjectConfigPath = path.resolve(selected);
+        }
+      }
       // Also the terminal state for detection-only agents: they share another
       // agent's hook, so needsDeploy() is always false and "detected but nothing
       // to write" is a fully satisfied integration, not a missing one.
@@ -328,7 +334,7 @@ export class DeploymentManager {
         newRecord.dshPatchPath = dshTarget.patchPath;
       }
 
-      Object.assign(newRecord, lifecycleFieldsForDeploy(def));
+      Object.assign(newRecord, lifecycleFieldsForDeploy(def, result));
 
       this.state[def.id] = newRecord;
     } else if (!result.skipped) {

@@ -31,15 +31,17 @@ export function homeFromConfigFile(configPath: string): string {
 /** Absolute paths written during deploy so uninstall can find them after env drift. */
 export function lifecycleFieldsForDeploy(
   def: AgentDefinition,
+  resolved?: Pick<DeployedAgentRecord, 'pluginInjectConfigPath'>,
 ): Pick<DeployedAgentRecord, 'hookSettingsPath' | 'pluginInjectConfigPath'> {
   const fields: Pick<DeployedAgentRecord, 'hookSettingsPath' | 'pluginInjectConfigPath'> = {};
   if (def.id === 'grok-build' && def.hook?.settingsPath) {
-    const resolved = path.resolve(def.hook.settingsPath);
-    if (path.isAbsolute(resolved)) fields.hookSettingsPath = resolved;
+    const resolvedHook = path.resolve(def.hook.settingsPath);
+    if (path.isAbsolute(resolvedHook)) fields.hookSettingsPath = resolvedHook;
   }
-  if (def.id === 'pi-coding-agent' && def.pluginInject?.configPaths?.[0]) {
-    const resolved = path.resolve(def.pluginInject.configPaths[0]);
-    if (path.isAbsolute(resolved)) fields.pluginInjectConfigPath = resolved;
+  if (def.id === 'pi-coding-agent' && def.pluginInject) {
+    const selected = absolutePath(resolved?.pluginInjectConfigPath)
+      ?? (def.pluginInject.configPaths?.[0] ? path.resolve(def.pluginInject.configPaths[0]) : undefined);
+    if (selected && path.isAbsolute(selected)) fields.pluginInjectConfigPath = selected;
   }
   return fields;
 }

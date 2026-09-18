@@ -282,6 +282,8 @@ export interface DeployResult {
   /** Set whenever `skipped` is true. */
   reason?: DeploySkipReason;
   error?: string;
+  /** Absolute config file PluginInjectStrategy actually wrote or confirmed. */
+  pluginInjectConfigPath?: string;
 }
 
 // ─── Deploy Strategy ───
@@ -306,7 +308,7 @@ export interface DeployedAgentRecord {
   dshPatchPath?: string;
   /** Resolved Grok hook settings file written during deploy. */
   hookSettingsPath?: string;
-  /** Resolved Pi `settings.json` written during deploy (`configPaths[0]`). */
+  /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
   pluginInjectConfigPath?: string;
 }
 

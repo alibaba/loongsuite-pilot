@@ -51,6 +51,21 @@ describe('persisted deploy paths', () => {
     });
 
     expect(lifecycleFieldsForDeploy({
+      id: 'pi-coding-agent',
+      displayName: 'Pi',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['/stale-pi'], commands: ['pi'] },
+      pluginInject: {
+        configPaths: ['/stale-pi/settings.json', '/current-pi/settings.json'],
+        pluginSpec: '/pilot/plugins/pi-coding-agent/index.mjs',
+        pluginId: 'loongsuite-pilot-pi-coding-agent',
+        configKey: 'extensions',
+      },
+    }, { pluginInjectConfigPath: '/current-pi/settings.json' })).toEqual({
+      pluginInjectConfigPath: path.resolve('/current-pi/settings.json'),
+    });
+
+    expect(lifecycleFieldsForDeploy({
       id: 'cursor',
       displayName: 'Cursor',
       deployMode: 'hook',
