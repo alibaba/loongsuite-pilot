@@ -14,6 +14,8 @@ interface EntryRuntime {
   watcher: fs.FSWatcher | null;
   pollTimer: ReturnType<typeof setInterval> | null;
   consecutiveUnavailable: number;
+  processing: Promise<void> | null;
+  refreshPending: boolean;
 }
 
 /**
@@ -24,6 +26,7 @@ interface EntryRuntime {
  */
 export class AgentDiscoveryService extends EventEmitter {
   private readonly runtimes: Map<string, EntryRuntime> = new Map();
+  private stopping = false;
   private globalPollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(entries: AgentDetectionEntry[]) {
@@ -35,21 +38,26 @@ export class AgentDiscoveryService extends EventEmitter {
         watcher: null,
         pollTimer: null,
         consecutiveUnavailable: 0,
+        processing: null,
+        refreshPending: false,
       });
     }
   }
 
   async start(): Promise<void> {
+    this.stopping = false;
     for (const [id, rt] of this.runtimes) {
       this.setupWatcher(rt);
     }
     await this.refresh('startup');
+    if (this.stopping) return;
 
     const intervalMs = Number(process.env.LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS) || DEFAULT_POLL_MS;
     this.globalPollTimer = setInterval(() => void this.refresh('poll'), intervalMs);
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.globalPollTimer) {
       clearInterval(this.globalPollTimer);
       this.globalPollTimer = null;
@@ -64,6 +72,7 @@ export class AgentDiscoveryService extends EventEmitter {
         clearInterval(rt.pollTimer);
         rt.pollTimer = null;
       }
+      await rt.processing;
       if (rt.state === 'running' || rt.state === 'starting') {
         await this.stopEntry(rt, 'shutdown');
       }
@@ -85,11 +94,26 @@ export class AgentDiscoveryService extends EventEmitter {
     return out;
   }
 
-  private async processEntry(rt: EntryRuntime): Promise<void> {
+  private processEntry(rt: EntryRuntime): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    // Coalesce watch bursts while serializing availability and lifecycle transitions.
+    rt.refreshPending = true;
+    if (rt.processing) return rt.processing;
+    rt.processing = (async () => {
+      do {
+        rt.refreshPending = false;
+        await this.processEntryOnce(rt);
+      } while (rt.refreshPending && !this.stopping);
+    })().finally(() => { rt.processing = null; });
+    return rt.processing;
+  }
+
+  private async processEntryOnce(rt: EntryRuntime): Promise<void> {
     const { entry } = rt;
     try {
       const enabled = entry.enabled ? entry.enabled() : true;
       const available = enabled ? await entry.isAvailable() : false;
+      if (this.stopping) return;
       const shouldRun = enabled && available;
 
       if (!shouldRun && rt.state === 'idle') {
@@ -105,6 +129,7 @@ export class AgentDiscoveryService extends EventEmitter {
         rt.state = 'starting';
         logger.info('starting agent', { id: entry.id });
         await entry.start();
+        if (this.stopping) return;
         rt.state = 'running';
         this.emit('agent:started', entry.id);
       } else if (!shouldRun && (rt.state === 'running' || rt.state === 'starting')) {
@@ -178,7 +203,7 @@ export class AgentDiscoveryService extends EventEmitter {
   }
 
   private setupPolling(rt: EntryRuntime): void {
-    if (rt.pollTimer) return;
+    if (this.stopping || rt.pollTimer) return;
     const interval = rt.entry.pollIntervalMs || DEFAULT_POLL_MS;
     rt.pollTimer = setInterval(() => void this.processEntry(rt), interval);
   }

@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
+import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
@@ -421,9 +422,12 @@ describe('CodexTranscriptInput', () => {
     const absentSessionDir = path.join(root, 'absent-sessions');
     await fs.mkdir(wakeupDir, { recursive: true });
 
+    const isolatedSessionDir = path.join(root, 'codex-home', 'u', 'fixture-user', 'sessions');
+    await fs.mkdir(isolatedSessionDir, { recursive: true });
     expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(false);
     await writeWakeupMarker(wakeupDir, 'session-1', {
       session_id: 'session-1',
+      session_dir: isolatedSessionDir,
       received_at: new Date().toISOString(),
     });
     expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(true);
@@ -431,6 +435,115 @@ describe('CodexTranscriptInput', () => {
       absentSessionDir,
       wakeupDir,
     ]);
+  });
+
+  it.each(['expired', 'malformed', 'missing-timestamp', 'unsupported-layout', 'missing-root'])(
+    'keeps discovery idle for a %s wakeup marker with no default sessions', async kind => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invalid-wakeup-'));
+      tempDirs.push(root);
+      const sessionDir = path.join(root, 'absent-sessions');
+      const wakeupDir = path.join(root, 'wakeups');
+      const home = path.join(root, 'codex-home');
+      const isolated = path.join(home, kind === 'unsupported-layout' ? 'other' : 'u', 'fixture', 'sessions');
+      await fs.mkdir(wakeupDir, { recursive: true });
+      if (kind !== 'missing-root') await fs.mkdir(isolated, { recursive: true });
+      const payload = {
+        codex_home: home,
+        session_dir: isolated,
+        received_at: kind === 'missing-timestamp' ? undefined
+          : new Date(Date.now() - (kind === 'expired' ? 49 * 3600_000 : 0)).toISOString(),
+      };
+      await fs.writeFile(path.join(wakeupDir, 'invalid.json'), kind === 'malformed' ? '{' : JSON.stringify(payload));
+      const input = new CodexTranscriptInput({
+        stateStore: new StateStore(path.join(root, 'state.json')),
+        sessionDir, wakeupDir, spanContextDir: path.join(root, 'contexts'),
+      });
+      const start = vi.spyOn(input, 'start');
+      const svc = new AgentDiscoveryService([{
+        id: input.id, type: input.collectionMethod,
+        watchPaths: CodexTranscriptInput.getWatchPaths(wakeupDir, sessionDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(wakeupDir, sessionDir),
+        start: () => input.start(), stop: () => input.stop(),
+      }]);
+      try {
+        await svc.start();
+        expect(svc.getStates()[input.id]).toBe('idle');
+        expect(start).not.toHaveBeenCalled();
+        expect(input.running).toBe(false);
+        expect((input as unknown as { timer: unknown }).timer).toBeNull();
+        expect((input as unknown as { wakeupWatcher: unknown }).wakeupWatcher).toBeNull();
+      } finally {
+        await svc.stop();
+      }
+    },
+  );
+
+  it('closes the actual wakeup watcher when stopped during Codex initialization', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-stop-during-start-'));
+    tempDirs.push(root);
+    const { input } = await createDormantInput(root);
+    let entered!: () => void;
+    let release!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const internal = input as unknown as {
+      indexDiscoveredTranscriptOwners(files: unknown[]): Promise<void>;
+      wakeupWatcher: unknown;
+      timer: unknown;
+    };
+    vi.spyOn(internal, 'indexDiscoveredTranscriptOwners').mockImplementation(async () => {
+      entered();
+      await gate;
+    });
+    const cycles = vi.fn();
+    input.on('input-runtime-delta', cycles);
+    const starting = input.start();
+    await entering;
+    const stopping = input.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(input.running).toBe(false);
+    expect(internal.wakeupWatcher).toBeNull();
+    expect(internal.timer).toBeNull();
+    expect(cycles).not.toHaveBeenCalled();
+  });
+
+  it.each([33, 64, 65])('prioritizes isolated rollouts globally across %i dual-layout homes', async count => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-global-root-budget-'));
+    tempDirs.push(root);
+    const { input, wakeupDir, sessionDir } = await createDormantInput(root);
+    await fs.mkdir(sessionDir, { recursive: true });
+    const canonicalRoots: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const home = path.join(root, `home-${index}`);
+      const legacy = path.join(home, 'sessions');
+      const isolated = path.join(home, 'u', 'fixture-user', 'sessions');
+      await fs.mkdir(legacy, { recursive: true });
+      const transcript = await writeTranscript(isolated, completedTurn());
+      canonicalRoots.push(await fs.realpath(isolated));
+      await writeWakeupMarker(wakeupDir, String(index).padStart(3, '0'), {
+        codex_home: home, session_dir: legacy, transcript_path: transcript,
+        received_at: new Date().toISOString(),
+      });
+    }
+    const internal = input as unknown as {
+      discoverDynamicSessionDirs(defaultDir: string): Promise<string[]>;
+      discoverSessionFiles(): Promise<Array<{ filePath: string }>>;
+      logger: { warn: (...args: unknown[]) => void };
+    };
+    const warn = vi.spyOn(internal.logger, 'warn');
+    const roots = await internal.discoverDynamicSessionDirs(await fs.realpath(sessionDir));
+    expect(roots).toHaveLength(64);
+    const isolatedRoots = roots.filter(dir => dir.includes(`${path.sep}u${path.sep}`));
+    expect(isolatedRoots).toEqual(canonicalRoots.reverse().slice(0, 64));
+    const rollouts = await internal.discoverSessionFiles();
+    expect(rollouts).toHaveLength(Math.min(count, 64));
+    expect(warn).toHaveBeenCalledWith(
+      'Codex dynamic session root limit reached within scanned markers',
+      { dropped: count * 2 - 64, cap: 64 },
+    );
+    await internal.discoverDynamicSessionDirs(await fs.realpath(sessionDir));
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('reuses cached owner metadata on an unchanged idle collection cycle', async () => {
@@ -673,9 +786,10 @@ describe('CodexTranscriptInput', () => {
     const transcriptText = completedTurn();
     const transcript = await writeTranscript(sessionDir, transcriptText);
     (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 2);
+    // fs.watch may also wake idle cycles; assert the consumption delta, not its index.
+    await waitFor(() => deltas.some(delta => delta.rawInBytes > 0));
 
-    const firstRead = deltas[1];
+    const firstRead = deltas.find(delta => delta.rawInBytes > 0)!;
     const recordCount = transcriptText.trimEnd().split('\n').length;
     expect(firstRead.rawReadCalls).toBeGreaterThan(0);
     expect(firstRead.rawReadBytes).toBeGreaterThanOrEqual(firstRead.rawInBytes);
@@ -694,14 +808,16 @@ describe('CodexTranscriptInput', () => {
     const invalidLine = 'not-json\n';
     await fs.appendFile(transcript, invalidLine, 'utf8');
     (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 3);
+    await waitFor(() => deltas.some(delta => delta.parseFailedRecords > 0));
 
-    const invalidRead = deltas[2];
+    const invalidRead = deltas.find(delta => delta.parseFailedRecords > 0)!;
     expect(invalidRead.rawInBytes).toBe(Buffer.byteLength(invalidLine));
     expect(invalidRead.rawInRecords).toBe(1);
     expect(invalidRead.parseSuccessRecords).toBe(0);
     expect(invalidRead.parseFailedRecords).toBe(1);
 
+    expect(deltas.reduce((total, delta) => total + delta.rawInBytes, 0))
+      .toBe(Buffer.byteLength(transcriptText) + Buffer.byteLength(invalidLine));
     await input.stop();
   });
 
