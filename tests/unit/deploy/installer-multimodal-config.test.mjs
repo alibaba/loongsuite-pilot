@@ -22,6 +22,8 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain('--multimodal-mode is only supported with install');
     expect(installerSh).toContain("--multimodal-mode requires 'none', 'input', 'output', or 'both'");
     expect(installerSh).toContain('requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key');
+    expect(installerSh).toContain('[[ "$SLS_ENDPOINT" != *[![:space:]]* ]]');
+    expect(installerSh).toContain('[[ "$SLS_API_KEY" != *[![:space:]]* ]]');
     expect(installerSh).toContain("none|input|output|both)");
     expect(installerSh).toContain('process.env.LP_MULTIMODAL_SUPPORTED_AGENTS');
     expect(installerSh).toContain("if (multimodalMode === 'none')");
@@ -43,6 +45,8 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('multimodalMode');
     expect(installerPs1).toContain('-MultimodalMode is only supported with install');
     expect(installerPs1).toContain('requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey');
+    expect(installerPs1).toContain("$SlsEndpoint -notmatch '\\S'");
+    expect(installerPs1).toContain("$SlsApiKey -notmatch '\\S'");
     expect(installerPs1).toContain('@("none", "input", "output", "both")');
     expect(installerPs1).toContain('opts.multimodalSupportedAgents');
     expect(installerPs1).toContain("if (opts.multimodalMode === 'none')");
@@ -67,6 +71,89 @@ describe('public installer multimodal mode flag', () => {
     expect(fn).toMatch(/if \(\$cfgExit -ne 0\) \{/);
     expect(fn).toContain('Failed to write config');
     expect(fn).toContain('Remove-PilotPathQuietly $cfgTmp');
+  });
+});
+
+const bashParsePrelude = installerSh.slice(0, installerSh.indexOf('# Validate current user'));
+const psParsePrelude = installerPs1.slice(0, installerPs1.indexOf('# Resolve package URL'));
+const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
+
+const completeSlsFlags = {
+  endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+  project: 'agentloop-example',
+  logstore: 'agent-event',
+  apiKey: 'test-sls-api-key',
+};
+
+function runShParse(args) {
+  return spawnSync('bash', ['-c', `${bashParsePrelude}\nexit 0`, '_', 'install', ...args], { encoding: 'utf8' });
+}
+
+function runPsParse(args) {
+  const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-parse-'));
+  const scriptPath = resolve(root, 'installer-parse.ps1');
+  try {
+    writeFileSync(scriptPath, psParsePrelude);
+    return spawnSync(powershell, [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
+      'install', ...args,
+    ], { encoding: 'utf8' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function slsFlagArgs(platform, sls) {
+  return platform === 'bash'
+    ? ['--sls-endpoint', sls.endpoint, '--sls-project', sls.project, '--sls-logstore', sls.logstore, '--sls-api-key', sls.apiKey]
+    : ['-SlsEndpoint', sls.endpoint, '-SlsProject', sls.project, '-SlsLogstore', sls.logstore, '-SlsApiKey', sls.apiKey];
+}
+
+describe('installer multimodal four-tuple parse gate', () => {
+  const blanks = ['endpoint', 'project', 'logstore', 'apiKey'];
+
+  it('bash rejects a whitespace-only SLS four-tuple field before install continues', () => {
+    const ok = runShParse(['--multimodal-mode', 'both', ...slsFlagArgs('bash', completeSlsFlags)]);
+    expect(ok.status, ok.stderr).toBe(0);
+    for (const field of blanks) {
+      const result = runShParse(['--multimodal-mode', 'both', ...slsFlagArgs('bash', { ...completeSlsFlags, [field]: '   ' })]);
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain('requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key');
+    }
+    const tabOnly = runShParse(['--multimodal-mode', 'both', ...slsFlagArgs('bash', { ...completeSlsFlags, endpoint: '\t' })]);
+    expect(tabOnly.status, tabOnly.stderr).toBe(1);
+    const equalsBlank = runShParse([
+      '--multimodal-mode', 'both',
+      '--sls-endpoint=   ',
+      '--sls-project', completeSlsFlags.project,
+      '--sls-logstore', completeSlsFlags.logstore,
+      '--sls-api-key', completeSlsFlags.apiKey,
+    ]);
+    expect(equalsBlank.status, equalsBlank.stderr).toBe(1);
+    const missingApiKey = runShParse([
+      '--multimodal-mode', 'both',
+      '--sls-endpoint', completeSlsFlags.endpoint,
+      '--sls-project', completeSlsFlags.project,
+      '--sls-logstore', completeSlsFlags.logstore,
+    ]);
+    expect(missingApiKey.status, missingApiKey.stderr).toBe(1);
+    const noneOk = runShParse(['--multimodal-mode', 'none', '--sls-endpoint', '   ']);
+    expect(noneOk.status, noneOk.stderr).toBe(0);
+  });
+
+  it.runIf(hasPowerShell)('PowerShell rejects a whitespace-only SLS four-tuple field before install continues', () => {
+    const ok = runPsParse(['-MultimodalMode', 'both', ...slsFlagArgs('powershell', completeSlsFlags)]);
+    expect(ok.status, ok.stderr).toBe(0);
+    for (const field of blanks) {
+      const result = runPsParse(['-MultimodalMode', 'both', ...slsFlagArgs('powershell', { ...completeSlsFlags, [field]: '   ' })]);
+      expect(result.status, result.stderr).toBe(1);
+      expect(`${result.stderr}${result.stdout}`).toContain('requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey');
+    }
+    const tabOnly = runPsParse(['-MultimodalMode', 'both', ...slsFlagArgs('powershell', { ...completeSlsFlags, endpoint: '\t' })]);
+    expect(tabOnly.status, tabOnly.stderr).toBe(1);
+    const noneOk = runPsParse(['-MultimodalMode', 'none', '-SlsEndpoint', '   ']);
+    expect(noneOk.status, noneOk.stderr).toBe(0);
   });
 });
 

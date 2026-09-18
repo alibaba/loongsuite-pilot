@@ -210,7 +210,8 @@ if [ "$MULTIMODAL_MODE_SET" -eq 1 ]; then
         exit 1
     fi
     if [ "$MULTIMODAL_MODE" != "none" ]; then
-        if [ -z "$SLS_ENDPOINT" ] || [ -z "$SLS_PROJECT" ] || [ -z "$SLS_LOGSTORE" ] || [ -z "$SLS_API_KEY" ]; then
+        if [[ "$SLS_ENDPOINT" != *[![:space:]]* ]] || [[ "$SLS_PROJECT" != *[![:space:]]* ]] \
+            || [[ "$SLS_LOGSTORE" != *[![:space:]]* ]] || [[ "$SLS_API_KEY" != *[![:space:]]* ]]; then
             echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
             exit 1
         fi

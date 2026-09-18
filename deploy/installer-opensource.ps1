@@ -155,7 +155,7 @@ if ($MultimodalMode -and $Command -ne "install") {
     exit 1
 }
 if ($MultimodalMode -and $MultimodalMode -ne "none") {
-    if (-not $SlsEndpoint -or -not $SlsProject -or -not $SlsLogstore -or -not $SlsApiKey) {
+    if ($SlsEndpoint -notmatch '\S' -or $SlsProject -notmatch '\S' -or $SlsLogstore -notmatch '\S' -or $SlsApiKey -notmatch '\S') {
         Write-Error "-MultimodalMode $MultimodalMode requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey"
         exit 1
     }
