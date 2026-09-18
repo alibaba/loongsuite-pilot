@@ -365,3 +365,75 @@ describe('copilot transcript-parser — CP5 v3 fixes (#1 wrapper duration + #2 m
     expect(() => BigInt(turn2Step.time_unix_nano)).not.toThrow();
   });
 });
+
+describe('copilot transcript-parser — CP5 v4 fixes (#2 STEP endTime + #3 placeholder suppression + #4 TOOL fields)', () => {
+  test('scenario 16: #2 — STEP time_unix_nano ≥ LLM _merged_end_time_unix_nano (no LLM超STEP)', () => {
+    const out = parseTranscript(SESSION2);
+    const llms = out.filter(e => e['event.name'] === 'llm.response');
+    const steps = out.filter(e => e['gen_ai.turn.start'] === true);
+    expect(llms.length).toBe(3);
+    expect(steps.length).toBe(3);
+    for (const llm of llms) {
+      const step = steps.find(s => s['gen_ai.step.id'] === llm['gen_ai.step.id']);
+      expect(step).toBeDefined();
+      // STEP end (time_unix_nano) must be ≥ LLM end (_merged_end_time_unix_nano)
+      // → converter's maxTime(stepRecords) picks up STEP record time, no LLM超STEP.
+      const llmEndNs = BigInt(llm['_merged_end_time_unix_nano']);
+      const stepTimeNs = BigInt(step.time_unix_nano);
+      expect(stepTimeNs).toBeGreaterThanOrEqual(llmEndNs);
+    }
+  });
+
+  test('scenario 17: #2 — scenarioA multi-LLM turn 5 STEP covers merged LLM end', () => {
+    const out = parseTranscript(SCENARIO_A);
+    const turn5Step = out.find(e => e['gen_ai.turn.start'] === true && e['gen_ai.step.id'] === '5');
+    const turn5Llm = out.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id'] === '5');
+    expect(turn5Step).toBeDefined();
+    expect(turn5Llm).toBeDefined();
+    const stepTimeNs = BigInt(turn5Step.time_unix_nano);
+    const llmEndNs = BigInt(turn5Llm['_merged_end_time_unix_nano']);
+    expect(stepTimeNs).toBeGreaterThanOrEqual(llmEndNs);
+  });
+
+  test('scenario 18: #3 — partial session file (no shutdown/abort) emits no ENTRY/AGENT records', () => {
+    // Build a stripped fixture from session2 by removing the session.shutdown
+    // line — simulates a partial poll before the session ended.
+    const raw = readRawEvents(SESSION2);
+    const stripped = raw.filter(e => e.type !== 'session.shutdown');
+    const tmpFile = path.join(FIXTURES, 'events-session2-partial-tmp.jsonl');
+    fs.writeFileSync(tmpFile, stripped.map(l => JSON.stringify(l)).join('\n') + '\n');
+    try {
+      const out = parseTranscript(tmpFile);
+      // No ENTRY/AGENT metadata-only records → no placeholder spans downstream.
+      const entryAgent = out.filter(e => typeof e['gen_ai.session.start_time'] === 'string'
+        && e['gen_ai.turn.start'] === undefined);
+      expect(entryAgent.length).toBe(0);
+      // But STEP/LLM/TOOL records are still emitted (they don't depend on shutdown).
+      const steps = out.filter(e => e['gen_ai.turn.start'] === true);
+      expect(steps.length).toBeGreaterThan(0);
+      const llms = out.filter(e => e['event.name'] === 'llm.response');
+      expect(llms.length).toBeGreaterThan(0);
+    } finally {
+      fs.unlinkSync(tmpFile);
+    }
+  });
+
+  test('scenario 19: #4 — permdeny-scriptmode tool.result records carry success=false + error.code=denied', () => {
+    const out = parseTranscript(PERMDENY_SCRIPTMODE);
+    const toolResults = out.filter(e => e['event.name'] === 'tool.result');
+    expect(toolResults.length).toBe(2);
+    for (const t of toolResults) {
+      expect(t['gen_ai.tool.success']).toBe(false);
+      expect(t['error.code']).toBe('denied');
+      expect(t['permission.result.kind']).toBe('denied-no-approval-rule-and-could-not-request-from-user');
+    }
+    // Each tool.call + tool.result share same tool_call.id and same gen_ai.step.id
+    const toolCalls = out.filter(e => e['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBe(2);
+    for (const call of toolCalls) {
+      const matched = toolResults.find(r => r['gen_ai.tool.call.id'] === call['gen_ai.tool.call.id']);
+      expect(matched).toBeDefined();
+      expect(matched['gen_ai.step.id']).toBe(call['gen_ai.step.id']);
+    }
+  });
+});

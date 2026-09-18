@@ -1333,6 +1333,41 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+
+    // TOOL: copy gen_ai.tool.success / error.code / error.message /
+    // permission.* from tool.result records onto the matching TOOL span
+    // (matched by gen_ai.tool.call.id). The converter's
+    // applyExecuteToolFinishAttributes only sets standard fields
+    // (gen_ai.tool.call.id / gen_ai.tool.name / gen_ai.tool.call.arguments /
+    // gen_ai.tool.call.result) — it does not propagate Copilot's
+    // permission/denied-state fields. Without this patch, scenario B
+    // (permission denied) TOOL spans lose success/error context.
+    const toolResultRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'tool.result'
+    );
+    if (toolResultRecords.length > 0) {
+      const toolSpans = spans.filter(s => s.kind === SpanKind.INTERNAL
+        && typeof s.attributes['gen_ai.tool.call.id'] === 'string');
+      const TOOL_ATTR_KEYS = [
+        'gen_ai.tool.success',
+        'error.code',
+        'error.message',
+        'permission.result.kind',
+        'permission.decision_source',
+      ];
+      for (const rec of toolResultRecords) {
+        const callId = (rec as Record<string, unknown>)['gen_ai.tool.call.id'];
+        if (typeof callId !== 'string' || !callId) continue;
+        const span = toolSpans.find(s => s.attributes['gen_ai.tool.call.id'] === callId);
+        if (!span) continue;
+        for (const key of TOOL_ATTR_KEYS) {
+          const v = (rec as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
   }
 
   private getOrCreateConvertState(

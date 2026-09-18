@@ -228,9 +228,15 @@ function buildAgentSpan(sessionId, sessionTraceId, sessionStart, sessionShutdown
   };
 }
 
-function buildStepSpan(sessionId, sessionTraceId, turnId, turnStart, turnEnd, resolvedModel) {
+function buildStepSpan(sessionId, sessionTraceId, turnId, turnStart, turnEnd, resolvedModel, maxChildEndNs) {
   const startTime = turnStart?.timestamp || '';
   const endTime = turnEnd?.timestamp || '';
+  // STEP record time_unix_nano: when children exist, use the max child end
+  // time so the converter's `maxTime(stepRecords)` picks up the true STEP
+  // end (covering LLM `_merged_end_time_unix_nano` + TOOL result times).
+  // When no children, fall back to turn_start so STEP still exists (dur=0
+  // is acceptable for empty STEP per spec).
+  const stepTimeNs = maxChildEndNs || isoToUnixNanos(startTime);
   return {
     'event.id': turnStart?.id || `copilot-step-${sessionId || 'unknown'}-${turnId}`,
     'event.name': 'other',
@@ -247,7 +253,7 @@ function buildStepSpan(sessionId, sessionTraceId, turnId, turnStart, turnEnd, re
     'gen_ai.turn.end': true,
     'gen_ai.session.start_time': startTime || undefined,
     'gen_ai.session.end_time': endTime || undefined,
-    time_unix_nano: isoToUnixNanos(startTime) || nowUnixNanos(),
+    time_unix_nano: stepTimeNs || nowUnixNanos(),
     observed_time_unix_nanos: nowUnixNanos(),
   };
 }
@@ -558,19 +564,33 @@ export function parseTranscript(filePath) {
   const resolvedModel = safeString(autoModeResolved?.data?.chosenModel);
 
   // Build STEP index by turnId. Each turnId produces exactly one STEP span.
+  // Also track maxChildEndNs per turn = max of (last assistant.message
+  // timestamp, tool.execution_complete timestamp, turn_end timestamp) so the
+  // STEP record's time_unix_nano covers all child span end times (fixes
+  // STEP dur=0 + LLM超STEP边界 — converter computes stepEnd = maxTime of
+  // stepRecords' time_unix_nano, which otherwise only sees LLM *start*).
   const turns = new Map();
   for (const ev of events) {
     const turnId = safeString(ev?.data?.turnId);
     if (!turnId || turns.has(turnId)) continue;
     if (ev.type === 'assistant.turn_start') {
-      turns.set(turnId, { start: ev, end: null, turnId });
+      turns.set(turnId, { start: ev, end: null, turnId, maxChildEndNs: '' });
     }
   }
   for (const ev of events) {
     const turnId = safeString(ev?.data?.turnId);
     if (!turnId) continue;
-    if (ev.type === 'assistant.turn_end' && turns.has(turnId)) {
-      turns.get(turnId).end = ev;
+    if (!turns.has(turnId)) continue;
+    const turn = turns.get(turnId);
+    if (ev.type === 'assistant.turn_end') {
+      turn.end = ev;
+    }
+    // Update max child end time from any event in this turn.
+    if (ev.type === 'assistant.message' || ev.type === 'tool.execution_complete' || ev.type === 'assistant.turn_end') {
+      const ns = isoToUnixNanos(ev.timestamp);
+      if (ns && (!turn.maxChildEndNs || BigInt(ns) > BigInt(turn.maxChildEndNs))) {
+        turn.maxChildEndNs = ns;
+      }
     }
   }
 
@@ -608,10 +628,25 @@ export function parseTranscript(filePath) {
   }
 
   const out = [];
-  out.push(buildEntrySpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, autoModeResolved, abortEvent));
-  out.push(buildAgentSpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, abortEvent, resolvedModel));
+  // Only emit ENTRY/AGENT metadata records when the session has reached a
+  // terminal endpoint (session.shutdown OR abort). Before that, the parser
+  // would otherwise emit "metadata-only" ENTRY/AGENT records with no LLM/TOOL
+  // peers in the same converter call → converter resolves sessionId from an
+  // empty parentRecords set → ENTRY/AGENT spans get `<none>` sessionId
+  // attribute (90 ERROR noise in CP5 v3). With this gate, partial-file polls
+  // (e.g. abandoned sessions with only session.start) emit zero records, and
+  // the converter auto-creates ENTRY/AGENT from LLM/TOOL records with proper
+  // session.id resolution. ENTRY/AGENT records are still needed at session
+  // end to carry `gen_ai.session.usage.*` / `gen_ai.session.abort.reason`
+  // fields for `patchCopilotCustomAttributes` to copy onto the auto-created
+  // ENTRY span.
+  const hasSessionEnd = sessionShutdown || abortEvent;
+  if (hasSessionEnd) {
+    out.push(buildEntrySpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, autoModeResolved, abortEvent));
+    out.push(buildAgentSpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, abortEvent, resolvedModel));
+  }
   for (const step of turns.values()) {
-    out.push(buildStepSpan(sessionId, sessionTraceId, step.turnId, step.start, step.end, resolvedModel));
+    out.push(buildStepSpan(sessionId, sessionTraceId, step.turnId, step.start, step.end, resolvedModel, step.maxChildEndNs));
   }
   for (const [turnId, msgs] of llmEventsByTurn.entries()) {
     const turn = turns.get(turnId);
