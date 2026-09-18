@@ -91,7 +91,16 @@ const completeSlsFlags = {
 };
 
 function runShParse(args) {
-  return spawnSync('bash', ['-c', `${bashParsePrelude}\nexit 0`, '_', 'install', ...args], { encoding: 'utf8' });
+  const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-parse-'));
+  const scriptPath = resolve(root, 'installer-parse.sh');
+  try {
+    // File, not `bash -c`: Windows CreateProcess truncates a ~8KB command line
+    // and Git Bash then sees a mid-if EOF.
+    writeFileSync(scriptPath, `${bashParsePrelude.replaceAll('\r\n', '\n')}\nexit 0\n`);
+    return spawnSync('bash', [scriptPath, 'install', ...args], { encoding: 'utf8' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function runPsParse(args) {
@@ -106,6 +115,10 @@ function runPsParse(args) {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function parseOutput(result) {
+  return `${result.stderr}${result.stdout}`;
 }
 
 function slsFlagArgs(platform, sls) {
@@ -152,7 +165,7 @@ describe('installer multimodal four-tuple parse gate', () => {
     for (const field of blanks) {
       const result = runPsParse(['-MultimodalMode', 'all', ...slsFlagArgs('powershell', { ...completeSlsFlags, [field]: '   ' })]);
       expect(result.status, result.stderr).toBe(1);
-      expect(`${result.stderr}${result.stdout}`).toContain('requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey');
+      expect(parseOutput(result)).toMatch(/requires -Sls\s*Endpoint,\s*-SlsProject,\s*-SlsLogstore,\s*and -SlsApiKey/);
     }
     const tabOnly = runPsParse(['-MultimodalMode', 'all', ...slsFlagArgs('powershell', { ...completeSlsFlags, endpoint: '\t' })]);
     expect(tabOnly.status, tabOnly.stderr).toBe(1);
