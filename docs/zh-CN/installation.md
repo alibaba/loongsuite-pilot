@@ -70,7 +70,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
-| `--multimodal-mode <mode>` | 全局多模态上传模式：`none`、`input`、`output` 或 `both`。写到探测到 ∩ 已选 ∩ {`codex`, `qoder`}。省略则不改已有配置。仅 `install` / 重装有效。Windows：`-MultimodalMode`。 |
+| `--multimodal-mode <mode>` | 全局多模态上传模式：`none`、`input`、`output` 或 `both`。写到已有的 {`codex`, `qoder`} agent 配置。省略则不改已有配置。非 `none` 必须同时带 `--sls-endpoint`、`--sls-project`、`--sls-logstore`、`--sls-api-key`。仅 `install` / 重装有效。Windows：`-MultimodalMode`。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
 | `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |

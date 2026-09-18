@@ -132,7 +132,8 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     exit 1
 }
 $script:MultimodalMode = $MultimodalMode
-$script:MultimodalAgents = ""
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+$script:MultimodalSupportedAgents = "codex,qoder"
 if ($MultimodalMode) {
     if ($MultimodalMode -notin @("none", "input", "output", "both")) {
         Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'both')"
@@ -142,6 +143,12 @@ if ($MultimodalMode) {
 if ($MultimodalMode -and $Command -ne "install") {
     Write-Error "-MultimodalMode is only supported with install (got $Command)"
     exit 1
+}
+if ($MultimodalMode -and $MultimodalMode -ne "none") {
+    if (-not $SlsEndpoint -or -not $SlsProject -or -not $SlsLogstore -or -not $SlsApiKey) {
+        Write-Error "-MultimodalMode $MultimodalMode requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey"
+        exit 1
+    }
 }
 
 # ============================================================
@@ -977,26 +984,11 @@ process.stdout.write(ids.join(','));
     Write-Host ""
 }
 
-# Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 function Select-MultimodalAgents {
     if (-not $script:MultimodalMode) { return }
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $env:LP_SELECTED_AGENTS = "$($script:SELECTED_AGENTS)"
-    $script:MultimodalAgents = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const fs = require("fs");
-const supported = ["codex", "qoder"];
-const selected = new Set((process.env.LP_SELECTED_AGENTS || "").split(",").map(s => s.trim()).filter(Boolean));
-const r = JSON.parse(fs.readFileSync(0, "utf8") || "[]");
-const ids = r.filter(a => a && a.detected && supported.includes(a.id) && selected.has(a.id)).map(a => a.id);
-process.stdout.write(ids.join(","));
-'@ 2>$null
-    Remove-Item Env:LP_SELECTED_AGENTS -ErrorAction SilentlyContinue
-    $ErrorActionPreference = $prevEAP
-    if ($script:MultimodalAgents) {
-        Msg "    多模态 ($($script:MultimodalMode)): $($script:MultimodalAgents)" `
-            "    Multimodal ($($script:MultimodalMode)): $($script:MultimodalAgents)"
-        Write-Host ""
-    }
+    Msg "    多模态 ($($script:MultimodalMode)): $($script:MultimodalSupportedAgents)" `
+        "    Multimodal ($($script:MultimodalMode)): $($script:MultimodalSupportedAgents)"
+    Write-Host ""
 }
 
 # ============================================================
@@ -1374,7 +1366,7 @@ function Write-Config {
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
         multimodalMode    = "$($script:MultimodalMode)"
-        multimodalAgents  = "$($script:MultimodalAgents)"
+        multimodalSupportedAgents = "$($script:MultimodalSupportedAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
@@ -1490,8 +1482,7 @@ if (opts.selectedAgents) {
 }
 if (opts.multimodalMode) {
   config.agents = config.agents || {};
-  const supported = ['codex', 'qoder'];
-  const listed = new Set(String(opts.multimodalAgents || '').split(',').map(s => s.trim()).filter(Boolean));
+  const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
   for (const id of supported) {
     if (!config.agents[id]) continue;
     if (opts.multimodalMode === 'none') {
@@ -1501,7 +1492,7 @@ if (opts.multimodalMode) {
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: listed.has(id) ? opts.multimodalMode : 'none' };
+    config.agents[id].multimodal = { ...prev, uploadMode: opts.multimodalMode };
   }
 }
 

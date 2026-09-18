@@ -10,19 +10,21 @@ const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'),
 describe('public installer multimodal mode flag', () => {
   it('shell installer accepts --multimodal-mode and writes uploadMode', () => {
     expect(installerSh).toContain('MULTIMODAL_MODE=""');
+    expect(installerSh).toContain('MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"');
     expect(installerSh).toContain('--multimodal-mode)');
     expect(installerSh).toContain('--multimodal-mode=*)');
     expect(installerSh).toContain('LP_MULTIMODAL_MODE="$MULTIMODAL_MODE"');
-    expect(installerSh).toContain('LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS"');
+    expect(installerSh).toContain('LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS"');
     expect(installerSh).toContain('--multimodal-mode is only supported with install');
+    expect(installerSh).toContain('requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key');
     expect(installerSh).toContain("none|input|output|both)");
     expect(installerSh).toContain('if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi');
     expect(installerSh).toContain('select_multimodal_agents()');
-    expect(installerSh).toContain('const supported = ["codex", "qoder"];');
-    expect(installerSh).toContain("const supported = ['codex', 'qoder'];");
+    expect(installerSh).toContain('process.env.LP_MULTIMODAL_SUPPORTED_AGENTS');
     expect(installerSh).toContain("if (multimodalMode === 'none')");
     expect(installerSh).toContain('delete config.agents[id].multimodal');
-    expect(installerSh).toContain("listed.has(id) ? multimodalMode : 'none'");
+    expect(installerSh).toContain('uploadMode: multimodalMode');
+    expect(installerSh).not.toContain('listed.has');
     expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
     expect(installerSh).toContain('storage: { type: \'sls\' }');
     expect(installerSh).toContain("label: 'multimodal.storage.type'");
@@ -31,16 +33,18 @@ describe('public installer multimodal mode flag', () => {
 
   it('PowerShell installer accepts -MultimodalMode and writes uploadMode', () => {
     expect(installerPs1).toContain('[string]$MultimodalMode');
+    expect(installerPs1).toContain('$script:MultimodalSupportedAgents = "codex,qoder"');
     expect(installerPs1).toContain('multimodalMode');
     expect(installerPs1).toContain('-MultimodalMode is only supported with install');
+    expect(installerPs1).toContain('requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey');
     expect(installerPs1).toContain('@("none", "input", "output", "both")');
     expect(installerPs1).toContain('if (-not $script:MultimodalMode) { return }');
     expect(installerPs1).toContain('function Select-MultimodalAgents');
-    expect(installerPs1).toContain('const supported = ["codex", "qoder"];');
-    expect(installerPs1).toContain("const supported = ['codex', 'qoder'];");
+    expect(installerPs1).toContain('opts.multimodalSupportedAgents');
     expect(installerPs1).toContain("if (opts.multimodalMode === 'none')");
     expect(installerPs1).toContain('delete config.agents[id].multimodal');
-    expect(installerPs1).toContain("listed.has(id) ? opts.multimodalMode : 'none'");
+    expect(installerPs1).toContain('uploadMode: opts.multimodalMode');
+    expect(installerPs1).not.toContain('listed.has');
     expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
     expect(installerPs1).toContain('storage: { type: \'sls\' }');
     expect(installerPs1).toContain("label: 'multimodal.storage.type'");
@@ -123,7 +127,6 @@ const completeSls = {
 function runWriteConfig(platform, multimodalMode, existing, {
   selectedAgents = '',
   probeAgents = [],
-  multimodalAgents = '',
   sls = {},
 } = {}) {
   const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-data-'));
@@ -142,7 +145,7 @@ function runWriteConfig(platform, multimodalMode, existing, {
         configPath,
         dataDir: root,
         multimodalMode,
-        multimodalAgents,
+        multimodalSupportedAgents: 'codex,qoder',
         selectedAgents,
         probeResult: probeJson,
         slsEndpoint: sls.endpoint ?? '',
@@ -162,7 +165,7 @@ function runWriteConfig(platform, multimodalMode, existing, {
       env: {
         ...process.env,
         LP_MULTIMODAL_MODE: multimodalMode,
-        LP_MULTIMODAL_AGENTS: multimodalAgents,
+        LP_MULTIMODAL_SUPPORTED_AGENTS: 'codex,qoder',
         LP_SELECTED_AGENTS: selectedAgents,
         LP_SLS_API_KEY: sls.apiKey ?? '',
         LP_DASHBOARD_PORT: '',
@@ -179,18 +182,16 @@ function runWriteConfig(platform, multimodalMode, existing, {
 describe('installer write_config multimodal-mode', () => {
   for (const platform of ['bash', 'powershell-js']) {
     describe(platform, () => {
-      it('writes the same mode onto listed existing agents and skips unknown ids', () => {
+      it('writes the same mode onto existing supported agents and skips unknown ids', () => {
         const result = runWriteConfig(platform, 'both', {
           agents: {
             ...enabledAgents.agents,
             cursor: { enabled: true },
           },
-        }, {
-          multimodalAgents: 'codex,cursor,foo',
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
-        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
+        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'both' });
         expect(result.config.agents.cursor.multimodal).toBeUndefined();
         expect(result.config.agents.foo).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
@@ -204,7 +205,7 @@ describe('installer write_config multimodal-mode', () => {
               multimodal: { uploadMode: 'none', allowedRootPaths: ['~/workspace'] },
             },
           },
-        }, { multimodalAgents: 'qoder' });
+        });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder).toEqual({
           enabled: false,
@@ -215,15 +216,26 @@ describe('installer write_config multimodal-mode', () => {
       it('does not write multimodal when the mode is omitted', () => {
         const result = runWriteConfig(platform, '', {
           agents: { qoder: { enabled: true } },
-        }, { multimodalAgents: 'qoder' });
+        });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder).toEqual({ enabled: true });
+      });
+
+      it('writes the mode onto existing supported agents even if they were not selected this install', () => {
+        const result = runWriteConfig(platform, 'output', {
+          agents: {
+            qoder: { enabled: false },
+            cursor: { enabled: true },
+          },
+        }, { selectedAgents: 'cursor' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'output' });
+        expect(result.config.agents.cursor.multimodal).toBeUndefined();
       });
 
       it('writes uploadMode only after --agents has created the entry', () => {
         const result = runWriteConfig(platform, 'both', undefined, {
           selectedAgents: 'codex',
-          multimodalAgents: 'codex,foo',
           probeAgents: [{ id: 'codex' }, { id: 'cursor' }],
         });
         expect(result.status, result.stderr).toBe(0);
@@ -240,7 +252,6 @@ describe('installer write_config multimodal-mode', () => {
           ...enabledAgents,
           multimodal: { extra: true },
         }, {
-          multimodalAgents: 'codex',
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
@@ -251,7 +262,6 @@ describe('installer write_config multimodal-mode', () => {
 
       it('does not write storage when the SLS four-tuple is incomplete', () => {
         const result = runWriteConfig(platform, 'both', enabledAgents, {
-          multimodalAgents: 'codex',
           sls: { ...completeSls, apiKey: '' },
         });
         expect(result.status, result.stderr).toBe(0);
@@ -271,7 +281,6 @@ describe('installer write_config multimodal-mode', () => {
             },
           },
         }, {
-          multimodalAgents: 'codex',
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
@@ -294,7 +303,6 @@ describe('installer write_config multimodal-mode', () => {
           },
           multimodal: { storage: existing },
         }, {
-          multimodalAgents: 'codex',
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
@@ -312,35 +320,6 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.agents.codex.multimodal).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
       });
-    });
-  }
-});
-
-function runAutoSelect(source, probeAgents, selectedAgents) {
-  const marker = 'const supported = ["codex", "qoder"];';
-  const start = source.indexOf(marker);
-  const writeCall = 'process.stdout.write(ids.join(","));';
-  const end = source.indexOf(writeCall, start);
-  expect(start).toBeGreaterThanOrEqual(0);
-  expect(end).toBeGreaterThan(start);
-  const js = `const fs = require("fs");\n${source.slice(start, end + writeCall.length)}`;
-  const result = spawnSync(process.execPath, ['-e', js], {
-    encoding: 'utf8',
-    input: JSON.stringify(probeAgents),
-    env: { ...process.env, LP_SELECTED_AGENTS: selectedAgents },
-  });
-  expect(result.status, result.stderr).toBe(0);
-  return result.stdout;
-}
-
-describe('multimodal probe after agent selection', () => {
-  for (const [platform, source] of [['bash', installerSh], ['powershell-js', installerPs1]]) {
-    it(`${platform} keeps detected ∩ selected ∩ supported`, () => {
-      expect(runAutoSelect(source, [
-        { id: 'codex', detected: true },
-        { id: 'qoder', detected: false },
-        { id: 'cursor', detected: true },
-      ], 'codex,qoder,cursor')).toBe('codex');
     });
   }
 });

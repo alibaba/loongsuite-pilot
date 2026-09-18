@@ -72,7 +72,8 @@ SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
 MULTIMODAL_MODE=""
-MULTIMODAL_AGENTS=""
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
 MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
@@ -196,6 +197,12 @@ fi
 if [ -n "$MULTIMODAL_MODE" ] && [ "$COMMAND" != "install" ]; then
     echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
     exit 1
+fi
+if [ -n "$MULTIMODAL_MODE" ] && [ "$MULTIMODAL_MODE" != "none" ]; then
+    if [ -z "$SLS_ENDPOINT" ] || [ -z "$SLS_PROJECT" ] || [ -z "$SLS_LOGSTORE" ] || [ -z "$SLS_API_KEY" ]; then
+        echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
+        exit 1
+    fi
 fi
 
 # Validate current user and sudo access on Linux
@@ -742,22 +749,11 @@ process.stdout.write(ids.join(','));
     echo ""
 }
 
-# Keep supported ids in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 select_multimodal_agents() {
     if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi
-    MULTIMODAL_AGENTS=$(printf '%s' "$PROBE_RESULT" | LP_SELECTED_AGENTS="$SELECTED_AGENTS" "$NODE_BIN" -e '
-const fs = require("fs");
-const supported = ["codex", "qoder"];
-const selected = new Set((process.env.LP_SELECTED_AGENTS || "").split(",").map(s => s.trim()).filter(Boolean));
-const r = JSON.parse(fs.readFileSync(0, "utf8") || "[]");
-const ids = r.filter(a => a && a.detected && supported.includes(a.id) && selected.has(a.id)).map(a => a.id);
-process.stdout.write(ids.join(","));
-' 2>/dev/null || true)
-    if [ -n "$MULTIMODAL_AGENTS" ]; then
-        msg "    多模态 ($MULTIMODAL_MODE): $MULTIMODAL_AGENTS" \
-            "    Multimodal ($MULTIMODAL_MODE): $MULTIMODAL_AGENTS"
-        echo ""
-    fi
+    msg "    多模态 ($MULTIMODAL_MODE): $MULTIMODAL_SUPPORTED_AGENTS" \
+        "    Multimodal ($MULTIMODAL_MODE): $MULTIMODAL_SUPPORTED_AGENTS"
+    echo ""
 }
 
 # ============================================================
@@ -1042,7 +1038,7 @@ write_config() {
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
         LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" \
-        LP_MULTIMODAL_AGENTS="$MULTIMODAL_AGENTS" \
+        LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
 const fs = require('fs');
@@ -1123,7 +1119,6 @@ const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
 const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
-const multimodalAgents = process.env.LP_MULTIMODAL_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 
@@ -1178,8 +1173,7 @@ if (selectedAgents) {
 
 if (multimodalMode) {
   config.agents = config.agents || {};
-  const supported = ['codex', 'qoder'];
-  const listed = new Set(multimodalAgents.split(',').map(s => s.trim()).filter(Boolean));
+  const supported = (process.env.LP_MULTIMODAL_SUPPORTED_AGENTS || '').split(',').map(s => s.trim()).filter(Boolean);
   for (const id of supported) {
     if (!config.agents[id]) continue;
     if (multimodalMode === 'none') {
@@ -1189,7 +1183,7 @@ if (multimodalMode) {
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: listed.has(id) ? multimodalMode : 'none' };
+    config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
   }
 }
 
