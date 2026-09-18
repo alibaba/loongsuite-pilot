@@ -84,6 +84,21 @@ import importlib.util
 import json
 import pathlib
 import sys
+import threading
+import types
+
+# Simulated Hermes 0.19 native callback contract; fixture event ordering is real-derived.
+runtime = types.ModuleType("run_agent")
+class AIAgent:
+    api_mode = "chat_completions"
+    def __init__(self, session_id):
+        self.session_id = session_id
+    def _interruptible_streaming_api_call(self, api_kwargs, *, on_first_delta=None):
+        worker = threading.Thread(target=on_first_delta)
+        worker.start()
+        worker.join()
+runtime.AIAgent = AIAgent
+sys.modules["run_agent"] = runtime
 
 plugin_path = pathlib.Path(sys.argv[1])
 fixture_path = pathlib.Path(sys.argv[2])
@@ -101,7 +116,12 @@ ctx = Context()
 module.register(ctx)
 for line in fixture_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
+    count = event["payload"].get("api_call_count", 0)
+    module.time.perf_counter_ns = lambda: 1_000_000_000
     ctx.hooks[event["hook"]](**event["payload"])
+    if event["hook"] == "pre_api_request":
+        module.time.perf_counter_ns = lambda: 1_000_000_000 + count * 125_000_000
+        AIAgent(event["payload"]["session_id"])._interruptible_streaming_api_call({})
 `;
     const run = spawnSync('python3', ['-c', driver, PLUGIN_PATH, observerFixturePath], {
       env: {
@@ -144,6 +164,9 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     expect(records.every(record => record['user.id'] === 'fixture-user')).toBe(true);
     expect(records.every(record =>
       !('agent.pilot.invocation.user.id' in record))).toBe(true);
+    expect(records.filter(record => record['event.name'] === 'llm.response')
+      .map(record => record['gen_ai.response.time_to_first_token']))
+      .toEqual([125_000_000, 250_000_000]);
     const requestRecords = records.filter(record => record['event.name'] === 'llm.request');
     expect(requestRecords).toHaveLength(2);
     // The system prompt only ever reaches the plugin through the request body:
@@ -216,6 +239,8 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
       expect(String(agentSpan?.attributes['gen_ai.system_instructions']))
         .toContain(EXPECTED_SYSTEM_PROMPT);
       expect(llmSpans).toHaveLength(2);
+      expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token']).sort((a, b) => Number(a) - Number(b)))
+        .toEqual([125_000_000, 250_000_000]);
       // otel-util-genai currently models definitions as turn-level metadata;
       // raw request-level attachment is asserted above for both API steps.
       expect(llmSpans.every(span =>
