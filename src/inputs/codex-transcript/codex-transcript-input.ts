@@ -183,6 +183,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
+  private lastDynamicRootLimitWarningAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
   private readonly transcriptPathByThreadId = new Map<string, string>();
@@ -205,12 +206,31 @@ export class CodexTranscriptInput extends BaseInput {
     this.multimodalProcessor = includeMultimodal ? processor : null;
   }
 
-  static getWatchPaths(): string[] {
-    return [resolveHome(DEFAULT_SESSION_DIR)];
+  static getWatchPaths(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): string[] {
+    return [sessionDir, wakeupDir];
   }
 
-  static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome(DEFAULT_SESSION_DIR));
+  static async checkAvailability(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): Promise<boolean> {
+    if (await directoryExists(sessionDir)) return true;
+    try {
+      const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
+      const now = Date.now();
+      for (const entry of selectCodexWakeupMarkers(entries)) {
+        const roots = await readCodexWakeupRoots(path.join(wakeupDir, entry.name), now);
+        for (const candidate of roots.flat()) {
+          if (await directoryExists(candidate)) return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   protected override async onStart(): Promise<void> {
@@ -2058,52 +2078,37 @@ export class CodexTranscriptInput extends BaseInput {
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'));
     const now = Date.now();
     await this.cleanupExpiredWakeupMarkers(allMarkerEntries, now);
-    const markerEntries = allMarkerEntries
-      // Marker names are Codex UUIDv7 session IDs, so descending lexical order
-      // keeps the newest task markers inside the bounded discovery window.
-      .sort((left, right) => right.name.localeCompare(left.name))
-      .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
-    const sessionDirs = new Set<string>();
-
-    for (const entry of markerEntries) {
-      let marker: Record<string, unknown> | null = null;
-      try {
-        marker = asRecord(JSON.parse(await fs.readFile(path.join(this.wakeupDir, entry.name), 'utf8')));
-      } catch {
-        continue;
-      }
-      if (!marker) continue;
-
-      const receivedAt = stringValue(marker.received_at);
-      const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
-      if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) continue;
-
-      const configuredSessionDir = stringValue(marker.session_dir);
-      const configuredCodexHome = stringValue(marker.codex_home);
-      if (configuredSessionDir && !path.isAbsolute(configuredSessionDir)) continue;
-      if (configuredCodexHome && !path.isAbsolute(configuredCodexHome)) continue;
-
-      let sessionDir = configuredSessionDir;
-      if (configuredCodexHome) {
-        const codexHomeSessionDir = path.resolve(configuredCodexHome, 'sessions');
-        if (configuredSessionDir && path.resolve(configuredSessionDir) !== codexHomeSessionDir) continue;
-        sessionDir = codexHomeSessionDir;
-      }
-      if (!sessionDir || !path.isAbsolute(sessionDir)) continue;
-
-      let canonicalSessionDir: string;
-      try {
-        canonicalSessionDir = await fs.realpath(sessionDir);
-        if (!(await fs.stat(canonicalSessionDir)).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      if (canonicalSessionDir === canonicalDefaultSessionDir) continue;
-      sessionDirs.add(canonicalSessionDir);
-      if (sessionDirs.size >= MAX_DYNAMIC_SESSION_DIRS) break;
+    // Reserve the global budget for evidence-backed roots before legacy fallbacks.
+    // Per-marker ordering alone still spends two slots per dual-layout home.
+    const tiers: Set<string>[] = [new Set(), new Set(), new Set()];
+    for (const entry of selectCodexWakeupMarkers(allMarkerEntries)) {
+      const roots = await readCodexWakeupRoots(path.join(this.wakeupDir, entry.name), now);
+      roots.forEach((candidates, tier) => {
+        for (const candidate of candidates) tiers[tier].add(candidate);
+      });
     }
-
-    return [...sessionDirs];
+    const sessionDirs = new Set<string>();
+    for (const candidates of tiers) {
+      for (const candidate of candidates) {
+        try {
+          const canonical = await fs.realpath(candidate);
+          if (canonical === canonicalDefaultSessionDir || !(await fs.stat(canonical)).isDirectory()) continue;
+          sessionDirs.add(canonical);
+        } catch {
+          // A temporarily unavailable root can be retried on the next discovery.
+        }
+      }
+    }
+    // At most three roots per marker are examined within the existing marker cap.
+    const dropped = sessionDirs.size - MAX_DYNAMIC_SESSION_DIRS;
+    if (dropped > 0 && now - this.lastDynamicRootLimitWarningAtMs >= WAKEUP_MARKER_CLEANUP_INTERVAL_MS) {
+      this.lastDynamicRootLimitWarningAtMs = now;
+      this.logger.warn('Codex dynamic session root limit reached within scanned markers', {
+        dropped,
+        cap: MAX_DYNAMIC_SESSION_DIRS,
+      });
+    }
+    return [...sessionDirs].slice(0, MAX_DYNAMIC_SESSION_DIRS);
   }
 
   private async cleanupExpiredWakeupMarkers(entries: Dirent[], now: number): Promise<void> {
@@ -2439,6 +2444,75 @@ function isCodexSessionDateDirectory(name: string, depth: number): boolean {
   if (depth === 1) return /^(0[1-9]|1[0-2])$/.test(name);
   if (depth === 2) return /^(0[1-9]|[12]\d|3[01])$/.test(name);
   return false;
+}
+
+/** Shared by activation and collection so stale/invalid markers cannot start an Input. */
+async function readCodexWakeupRoots(markerPath: string, now: number): Promise<string[][]> {
+  const roots: string[][] = [[], [], []];
+  try {
+    const marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+    if (!marker) return roots;
+    const receivedAt = stringValue(marker.received_at);
+    const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+    if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) return roots;
+
+    const home = stringValue(marker.codex_home);
+    const sessionDir = stringValue(marker.session_dir);
+    const transcriptPath = stringValue(marker.transcript_path);
+    if ((home && !path.isAbsolute(home)) || (sessionDir && !path.isAbsolute(sessionDir))) return roots;
+    const legacy = home ? path.resolve(home, 'sessions') : undefined;
+    const transcriptRoot = transcriptPath ? sessionDirFromTranscriptPath(transcriptPath) : undefined;
+    if (transcriptRoot && (!home || isCodexSessionDirForHome(transcriptRoot, home))) {
+      roots[0].push(transcriptRoot);
+    }
+    if (sessionDir && (!home || isCodexSessionDirForHome(sessionDir, home))) {
+      const resolved = path.resolve(sessionDir);
+      roots[resolved === legacy ? 2 : 1].push(resolved);
+    }
+    if (legacy) roots[2].push(legacy);
+  } catch {
+    // Atomic replacement, invalid JSON, and unreadable markers are retried later.
+  }
+  return roots;
+}
+
+function selectCodexWakeupMarkers(entries: Dirent[]): Dirent[] {
+  // UUIDv7 marker names sort newest first; keep every read within the scan budget.
+  return entries.filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+    .sort((left, right) => right.name.localeCompare(left.name))
+    .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
+}
+
+function sessionDirFromTranscriptPath(transcriptPath: string): string | undefined {
+  if (!path.isAbsolute(transcriptPath)) return undefined;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return undefined;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !isCodexSessionDateDirectory(path.basename(yearDir), 0)
+    || !isCodexSessionDateDirectory(path.basename(monthDir), 1)
+    || !isCodexSessionDateDirectory(path.basename(dayDir), 2)
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return undefined;
+  }
+  return path.resolve(sessionDir);
+}
+
+function isCodexSessionDirForHome(sessionDir: string, codexHome: string): boolean {
+  const relative = path.relative(path.resolve(codexHome), path.resolve(sessionDir));
+  if (relative === 'sessions') return true;
+  const parts = relative.split(path.sep);
+  return parts.length === 3
+    && parts[0] === 'u'
+    && parts[1].length > 0
+    && parts[1] !== '.'
+    && parts[1] !== '..'
+    && parts[2] === 'sessions';
 }
 
 async function canonicalDirectoryPath(directoryPath: string): Promise<string> {
