@@ -33,11 +33,12 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
-import { parseTranscript } from '../../../assets/hooks/copilot/transcript-parser.mjs';
+import { parseTranscript, hasSessionShutdown } from '../../../assets/hooks/copilot/transcript-parser.mjs';
 
 const DEFAULT_SESSION_DIR = '~/.copilot/session-state';
 const DEFAULT_FILE_PATTERN = '*/events.jsonl';
 const WAKEUP_DIR = '~/.loongsuite-pilot/state/copilot/session-wakeups';
+const SHUTDOWN_TIMEOUT_MS = 5 * 60 * 1000;
 
 export interface CopilotLogInputOptions
   extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
@@ -172,7 +173,9 @@ export class CopilotLogInput extends BaseSessionInput {
       return [];
     }
     const prevOffset = this.stateStore.getOffset(stateKey);
-    if (prevOffset >= stat.size) return [];
+    if (prevOffset >= stat.size) {
+      return this.maybeFlushTimeoutBuffer(stateKey);
+    }
 
     let parsed: AgentActivityEntry[] = [];
     try {
@@ -186,6 +189,41 @@ export class CopilotLogInput extends BaseSessionInput {
     }
     this.stateStore.setOffset(stateKey, stat.size);
     this.stateStore.update(stateKey, { extra: { inode: Number(stat.ino) } });
-    return parsed;
+
+    let hasShutdown = false;
+    try {
+      hasShutdown = hasSessionShutdown(filePath);
+    } catch {
+      hasShutdown = false;
+    }
+
+    const now = Date.now();
+    const existing = this.sessionBuffers.get(stateKey);
+    const firstSeenMs = existing ? existing.firstSeenMs : now;
+    this.sessionBuffers.set(stateKey, { records: parsed, firstSeenMs });
+
+    if (hasShutdown) {
+      this.sessionBuffers.delete(stateKey);
+      return parsed;
+    }
+    if (now - firstSeenMs >= SHUTDOWN_TIMEOUT_MS) {
+      this.sessionBuffers.delete(stateKey);
+      return parsed;
+    }
+    return [];
   }
+
+  private maybeFlushTimeoutBuffer(stateKey: string): AgentActivityEntry[] {
+    const buf = this.sessionBuffers.get(stateKey);
+    if (!buf) return [];
+    const now = Date.now();
+    if (now - buf.firstSeenMs < SHUTDOWN_TIMEOUT_MS) return [];
+    this.sessionBuffers.delete(stateKey);
+    return buf.records;
+  }
+
+  private readonly sessionBuffers = new Map<
+    string,
+    { records: AgentActivityEntry[]; firstSeenMs: number }
+  >();
 }

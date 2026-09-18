@@ -8,9 +8,8 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318/v1/traces',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318/v1/traces', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
   };
 }
@@ -100,6 +99,52 @@ describe('OtlpTraceFlusher - event.id dedup across re-parses', () => {
     const buf = (flusher as unknown as { turnBuffers: Map<string, { records: AgentActivityEntry[]; recordIndex: Map<string, number> }> }).turnBuffers.get('turn:turn-1');
     expect(buf!.records.length).toBe(2);
     expect(buf!.recordIndex.size).toBe(0);
+    await flusher.shutdown();
+  });
+
+  it('deep-merges fields across re-parses: preserves gen_ai.llm.reasoning.text from first poll when second poll omits it', async () => {
+    const flusher = makeFlusher();
+    // Poll 1: LLM record carries reasoning.text + response_id
+    const r1 = makeEntry('evt-llm-1', 'turn-1', {
+      'gen_ai.llm.reasoning.text': 'thinking hard about the plan',
+      'gen_ai.response.id': 'resp-1',
+    });
+    await flusher.send(r1);
+    // Poll 2: same event.id, but reasoning.text field absent (parser hit a
+    // turn-end before reasoning completed, or model didn't emit reasoning).
+    // Deep merge MUST keep the first non-empty value (regression test for
+    // v7 replace-bug which dropped reasoning.text → 0/6 LLMs in CP5 v6).
+    const r2 = makeEntry('evt-llm-1', 'turn-1', {
+      'gen_ai.response.id': 'resp-1',
+    });
+    await flusher.send(r2);
+    const buf = (flusher as unknown as { turnBuffers: Map<string, { records: AgentActivityEntry[]; recordIndex: Map<string, number> }> }).turnBuffers.get('turn:turn-1');
+    expect(buf!.records.length).toBe(1);
+    expect(buf!.records[0]['gen_ai.llm.reasoning.text']).toBe('thinking hard about the plan');
+    expect(buf!.records[0]['gen_ai.response.id']).toBe('resp-1');
+    await flusher.shutdown();
+  });
+
+  it('deep-merges: later non-empty value does NOT overwrite first non-empty value (first-write-wins)', async () => {
+    const flusher = makeFlusher();
+    // First poll: record with fieldA=alpha and fieldB=''
+    const r1 = makeEntry('evt-1', 'turn-1', {
+      'gen_ai.llm.reasoning.text': 'alpha-version-thinking',
+    } as unknown as Record<string, unknown>);
+    // Add a custom field via extra to simulate session.resolved_model
+    (r1 as unknown as Record<string, unknown>)['gen_ai.session.resolved_model'] = 'gpt-5.6-luna';
+    await flusher.send(r1);
+    // Second poll: same event.id but resolved_model is empty string (parser
+    // transient field loss — must NOT overwrite the first non-empty value).
+    const r2 = makeEntry('evt-1', 'turn-1', {
+      'gen_ai.llm.reasoning.text': 'beta-version-thinking',
+    } as unknown as Record<string, unknown>);
+    (r2 as unknown as Record<string, unknown>)['gen_ai.session.resolved_model'] = '';
+    await flusher.send(r2);
+    const buf = (flusher as unknown as { turnBuffers: Map<string, { records: AgentActivityEntry[]; recordIndex: Map<string, number> }> }).turnBuffers.get('turn:turn-1');
+    expect(buf!.records.length).toBe(1);
+    expect(buf!.records[0]['gen_ai.session.resolved_model']).toBe('gpt-5.6-luna');
+    expect(buf!.records[0]['gen_ai.llm.reasoning.text']).toBe('alpha-version-thinking');
     await flusher.shutdown();
   });
 });

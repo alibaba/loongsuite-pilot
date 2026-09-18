@@ -524,3 +524,34 @@ describe('copilot transcript-parser — CP5 v4 fixes (#2 STEP endTime + #3 place
     }
   });
 });
+
+describe('copilot transcript-parser — CP5 v8 fixes (#2 sessionId gate + #3 input shutdown gate)', () => {
+  test('scenario 24: CP5 v8 Bug #2 — session.shutdown present but sessionId empty → no ENTRY/AGENT emitted', () => {
+    // Edge case: very rare in practice (session.start missing or stripped),
+    // but CP5 v6 tester verdict showed 50+ ERROR noise from must-attr rules
+    // when placeholder ENTRY/AGENT spans with `<none>` sessionId slip through.
+    // Build a stripped fixture from session2 by removing session.start line.
+    const raw = readRawEvents(SESSION2);
+    const stripped = raw.filter(e => e.type !== 'session.start');
+    const tmpFile = path.join(FIXTURES, 'events-session2-no-start-tmp.jsonl');
+    fs.writeFileSync(tmpFile, stripped.map(l => JSON.stringify(l)).join('\n') + '\n');
+    try {
+      const out = parseTranscript(tmpFile);
+      const entryAgent = out.filter(e => typeof e['gen_ai.session.start_time'] === 'string'
+        && e['gen_ai.turn.start'] === undefined);
+      expect(entryAgent.length).toBe(0);
+    } finally {
+      fs.unlinkSync(tmpFile);
+    }
+  });
+
+  test('scenario 25: CP5 v8 Bug #2 — session.shutdown + sessionId present → ENTRY/AGENT still emitted (regression guard)', () => {
+    const out = parseTranscript(SESSION2);
+    const entryAgent = out.filter(r => r['event.name'] === 'other');
+    expect(entryAgent.length).toBeGreaterThanOrEqual(1);
+    for (const r of entryAgent) {
+      expect(typeof r['gen_ai.session.id']).toBe('string');
+      expect(r['gen_ai.session.id'].length).toBeGreaterThan(0);
+    }
+  });
+});

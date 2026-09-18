@@ -644,7 +644,14 @@ export function parseTranscript(filePath) {
   // fields for `patchCopilotCustomAttributes` to copy onto the auto-created
   // ENTRY span.
   const hasSessionEnd = sessionShutdown || abortEvent;
-  if (hasSessionEnd) {
+  // Suppress ENTRY/AGENT when sessionId is empty — partial polls that somehow
+  // hit session.shutdown without session.start (very rare) would otherwise
+  // emit ENTRY/AGENT records with empty gen_ai.session.id, which the converter
+  // auto-creates placeholder ENTRY/AGENT spans from (parentRecords all 'other'
+  // filtered → common.sessionId=null → `<none>` span, validate-trace 50+
+  // ERRORs on must-attr rules). Require both hasSessionEnd AND sessionId.
+  const hasSessionId = typeof sessionId === 'string' && sessionId.length > 0;
+  if (hasSessionEnd && hasSessionId) {
     out.push(buildEntrySpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, autoModeResolved, abortEvent));
     out.push(buildAgentSpan(sessionId, sessionTraceId, sessionStart, sessionShutdown, abortEvent, resolvedModel));
   }
@@ -684,3 +691,12 @@ export const __internal = {
   FILTERED_TYPES,
   NO_SPAN_TYPES,
 };
+
+export function hasSessionShutdown(filePath) {
+  try {
+    const events = readEvents(filePath);
+    return events.some(e => e && e.type === 'session.shutdown');
+  } catch {
+    return false;
+  }
+}

@@ -7,3 +7,5 @@
 export declare function parseTranscript(
   filePath: string,
 ): import('../../src/types/events.js').AgentActivityEntry[];
+
+export declare function hasSessionShutdown(filePath: string): boolean;

@@ -448,6 +448,7 @@ function estimateSpanSize(span: ReadableSpan): number {
 }
 
 /**
+/**
  * Apply QoderWork's explicit loop.iteration boundaries to STEP spans without
  * changing the enclosed LLM timestamps. The converter otherwise derives STEP
  * start/end from child records, which loses the small but real orchestration
@@ -520,6 +521,33 @@ function hrTimeToNano(value: readonly [number, number]): bigint {
 
 function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+}
+
+/**
+ * Deep-merge a new AgentActivityEntry into an existing one, preserving
+ * earlier non-empty values when the new record's field is empty. Earlier
+ * polls carry some fields (e.g. gen_ai.llm.reasoning.text on the first
+ * reasoning-event poll) that later polls lack — replace semantics (v7)
+ * silently dropped them, causing tester CP5 v6 to see reasoning.text=0/6
+ * and resolved_model missing from ENTRY spans. Deep merge keeps the
+ * first non-empty value per field; later non-empty values are ignored
+ * (first-write-wins to avoid flapping on transient field changes).
+ */
+function mergeRecordFields(
+  existing: AgentActivityEntry,
+  incoming: AgentActivityEntry,
+): AgentActivityEntry {
+  const merged = { ...existing } as Record<string, unknown>;
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.length === 0) continue;
+    const cur = merged[k];
+    if (cur === undefined || cur === null || (typeof cur === 'string' && cur.length === 0)) {
+      merged[k] = v;
+    }
+    // cur is non-empty → keep first-write value, ignore incoming
+  }
+  return merged as AgentActivityEntry;
 }
 
 export class OtlpTraceFlusher extends BaseFlusher {
@@ -758,14 +786,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.sessionId = incomingSessionId;
     }
     // Dedup by event.id: if the same event.id was already pushed (from a prior
-    // re-parse of the same session file), replace the stale copy with the new
-    // one (later polls carry richer fields). Records without event.id fall
-    // through to normal append (rare; parser emits event.id on all records).
+    // re-parse of the same session file), deep-merge fields so earlier polls'
+    // fields (e.g. gen_ai.llm.reasoning.text that only appears on the first
+    // poll) are preserved when a later poll's record lacks them. Replace
+    // semantics (v7) lost reasoning.text + gen_ai.session.resolved_model —
+    // deep merge keeps first-non-empty value per field. Records without
+    // event.id fall through to normal append.
     const eventId = (entry['event.id'] as string | undefined) ?? undefined;
     if (typeof eventId === 'string' && eventId.length > 0) {
       const existingIdx = buf.recordIndex.get(eventId);
       if (existingIdx !== undefined) {
-        buf.records[existingIdx] = entry;
+        buf.records[existingIdx] = mergeRecordFields(buf.records[existingIdx], entry);
       } else {
         buf.recordIndex.set(eventId, buf.records.length);
         buf.records.push(entry);
