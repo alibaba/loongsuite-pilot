@@ -37,21 +37,22 @@ export function maskString(
   const resolvedOptions = resolveStringMaskOptions(options);
   const ranges: MaskRange[] = [];
   const protectedPreviewRanges = collectMaskedPreviewRanges(value);
+  const scanValue = blankProtectedPreviewRanges(value, protectedPreviewRanges);
 
   if (plan.rules.length > 0) {
-    const normalizedValue = value.toLowerCase();
+    const normalizedValue = scanValue.toLowerCase();
     if (hasAnyPrefilter(normalizedValue, plan.rules)) {
       ranges.push(
         ...(isLargeString(value, resolvedOptions.largeStringThresholdBytes)
           ? collectLargeStringRanges(
-              value,
+              scanValue,
               normalizedValue,
               plan.rules,
               plan.replacementMode,
               resolvedOptions,
             )
           : collectRangesForSegment(
-              value,
+              scanValue,
               normalizedValue,
               0,
               plan.rules,
@@ -62,13 +63,12 @@ export function maskString(
     }
   }
   if (plan.piiTypes.size > 0) {
-    ranges.push(...collectPiiRanges(value, plan.piiTypes, plan.replacementMode));
+    ranges.push(
+      ...collectPiiRanges(scanValue, plan.piiTypes, plan.replacementMode),
+    );
   }
 
-  return applyMaskRanges(
-    value,
-    ranges.filter(range => !overlapsProtectedPreview(range, protectedPreviewRanges)),
-  );
+  return applyMaskRanges(value, ranges);
 }
 
 interface ProtectedPreviewRange {
@@ -87,18 +87,23 @@ function collectMaskedPreviewRanges(value: string): ProtectedPreviewRange[] {
   return ranges;
 }
 
-function overlapsProtectedPreview(
-  range: MaskRange,
+function blankProtectedPreviewRanges(
+  value: string,
   protectedRanges: readonly ProtectedPreviewRange[],
-): boolean {
-  let low = 0;
-  let high = protectedRanges.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    if (protectedRanges[middle].end <= range.start) low = middle + 1;
-    else high = middle;
+): string {
+  if (protectedRanges.length === 0) return value;
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const range of protectedRanges) {
+    chunks.push(
+      value.slice(cursor, range.start),
+      ' '.repeat(range.end - range.start),
+    );
+    cursor = range.end;
   }
-  return low < protectedRanges.length && protectedRanges[low].start < range.end;
+  chunks.push(value.slice(cursor));
+  return chunks.join('');
 }
 
 function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): MaskPlan {

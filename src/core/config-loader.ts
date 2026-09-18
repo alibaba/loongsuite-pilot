@@ -757,7 +757,8 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
   const rawReplacementMode =
-    env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE') ?? file?.mask?.replacementMode;
+    nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
+    file?.mask?.replacementMode;
   const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
     rawReplacementMode as MaskReplacementMode,
   )

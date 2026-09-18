@@ -1712,6 +1712,19 @@ describe('ConfigLoader', () => {
       expect(config.mask.replacementMode).toBe('preview');
     });
 
+    it('treats an empty replacement mode env as unset', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', '');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
     it('falls back to placeholder for an invalid replacement mode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
