@@ -4623,7 +4623,7 @@ describe('Codex transcript multimodal extraction', () => {
     ]);
   });
 
-  it('gates input vs tool image conversion by uploadMode', () => {
+  it('gates user vs tool-result image conversion by uploadMode', () => {
     const png = Buffer.from('fake-png-mode').toString('base64');
     const fixture = multimodalRecords([
       userContentItem([
@@ -4649,17 +4649,17 @@ describe('Codex transcript multimodal extraction', () => {
     expect(JSON.stringify(off!.steps)).not.toContain('"type":"uri"');
     expect(JSON.stringify(off)).not.toContain(png);
 
-    const inputOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
-    expect(userParts(inputOnly!)[1]).toMatchObject({ type: 'uri' });
-    const inputToolOut = inputOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    const inputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
+    expect(userParts(inputMode!)[1]).toMatchObject({ type: 'uri' });
+    const inputToolOut = inputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(true);
 
-    const toolOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'tool' });
-    expect(userParts(toolOnly!).some((p: any) => p.type === 'uri')).toBe(false);
-    const toolOut = toolOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(toolOut?.some(p => p.type === 'uri')).toBe(true);
+    const outputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'output' });
+    expect(userParts(outputMode!).some((p: any) => p.type === 'uri')).toBe(false);
+    const outputToolOut = outputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(true);
 
-    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
+    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'all' });
     expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });
     const bothToolOut = both!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
     expect(bothToolOut?.some(p => p.type === 'uri')).toBe(true);

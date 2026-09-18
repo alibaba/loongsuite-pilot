@@ -12,7 +12,8 @@
 #     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
-#     -SlsApiKey "your-api-key"
+#     -SlsApiKey "your-api-key" `
+#     -MultimodalMode all
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -54,6 +55,9 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [switch]$AllAgents,
+    [AllowEmptyString()]
+    [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
@@ -133,6 +137,29 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
+}
+if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode) {
+    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'all'"
+    exit 1
+}
+$script:MultimodalMode = $MultimodalMode
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+$script:MultimodalSupportedAgents = "codex,qoder"
+if ($MultimodalMode) {
+    if ($MultimodalMode -notin @("none", "input", "output", "all")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
+        exit 1
+    }
+}
+if ($MultimodalMode -and $Command -ne "install") {
+    Write-Error "-MultimodalMode is only supported with install (got $Command)"
+    exit 1
+}
+if ($MultimodalMode -and $MultimodalMode -ne "none") {
+    if ($SlsEndpoint -notmatch '\S' -or $SlsProject -notmatch '\S' -or $SlsLogstore -notmatch '\S' -or $SlsApiKey -notmatch '\S') {
+        Write-Error "-MultimodalMode $MultimodalMode requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey"
+        exit 1
+    }
 }
 
 # ============================================================
@@ -888,6 +915,21 @@ $script:SELECTED_AGENTS = $Agents
 $script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
+    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
+    # in config (other agent settings survive), so pilot auto-detects all
+    # agents at runtime -- including ones installed after this run.
+    if ($AllAgents) {
+        if ($script:SELECTED_AGENTS) {
+            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
+                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
+            $script:SELECTED_AGENTS = ""
+        }
+        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        Write-Host ""
+        return
+    }
+
     if ($script:SELECTED_AGENTS) {
         Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -1041,10 +1083,13 @@ function Confirm-ConfigOverwrite {
         maskMode = $MaskMode
         maskTypes = $MaskTypes
         maskReplacementMode = $MaskReplacementMode
+        multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $diffs = & $script:NODE_BIN -e @'
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
@@ -1070,12 +1115,17 @@ const checks = [
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
-for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
+for (const c of changed) {
+  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
+}
 '@ $configFile $jsonArg 2>$null
-    $ErrorActionPreference = $prevEAP
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
 
     if (-not $diffs) { return }
 
@@ -1336,6 +1386,9 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })
+        multimodalMode    = "$($script:MultimodalMode)"
+        multimodalSupportedAgents = "$($script:MultimodalSupportedAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
@@ -1352,8 +1405,13 @@ function Write-Config {
     # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
     $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
     Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $script:NODE_BIN -e @'
+    # Native node does not throw; read $LASTEXITCODE on the next line so a JSON
+    # or write failure cannot print "Config written" and keep installing.
+    $cfgExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e @'
 const fs = require('fs');
 let raw = fs.readFileSync(process.argv[1], 'utf-8');
 if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
@@ -1426,11 +1484,14 @@ if (opts.maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = opts.maskReplacementMode;
 }
-if (opts.selectedAgents) {
+const allAgents = JSON.parse(opts.probeResult || '[]');
+if (opts.allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1440,20 +1501,53 @@ if (opts.selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (opts.allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
+}
+if (opts.multimodalMode) {
+  config.agents = config.agents || {};
+  const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = opts.allAgentsMode === '1' && opts.multimodalMode !== 'none';
+  for (const id of supported) {
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
+    if (opts.multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? opts.multimodalMode : 'none' };
+  }
+}
+
+if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
+  config.multimodal = { storage: { type: 'sls' } };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
-    $ErrorActionPreference = $prevEAP
-    Remove-PilotPathQuietly $cfgTmp
+        $cfgExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-PilotPathQuietly $cfgTmp
+    }
+    if ($cfgExit -ne 0) {
+        Msg "❌ 配置写入失败 (exit=$cfgExit)" "❌ Failed to write config (exit=$cfgExit)"
+        exit 1
+    }
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""

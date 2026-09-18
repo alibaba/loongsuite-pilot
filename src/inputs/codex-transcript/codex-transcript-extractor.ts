@@ -182,7 +182,7 @@ function extractCodexTurn(
   let developerInstructions = opts.developerInstructions;
   const blobToUri = opts.blobToUri;
   // Default both when blobToUri is set without mode.
-  const uploadMode = opts.uploadMode ?? (blobToUri ? 'both' : 'none');
+  const uploadMode = opts.uploadMode ?? (blobToUri ? 'all' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];

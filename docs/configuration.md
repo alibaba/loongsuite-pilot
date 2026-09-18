@@ -101,7 +101,7 @@ Minimal reuse (Codex). The SLS flusher is the storage destination; `uploadMode` 
     "codex": {
       "enabled": true,
       "captureMessageContent": true,
-      "multimodal": { "uploadMode": "both" }
+      "multimodal": { "uploadMode": "all" }
     }
   }
 }
