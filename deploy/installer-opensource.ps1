@@ -55,6 +55,7 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [AllowEmptyString()]
     [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
@@ -134,6 +135,10 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
 }
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
+    exit 1
+}
+if ($PSBoundParameters.ContainsKey('MultimodalMode') -and -not $MultimodalMode) {
+    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'both'"
     exit 1
 }
 $script:MultimodalMode = $MultimodalMode
@@ -989,13 +994,6 @@ process.stdout.write(ids.join(','));
     Write-Host ""
 }
 
-function Select-MultimodalAgents {
-    if (-not $script:MultimodalMode) { return }
-    Msg "    多模态 ($($script:MultimodalMode)): $($script:MultimodalSupportedAgents)" `
-        "    Multimodal ($($script:MultimodalMode)): $($script:MultimodalSupportedAgents)"
-    Write-Host ""
-}
-
 # ============================================================
 # Prompt for userId
 # ============================================================
@@ -1495,6 +1493,7 @@ if (opts.selectedAgents) {
 if (opts.multimodalMode) {
   config.agents = config.agents || {};
   const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
   for (const id of supported) {
     if (!config.agents[id]) continue;
     if (opts.multimodalMode === 'none') {
@@ -1504,7 +1503,7 @@ if (opts.multimodalMode) {
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: opts.multimodalMode };
+    config.agents[id].multimodal = { ...prev, uploadMode: selected.has(id) ? opts.multimodalMode : 'none' };
   }
 }
 
@@ -2605,7 +2604,6 @@ function Cmd-Install {
         Download-AndExtract
         Probe-Agents
         Select-Agents
-        Select-MultimodalAgents
         Prompt-UserId
         Confirm-ConfigOverwrite
         Deploy-Package $script:INSTALL_SRC

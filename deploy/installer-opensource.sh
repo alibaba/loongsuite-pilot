@@ -72,6 +72,7 @@ SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
 MULTIMODAL_MODE=""
+MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
 MASK_MODE=""
@@ -142,8 +143,8 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
-        --multimodal-mode)    MULTIMODAL_MODE="$2"; shift 2 ;;
-        --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; shift ;;
+        --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
+        --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
@@ -193,22 +194,26 @@ if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; };
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
 fi
-if [ -n "$MULTIMODAL_MODE" ]; then
+if [ "$MULTIMODAL_MODE_SET" -eq 1 ]; then
+    if [ -z "$MULTIMODAL_MODE" ]; then
+        echo "❌ --multimodal-mode requires 'none', 'input', 'output', or 'both'" >&2
+        exit 1
+    fi
     case "$MULTIMODAL_MODE" in
         none|input|output|both) ;;
         *)
             echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'both')" >&2
             exit 1 ;;
     esac
-fi
-if [ -n "$MULTIMODAL_MODE" ] && [ "$COMMAND" != "install" ]; then
-    echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
-    exit 1
-fi
-if [ -n "$MULTIMODAL_MODE" ] && [ "$MULTIMODAL_MODE" != "none" ]; then
-    if [ -z "$SLS_ENDPOINT" ] || [ -z "$SLS_PROJECT" ] || [ -z "$SLS_LOGSTORE" ] || [ -z "$SLS_API_KEY" ]; then
-        echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
+    if [ "$COMMAND" != "install" ]; then
+        echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
         exit 1
+    fi
+    if [ "$MULTIMODAL_MODE" != "none" ]; then
+        if [ -z "$SLS_ENDPOINT" ] || [ -z "$SLS_PROJECT" ] || [ -z "$SLS_LOGSTORE" ] || [ -z "$SLS_API_KEY" ]; then
+            echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
+            exit 1
+        fi
     fi
 fi
 
@@ -756,13 +761,6 @@ process.stdout.write(ids.join(','));
     echo ""
 }
 
-select_multimodal_agents() {
-    if [ -z "$MULTIMODAL_MODE" ]; then return 0; fi
-    msg "    多模态 ($MULTIMODAL_MODE): $MULTIMODAL_SUPPORTED_AGENTS" \
-        "    Multimodal ($MULTIMODAL_MODE): $MULTIMODAL_SUPPORTED_AGENTS"
-    echo ""
-}
-
 # ============================================================
 # Interactive: prompt for userId (skipped when --userId given or non-interactive)
 # ============================================================
@@ -1187,6 +1185,7 @@ if (selectedAgents) {
 if (multimodalMode) {
   config.agents = config.agents || {};
   const supported = (process.env.LP_MULTIMODAL_SUPPORTED_AGENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(selectedAgents.split(',').map(s => s.trim()).filter(Boolean));
   for (const id of supported) {
     if (!config.agents[id]) continue;
     if (multimodalMode === 'none') {
@@ -1196,7 +1195,7 @@ if (multimodalMode) {
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: multimodalMode };
+    config.agents[id].multimodal = { ...prev, uploadMode: selected.has(id) ? multimodalMode : 'none' };
   }
 }
 
@@ -2019,7 +2018,6 @@ cmd_install() {
     download_and_extract
     probe_agents
     select_agents
-    select_multimodal_agents
     prompt_user_id
     confirm_config_overwrite
     # set -e would end the install here anyway; saying why beats an exit code on its own.
