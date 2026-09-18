@@ -21,7 +21,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     }
   });
 
-  it('dispatches real-context plugin JSONL through OpenClawPluginInput to a flusher', async () => {
+  it.each(['end-first', 'message-first'])('dispatches %s plugin JSONL with TTFT through InputManager to spans', async (order) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
@@ -40,7 +40,21 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     try {
       const plugin = (await import(`${PLUGIN_PATH}?integration=${Date.now()}`)).default;
       const fixture = await fs.readFile(FIXTURE_PATH, 'utf8');
-      const envelopes = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const source = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const envelopes = [];
+      let pendingEnd;
+      for (const envelope of source) {
+        if (envelope.hook === 'model_call_ended') {
+          envelope.event.timeToFirstByteMs = 12.5;
+          if (order === 'message-first') { pendingEnd = envelope; continue; }
+        }
+        envelopes.push(envelope);
+        if (envelope.hook === 'before_message_write' && envelope.event.message?.role === 'assistant' && pendingEnd) {
+          envelopes.push(pendingEnd);
+          pendingEnd = undefined;
+        }
+      }
+      expect(pendingEnd).toBeUndefined();
       const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
       plugin.register({
         pluginConfig: {},
@@ -160,6 +174,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
         span.attributes['gen_ai.user.id'] === 'channel-sender')).toBe(true);
 
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token'])).toEqual([12_500_000, 12_500_000]);
       expect(llmSpans.map(span => [
         span.attributes['gen_ai.usage.input_tokens'],
         span.attributes['gen_ai.usage.output_tokens'],

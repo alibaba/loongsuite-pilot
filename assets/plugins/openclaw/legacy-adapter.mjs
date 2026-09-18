@@ -72,7 +72,7 @@ export function createLegacyHandlers(shared) {
         ...timing,
         "agent.openclaw.timing.inferred": true,
         "agent.openclaw.timing.source": source,
-      }));
+      }), undefined, false);
     // A subsequent call with no tool boundary can only be bounded by the last
     // observed assistant completion (e.g. automatic continuation/retry).
     state.boundary = end;
