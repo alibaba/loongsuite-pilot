@@ -109,6 +109,15 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  // Dedup index: event.id → position in `records`. Copilot session files are
+  // re-parsed in full on every poll (parser is stateless over the whole file),
+  // so without dedup the buffer accumulates N× duplicates of the same record
+  // across polls when Signal A doesn't fire mid-session (LLMs with tool_calls
+  // have finish_reasons=['tool_calls'], non-terminal). On flush, converter
+  // would then see N× records and emit N× TOOL / ENTRY / AGENT spans.
+  // Dedup by event.id keeps the latest copy (later polls carry richer fields
+  // like tool.result's success/error_code/permission.* that arrive late).
+  recordIndex: Map<string, number>;
   completed: boolean;
   lastActivityMs: number;
   logicalBytes: number;
@@ -736,6 +745,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agentType,
         sessionId: incomingSessionId,
         records: [],
+        recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
         logicalBytes: 0,
@@ -747,7 +757,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
-    buf.records.push(entry);
+    // Dedup by event.id: if the same event.id was already pushed (from a prior
+    // re-parse of the same session file), replace the stale copy with the new
+    // one (later polls carry richer fields). Records without event.id fall
+    // through to normal append (rare; parser emits event.id on all records).
+    const eventId = (entry['event.id'] as string | undefined) ?? undefined;
+    if (typeof eventId === 'string' && eventId.length > 0) {
+      const existingIdx = buf.recordIndex.get(eventId);
+      if (existingIdx !== undefined) {
+        buf.records[existingIdx] = entry;
+      } else {
+        buf.recordIndex.set(eventId, buf.records.length);
+        buf.records.push(entry);
+      }
+    } else {
+      buf.records.push(entry);
+    }
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
