@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import hashlib
+import inspect
 import json
 import os
 import secrets
@@ -46,6 +49,74 @@ _PROCESS_FILE_TOKEN = "%s-%s-%s" % (
 )
 _STATE_LOCK = threading.RLock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
+_TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
+
+
+def _install_first_delta_observer() -> None:
+    """Observe Hermes' native first delta without changing its stream or callbacks.
+
+    Install lazily: plugin discovery can run before AIAgent finishes importing.
+    Hermes starts a plain Thread for streaming, so capture the request in the
+    caller context and carry it into that thread via the callback closure.
+    """
+    try:
+        module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+        agent_class = getattr(module, "AIAgent", None)
+        original = getattr(agent_class, "_interruptible_streaming_api_call", None)
+        if not callable(original):
+            return
+        if hasattr(original, "_pilot_ttft_context"):
+            # Plugin rediscovery must use the new module's request context.
+            original._pilot_ttft_context = _TTFT_API
+            return
+        signature = inspect.signature(original)
+        parameter = signature.parameters.get("on_first_delta")
+        if parameter is None or parameter.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY
+        ):
+            return
+
+        @functools.wraps(original)
+        def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+            api = observed._pilot_ttft_context.get()
+            observed._pilot_ttft_context.set(None)
+            # Other wire protocols do not share the same first-output semantics.
+            if (
+                api is None or api.get("post_ns") is not None
+                or getattr(agent, "api_mode", None) != "chat_completions"
+                or getattr(agent, "session_id", None) != api.get("session_id")
+            ):
+                return original(agent, *args, **kwargs)
+            try:
+                bound = signature.bind(agent, *args, **kwargs)
+            except Exception:
+                return original(agent, *args, **kwargs)
+            callback = bound.arguments.get("on_first_delta")
+
+            def first_delta(*callback_args: Any, **callback_kwargs: Any) -> Any:
+                try:
+                    first_ns = time.perf_counter_ns()
+                    with _STATE_LOCK:
+                        if (
+                            not getattr(agent, "_disable_streaming", False)
+                            and api.get("post_ns") is None
+                            and api.get("first_token_ns") is None
+                        ):
+                            api["first_token_ns"] = first_ns
+                except Exception:
+                    pass
+                if callback is not None:
+                    return callback(*callback_args, **callback_kwargs)
+                return None
+
+            bound.arguments["on_first_delta"] = first_delta
+            return original(*bound.args, **bound.kwargs)
+
+        observed._pilot_ttft_context = _TTFT_API
+        agent_class._interruptible_streaming_api_call = observed
+    except Exception:
+        # Older Hermes versions retain event collection without TTFT.
+        pass
 
 
 def _read_json_object(path: Path) -> Dict[str, Any]:
@@ -827,6 +898,10 @@ def _build_records(
             if status_code is not None:
                 response["http.status_code"] = status_code
         response.update(_usage_fields(post))
+        first_ns = api.get("first_token_ns")
+        started_ns = api.get("started_perf_ns")
+        if isinstance(first_ns, int) and isinstance(started_ns, int) and first_ns > started_ns:
+            response["gen_ai.response.time_to_first_token"] = first_ns - started_ns
         records.append(response)
 
     for call_id, tool in turn["tools"].items():
@@ -939,6 +1014,7 @@ def _handle_on_session_start(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -957,6 +1033,7 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -981,7 +1058,8 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         turn["task_id"] = task_id
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
-    turn["apis"].append({
+    api = {
+        "session_id": session_id,
         "task_id": task_id,
         "api_request_id": payload.get("api_request_id"),
         "api_call_count": payload.get("api_call_count"),
@@ -1002,10 +1080,18 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
             ),
         },
         "post": {},
-    })
+    }
+    turn["apis"].append(api)
+    try:
+        api["started_perf_ns"] = time.perf_counter_ns()
+        _install_first_delta_observer()
+        _TTFT_API.set(api)
+    except Exception:
+        pass
 
 
 def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -1046,6 +1132,7 @@ def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -1163,6 +1250,7 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_post_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -1177,6 +1265,7 @@ def _handle_post_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_on_session_end(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
@@ -1191,6 +1280,7 @@ def _handle_on_session_end(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_on_session_finalize(now_ns: int, payload: Dict[str, Any]) -> None:
+    _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if isinstance(session_id, str) and session_id:
         _SESSIONS.pop(session_id, None)

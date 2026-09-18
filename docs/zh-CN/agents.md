@@ -4,6 +4,17 @@
 
 本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及是否采集敏感消息内容。
 
+## Hermes TTFT
+
+对于 Hermes 的 OpenAI 兼容流式 Chat Completions 请求，Pilot 从
+`pre_api_request` 到首个非空文本、推理或工具名称 delta 计算 TTFT，
+以纳秒写入 `gen_ai.response.time_to_first_token`。仅包含 role 或 usage
+的帧不计入首输出。计时不依赖消息内容采集开关。
+
+此功能使用 Hermes 原生 `on_first_delta` 回调（已在 Hermes 0.19.0 验证）。
+旧版本缺少该回调、其他 API 模式、非流式响应，或未观察到首输出时省略 TTFT，
+不会用 API 总耗时代替。更新插件后需重启 Hermes 进程。
+
 ## 支持的 Agent ID
 
 这些 ID 用于标识受支持的集成。大多数 ID 可直接用于安装参数、
