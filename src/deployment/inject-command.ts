@@ -5,7 +5,7 @@ import { AgentDefLoader } from './agent-def-loader.js';
 import { isAgentGatedEnabled, resolvePilotDir } from './deploy-command.js';
 import { loadConfig } from '../core/config-loader.js';
 import { resolveHome, writeTextFileAtomic } from '../utils/fs-utils.js';
-import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
+import { withClaudeSettingsLock, quoteClaudeHookPath, legacyClaudeHookPaths } from '../hooks/claude-settings.js';
 import { redirectRootLoggerToStderr } from '../utils/logger.js';
 import type { AgentHookConfig } from '../types/deployment.js';
 
@@ -52,12 +52,14 @@ export function mergeClaudeHooks(settings: ObjectValue, hook: AgentHookConfig, d
   result.env = env;
   env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
   // Quote the installed path as one shell word, including spaces and apostrophes.
-  const quoted = /^[a-zA-Z0-9_./:-]+$/.test(hook.hookCommand)
-    ? hook.hookCommand
-    : `'${hook.hookCommand.replace(/'/g, `'"'"'`)}'`;
+  const quoted = quoteClaudeHookPath(hook.hookCommand);
   const commands = new Map(hook.events.map(event => [event,
     `${quoted} ${event.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()}`]));
   const expected = new Set(commands.values());
+  for (const event of hook.events) {
+    const arg = event.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+    for (const legacy of legacyClaudeHookPaths(hook.hookCommand)) expected.add(`${legacy} ${arg}`);
+  }
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) throw new Error(`hooks.${event} must be an array`);
     hooks[event] = groups.flatMap((group: unknown) => {
@@ -83,13 +85,7 @@ export async function injectClaudeDirectory(configDir: string, dataDir: string, 
   await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   const realDir = await fs.realpath(configDir);
   const settingsPath = path.join(realDir, 'settings.json');
-  const deadline = Date.now() + lockTimeoutMs;
-  let lock;
-  while (!(lock = acquireSingleInstanceLock(path.join(realDir, '.loongsuite-pilot-inject.lock')).lock)) {
-    if (Date.now() >= deadline) throw new Error('Cannot acquire configuration lock (busy or not writable)');
-    await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  try {
+  return withClaudeSettingsLock(settingsPath, async () => {
     let raw: string | undefined;
     let mode = 0o600;
     try {
@@ -107,7 +103,7 @@ export async function injectClaudeDirectory(configDir: string, dataDir: string, 
       mode, expected: raw === undefined ? { exists: false } : { exists: true, content: raw },
     });
     return { status, agentId: 'claude-code', settingsPath };
-  } finally { lock.release(); }
+  }, lockTimeoutMs);
 }
 
 export async function runInjectCommand(argv: string[]): Promise<number> {

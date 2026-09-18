@@ -1668,10 +1668,26 @@ cmd_agent() {
     esac
 }
 
+inject_failure() {
+    # Messages are fixed literals, so this works even when Node is unavailable.
+    local message="$1"
+    shift
+    echo "loongsuite-pilot inject: $message" >&2
+    local arg
+    for arg in "$@"; do
+        if [ "$arg" = "--json" ]; then
+            printf '{"status":"failed","error":"%s"}\n' "$message"
+            break
+        fi
+    done
+    return 1
+}
+
 cmd_inject() {
     local node_bin version_dir
-    node_bin=$(resolve_node) || return 1
-    version_dir=$(resolve_current_version) || return 1
+    node_bin=$(resolve_node) || { inject_failure "Node runtime not found" "$@"; return 1; }
+    version_dir=$(resolve_current_version) || { inject_failure "No valid loongsuite-pilot version found" "$@"; return 1; }
+    [ -r "$version_dir/dist/index.js" ] || { inject_failure "Pilot entrypoint is missing or unreadable" "$@"; return 1; }
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"

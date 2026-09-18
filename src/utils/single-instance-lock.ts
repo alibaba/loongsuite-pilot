@@ -50,6 +50,8 @@ export interface LockAcquireResult {
   lock: SingleInstanceLock | null;
   /** pid of the live holder when acquisition failed because one exists. */
   holderPid?: number;
+  /** Permanent acquisition failure, distinct from a retryable lock race. */
+  error?: NodeJS.ErrnoException;
   /** Whether the live holder's process lifetime could be verified against the lock. */
   holderProcessStartState?:
     | 'same-process-owner'
@@ -239,7 +241,7 @@ export function acquireSingleInstanceLock(
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') {
         // Unexpected fs error: fail closed (do not run) but report no holder.
-        return { lock: null };
+        return { lock: null, error: err as NodeJS.ErrnoException };
       }
       const existing = readLock(lockPath);
       const inspection = inspectLock(lockPath, existing, patterns);
@@ -249,7 +251,11 @@ export function acquireSingleInstanceLock(
           previousPid: existing?.pid,
           reason: inspection.staleReason ?? 'malformed-lock',
         };
-        try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+        try { fs.unlinkSync(lockPath); } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            return { lock: null, error: err as NodeJS.ErrnoException };
+          }
+        }
         return 'retry';
       }
       return {
