@@ -212,7 +212,7 @@ function buildAgentSpan(sessionId, sessionTraceId, sessionStart, sessionShutdown
   const endTime = sessionShutdown?.timestamp || abortEvent?.timestamp || '';
   const effectiveModel = resolvedModel || safeString(sessionStart?.data?.copilotVersion);
   return {
-    'event.id': `copilot-agent-${sessionId || 'unknown'}-${crypto.randomUUID()}`,
+    'event.id': `copilot-agent-${sessionId || 'unknown'}`,
     'event.name': 'other',
     trace_id: sessionTraceId || undefined,
     'user.id': '',

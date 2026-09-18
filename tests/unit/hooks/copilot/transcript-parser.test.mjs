@@ -449,4 +449,78 @@ describe('copilot transcript-parser — CP5 v4 fixes (#2 STEP endTime + #3 place
       expect(s['event.name']).toBe('react.step');
     }
   });
+
+  test('scenario 20: CP5 v6 Bug #1 — multi-STEP session shares 1 trace_id across all records', () => {
+    // converter groupByTurn keys on gen_ai.turn.id (= sessionId per v3 fix) and
+    // honors the first valid trace_id from records in that turn. Parser must
+    // emit ONE trace_id per session so the converter creates ONE root traceId
+    // inherited by all STEP/LLM/TOOL spans (no per-STEP mini-traces).
+    const out = parseTranscript(SCENARIO_A);
+    const traceIds = new Set(out.map(r => r['trace_id']).filter(Boolean));
+    expect(traceIds.size).toBe(1);
+    // ENTRY + AGENT + 7 STEP + LLM + TOOL all share it.
+    const entryAgent = out.filter(r => r['event.name'] === 'other');
+    for (const r of entryAgent) {
+      expect(r['trace_id']).toBe([...traceIds][0]);
+    }
+  });
+
+  test('scenario 21: CP5 v6 Bug #2 — ENTRY/AGENT records carry non-empty gen_ai.session.id', () => {
+    // converter auto-creates ENTRY/AGENT spans with `<none>` sessionId when
+    // parentRecords lack gen_ai.session.id. Parser must always set it.
+    const out = parseTranscript(SESSION2);
+    const entryAgent = out.filter(r => r['event.name'] === 'other');
+    expect(entryAgent.length).toBeGreaterThanOrEqual(1);
+    for (const r of entryAgent) {
+      expect(typeof r['gen_ai.session.id']).toBe('string');
+      expect(r['gen_ai.session.id'].length).toBeGreaterThan(0);
+      // user.id + agent.name also expected by validate-trace
+      expect(r['gen_ai.agent.name']).toBe('copilot');
+    }
+    // Defensive: zero records with empty gen_ai.session.id across the whole
+    // session output (covers STEP/LLM/TOOL too).
+    const empty = out.filter(r => 'gen_ai.session.id' in r && !r['gen_ai.session.id']);
+    expect(empty.length).toBe(0);
+  });
+
+  test('scenario 22: CP5 v6 Bug #3 — each tool_call_id maps to exactly 1 tool.call + 1 tool.result', () => {
+    // converter pairTool pairs tool.call + tool.result by gen_ai.tool.call.id
+    // and creates exactly 1 TOOL span per pair. Parser must emit exactly 2
+    // records per call_id (no duplicates at parser output — E2E duplication
+    // comes from re-parse accumulation in OTLP flusher, not parser).
+    const out = parseTranscript(SCENARIO_A);
+    const toolRecords = out.filter(r => r['gen_ai.tool.call.id']);
+    expect(toolRecords.length).toBeGreaterThan(0);
+    const byCallId = new Map();
+    for (const r of toolRecords) {
+      const cid = r['gen_ai.tool.call.id'];
+      if (!byCallId.has(cid)) byCallId.set(cid, []);
+      byCallId.get(cid).push(r);
+    }
+    for (const [cid, rs] of byCallId.entries()) {
+      expect(rs.length).toBe(2);
+      const calls = rs.filter(r => r['event.name'] === 'tool.call');
+      const results = rs.filter(r => r['event.name'] === 'tool.result');
+      expect(calls.length).toBe(1);
+      expect(results.length).toBe(1);
+      // call carries args; result carries success/error/permission.*
+      expect(calls[0]['gen_ai.tool.call.arguments']).toBeDefined();
+    }
+  });
+
+  test('scenario 23: CP5 v6 Bug #4 — permission.decision_source passthrough on tool.result', () => {
+    // events.jsonl permission.completed carries data.decisionSource
+    // (e.g. "unattended_fallback"). Parser must map it to
+    // permission.decision_source on the tool.result record so
+    // patchCopilotCustomAttributes can copy it onto the TOOL span.
+    const out = parseTranscript(PERMDENY_SCRIPTMODE);
+    const toolResults = out.filter(r => r['event.name'] === 'tool.result');
+    expect(toolResults.length).toBeGreaterThanOrEqual(1);
+    for (const r of toolResults) {
+      expect(r['permission.decision_source']).toBe('unattended_fallback');
+      expect(r['gen_ai.tool.success']).toBe(false);
+      expect(r['error.code']).toBe('denied');
+      expect(r['permission.result.kind']).toBe('denied-no-approval-rule-and-could-not-request-from-user');
+    }
+  });
 });
