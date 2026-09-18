@@ -1518,8 +1518,10 @@ if (opts.multimodalMode) {
   config.agents = config.agents || {};
   const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
   const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = opts.allAgentsMode === '1' && opts.multimodalMode !== 'none';
   for (const id of supported) {
-    if (!config.agents[id]) continue;
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
     if (opts.multimodalMode === 'none') {
       delete config.agents[id].multimodal;
       continue;
@@ -1527,7 +1529,7 @@ if (opts.multimodalMode) {
     const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
       ? config.agents[id].multimodal
       : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: selected.has(id) ? opts.multimodalMode : 'none' };
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? opts.multimodalMode : 'none' };
   }
 }
 
