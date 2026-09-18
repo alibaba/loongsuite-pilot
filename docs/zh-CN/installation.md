@@ -4,6 +4,8 @@
 
 本文说明如何安装、验证、卸载 LoongSuite Pilot，或从源码运行。
 
+Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前执行 [`loongsuite-pilot inject`](claude-session-injection.md) 合并采集 Hook。
+
 ## 前置要求
 
 - `curl` 或 `wget`

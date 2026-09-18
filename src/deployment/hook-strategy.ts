@@ -8,6 +8,7 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
+import { withClaudeSettingsLock, quoteClaudeHookPath, legacyClaudeHookPaths } from '../hooks/claude-settings.js';
 import {
   fileExists,
   readJsonFile,
@@ -91,15 +92,21 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
+  if (process.platform !== 'win32' && agentId === 'claude-code') {
+    return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
+  }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
 }
 
-function legacyQuotedPs1HookCommands(
+function legacyHookCommands(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
+  if (process.platform !== 'win32' && agentId === 'claude-code') {
+    return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
+  }
   if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
@@ -184,7 +191,9 @@ export class HookStrategy implements DeployStrategy {
     }
 
     try {
-      await this.ensureSettingsFile(hookConfig.settingsPath);
+      const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
+      if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
+      else await ensureSettings();
 
       // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
       // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
@@ -235,7 +244,9 @@ export class HookStrategy implements DeployStrategy {
 
       if (hookConfig.env) {
         try {
-          await this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env);
+          const updateEnv = () => this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env!);
+          if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, updateEnv);
+          else await updateEnv();
         } catch (err) {
           // env injection failure must not block hook deployment — pilot can still
           // collect the basic transcript-based events without preload.
@@ -468,7 +479,7 @@ export class HookStrategy implements DeployStrategy {
       shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
-        ...legacyQuotedPs1HookCommands(
+        ...legacyHookCommands(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
       ],
@@ -493,7 +504,7 @@ export class HookStrategy implements DeployStrategy {
         useNestedFormat: hookConfig.format === 'nested',
         replaceHookCommands: [
           ...(hookConfig.replaceHookCommands ?? []),
-          ...legacyQuotedPs1HookCommands(
+          ...legacyHookCommands(
             hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
           ),
         ],
