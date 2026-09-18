@@ -137,7 +137,7 @@ if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
 }
-if ($PSBoundParameters.ContainsKey('MultimodalMode') -and -not $MultimodalMode) {
+if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode) {
     Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'both'"
     exit 1
 }

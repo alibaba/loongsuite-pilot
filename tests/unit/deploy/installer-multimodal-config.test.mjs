@@ -37,7 +37,7 @@ describe('public installer multimodal mode flag', () => {
   it('PowerShell installer accepts -MultimodalMode and writes uploadMode', () => {
     expect(installerPs1).toContain('[string]$MultimodalMode');
     expect(installerPs1).toContain('[AllowEmptyString()]');
-    expect(installerPs1).toContain("if ($PSBoundParameters.ContainsKey('MultimodalMode') -and -not $MultimodalMode)");
+    expect(installerPs1).toContain("if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode)");
     expect(installerPs1).toContain("-MultimodalMode requires 'none', 'input', 'output', or 'both'");
     expect(installerPs1).toContain('$script:MultimodalSupportedAgents = "codex,qoder"');
     expect(installerPs1).toContain('multimodalMode');
@@ -235,6 +235,18 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
         expect(result.config.agents.cursor.multimodal).toBeUndefined();
+      });
+
+      it('keeps both on selected codex and writes none onto existing qoder both', () => {
+        const result = runWriteConfig(platform, 'both', {
+          agents: {
+            codex: { enabled: true, multimodal: { uploadMode: 'both' } },
+            qoder: { enabled: true, multimodal: { uploadMode: 'both' } },
+          },
+        }, { selectedAgents: 'codex' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'both' });
+        expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
       });
 
       it('writes uploadMode only after --agents has created the entry', () => {
