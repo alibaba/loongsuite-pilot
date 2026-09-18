@@ -1,0 +1,47 @@
+{
+  "id": "copilot",
+  "displayName": "GitHub Copilot CLI",
+  "deployMode": "copilot-plugin",
+  "detection": {
+    "paths": ["~/.copilot"],
+    "commands": ["copilot", "gh copilot"]
+  },
+  "hook": {
+    "events": [
+      "sessionStart",
+      "userPromptSubmitted",
+      "preToolUse",
+      "postToolUse",
+      "postToolUseFailure",
+      "sessionEnd",
+      "agentStop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case"
+  },
+  "copilotPlugin": {
+    "pluginRoot": "~/.copilot/installed-plugins/loongsuite-pilot/loongsuite-pilot",
+    "pluginId": "loongsuite-pilot",
+    "settingsPath": "~/.copilot/settings.json",
+    "configPath": "~/.copilot/config.json",
+    "events": [
+      "sessionStart",
+      "userPromptSubmitted",
+      "preToolUse",
+      "postToolUse",
+      "postToolUseFailure",
+      "sessionEnd",
+      "agentStop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case",
+    "timeoutSec": 5
+  },
+  "input": {
+    "type": "session-file-polling",
+    "sessionDir": "~/.copilot/session-state",
+    "filePattern": "*/events.jsonl"
+  }
+}

@@ -10,7 +10,8 @@ export type DeployMode =
   | 'plugin-inject'
   | 'directory-plugin'
   | 'detection-only'
-  | 'dsh-yaml-patch';
+  | 'dsh-yaml-patch'
+  | 'copilot-plugin';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
@@ -120,6 +121,50 @@ export interface AgentHookConfig {
     name: string;
     tools: string[];
   };
+}
+
+/**
+ * Copilot CLI plugin-hook config.
+ *
+ * Copilot CLI does NOT read hooks from `~/.copilot/config.json` (that file
+ * stores runtime state only — `installedPlugins` / `firstLaunchAt`). Per the
+ * Agent Plugins 1.0 format, hooks are loaded exclusively from a plugin
+ * package's `hooks/hooks.json`. This config tells CopilotPluginStrategy:
+ *
+ *   - `pluginRoot`: directory where the plugin package lives
+ *     (default `~/.copilot/plugins/loongsuite-pilot/com.github.copilot`).
+ *   - `pluginId`: stable identifier registered in `~/.copilot/settings.json`
+ *     `enabledPlugins` (default `loongsuite-pilot`).
+ *   - `settingsPath`: `~/.copilot/settings.json` (JSONC) — we update its
+ *     `enabledPlugins` array to point at the deployed plugin package.
+ *
+ * `hookCommand` / `events` / `format` / `eventSubcommand` have the same
+ * semantics as AgentHookConfig — they are written into the plugin's
+ * `hooks/hooks.json` (Agent Plugins 1.0 format).
+ */
+export interface CopilotPluginHookConfig {
+  /** Directory that holds the plugin package (plugin.json + hooks/hooks.json). */
+  pluginRoot: string;
+  /** Plugin id registered in ~/.copilot/settings.json enabledPlugins. */
+  pluginId: string;
+  /** Path to the JSONC settings file whose enabledPlugins we update. */
+  settingsPath: string;
+  /**
+   * Path to the JSONC config.json (managed automatically by Copilot CLI) whose
+   * `installedPlugins` array we mirror — entries there are what make the CLI
+   * load the plugin at startup.
+   */
+  configPath: string;
+  /** Hook events to register (camelCase, e.g. "sessionStart"). */
+  events: string[];
+  /** Shell entry-point invoked by each hook event. */
+  hookCommand: string;
+  /** Hook format — Copilot expects `nested` ({type:"command", command}). */
+  format: HookFormat;
+  /** If 'kebab-case', append kebab event subcommand to hookCommand per event. */
+  eventSubcommand?: 'kebab-case';
+  /** Optional timeoutSec per hook entry (default 5). */
+  timeoutSec?: number;
 }
 
 export interface PluginSourceConfig {
@@ -246,6 +291,7 @@ export interface AgentDefinition {
   /** Runtime id used by local worker activation, e.g. "claude-code". */
   localWorkerRuntime?: string;
   hook?: AgentHookConfig;
+  copilotPlugin?: CopilotPluginHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   /** Present only for registered high-level PI SDK Agents. */
