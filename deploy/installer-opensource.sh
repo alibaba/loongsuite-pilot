@@ -71,6 +71,7 @@ CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
+ALL_AGENTS=0
 MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
@@ -143,6 +144,7 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --all-agents)         ALL_AGENTS=1; shift ;;
         --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
         --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
@@ -674,6 +676,21 @@ probe_agents() {
 # Agent selection: interactive menu or --agents flag
 # ============================================================
 select_agents() {
+    # --all-agents: collect every agent. Skip selection entirely and leave no
+    # enabled gate in config (other agent settings survive), so pilot auto-detects
+    # all agents at runtime — including ones installed after this run.
+    if [ "$ALL_AGENTS" = "1" ]; then
+        if [ -n "$SELECTED_AGENTS" ]; then
+            msg "    ⚠️  --all-agents 已启用，忽略 --agents 指定的列表" \
+                "    ⚠️  --all-agents is set; ignoring the --agents list"
+            SELECTED_AGENTS=""
+        fi
+        msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" \
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        echo ""
+        return 0
+    fi
+
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
         echo ""
@@ -1125,6 +1142,7 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
+const allAgentsMode = '${ALL_AGENTS}';
 const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
@@ -1159,11 +1177,14 @@ if (maskReplacementMode) {
   config.mask.replacementMode = maskReplacementMode;
 }
 
-if (selectedAgents) {
+const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
+if (allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1173,14 +1194,18 @@ if (selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
 }
 
 if (multimodalMode) {
@@ -1300,7 +1325,7 @@ _rc_block_contains() {
 
 inject_qodercli_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1385,7 +1410,7 @@ remove_qodercli_token_intercept() {
 # variable differ here — the wrapper and preload script are the same assets.
 inject_qoderclicn_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
     if ! command -v qoderclicn >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1513,7 +1538,7 @@ _rc_user_override_present() {
 
 inject_claude_code_fetch_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
     if ! command -v claude >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"

@@ -55,6 +55,7 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [switch]$AllAgents,
     [AllowEmptyString()]
     [string]$MultimodalMode,
     [string]$MaskMode,
@@ -914,6 +915,21 @@ $script:SELECTED_AGENTS = $Agents
 $script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
+    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
+    # in config (other agent settings survive), so pilot auto-detects all
+    # agents at runtime -- including ones installed after this run.
+    if ($AllAgents) {
+        if ($script:SELECTED_AGENTS) {
+            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
+                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
+            $script:SELECTED_AGENTS = ""
+        }
+        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        Write-Host ""
+        return
+    }
+
     if ($script:SELECTED_AGENTS) {
         Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -1370,6 +1386,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })
         multimodalMode    = "$($script:MultimodalMode)"
         multimodalSupportedAgents = "$($script:MultimodalSupportedAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
@@ -1467,11 +1484,14 @@ if (opts.maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = opts.maskReplacementMode;
 }
-if (opts.selectedAgents) {
+const allAgents = JSON.parse(opts.probeResult || '[]');
+if (opts.allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1481,14 +1501,18 @@ if (opts.selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (opts.allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
 }
 if (opts.multimodalMode) {
   config.agents = config.agents || {};

@@ -72,6 +72,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
+| `--all-agents` | 采集全部 Agent。不写 `enabled` 门禁，缺省即开。与 `--agents` 同时出现时忽略 `--agents`。Windows：`-AllAgents`。 |
 | `--multimodal-mode <mode>` | `none` / `input` / `output` / `both`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`；值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |

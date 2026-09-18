@@ -71,6 +71,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
+| `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
 | `--multimodal-mode <mode>` | `none` / `input` / `output` / `both`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
