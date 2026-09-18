@@ -59,6 +59,24 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.needsDeploy(piDefinition())).toBe(false);
   });
 
+  it('reports the existing config path when an earlier candidate is missing', async () => {
+    const missingPath = path.join(tmpDir, 'missing-pi', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, '{}\n');
+
+    const result = await strategy.deploy(piDefinition({
+      configPaths: [missingPath, settingsPath],
+      createIfMissing: true,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(result.pluginInjectConfigPath).toBe(path.resolve(settingsPath));
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([
+      path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+    ]);
+    await expect(fs.access(missingPath)).rejects.toThrow();
+  });
+
   it('creates the first config path when createIfMissing is enabled', async () => {
     const result = await strategy.deploy(piDefinition());
 

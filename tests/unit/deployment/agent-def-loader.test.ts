@@ -385,6 +385,271 @@ describe('AgentDefLoader', () => {
     }
   });
 
+  it('resolves PI_CODING_AGENT_DIR for Pi detection and settings', async () => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const override = path.join(tmpDir, 'pi-profile');
+    process.env.PI_CODING_AGENT_DIR = override;
+    try {
+      const def = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: ['$PI_CODING_AGENT_DIR'], commands: ['pi'] },
+        pluginInject: {
+          configPaths: ['$PI_CODING_AGENT_DIR/settings.json'],
+          pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/index.mjs',
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+          createIfMissing: true,
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'pi-coding-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.detection.paths[0]).toBe(override);
+      expect(loaded.pluginInject?.configPaths[0]).toBe(path.join(override, 'settings.json'));
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  });
+
+  it('defaults $PI_CODING_AGENT_DIR to ~/.pi/agent', async () => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
+    try {
+      const def = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: ['$PI_CODING_AGENT_DIR'], commands: ['pi'] },
+        pluginInject: {
+          configPaths: ['$PI_CODING_AGENT_DIR/settings.json'],
+          pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/index.mjs',
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'pi-coding-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      const expectedDir = path.join(os.homedir(), '.pi', 'agent');
+
+      expect(loaded.detection.paths[0]).toBe(expectedDir);
+      expect(loaded.pluginInject?.configPaths[0]).toBe(path.join(expectedDir, 'settings.json'));
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  });
+
+  it('treats a blank PI_CODING_AGENT_DIR as unset', async () => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = '   ';
+    try {
+      const def = {
+        id: 'pi-coding-agent',
+        displayName: 'Pi Coding Agent',
+        deployMode: 'plugin-inject',
+        detection: { paths: ['$PI_CODING_AGENT_DIR'], commands: ['pi'] },
+        pluginInject: {
+          configPaths: ['$PI_CODING_AGENT_DIR/settings.json'],
+          pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/index.mjs',
+          pluginId: 'loongsuite-pilot-pi-coding-agent',
+          configKey: 'extensions',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'pi-coding-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      expect(loaded.detection.paths[0]).toBe(path.join(os.homedir(), '.pi', 'agent'));
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  });
+
+  it('ships $PI_CODING_AGENT_DIR in the built-in Pi definition', async () => {
+    const shipped = JSON.parse(
+      await fs.readFile(path.resolve('agents.d/pi-coding-agent.json'), 'utf8'),
+    ) as { detection: { paths: string[] }; pluginInject: { configPaths: string[] } };
+    expect(shipped.detection.paths).toEqual(['$PI_CODING_AGENT_DIR']);
+    expect(shipped.pluginInject.configPaths).toEqual(['$PI_CODING_AGENT_DIR/settings.json']);
+  });
+
+  it('resolves GROK_HOME for Grok detection and hook settings', async () => {
+    const previous = process.env.GROK_HOME;
+    const override = path.join(tmpDir, 'grok-profile');
+    process.env.GROK_HOME = override;
+    try {
+      const def = {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: ['$GROK_HOME'], commands: [] },
+        hook: {
+          settingsPath: '$GROK_HOME/hooks/loongsuite-pilot.json',
+          events: ['stop'],
+          hookCommand: '$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh',
+          format: 'nested',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'grok-build.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.detection.paths[0]).toBe(override);
+      expect(loaded.hook?.settingsPath).toBe(path.join(override, 'hooks', 'loongsuite-pilot.json'));
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+    }
+  });
+
+  it('defaults $GROK_HOME to ~/.grok', async () => {
+    const previous = process.env.GROK_HOME;
+    delete process.env.GROK_HOME;
+    try {
+      const def = {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: ['$GROK_HOME'], commands: [] },
+        hook: {
+          settingsPath: '$GROK_HOME/hooks/loongsuite-pilot.json',
+          events: ['stop'],
+          hookCommand: '$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh',
+          format: 'nested',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'grok-build.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      const expectedDir = path.join(os.homedir(), '.grok');
+
+      expect(loaded.detection.paths[0]).toBe(expectedDir);
+      expect(loaded.hook?.settingsPath).toBe(path.join(expectedDir, 'hooks', 'loongsuite-pilot.json'));
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+    }
+  });
+
+  it('treats a blank GROK_HOME as unset', async () => {
+    const previous = process.env.GROK_HOME;
+    process.env.GROK_HOME = '   ';
+    try {
+      const def = {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: ['$GROK_HOME'], commands: [] },
+      };
+      await fs.writeFile(path.join(builtinDir, 'grok-build.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      expect(loaded.detection.paths[0]).toBe(path.join(os.homedir(), '.grok'));
+    } finally {
+      if (previous === undefined) delete process.env.GROK_HOME;
+      else process.env.GROK_HOME = previous;
+    }
+  });
+
+  it('ships $GROK_HOME in the built-in Grok definition', async () => {
+    const shipped = JSON.parse(
+      await fs.readFile(path.resolve('agents.d/grok-build.json'), 'utf8'),
+    ) as { detection: { paths: string[] }; hook: { settingsPath: string } };
+    expect(shipped.detection.paths).toEqual(['$GROK_HOME']);
+    expect(shipped.hook.settingsPath).toBe('$GROK_HOME/hooks/loongsuite-pilot.json');
+  });
+
+  it('resolves DSH_HOME for DSH detection', async () => {
+    const previous = process.env.DSH_HOME;
+    const override = path.join(tmpDir, 'dsh-profile');
+    process.env.DSH_HOME = override;
+    try {
+      const def = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: ['$DSH_HOME'], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: '$PILOT_DATA/plugins/dsh/plugin.mjs',
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'dsh.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.detection.paths[0]).toBe(override);
+      expect(loaded.dshYamlPatch?.patchPath).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previous;
+    }
+  });
+
+  it('defaults $DSH_HOME to ~/.dsh', async () => {
+    const previous = process.env.DSH_HOME;
+    delete process.env.DSH_HOME;
+    try {
+      const def = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: ['$DSH_HOME'], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: '$PILOT_DATA/plugins/dsh/plugin.mjs',
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'dsh.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      expect(loaded.detection.paths[0]).toBe(path.join(os.homedir(), '.dsh'));
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previous;
+    }
+  });
+
+  it('treats a blank DSH_HOME as unset', async () => {
+    const previous = process.env.DSH_HOME;
+    process.env.DSH_HOME = '   ';
+    try {
+      const def = {
+        id: 'dsh',
+        displayName: 'DeepSeek Harness',
+        deployMode: 'dsh-yaml-patch',
+        detection: { paths: ['$DSH_HOME'], commands: ['dsh'] },
+        dshYamlPatch: {
+          pluginSource: '$PILOT_DATA/plugins/dsh/plugin.mjs',
+          entryId: 'loongsuite-pilot-observability',
+          marker: 'PILOT-OBSERVABILITY-MANAGED',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'dsh.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+      expect(loaded.detection.paths[0]).toBe(path.join(os.homedir(), '.dsh'));
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previous;
+    }
+  });
+
+  it('ships $DSH_HOME on detection and omits patchPath so locator keeps process discovery', async () => {
+    const shipped = JSON.parse(
+      await fs.readFile(path.resolve('agents.d/dsh.json'), 'utf8'),
+    ) as { detection: { paths: string[] }; dshYamlPatch: { patchPath?: string } };
+    expect(shipped.detection.paths).toEqual(['$DSH_HOME']);
+    expect(shipped.dshYamlPatch.patchPath).toBeUndefined();
+  });
+
   it('handles missing directories gracefully', async () => {
     const loader = new AgentDefLoader({
       builtinDir: path.join(tmpDir, 'nonexistent'),
