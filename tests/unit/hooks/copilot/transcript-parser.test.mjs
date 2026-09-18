@@ -436,4 +436,17 @@ describe('copilot transcript-parser — CP5 v4 fixes (#2 STEP endTime + #3 place
       expect(matched['gen_ai.step.id']).toBe(call['gen_ai.step.id']);
     }
   });
+
+  test('scenario 19.5: CP5 v5 — STEP record event.name is not "other" (survives converter OTHER filter)', () => {
+    // converter.js filters `event.name === EventName.OTHER` records out before
+    // groupByStep. STEP records must use a non-'other' event.name so they reach
+    // maxTime(stepRecords) and propagate the true STEP end time end-to-end.
+    const out = parseTranscript(SESSION2);
+    const steps = out.filter(e => e['gen_ai.turn.start'] === true);
+    expect(steps.length).toBeGreaterThan(0);
+    for (const s of steps) {
+      expect(s['event.name']).not.toBe('other');
+      expect(s['event.name']).toBe('react.step');
+    }
+  });
 });

@@ -239,7 +239,10 @@ function buildStepSpan(sessionId, sessionTraceId, turnId, turnStart, turnEnd, re
   const stepTimeNs = maxChildEndNs || isoToUnixNanos(startTime);
   return {
     'event.id': turnStart?.id || `copilot-step-${sessionId || 'unknown'}-${turnId}`,
-    'event.name': 'other',
+    // 'react.step' — not in converter's EventName enum, so it survives the
+    // `event.name !== OTHER` filter at converter.js ~line 75 and reaches
+    // groupByStep / maxTime(stepRecords) to propagate STEP end time.
+    'event.name': 'react.step',
     trace_id: sessionTraceId || undefined,
     'user.id': '',
     'gen_ai.session.id': sessionId || '',
