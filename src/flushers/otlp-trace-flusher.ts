@@ -1,6 +1,7 @@
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
+import { SpanKind } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -1129,6 +1130,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
+      // Post-convert patch: the otel-util-genai converter auto-creates ENTRY
+      // and LLM spans but does not natively pass through Copilot-specific
+      // `gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
+      // `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`,
+      // or `gen_ai.llm.reasoning.text` fields from the input records. Copy
+      // them onto the auto-created spans here so otlp-debug + downstream
+      // consumers see them on the exported span attributes.
+      this.patchCopilotCustomAttributes(spans, records);
+
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
@@ -1232,6 +1242,97 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   getEndpointCounters(): Map<string, OtlpEndpointCounter> {
     return this.endpointCounters;
+  }
+
+  /**
+   * Copy Copilot-specific custom attributes from input records onto the
+   * auto-created ENTRY and LLM spans.
+   *
+   * The otel-util-genai converter creates ENTRY/AGENT/STEP/LLM/TOOL spans
+   * automatically from records, but `buildEntryInvocation` and
+   * `buildLlmInvocation` do not extract Copilot's session-level usage fields
+   * (`gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
+   * `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`)
+   * or `gen_ai.llm.reasoning.text` from records — so they never reach the
+   * span attributes via the standard conversion path. Patch them here.
+   *
+   * ENTRY spans are matched by kind=SERVER + name="enter_ai_application_system".
+   * For multi-turn sessions the converter emits one ENTRY per turn group; we
+   * apply session-level fields to ALL of them (they share the same session).
+   *
+   * LLM spans are matched by `gen_ai.response.id` between record and span.
+   */
+  private patchCopilotCustomAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
+    const ENTRY_ATTR_KEYS = [
+      'gen_ai.session.usage.input_tokens',
+      'gen_ai.session.usage.output_tokens',
+      'gen_ai.session.usage.cache_read.input_tokens',
+      'gen_ai.session.usage.cache_creation.input_tokens',
+      'gen_ai.session.usage.reasoning_tokens',
+      'gen_ai.session.usage.total_api_duration_ms',
+      'gen_ai.session.abort.reason',
+      'gen_ai.session.total_premium_requests',
+      'gen_ai.session.conversation_tokens',
+      'gen_ai.session.code_changes.lines_added',
+      'gen_ai.session.code_changes.lines_removed',
+      'gen_ai.session.code_changes.files_modified',
+      'gen_ai.session.current_model',
+      'gen_ai.session.resolved_model',
+    ];
+
+    // Find the session-level carrier record (ENTRY record emitted by Copilot
+    // transcript-parser — event.name='other' with session-level fields).
+    const entryRecord = records.find(r =>
+      (r as Record<string, unknown>)['gen_ai.session.usage.input_tokens'] !== undefined
+      || (r as Record<string, unknown>)['gen_ai.session.abort.reason'] !== undefined
+    );
+
+    if (entryRecord) {
+      const entrySpans = spans.filter(s =>
+        s.kind === SpanKind.SERVER && s.name === 'enter_ai_application_system'
+      );
+      for (const span of entrySpans) {
+        for (const key of ENTRY_ATTR_KEYS) {
+          const v = (entryRecord as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
+
+    // LLM: copy gen_ai.llm.reasoning.text + gen_ai.input.messages from
+    // llm.response records onto the matching LLM span (matched by
+    // gen_ai.response.id). The converter passes output.messages through but
+    // drops input.messages on the standard LLM attribute path, so we reattach
+    // it here.
+    const llmRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'llm.response'
+      && (
+        typeof (r as Record<string, unknown>)['gen_ai.llm.reasoning.text'] === 'string'
+        || typeof (r as Record<string, unknown>)['gen_ai.input.messages'] === 'string'
+      )
+    );
+    if (llmRecords.length > 0) {
+      const llmSpans = spans.filter(s => s.kind === SpanKind.CLIENT);
+      for (const rec of llmRecords) {
+        const respId = (rec as Record<string, unknown>)['gen_ai.response.id'];
+        if (typeof respId !== 'string' || !respId) continue;
+        const span = llmSpans.find(s => s.attributes['gen_ai.response.id'] === respId);
+        if (!span) continue;
+        const reasoning = (rec as Record<string, unknown>)['gen_ai.llm.reasoning.text'];
+        if (typeof reasoning === 'string') {
+          (span.attributes as Record<string, unknown>)['gen_ai.llm.reasoning.text'] = reasoning;
+        }
+        const inputMsgs = (rec as Record<string, unknown>)['gen_ai.input.messages'];
+        if (typeof inputMsgs === 'string' && inputMsgs.length > 0) {
+          (span.attributes as Record<string, unknown>)['gen_ai.input.messages'] = inputMsgs;
+        }
+      }
+    }
   }
 
   private getOrCreateConvertState(

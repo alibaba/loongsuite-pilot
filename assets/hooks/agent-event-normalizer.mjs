@@ -128,6 +128,47 @@ const QODER_MAPPED_SOURCE_KEYS = new Set([
   'uuid',
 ]);
 
+const COPILOT_MAPPED_SOURCE_KEYS = new Set([
+  'apiCallId',
+  'chosenModel',
+  'cwd',
+  'decisionSource',
+  'event.id',
+  'event.name',
+  'gen_ai.session.id',
+  'hookEvent',
+  'hook_event_name',
+  'hookInvocationId',
+  'interactionId',
+  'interaction_id',
+  'model',
+  'newModel',
+  'observed_time_unix_nano',
+  'parentAgentTaskId',
+  'permissionMode',
+  'permissionRequest',
+  'promptRequest',
+  'reasoningEffort',
+  'reasoningOpaque',
+  'reasoningText',
+  'requestId',
+  'routingMethod',
+  'sessionId',
+  'session_id',
+  'shutdownType',
+  'timestamp',
+  'time_unix_nano',
+  'toolCallId',
+  'tool_call_id',
+  'toolName',
+  'tool_name',
+  'toolRequests',
+  'toolTelemetry',
+  'turnId',
+  'turn_id',
+  'user.id',
+]);
+
 export function sanitizeObject(obj) {
   if (obj === null || obj === undefined) return undefined;
   if (Array.isArray(obj)) {
@@ -680,4 +721,60 @@ function inferQoderToolResultStatus(content) {
   if (content.is_error === true) return 'failure';
   if (content.is_error === false) return 'success';
   return undefined;
+}
+
+/**
+ * Build a normalized hook record for Copilot (GitHub Copilot CLI).
+ *
+ * Note: CopilotLogInput reads events.jsonl directly via transcript-parser.mjs
+ * and does not flow through this builder. This function exists for parity with
+ * buildCursorHookRecord / buildQoderHookRecord so future hook-JSONL paths
+ * (should the Copilot hook processor ever emit raw JSONL) have a stable
+ * normalization contract. It is intentionally isolated: it never touches the
+ * shared MESSAGE_CONTENT_FIELDS / MESSAGE_CONTENT_SOURCE_KEYS sets and only
+ * attaches Copilot-specific source fields under the `agent.copilot.*`
+ * namespace.
+ */
+export function buildCopilotHookRecord(payload, options = {}) {
+  const now = options.now || new Date();
+  const runtimeConfig = options.runtimeConfig || {};
+  const sourceEvent = getSourceHookEvent(payload);
+  const eventName = getStringValue(payload, 'event.name') || mapSourceHookEventToEventName(sourceEvent);
+  const model = getStringValue(payload, 'model') || 'unknown';
+  const toolArguments = parseMaybeJson(payload.toolArguments ?? payload.arguments);
+  const toolResult = parseMaybeJson(payload.toolResult ?? payload.result);
+  const record = {
+    'event.id': getStringValue(payload, 'event.id') || crypto.randomUUID(),
+    'event.name': eventName,
+    'user.id': resolveUserId(payload, runtimeConfig),
+    'gen_ai.session.id': getStringValue(payload, 'gen_ai.session.id')
+      || getStringValue(payload, 'sessionId')
+      || getStringValue(payload, 'session_id')
+      || '',
+    'gen_ai.turn.id': getStringValue(payload, 'gen_ai.turn.id')
+      || getStringValue(payload, 'turnId')
+      || getStringValue(payload, 'turn_id'),
+    'gen_ai.agent.type': 'copilot',
+    'gen_ai.provider.name': inferProviderName({ ...payload, 'gen_ai.request.model': model, 'gen_ai.agent.type': 'copilot' }),
+    'gen_ai.request.model': getStringValue(payload, 'gen_ai.request.model') || model,
+    'gen_ai.response.model': getStringValue(payload, 'gen_ai.response.model') || model,
+    'gen_ai.tool.name': getStringValue(payload, 'toolName') || getStringValue(payload, 'tool_name'),
+    'gen_ai.tool.call.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.exec.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toJsonValue(toolArguments) : undefined,
+    'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolResult) : undefined,
+    'gen_ai.tool.success': typeof payload.success === 'boolean' ? payload.success : undefined,
+    'error.code': getStringValue(payload, 'error.code') || getStringValue(payload, 'error_code'),
+    'error.message': getStringValue(payload, 'error.message') || getStringValue(payload, 'error_message'),
+    'permission.result.kind': getStringValue(payload, 'permission.result.kind'),
+    'permission.decision_source': getStringValue(payload, 'decisionSource') || getStringValue(payload, 'decision_source'),
+    'agent.copilot.hook_event_name': sourceEvent,
+    'agent.copilot.hook_invocation_id': getStringValue(payload, 'hookInvocationId'),
+    'agent.copilot.interaction_id': getStringValue(payload, 'interactionId'),
+    'agent.copilot.reasoning_text': getStringValue(payload, 'reasoningText'),
+    observed_time_unix_nano: getStringValue(payload, 'observed_time_unix_nano') || timestampToUnixNanos(now),
+    time_unix_nano: getStringValue(payload, 'time_unix_nano') || timestampToUnixNanos(payload.timestamp ?? now),
+  };
+  addSourceAttributes(record, 'copilot', payload, COPILOT_MAPPED_SOURCE_KEYS);
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
