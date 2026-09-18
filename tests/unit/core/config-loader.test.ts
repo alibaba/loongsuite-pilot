@@ -1538,7 +1538,11 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('defaults to none when mask.mode is missing', async () => {
@@ -1547,7 +1551,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('loads all mode and ignores types', async () => {
@@ -1559,7 +1567,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('loads custom mode with supported types only', async () => {
@@ -1583,6 +1595,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
+        replacementMode: 'placeholder',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1605,7 +1618,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('custom mode with empty or omitted types enables no mask types', async () => {
@@ -1614,7 +1631,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'custom', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('uses mask mode env over config file', async () => {
@@ -1627,7 +1648,11 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_MASK_MODE', 'all');
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('uses mask types env for custom mode and filters unsupported values', async () => {
@@ -1645,6 +1670,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
+        replacementMode: 'placeholder',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1655,6 +1681,60 @@ describe('ConfigLoader', () => {
           'bankCard',
         ],
       });
+    });
+
+    it('loads preview replacement mode from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('uses replacement mode env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'placeholder',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'preview');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('treats an empty replacement mode env as unset', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', '');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('falls back to placeholder for an invalid replacement mode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'fingerprint',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('placeholder');
     });
   });
 

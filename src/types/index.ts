@@ -32,6 +32,7 @@ export interface CmsConfig {
 }
 
 export type MaskMode = 'none' | 'all' | 'custom';
+export type MaskReplacementMode = 'placeholder' | 'preview';
 
 export const PII_MASK_TYPES = [
   'idCard',
@@ -56,6 +57,7 @@ export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 export interface MaskConfig {
   mode: MaskMode;
   types: MaskType[];
+  replacementMode?: MaskReplacementMode;
 }
 
 export interface OtlpTraceRawConfig {
