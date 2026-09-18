@@ -76,6 +76,7 @@ MULTIMODAL_MODE=""
 MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
 MASK_MODE=""
 MASK_TYPES=""
+MASK_REPLACEMENT_MODE=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -147,6 +148,8 @@ while [[ $# -gt 0 ]]; do
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
+        --mask-replacement-mode) MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
+        --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -180,6 +183,10 @@ if [ "$MASK_MODE" = "custom" ] && [ -z "$MASK_TYPES" ]; then
 fi
 if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
+    exit 1
+fi
+if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder" ] && [ "$MASK_REPLACEMENT_MODE" != "preview" ]; then
+    echo "❌ Unknown mask replacement mode: $MASK_REPLACEMENT_MODE (use 'placeholder' or 'preview')" >&2
     exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
@@ -826,6 +833,7 @@ const checks = [
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
   { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
@@ -835,8 +843,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1121,6 +1129,7 @@ const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
 const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
+const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1145,6 +1154,10 @@ if (maskMode) {
   } else {
     delete config.mask.types;
   }
+}
+if (maskReplacementMode) {
+  config.mask = config.mask || {};
+  config.mask.replacementMode = maskReplacementMode;
 }
 
 if (selectedAgents) {

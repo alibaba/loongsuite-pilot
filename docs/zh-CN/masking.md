@@ -19,6 +19,12 @@ LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密
 bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all
 ```
 
+如需输出可近似区分的星号预览：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all --mask-replacement-mode preview
+```
+
 自定义模式安装参数：
 
 ```bash
@@ -87,9 +93,18 @@ export LOONGSUITE_PILOT_MASK_MODE=custom
 export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
-## 替换标记
+## 替换格式
 
-规则命中后，Pilot 会使用固定标记替换原始密钥：
+`mask.replacementMode` 支持：
+
+| 模式 | 行为 |
+|------|------|
+| `placeholder` | 默认值。使用固定 marker，保持旧版本输出不变。 |
+| `preview` | 保留 marker，并在 `{}` 中附加星号预览。预览只用于近似区分，不保证唯一。 |
+
+等价环境变量为 `LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview`。空值或非法值回退到 `placeholder`。
+
+规则命中后，`placeholder` 使用以下固定标记：
 
 | 脱敏类型 | 替换标记 |
 |----------|----------|
@@ -103,7 +118,17 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 | `ipAddress` | `[IPADDRESS_MASKED]` |
 | `bankCard` | `[BANKCARD_MASKED]` |
 
-输出事件中不会保留原始值。
+`preview` 输出示例：
+
+```text
+[PHONE_MASKED]{138****1234}
+[IPADDRESS_MASKED]{192.*.*.10}
+[DATABASEURL_MASKED]{mysql://user:****@db.example.com/orders}
+```
+
+手机号和银行卡会先去掉空格、横线等格式字符，再按固定数字位生成预览。同一号码的常见格式会得到相同结果。数据库 URL 会删除 query 和 fragment，数据库密码固定为 `****`；IPv4 主机使用 IP 预览规则。
+
+输出事件中不会保留原始完整值。
 
 ## 哪些字段会被扫描
 

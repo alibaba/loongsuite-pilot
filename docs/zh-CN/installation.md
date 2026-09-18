@@ -4,6 +4,8 @@
 
 本文说明如何安装、验证、卸载 LoongSuite Pilot，或从源码运行。
 
+Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前执行 [`loongsuite-pilot inject`](claude-session-injection.md) 合并采集 Hook。
+
 ## 前置要求
 
 - `curl` 或 `wget`
@@ -83,6 +85,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--sls-api-key <key>` | API Key 模式的 SLS API Key，不能和 AK/SK 参数同时使用。 |
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
+| `--mask-replacement-mode <mode>` | 脱敏替换格式：`placeholder`（默认固定占位符）或 `preview`（星号预览）。Windows 对应 `-MaskReplacementMode`。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
 | `--collect-trace <true\|false>` | 开启或关闭 Trace 上报。 |
 | `--cms-license-key <key>` | CMS 或 ARMS Trace license key。 |

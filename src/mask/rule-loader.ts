@@ -48,8 +48,13 @@ export function loadEnabledRules(config: MaskConfig): CompiledMaskRule[] {
 
 export function loadMaskPlan(config: MaskConfig): MaskPlan {
   const enabledTypes = resolveEnabledMaskTypes(config);
+  const replacementMode = config.replacementMode ?? 'placeholder';
   if (enabledTypes.size === 0) {
-    return { rules: [], piiTypes: new Set() };
+    return {
+      rules: [],
+      piiTypes: new Set(),
+      replacementMode,
+    };
   }
 
   return {
@@ -61,6 +66,7 @@ export function loadMaskPlan(config: MaskConfig): MaskPlan {
         PII_MASK_TYPE_SET.has(type),
       ),
     ),
+    replacementMode,
   };
 }
 

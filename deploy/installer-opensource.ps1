@@ -58,6 +58,7 @@ param(
     [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
+    [string]$MaskReplacementMode,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -125,6 +126,10 @@ if ($MaskMode -eq "custom" -and -not $MaskTypes) {
 }
 if ($MaskTypes -and $MaskMode -ne "custom") {
     Write-Error "-MaskTypes can only be used with -MaskMode custom"
+    exit 1
+}
+if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "preview")) {
+    Write-Error "Unknown mask replacement mode: $MaskReplacementMode (use 'placeholder' or 'preview')"
     exit 1
 }
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
@@ -1063,6 +1068,7 @@ function Confirm-ConfigOverwrite {
         dashboardPort = $DashboardPort
         maskMode = $MaskMode
         maskTypes = $MaskTypes
+        maskReplacementMode = $MaskReplacementMode
         multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
@@ -1094,6 +1100,7 @@ const checks = [
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -1370,6 +1377,7 @@ function Write-Config {
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
+        maskReplacementMode = "$MaskReplacementMode"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
@@ -1456,6 +1464,10 @@ if (opts.maskMode) {
   if (opts.maskMode === 'custom') {
     config.mask.types = opts.maskTypes.split(',').map(t => t.trim()).filter(Boolean);
   } else { delete config.mask.types; }
+}
+if (opts.maskReplacementMode) {
+  config.mask = config.mask || {};
+  config.mask.replacementMode = opts.maskReplacementMode;
 }
 if (opts.selectedAgents) {
   config.agents = config.agents || {};
