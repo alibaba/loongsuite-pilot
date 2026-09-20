@@ -3251,7 +3251,10 @@ function Remove-CopilotPlugin {
         $file = Join-Path $copilotHome $name
         if (-not (Test-Path -LiteralPath $file)) { continue }
         try {
-            $data = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+            $raw = Get-Content -LiteralPath $file -Raw
+            $clean = [regex]::Replace($raw, '("(?:\\.|[^"\\])*")|//[^\r\n]*|/\*[\s\S]*?\*/', { param($m) if ($m.Groups[1].Success) { $m.Value } else { '' } })
+            $clean = [regex]::Replace($clean, '("(?:\\.|[^"\\])*")|,\s*(?=[}\]])', { param($m) if ($m.Groups[1].Success) { $m.Value } else { '' } })
+            $data = $clean | ConvertFrom-Json
             $changed = $false
             if ($data.enabledPlugins -and $data.enabledPlugins.PSObject.Properties['loongsuite-pilot@loongsuite-pilot']) {
                 $data.enabledPlugins.PSObject.Properties.Remove('loongsuite-pilot@loongsuite-pilot'); $changed = $true

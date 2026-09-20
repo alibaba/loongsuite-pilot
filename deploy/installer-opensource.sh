@@ -1535,7 +1535,12 @@ for (const name of ['settings.json', 'config.json']) {
   const file = path.join(home, name);
   if (!fs.existsSync(file)) continue;
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const raw = fs.readFileSync(file, 'utf8');
+    // Copilot rewrites config.json as JSONC after a real session. Preserve
+    // quoted URLs/escapes while removing comments and optional trailing commas.
+    const clean = raw.replace(/("(?:\\.|[^"\\])*")|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g, (match, string) => string || '')
+      .replace(/("(?:\\.|[^"\\])*")|,\s*(?=[}\]])/g, (match, string) => string || '');
+    const data = JSON.parse(clean);
     let changed = false;
     if (data.enabledPlugins && Object.hasOwn(data.enabledPlugins, 'loongsuite-pilot@loongsuite-pilot')) {
       delete data.enabledPlugins['loongsuite-pilot@loongsuite-pilot']; changed = true;
