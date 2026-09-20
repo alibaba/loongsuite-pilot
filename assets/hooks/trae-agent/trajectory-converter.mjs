@@ -24,22 +24,43 @@
  * that re-emitting the same step across polling cycles yields the same IDs
  * (downstream dedup relies on this).
  *
- * Authority rules (architect P0/P1):
+ * Authority rules (architect P0/P1 + reviewer P1-2/4/5/6):
  *   - usage tokens come from `llm_interactions[i].response.usage` (full
  *     cache_creation/cache_read/reasoning_tokens breakdown). The
  *     `agent_steps[i].llm_response.usage` short form is NOT consulted.
+ *     For Anthropic-style providers (including Anthropic-compatible proxies
+ *     such as DashScope's Claude endpoint) the raw `input_tokens` EXCLUDES
+ *     cached tokens, so the standard `gen_ai.usage.input_tokens` is the SUM
+ *     of non-cached input + cache_read + cache_creation (the schema requires
+ *     the two cache fields to be SUBSETS of input_tokens). Providers whose
+ *     input_tokens already includes cache are left untouched. (P1-5)
  *   - tool_calls are read from `llm_interactions[i].response.tool_calls`,
  *     not from the interaction's top level.
  *   - output.messages tool parts use `type: 'tool_call'` (NOT `tool_use`)
  *     and `type: 'tool_call_response'` for results — the validate-trace
- *     rule set recognizes only those part types.
- *   - llm.request and llm.response get distinct timestamps (request at the
- *     interaction's timestamp, response at the NEXT step's timestamp — or
- *     trajectory.end_time for the last step) so LLM spans have non-zero
- *     duration. The same scheme applies to tool.call / tool.result.
- *   - On the LAST step's llm.response, 'stop' is appended to
- *     finish_reasons so the OTLP flusher's Signal A terminal-event check
- *     fires and the turn closes without waiting for shutdown.
+ *     rule set recognizes only those part types. The final step's real
+ *     `task_done` control tool_call is preserved verbatim (with its
+ *     arguments); the converter never fabricates assistant text the model
+ *     did not produce. (P1-6)
+ *   - Timestamps: trae-agent records COMPLETION times only —
+ *     `llm_interactions[i].timestamp` is when LLM response i finished and
+ *     `agent_steps[i].timestamp` is when step i finished (after its tools
+ *     ran). There is no request-start or tool-start field, so spans use the
+ *     nearest verifiable boundaries instead of borrowing the NEXT response's
+ *     time (which misattributed tool + next-call latency to the current
+ *     span): LLM span i = [previous step completion (or trajectory
+ *     start_time) → interaction[i].timestamp]; TOOL span i =
+ *     [interaction[i].timestamp → step[i].timestamp]. (P1-4)
+ *   - Turn boundary: the finalized last step's llm.response carries
+ *     `gen_ai.turn.end=true`, which is the SOLE authoritative boundary for
+ *     trae-agent (the OTLP flusher keys off it, NOT finish_reason). The
+ *     converter no longer appends a synthetic 'stop'. Because trae-agent
+ *     saves the last agent_step BEFORE finalize_recording writes end_time,
+ *     a poll can observe the last step while the run is still in progress;
+ *     the cycle that first sees end_time then re-emits that step's
+ *     llm.response ONCE with turn.end so the buffered turn still closes
+ *     (deterministic event.id/span_id make the re-emission idempotent
+ *     downstream). (P1-2)
  */
 
 import crypto from 'node:crypto';
@@ -59,12 +80,23 @@ const ROOT_PARENT_SPAN_ID = '0000000000000000';
  * step numbers; steps in that set are skipped.
  *
  * @param {TrajectoryJson} json
- * @param {{ seenStepNumbers?: Set<number>, sessionReset?: boolean }} [opts]
- * @returns {{ entries: Array<Record<string, unknown>>, emittedStepNumbers: number[] }}
+ * @param {{
+ *   seenStepNumbers?: Set<number>,
+ *   sessionReset?: boolean,
+ *   runCompletionEmitted?: boolean,
+ * }} [opts] `runCompletionEmitted` is true when a prior polling cycle already
+ *   emitted the finalize (turn.end) terminal for this run's last step, so the
+ *   P1-2 completion marker is not re-emitted on every subsequent poll.
+ * @returns {{
+ *   entries: Array<Record<string, unknown>>,
+ *   emittedStepNumbers: number[],
+ *   runCompletionEmitted: boolean,
+ * }}
  */
 export function convertTrajectory(json, opts = {}) {
   const seen = opts.seenStepNumbers ?? new Set();
   const sessionReset = Boolean(opts.sessionReset);
+  const runCompletionEmitted = Boolean(opts.runCompletionEmitted);
   const parsed = parseTrajectory(json);
 
   const sessionId = deriveSessionId(parsed);
@@ -85,27 +117,89 @@ export function convertTrajectory(json, opts = {}) {
   // is NOT the real last step.
   const runComplete = Boolean(parsed.endTime);
   let firstEmittedLlmRequest = true;
+  let emittedTurnEnd = false;
+
+  /**
+   * Build the llm.response record for a step. Shared by the main loop and the
+   * P1-2 finalize-only completion marker so both produce deterministically-IDed
+   * records that collapse onto the same span downstream.
+   *
+   * `markerOnly` builds the P1-2 turn-end signal: it carries gen_ai.turn.end but
+   * OMITS gen_ai.output.messages. The downstream converter
+   * (mergeResponsesByResponseId) collapses records sharing gen_ai.response.id by
+   * CONCATENATING their output.messages parts, so a marker that repeated the last
+   * step's payload would double it (text + task_done emitted twice) on the merged
+   * span. The already-buffered record from the poll that first saw the last step
+   * carries the real payload; the marker only needs to close the turn.
+   */
+  const buildLlmResponse = ({ step, interaction, stepSpanId, llmSpanId, stepId, turnId, providerName, llmEndNano, isLastStep, markerOnly }) => {
+    const usage = normalizeUsageTokens(interaction.response.usage, providerName);
+    const outputMessages = markerOnly ? [] : buildOutputMessages(interaction);
+    const finishReasons = buildFinishReasons(interaction.response.finishReason);
+    return {
+      time_unix_nano: String(llmEndNano),
+      observed_time_unix_nano: String(llmEndNano),
+      'event.id': hashId([sessionId, 'llm', String(step.stepNumber), 'response'], 32),
+      'user.id': '',
+      'event.name': 'llm.response',
+      trace_id: traceId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': stepId,
+      'gen_ai.agent.type': AGENT_TYPE,
+      'gen_ai.agent.id': sessionId,
+      'gen_ai.provider.name': providerName,
+      ...(sessionReset ? { 'agent.trajectory.session_reset': true } : {}),
+      span_id: llmSpanId,
+      parent_span_id: stepSpanId,
+      'gen_ai.request.model': interaction.model || parsed.model,
+      'gen_ai.response.model': interaction.response.model || interaction.model || parsed.model,
+      'gen_ai.response.id': `${sessionId}:r${step.stepNumber}`,
+      'gen_ai.response.finish_reasons': finishReasons,
+      // Explicit turn-end marker, stamped ONLY on the finalized last step. The
+      // OTLP flusher (isTerminalEvent) and turn-boundary enrichment both key off
+      // this marker for trae-agent instead of finish_reason: an intermediate
+      // step can carry a natural 'stop' (the model returned plain text mid-run)
+      // while trae-agent keeps going to a later task_done step. (P1-2)
+      ...(isLastStep ? { 'gen_ai.turn.end': true } : {}),
+      ...(outputMessages.length > 0 ? { 'gen_ai.output.messages': outputMessages } : {}),
+      ...(usage
+        ? {
+            'gen_ai.usage.input_tokens': usage.inputTokens,
+            'gen_ai.usage.output_tokens': usage.outputTokens,
+            'gen_ai.usage.cache_read.input_tokens': usage.cacheReadInputTokens,
+            'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationInputTokens,
+          }
+        : {}),
+    };
+  };
+
   for (let i = 0; i < stepCount; i++) {
     const step = parsed.steps[i];
     if (!step.stepNumber || seen.has(step.stepNumber)) continue;
     const interaction = parsed.interactions[i] ?? null;
-    // Only treat the tail step as "last" (stamp 'stop', strip task_done, end
-    // spans at trajectory.end_time) once the run is finalized. During
-    // incremental polling the tail is provisional: marking it terminal makes
-    // the OTLP flusher's Signal A close the turn immediately and drop the
-    // later steps that share the same turn.id (they then arrive as "late
-    // entries" for an already-flushed turn and are discarded), so ARMS would
-    // only ever receive the first step of a multi-step ReAct run.
+    // Only treat the tail step as "last" (stamp turn.end, close spans) once the
+    // run is finalized. During incremental polling the tail is provisional:
+    // marking it terminal makes the OTLP flusher close the turn immediately and
+    // drop the later steps that share the same turn.id (they then arrive as
+    // "late entries" for an already-flushed turn and are discarded), so ARMS
+    // would only ever receive the first step of a multi-step ReAct run.
     const isLastStep = runComplete && i === lastStepIndex;
-    // The "end" timestamp for LLM/TOOL spans of this step is the next
-    // interaction's timestamp (start of the next LLM call). This is strictly
-    // <= the next STEP's start time (because trae-agent stamps step[i+1]
-    // ~0.5ms AFTER interaction[i+1]), so adjacent STEP spans do not overlap.
-    // For the last step, fall back to trajectory.end_time.
-    const nextInteractionTs = !isLastStep && parsed.interactions[i + 1]?.timestamp
-      ? parsed.interactions[i + 1].timestamp
-      : (parsed.endTime || step.timestamp);
-    const stepEndTime = nextInteractionTs;
+    const providerName = interaction?.provider || parsed.provider || PROVIDER_FALLBACK;
+
+    // ── Timestamp model (P1-4) ──
+    // trae-agent records COMPLETION times only: interaction[i].timestamp is when
+    // LLM response i finished; step[i].timestamp is when step i finished (after
+    // its tools ran). Use the nearest verifiable boundaries rather than the NEXT
+    // response's time:
+    //   LLM span i  = [previous step completion (or start_time) → interaction[i].ts]
+    //   TOOL span i = [interaction[i].ts (LLM done, tools begin) → step[i].ts]
+    const llmEndTime = interaction?.timestamp || step.timestamp;
+    const llmEndNano = nanoOf(llmEndTime);
+    const prevBoundary = i > 0 ? (parsed.steps[i - 1]?.timestamp || '') : parsed.startTime;
+    const llmStartNano = lowerBoundNano(prevBoundary, llmEndNano);
+    const toolStartNano = llmEndNano;
+    const toolEndNano = upperBoundNano(step.timestamp, toolStartNano);
 
     const stepSpanId = hashId([sessionId, 'step', String(step.stepNumber)], 16);
     const llmSpanId = hashId([sessionId, 'llm', String(step.stepNumber)], 16);
@@ -118,25 +212,23 @@ export function convertTrajectory(json, opts = {}) {
       'gen_ai.step.id': stepId,
       'gen_ai.agent.type': AGENT_TYPE,
       'gen_ai.agent.id': sessionId,
-      'gen_ai.provider.name': interaction?.provider || parsed.provider || PROVIDER_FALLBACK,
+      'gen_ai.provider.name': providerName,
       ...(sessionReset ? { 'agent.trajectory.session_reset': true } : {}),
     };
 
     if (interaction) {
-      const requestTime = interaction.timestamp || step.timestamp;
-      const responseTime = stepEndTime;
       // ── LLM_CALL request ──
       // On the first emitted LLM request of the turn, also populate
-      // gen_ai.input.messages_delta with the initial prompt. The OTLP
-      // converter library reads _delta from the first llm.request to build
-      // ENTRY/AGENT input.messages (it does NOT read the full gen_ai.input.
-      // messages field for ENTRY/AGENT). Without _delta, those synthesized
-      // spans carry no input.messages and fail the data-quality checks.
+      // gen_ai.input.messages_delta with the initial prompt. The OTLP converter
+      // library reads _delta from the first llm.request to build ENTRY/AGENT
+      // input.messages (it does NOT read the full gen_ai.input.messages field
+      // for ENTRY/AGENT). Without _delta, those synthesized spans carry no
+      // input.messages and fail the data-quality checks.
       const isFirstEmitted = firstEmittedLlmRequest;
       firstEmittedLlmRequest = false;
       entries.push({
-        time_unix_nano: timestampToUnixNanos(requestTime),
-        observed_time_unix_nano: timestampToUnixNanos(responseTime),
+        time_unix_nano: String(llmStartNano),
+        observed_time_unix_nano: String(llmEndNano),
         'event.id': hashId([sessionId, 'llm', String(step.stepNumber), 'request'], 32),
         'user.id': '',
         'event.name': 'llm.request',
@@ -156,43 +248,10 @@ export function convertTrajectory(json, opts = {}) {
       });
 
       // ── LLM_CALL response ── usage authority = interaction.response.usage
-      const usage = interaction.response.usage;
-      const outputMessages = buildOutputMessages(interaction, isLastStep);
-      // On the last step, append 'stop' to finish_reasons so Signal A fires
-      // and the turn flushes at the boundary instead of waiting for shutdown.
-      const finishReasons = buildFinishReasons(interaction.response.finishReason, isLastStep);
-      entries.push({
-        time_unix_nano: timestampToUnixNanos(responseTime),
-        observed_time_unix_nano: timestampToUnixNanos(responseTime),
-        'event.id': hashId([sessionId, 'llm', String(step.stepNumber), 'response'], 32),
-        'user.id': '',
-        'event.name': 'llm.response',
-        ...commonBase,
-        span_id: llmSpanId,
-        parent_span_id: stepSpanId,
-        'gen_ai.request.model': interaction.model || parsed.model,
-        'gen_ai.response.model': interaction.response.model || interaction.model || parsed.model,
-        'gen_ai.response.id': `${sessionId}:r${step.stepNumber}`,
-        'gen_ai.response.finish_reasons': finishReasons,
-        // Explicit turn-end marker, stamped ONLY on the finalized last step.
-        // The OTLP flusher (isTerminalEvent) and turn-boundary enrichment
-        // (isTerminalTurnEntry) both key off this marker for trae-agent instead
-        // of finish_reason: an intermediate step can carry a natural 'stop'
-        // (the model returned plain text mid-run) while trae-agent keeps going
-        // to a later task_done step. Deriving the boundary from finish_reason
-        // would flush the turn early at that intermediate step and then again at
-        // the real last step, splitting one ReAct run into duplicate traces.
-        ...(isLastStep ? { 'gen_ai.turn.end': true } : {}),
-        ...(outputMessages.length > 0 ? { 'gen_ai.output.messages': outputMessages } : {}),
-        ...(usage
-          ? {
-              'gen_ai.usage.input_tokens': usage.inputTokens,
-              'gen_ai.usage.output_tokens': usage.outputTokens,
-              'gen_ai.usage.cache_read.input_tokens': usage.cacheReadInputTokens,
-              'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationInputTokens,
-            }
-          : {}),
-      });
+      entries.push(buildLlmResponse({
+        step, interaction, stepSpanId, llmSpanId, stepId, turnId, providerName, llmEndNano, isLastStep,
+      }));
+      if (isLastStep) emittedTurnEnd = true;
     }
 
     // ── TOOL spans (one call+result pair per tool_calls[i]) ──
@@ -202,20 +261,11 @@ export function convertTrajectory(json, opts = {}) {
       const call = step.toolCalls[t];
       const result = step.toolResults.find(r => r.callId && r.callId === call.callId) ?? null;
       const toolSpanId = hashId([sessionId, 'tool', String(step.stepNumber), String(t), call.callId || ''], 16);
-      const toolBase = {
-        trace_id: traceId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': stepId,
-        'gen_ai.agent.type': AGENT_TYPE,
-        'gen_ai.agent.id': sessionId,
-        'gen_ai.provider.name': interaction?.provider || parsed.provider || PROVIDER_FALLBACK,
-        ...(sessionReset ? { 'agent.trajectory.session_reset': true } : {}),
-      };
+      const toolBase = { ...commonBase };
 
       entries.push({
-        time_unix_nano: timestampToUnixNanos(step.timestamp),
-        observed_time_unix_nano: timestampToUnixNanos(stepEndTime),
+        time_unix_nano: String(toolStartNano),
+        observed_time_unix_nano: String(toolEndNano),
         'event.id': hashId([sessionId, 'tool', String(step.stepNumber), String(t), 'call'], 32),
         'user.id': '',
         'event.name': 'tool.call',
@@ -229,8 +279,8 @@ export function convertTrajectory(json, opts = {}) {
 
       if (result) {
         entries.push({
-          time_unix_nano: timestampToUnixNanos(stepEndTime),
-          observed_time_unix_nano: timestampToUnixNanos(stepEndTime),
+          time_unix_nano: String(toolEndNano),
+          observed_time_unix_nano: String(toolEndNano),
           'event.id': hashId([sessionId, 'tool', String(step.stepNumber), String(t), 'result'], 32),
           'user.id': '',
           'event.name': 'tool.result',
@@ -254,45 +304,63 @@ export function convertTrajectory(json, opts = {}) {
     emittedStepNumbers.push(step.stepNumber);
   }
 
+  // ── P1-2: finalize-only completion marker ──
+  // trae-agent saves the last agent_step BEFORE finalize_recording writes
+  // end_time. A poll that observed the last step while the run was still in
+  // progress emitted it WITHOUT turn.end and recorded it as seen. On the poll
+  // that first sees end_time every step is skipped, so the turn would never
+  // close. Re-emit the finalized last step's llm.response ONCE as a turn-end
+  // SIGNAL: its deterministic event.id/span_id/response.id collapse onto the
+  // already-buffered record downstream, and the flusher only needs turn.end to
+  // close the turn. markerOnly omits output.messages so that collapse does not
+  // double the last step's payload (see buildLlmResponse).
+  if (runComplete && !emittedTurnEnd && !runCompletionEmitted && lastStepIndex >= 0) {
+    const lastStep = parsed.steps[lastStepIndex];
+    const lastInteraction = parsed.interactions[lastStepIndex] ?? null;
+    if (lastStep?.stepNumber && lastInteraction && seen.has(lastStep.stepNumber)) {
+      const providerName = lastInteraction.provider || parsed.provider || PROVIDER_FALLBACK;
+      const llmEndNano = nanoOf(lastInteraction.timestamp || lastStep.timestamp);
+      entries.push(buildLlmResponse({
+        step: lastStep,
+        interaction: lastInteraction,
+        stepSpanId: hashId([sessionId, 'step', String(lastStep.stepNumber)], 16),
+        llmSpanId: hashId([sessionId, 'llm', String(lastStep.stepNumber)], 16),
+        stepId: `${sessionId}:s${lastStep.stepNumber}`,
+        turnId: sessionId,
+        providerName,
+        llmEndNano,
+        isLastStep: true,
+        markerOnly: true,
+      }));
+      emittedTurnEnd = true;
+    }
+  }
+
   entries.sort((a, b) => {
     const an = BigInt(a.time_unix_nano);
     const bn = BigInt(b.time_unix_nano);
     return an < bn ? -1 : an > bn ? 1 : 0;
   });
-  return { entries, emittedStepNumbers };
+  return { entries, emittedStepNumbers, runCompletionEmitted: emittedTurnEnd || runCompletionEmitted };
 }
 
 /**
  * Build the assistant output message list. The assistant message content is
- * whatever the LLM produced (text or thinking + tool_call parts). Tool-call
- * arguments come from interaction.response.tool_calls (architect P1: not
- * from the top-level field).
- *
- * Part type is 'tool_call' (NOT 'tool_use') — the validate-trace rules only
- * recognize ['text','tool_call','tool_call_response','reasoning'].
- */
-/**
- * Build the assistant output message list. The assistant message content is
- * whatever the LLM produced (text or thinking + tool_call parts). Tool-call
- * arguments come from interaction.response.tool_calls (architect P1: not
- * from the top-level field).
+ * whatever the LLM produced (text and/or tool_call parts). Tool-call arguments
+ * come from interaction.response.tool_calls (architect P1: not from the
+ * top-level field).
  *
  * Part type is 'tool_call' (NOT 'tool_use') — the validate-trace rules only
  * recognize ['text','tool_call','tool_call_response','reasoning'].
  *
- * On the last step, `task_done` tool_calls are stripped from output.messages:
- * trae-agent uses `task_done` as a control-flow terminal marker (no result,
- * no real tool execution), and the validate-trace `semantic.last_step_no_tool_call`
- * rule expects the final step's LLM output to be a plain-text answer without
- * tool_calls. The text answer is preserved as the terminal output.
- *
- * P1-10 fallback: if末步 `task_done` was the only part (content was empty),
- * stripping it leaves parts=[] and the OTLP flusher drops the entire
- * `gen_ai.output.messages` attribute → `semantic.llm_has_input_output` ERROR.
- * When this happens, emit a placeholder text part `{type:'text', content:'task_done'}`
- * so the attribute is non-empty and the terminal state is recorded.
+ * P1-6: the final step's real `task_done` control tool_call is preserved
+ * verbatim (name + arguments). The converter NEVER strips it and NEVER
+ * fabricates assistant text the model did not produce — the turn boundary is
+ * carried by `gen_ai.turn.end` on the record, not by reshaping the model
+ * output. When the model returned only a task_done call (empty text), the
+ * output is exactly that tool_call part; no placeholder is invented.
  */
-function buildOutputMessages(interaction, isLastStep = false) {
+function buildOutputMessages(interaction) {
   const parts = [];
   const content = interaction.response.content;
   if (typeof content === 'string' && content.length > 0) {
@@ -306,12 +374,7 @@ function buildOutputMessages(interaction, isLastStep = false) {
       }
     }
   }
-  let strippedTaskDone = false;
   for (const call of interaction.response.toolCalls) {
-    if (isLastStep && call.name === 'task_done') {
-      strippedTaskDone = true;
-      continue;
-    }
     parts.push({
       type: 'tool_call',
       id: call.callId || call.id || undefined,
@@ -319,36 +382,44 @@ function buildOutputMessages(interaction, isLastStep = false) {
       content: call.arguments ?? null,
     });
   }
-  if (parts.length === 0 && strippedTaskDone) {
-    parts.push({ type: 'text', content: 'task_done' });
-  }
   if (parts.length === 0) return [];
   return [{ role: 'assistant', parts }];
 }
 
 /**
- * Build finish_reasons array. On the last step OF A FINALIZED RUN, append
- * 'stop' to the actual finish reason so the OTLP flusher's terminal-event
- * check (Signal A) fires and the turn closes at the boundary. trae-agent
- * trajectories always end with `finish_reason='tool_use'` (the final LLM call
- * still produced a tool call before `success=true` was reached), so without
- * this marker the turn only flushes at shutdown.
- *
- * `isLastStep` must already be gated on run-completion by the caller (see
- * convertTrajectory: `isLastStep = runComplete && i === lastStepIndex`). During
- * incremental polling the provisional tail must NOT be stamped 'stop', or
- * Signal A would close the turn early and the remaining steps of the same
- * turn.id would be dropped as late entries.
+ * Build finish_reasons array from the model's ACTUAL finish reason only.
+ * P1-6: no synthetic 'stop' is appended — trae-agent's turn boundary is the
+ * explicit `gen_ai.turn.end` marker (the OTLP flusher's trae-agent branch keys
+ * off it, not finish_reason), so inventing a 'stop' the model never returned
+ * would falsify the response metadata for no benefit.
  */
-function buildFinishReasons(actualFinishReason, isLastStep) {
+function buildFinishReasons(actualFinishReason) {
   const reasons = [];
   if (actualFinishReason && actualFinishReason.length > 0) {
     reasons.push(actualFinishReason);
   }
-  if (isLastStep && !reasons.includes('stop')) {
-    reasons.push('stop');
-  }
   return reasons;
+}
+
+/**
+ * P1-5: normalize token usage per provider semantics. Anthropic (and
+ * Anthropic-compatible proxies such as DashScope's Claude endpoint) report
+ * `input_tokens` EXCLUDING cached tokens, listing `cache_read_input_tokens` and
+ * `cache_creation_input_tokens` separately. The GenAI schema requires those two
+ * to be SUBSETS of `gen_ai.usage.input_tokens`, so for Anthropic-style providers
+ * the standard input total is the SUM of all three. Providers whose input_tokens
+ * already includes cache (e.g. OpenAI) are returned untouched to avoid double
+ * counting. Returns undefined when the interaction carried no usage.
+ */
+function normalizeUsageTokens(usage, providerName) {
+  if (!usage) return undefined;
+  const rawInput = usage.inputTokens || 0;
+  const cacheRead = usage.cacheReadInputTokens || 0;
+  const cacheCreation = usage.cacheCreationInputTokens || 0;
+  const p = String(providerName || '').toLowerCase();
+  const anthropicStyle = p.includes('anthropic') || p.includes('claude');
+  const inputTokens = anthropicStyle ? rawInput + cacheRead + cacheCreation : rawInput;
+  return { ...usage, inputTokens };
 }
 
 function serializeResult(result) {
@@ -389,6 +460,36 @@ function timestampToUnixNanos(ts) {
   if (Number.isFinite(numeric)) return timestampToUnixNanos(numeric);
   const parsed = Date.parse(trimmed);
   return timestampToUnixNanos(Number.isNaN(parsed) ? Date.now() : parsed);
+}
+
+/** BigInt nanos for a raw timestamp (mirrors timestampToUnixNanos). */
+function nanoOf(ts) {
+  return BigInt(timestampToUnixNanos(ts));
+}
+
+/**
+ * P1-4 guard: a span START derived from an earlier boundary. If the boundary is
+ * missing or not strictly before `endNano` (clock skew / same-millisecond
+ * stamps), clamp to endNano-1 so the span keeps a positive, non-zero duration
+ * without borrowing a later event's time.
+ */
+function lowerBoundNano(boundaryTs, endNano) {
+  if (!boundaryTs) return endNano > 0n ? endNano - 1n : 0n;
+  const startNano = nanoOf(boundaryTs);
+  if (startNano <= 0n || startNano >= endNano) return endNano > 0n ? endNano - 1n : 0n;
+  return startNano;
+}
+
+/**
+ * P1-4 guard: a span END derived from a later boundary. If the boundary is
+ * missing or not strictly after `startNano`, clamp to startNano+1 so tool
+ * spans keep a positive duration.
+ */
+function upperBoundNano(boundaryTs, startNano) {
+  if (!boundaryTs) return startNano + 1n;
+  const endNano = nanoOf(boundaryTs);
+  if (endNano <= startNano) return startNano + 1n;
+  return endNano;
 }
 
 // ── CLI entry: read trajectory file, emit JSONL ──

@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { convertTrajectory } from '../../../../assets/hooks/trae-agent/trajectory-converter.mjs';
 import { parseTrajectory } from '../../../../assets/hooks/trae-agent/trajectory-parser.mjs';
+import { TERMINAL_CONTROL_TOOLS } from '../../../../scripts/validate-trace.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(__dirname, 'fixtures', 'fixture_trajectory_qwen_max.json');
@@ -129,12 +130,50 @@ describe('convertTrajectory - non-zero duration (P1-4)', () => {
     }
   });
 
-  test('last step LLM response time = trajectory.end_time (no next step available)', () => {
+  test('last step LLM response time = its own interaction completion, NOT end_time (P1-4)', () => {
+    // P1-4: trae-agent records COMPLETION times only. The LLM span ends at
+    // interaction[i].timestamp (when the response finished), NOT at the
+    // trajectory end_time (written later by finalize_recording; borrowing it
+    // would inflate the last LLM span with finalize overhead).
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
     const parsed = parseTrajectory(RAW);
-    const expectedNanos = timestampToNanos(parsed.endTime);
+    const expectedNanos = timestampToNanos(parsed.interactions[14].timestamp);
     expect(BigInt(lastResp.time_unix_nano)).toBe(BigInt(expectedNanos));
+    // sanity: finalize's end_time is strictly later than the last LLM completion
+    expect(BigInt(timestampToNanos(parsed.endTime))).toBeGreaterThan(BigInt(expectedNanos));
+  });
+
+  test('LLM span = [prev step completion → own interaction completion] (P1-4 attribution)', () => {
+    // The OLD model ended LLM span i at interaction[i+1].timestamp, misattributing
+    // tool + next-call latency to span i. Now span i ends at its OWN completion and
+    // starts at the previous step's completion (or trajectory start_time for step 1).
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const parsed = parseTrajectory(RAW);
+    for (let i = 0; i < 15; i++) {
+      const sn = i + 1;
+      const req = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      const resp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      const expectedStart = i === 0 ? parsed.startTime : parsed.steps[i - 1].timestamp;
+      expect(BigInt(req.time_unix_nano)).toBe(BigInt(timestampToNanos(expectedStart)));
+      expect(BigInt(resp.time_unix_nano)).toBe(BigInt(timestampToNanos(parsed.interactions[i].timestamp)));
+    }
+  });
+
+  test('TOOL span = [LLM completion → step completion] (P1-4 attribution)', () => {
+    // tool.call starts when the LLM response finished (tools begin); tool.result
+    // ends at the agent_step completion. Steps 2..14 have strictly-later step
+    // timestamps (step 1's collides at ms granularity and is clamped to +1ns, so
+    // it is excluded from the exact-end assertion but still satisfies result>call).
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const parsed = parseTrajectory(RAW);
+    for (let i = 1; i < 14; i++) {
+      const sn = i + 1;
+      const call = entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      const result = entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
+      expect(BigInt(call.time_unix_nano)).toBe(BigInt(timestampToNanos(parsed.interactions[i].timestamp)));
+      expect(BigInt(result.time_unix_nano)).toBe(BigInt(timestampToNanos(parsed.steps[i].timestamp)));
+    }
   });
 });
 
@@ -172,13 +211,31 @@ describe('convertTrajectory - LLM input/output message shape (P1-5, P1-7)', () =
     }
   });
 
-  test('LLM response usage tokens come from llm_interactions[i].response.usage', () => {
+  test('LLM response usage: Anthropic cache tokens folded into input_tokens (P1-5)', () => {
+    // P1-5: Anthropic (and Anthropic-compatible proxies such as DashScope's Claude
+    // endpoint) report input_tokens EXCLUDING cache, listing cache_read /
+    // cache_creation separately. The GenAI schema requires those two to be SUBSETS
+    // of gen_ai.usage.input_tokens, so the converter sums all three for
+    // Anthropic-style providers: 110 + 1024 (cache_read) + 0 (cache_creation).
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     const resp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s1'));
-    expect(resp['gen_ai.usage.input_tokens']).toBe(110);
+    expect(resp['gen_ai.usage.input_tokens']).toBe(1134);
     expect(resp['gen_ai.usage.output_tokens']).toBe(53);
+    // the cache breakdown is still reported separately (subset of input_tokens)
     expect(resp['gen_ai.usage.cache_read.input_tokens']).toBe(1024);
     expect(resp['gen_ai.usage.cache_creation.input_tokens']).toBe(0);
+  });
+
+  test('non-Anthropic provider leaves input_tokens untouched (no cache folding) (P1-5)', () => {
+    // OpenAI-style providers already include cache in input_tokens; folding would
+    // double-count. The converter must leave their input_tokens exactly as reported.
+    const mutated = JSON.parse(JSON.stringify(RAW));
+    mutated.provider = 'openai';
+    for (const it of mutated.llm_interactions) it.provider = 'openai';
+    const { entries } = convertTrajectory(mutated, { seenStepNumbers: new Set() });
+    const resp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s1'));
+    expect(resp['gen_ai.usage.input_tokens']).toBe(110);
+    expect(resp['gen_ai.usage.cache_read.input_tokens']).toBe(1024);
   });
 
   test('tool_call_response role is "tool" per ARMS GenAI spec', () => {
@@ -203,12 +260,15 @@ describe('convertTrajectory - LLM input/output message shape (P1-5, P1-7)', () =
 });
 
 describe('convertTrajectory - terminal marker on last step (P1-6)', () => {
-  test('last LLM response finish_reasons includes stop (Signal A terminal)', () => {
+  test('last LLM response finish_reasons = the model actual reason only (no synthetic stop)', () => {
+    // P1-6: the converter no longer appends a fabricated 'stop'. trae-agent's turn
+    // boundary is the explicit gen_ai.turn.end marker (the OTLP flusher's trae-agent
+    // branch keys off it, NOT finish_reason), so finish_reasons carries ONLY what the
+    // model actually returned — 'tool_use' for the task_done terminal step.
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
-    expect(lastResp['gen_ai.response.finish_reasons']).toContain('stop');
-    // the actual finish_reason ('tool_use') is preserved
-    expect(lastResp['gen_ai.response.finish_reasons']).toContain('tool_use');
+    expect(lastResp['gen_ai.response.finish_reasons']).toEqual(['tool_use']);
+    expect(lastResp['gen_ai.response.finish_reasons']).not.toContain('stop');
   });
 
   test('non-last LLM responses do NOT carry stop (no premature terminal)', () => {
@@ -283,45 +343,43 @@ describe('convertTrajectory - incremental polling terminal gating (run-in-progre
     expect(stopResponses(entries).length).toBe(0);
   });
 
-  test('incremental sequence: stop appears only once the run is finalized', () => {
+  test('incremental sequence: turn.end appears only once the run is finalized', () => {
     // Poll 1 — run in progress, only step 1 recorded so far.
     const r1 = convertTrajectory(partialTrajectory(1), { seenStepNumbers: new Set() });
     expect(r1.emittedStepNumbers).toEqual([1]);
-    expect(stopResponses(r1.entries).length).toBe(0); // no premature terminal
+    expect(turnEndResponses(r1.entries).length).toBe(0); // no premature terminal
+    expect(r1.runCompletionEmitted).toBe(false);
 
     // Poll 2 — run finalized (all 15 steps + end_time); step 1 already seen.
     const seen = new Set(r1.emittedStepNumbers);
-    const r2 = convertTrajectory(RAW, { seenStepNumbers: seen });
+    const r2 = convertTrajectory(RAW, { seenStepNumbers: seen, runCompletionEmitted: r1.runCompletionEmitted });
     expect(r2.emittedStepNumbers).toEqual([2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
-    const stops = stopResponses(r2.entries);
-    expect(stops.length).toBe(1); // exactly the final step closes the turn
-    expect(stops[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
-    // the explicit turn.end marker also appears exactly once, on the same tail
+    // P1-6: the terminal signal is the explicit gen_ai.turn.end marker (NOT a
+    // synthetic 'stop'); it appears exactly once, on the finalized tail.
     const turnEnds = turnEndResponses(r2.entries);
     expect(turnEnds.length).toBe(1);
     expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
+    expect(r2.runCompletionEmitted).toBe(true);
   });
 
-  test('finalized trajectory whose tail was seen in a prior partial poll still stamps stop on the new tail', () => {
-    // Poll 1 saw steps 1-3 of an in-progress run (no stop). Poll 2 sees the
-    // finalized 5-step run; steps 4 and 5 are new, step 5 must carry stop.
+  test('finalized trajectory whose tail was seen in a prior partial poll closes the turn on the new tail', () => {
+    // Poll 1 saw steps 1-3 of an in-progress run (no terminal). Poll 2 sees the
+    // finalized 5-step run; steps 4 and 5 are new, step 5 must carry turn.end.
     const partial = partialTrajectory(3);
     const r1 = convertTrajectory(partial, { seenStepNumbers: new Set() });
-    expect(stopResponses(r1.entries).length).toBe(0);
+    expect(turnEndResponses(r1.entries).length).toBe(0);
 
     const finalized = JSON.parse(JSON.stringify(RAW));
     finalized.agent_steps = finalized.agent_steps.slice(0, 5);
     finalized.llm_interactions = finalized.llm_interactions.slice(0, 5);
     // end_time / success retained from RAW => runComplete === true
-    const r2 = convertTrajectory(finalized, { seenStepNumbers: new Set(r1.emittedStepNumbers) });
+    const r2 = convertTrajectory(finalized, { seenStepNumbers: new Set(r1.emittedStepNumbers), runCompletionEmitted: r1.runCompletionEmitted });
     expect(r2.emittedStepNumbers).toEqual([4, 5]);
-    const stops = stopResponses(r2.entries);
-    expect(stops.length).toBe(1);
-    expect(stops[0]['gen_ai.step.id'].endsWith(':s5')).toBe(true);
-    // turn.end rides on the same finalized tail (s5), never on the new-but-not-last s4
+    // turn.end rides on the finalized tail (s5), never on the new-but-not-last s4
     const turnEnds = turnEndResponses(r2.entries);
     expect(turnEnds.length).toBe(1);
     expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s5')).toBe(true);
+    expect(r2.runCompletionEmitted).toBe(true);
   });
 
   test('intermediate step with a natural stop finish_reason is NOT marked turn.end while partial', () => {
@@ -336,53 +394,107 @@ describe('convertTrajectory - incremental polling terminal gating (run-in-progre
     expect(emittedStepNumbers).toEqual([1, 2, 3]);
     expect(turnEndResponses(entries).length).toBe(0);
   });
+
+  test('P1-2: run finalized with no new steps re-emits the seen tail once with turn.end', () => {
+    // trae-agent saves the last agent_step BEFORE finalize_recording writes
+    // end_time, so a poll can observe the REAL last step while the run is still in
+    // progress: it emits that step WITHOUT turn.end and records it as seen. The
+    // next poll sees end_time but every step is already seen, so the main loop
+    // emits nothing — the P1-2 marker must re-emit the finalized tail's
+    // llm.response ONCE with turn.end so the buffered turn still closes.
+    const inProgress = JSON.parse(JSON.stringify(RAW));
+    inProgress.end_time = '';       // last step present, run not yet finalized
+    inProgress.success = false;
+    const r1 = convertTrajectory(inProgress, { seenStepNumbers: new Set() });
+    expect(r1.emittedStepNumbers).toEqual([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
+    expect(turnEndResponses(r1.entries).length).toBe(0);   // not final yet
+    expect(r1.runCompletionEmitted).toBe(false);
+
+    // Poll 2: run finalized (end_time present), all 15 steps already seen.
+    const seen = new Set(r1.emittedStepNumbers);
+    const r2 = convertTrajectory(RAW, { seenStepNumbers: seen, runCompletionEmitted: r1.runCompletionEmitted });
+    expect(r2.emittedStepNumbers).toEqual([]);             // nothing new from the loop
+    const turnEnds = turnEndResponses(r2.entries);
+    expect(turnEnds.length).toBe(1);                       // marker re-emitted the tail
+    expect(turnEnds[0]['event.name']).toBe('llm.response');
+    expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
+    expect(r2.runCompletionEmitted).toBe(true);
+    // deterministic id/span make the re-emission collapse onto the buffered record
+    const p1Tail = r1.entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
+    expect(turnEnds[0]['event.id']).toBe(p1Tail['event.id']);
+    expect(turnEnds[0].span_id).toBe(p1Tail.span_id);
+    // The marker is a turn-end SIGNAL only: it shares response.id with poll1's
+    // tail (the downstream mergeResponsesByResponseId key) but OMITS
+    // output.messages, because that merge CONCATENATES parts — a marker carrying
+    // the payload again would double the last step's text + task_done on the
+    // merged span. poll1's buffered record is the sole payload authority.
+    expect(turnEnds[0]['gen_ai.response.id']).toBe(p1Tail['gen_ai.response.id']);
+    expect(turnEnds[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(p1Tail['gen_ai.output.messages']).toBeDefined();
+
+    // Poll 3: the runCompletionEmitted guard stops the marker re-firing forever.
+    const r3 = convertTrajectory(RAW, { seenStepNumbers: seen, runCompletionEmitted: r2.runCompletionEmitted });
+    expect(r3.emittedStepNumbers).toEqual([]);
+    expect(r3.entries.length).toBe(0);
+    expect(turnEndResponses(r3.entries).length).toBe(0);
+  });
 });
 
-describe('convertTrajectory - strip task_done from last step output (P1-9)', () => {
-  test('last step output.messages has NO tool_call part (task_done stripped)', () => {
-    // trae-agent uses `task_done` as a control-flow terminal marker (no result,
-    // no real tool execution). validate-trace's `semantic.last_step_no_tool_call`
-    // rule expects the final step's LLM output to be a plain-text answer.
+describe('convertTrajectory - preserve real task_done tool_call on last step (P1-6)', () => {
+  test('last step output.messages preserves the real task_done tool_call verbatim', () => {
+    // P1-6: trae-agent ends a run with a real `task_done` control tool_call. The
+    // converter preserves it verbatim (name + arguments) and NEVER fabricates
+    // assistant text the model did not produce. The turn boundary is carried by
+    // gen_ai.turn.end on the record, not by reshaping the model output.
+    // (validate-trace's last_step_no_tool_call rule exempts terminal-control names.)
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
     const msgs = lastResp['gen_ai.output.messages'];
     expect(Array.isArray(msgs)).toBe(true);
     expect(msgs.length).toBeGreaterThan(0);
-    const partTypes = msgs[0].parts.map(p => p.type);
-    expect(partTypes).not.toContain('tool_call');
-    // text answer is preserved as the terminal output
+    const parts = msgs[0].parts;
+    const partTypes = parts.map(p => p.type);
+    // the model's real text answer is preserved …
     expect(partTypes).toContain('text');
-    expect(msgs[0].parts.some(p => p.type === 'text' && typeof p.content === 'string' && p.content.length > 0)).toBe(true);
+    expect(parts.some(p => p.type === 'text' && typeof p.content === 'string' && p.content.length > 0)).toBe(true);
+    // … AND the real task_done tool_call is preserved (NOT stripped)
+    expect(partTypes).toContain('tool_call');
+    const taskDone = parts.find(p => p.type === 'tool_call');
+    expect(taskDone.name).toBe('task_done');
+    // arguments preserved verbatim (fixture task_done carries an empty object)
+    expect(taskDone.content).toEqual({});
   });
 
-  test('non-last step output.messages keeps tool_call parts (only末步 strips task_done)', () => {
+  test('non-last step output.messages keeps its tool_call parts', () => {
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
-    // step 1 has str_replace_based_edit_tool call — must remain in output
+    // step 1 has a str_replace_based_edit_tool call — must remain in the output
     const resp1 = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s1'));
     const partTypes1 = resp1['gen_ai.output.messages'][0].parts.map(p => p.type);
     expect(partTypes1).toContain('tool_call');
   });
 
-  test('non-task_done tool_calls on末步 are preserved (only task_done is stripped)', () => {
-    // Synthetic: replace last interaction's task_done with bash call, keep text.
+  test('a real (non-task_done) tool_call on the last step is preserved with its arguments', () => {
+    // Synthetic: replace the last interaction's task_done with a bash call.
     const mutated = JSON.parse(JSON.stringify(RAW));
     mutated.llm_interactions[14].response.tool_calls = [
       { call_id: 'toolu_synthetic_bash', name: 'bash', arguments: { cmd: 'echo hi' }, id: null },
     ];
     const { entries } = convertTrajectory(mutated, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
-    const partTypes = lastResp['gen_ai.output.messages'][0].parts.map(p => p.type);
-    // bash is a real tool — must NOT be stripped on末步
+    const parts = lastResp['gen_ai.output.messages'][0].parts;
+    const partTypes = parts.map(p => p.type);
     expect(partTypes).toContain('tool_call');
-    const bashPart = lastResp['gen_ai.output.messages'][0].parts.find(p => p.type === 'tool_call');
+    const bashPart = parts.find(p => p.type === 'tool_call');
     expect(bashPart.name).toBe('bash');
+    expect(bashPart.content).toEqual({ cmd: 'echo hi' });
   });
 
-  test('P1-10:末步 task_done 是唯一 part + content 空时，placeholder text 兜底', () => {
-    // Synthetic:末步 LLM response content='' and tool_calls=[task_done only].
-    // After P1-9 strip, parts would be empty → output.messages attribute
-    // would be dropped entirely → semantic.llm_has_input_output ERROR.
-    // The converter must push a placeholder text part so attribute stays non-empty.
+  test('last step never fabricates placeholder text when the model returned only task_done (P1-6)', () => {
+    // Synthetic: last response content='' and tool_calls=[task_done only]. The OLD
+    // converter invented placeholder text to keep output.messages non-empty. P1-6
+    // forbids fabrication: the real task_done tool_call alone keeps the attribute
+    // non-empty (so semantic.llm_has_input_output still passes) and NO invented
+    // text part appears.
     const mutated = JSON.parse(JSON.stringify(RAW));
     mutated.llm_interactions[14].response.content = '';
     mutated.llm_interactions[14].response.tool_calls = [
@@ -390,17 +502,24 @@ describe('convertTrajectory - strip task_done from last step output (P1-9)', () 
     ];
     const { entries } = convertTrajectory(mutated, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
-    expect(lastResp['gen_ai.output.messages']).toBeDefined();
-    expect(Array.isArray(lastResp['gen_ai.output.messages'])).toBe(true);
-    expect(lastResp['gen_ai.output.messages'].length).toBeGreaterThan(0);
-    const partTypes = lastResp['gen_ai.output.messages'][0].parts.map(p => p.type);
-    // no tool_call (task_done stripped)
-    expect(partTypes).not.toContain('tool_call');
-    // placeholder text part exists
-    expect(partTypes).toContain('text');
-    const textPart = lastResp['gen_ai.output.messages'][0].parts.find(p => p.type === 'text');
-    expect(typeof textPart.content).toBe('string');
-    expect(textPart.content.length).toBeGreaterThan(0);
+    const msgs = lastResp['gen_ai.output.messages'];
+    expect(Array.isArray(msgs)).toBe(true);
+    expect(msgs.length).toBeGreaterThan(0);
+    const parts = msgs[0].parts;
+    // exactly the real task_done tool_call — no fabricated text placeholder
+    expect(parts.map(p => p.type)).toEqual(['tool_call']);
+    expect(parts[0].name).toBe('task_done');
+  });
+
+  test('preserved task_done name is in validate-trace terminal-control exemption (P1-6 cross-lock)', () => {
+    // Ties the converter output to the validator exemption: if either side renames
+    // the terminal control tool, semantic.last_step_no_tool_call would false-positive
+    // on trae-agent's finalized last step again.
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
+    const toolCallParts = lastResp['gen_ai.output.messages'][0].parts.filter(p => p.type === 'tool_call');
+    expect(toolCallParts.length).toBeGreaterThan(0);
+    for (const p of toolCallParts) expect(TERMINAL_CONTROL_TOOLS.has(p.name)).toBe(true);
   });
 });
 

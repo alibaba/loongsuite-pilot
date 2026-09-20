@@ -1573,15 +1573,32 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- trae-agent (log-watch: trajectory JSON polling) ---
-    // trae-agent overwrites a single trajectory.json each cycle; no shell hook
-    // is installed. The input reads the file, dedups by step_number, and emits
-    // the 5-layer span tree via assets/hooks/trae-agent/trajectory-converter.mjs.
-    // The trajectory file path matches the agents.d/trae-agent.json declaration
-    // (~/.trae-agent/trajectories/trajectory.json); the converter path is the
-    // pilot install root + the per-agent asset subdir so it resolves in both
-    // dev (project root) and installed (dataDir/versions/<v>) layouts.
+    // trae-agent's TrajectoryRecorder rewrites a trajectory JSON on every
+    // record_* call; no shell hook is installed. The input reads the file,
+    // dedups by step_number, and emits the 5-layer span tree via
+    // assets/hooks/trae-agent/trajectory-converter.mjs.
+    // P1-1: trae-agent defaults to a TIMESTAMPED `trajectory_<ts>.json` under a
+    // CWD-relative `trajectories/` dir, so a single hardcoded path misses real
+    // runs. Discovery scans a watched directory for the newest `trajectory*.json`
+    // each cycle. Operators can override via listeners['trae-agent-trajectory']:
+    //   - trajectoryDir  → directory to scan (default ~/.trae-agent/trajectories)
+    //   - trajectoryFile → pin one exact file (skips discovery; testing/advanced)
+    // The converter path is the pilot install root + the per-agent asset subdir
+    // so it resolves in both dev (project root) and installed
+    // (dataDir/versions/<v>) layouts.
     const traePilotDir = this.resolvePilotDir();
-    const traeTrajectoryFile = TraeAgentTrajectoryInput.resolveDefaultTrajectoryFile();
+    const traeListenerCfg = listenerCfg['trae-agent-trajectory'];
+    const traeDefaultDir = TraeAgentTrajectoryInput.getDefaultTrajectoryDir();
+    const traeExplicitFile = traeListenerCfg?.trajectoryFile
+      ? resolveHome(traeListenerCfg.trajectoryFile)
+      : undefined;
+    const traeTrajectoryDir = traeListenerCfg?.trajectoryDir
+      ? resolveHome(traeListenerCfg.trajectoryDir)
+      : traeDefaultDir;
+    // When an explicit file is pinned, poll exactly it (no dir discovery);
+    // otherwise pass the dir as the required fallback path and let
+    // resolveTrajectoryFile() discover the newest match each cycle.
+    const traeWatchDir = traeExplicitFile ? path.dirname(traeExplicitFile) : traeTrajectoryDir;
     const traeConverterPath = path.join(
       traePilotDir,
       'assets',
@@ -1591,21 +1608,22 @@ export class Orchestrator extends EventEmitter {
     );
     const traeAgentTrajectoryInput = new TraeAgentTrajectoryInput({
       stateStore: this.stateStore,
-      trajectoryFile: traeTrajectoryFile,
+      trajectoryFile: traeExplicitFile ?? traeTrajectoryDir,
+      trajectoryDir: traeExplicitFile ? undefined : traeTrajectoryDir,
       converterPath: traeConverterPath,
-      pollIntervalMs: listenerCfg['trae-agent-trajectory']?.pollInterval,
+      pollIntervalMs: traeListenerCfg?.pollInterval,
     });
     this.inputManager.registerInput(traeAgentTrajectoryInput);
     entries.push(
       this.inputManager.buildDetectionEntry(traeAgentTrajectoryInput, {
-        watchPaths: [path.dirname(traeTrajectoryFile)],
-        isAvailable: TraeAgentTrajectoryInput.checkAvailability,
+        watchPaths: [traeWatchDir],
+        isAvailable: async () => directoryExists(traeWatchDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-agent-trajectory']) &&
           this.agentControlManager.resolveEnabled(
             'trae-agent-trajectory',
-            listenerCfg['trae-agent-trajectory']?.enabled ?? true,
+            traeListenerCfg?.enabled ?? true,
           ),
-        pollIntervalMs: listenerCfg['trae-agent-trajectory']?.pollInterval,
+        pollIntervalMs: traeListenerCfg?.pollInterval,
       }),
     );
 

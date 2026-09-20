@@ -55,42 +55,24 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const stateKey = this.id;
+    const trajectoryFile = await this.resolveTrajectoryFile();
+    if (!trajectoryFile) return [];
     let stat: fsSync.Stats;
     try {
-      stat = await fs.stat(this.trajectoryFile);
+      stat = await fs.stat(trajectoryFile);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.logger.warn('trajectory stat failed', { file: this.trajectoryFile, error: String(err) });
+        this.logger.warn('trajectory stat failed', { file: trajectoryFile, error: String(err) });
       }
       return [];
     }
     if (!stat.isFile()) return [];
 
-    const prevState = this.stateStore.get(stateKey);
-    const prevExtra = (prevState.extra ?? {}) as TrajectoryExtra;
-    const prevFingerprint = prevExtra.fingerprint;
-    const currentFp = this.trajectoryFingerprint(stat);
-
-    let sessionReset = false;
-    let seenStepNumbers = new Set<number>(prevExtra.seenStepNumbers ?? []);
-    if (prevFingerprint && prevFingerprint !== currentFp) {
-      const truncated = this.isTruncation(prevFingerprint, currentFp, stat);
-      if (truncated) {
-        this.logger.info('trajectory truncated or replaced, resetting dedup state', {
-          file: this.trajectoryFile,
-          prev: prevFingerprint,
-          current: currentFp,
-        });
-        seenStepNumbers = new Set<number>();
-        sessionReset = true;
-      }
-    }
-
     let raw: string;
     try {
-      raw = await fs.readFile(this.trajectoryFile, 'utf8');
+      raw = await fs.readFile(trajectoryFile, 'utf8');
     } catch (err) {
-      this.logger.warn('trajectory read failed', { file: this.trajectoryFile, error: String(err) });
+      this.logger.warn('trajectory read failed', { file: trajectoryFile, error: String(err) });
       return [];
     }
     if (!raw.trim()) return [];
@@ -99,29 +81,101 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      this.logger.warn('trajectory json parse failed', { file: this.trajectoryFile, error: String(err) });
+      this.logger.warn('trajectory json parse failed', { file: trajectoryFile, error: String(err) });
       return [];
+    }
+
+    const prevState = this.stateStore.get(stateKey);
+    const prevExtra = (prevState.extra ?? {}) as TrajectoryExtra;
+    const prevFingerprint = prevExtra.fingerprint;
+    const currentFp = this.trajectoryFingerprint(stat);
+
+    // P1-3: dedup state is scoped to a LOGICAL RUN, not to the physical file.
+    // trae-agent rewrites its trajectory via `open(path, "w")` (inode stable);
+    // a new run reusing the same configured path can therefore present a larger
+    // file with the same inode, so the size-shrink / inode-change truncation
+    // heuristic alone would keep the previous run's seenStepNumbers and drop
+    // the new run's same-numbered steps (a whole silent turn loss). Derive a
+    // run identity from the trajectory content and reset dedup whenever it
+    // changes, independent of the file fingerprint.
+    const currentRunId = this.deriveRunIdentity(parsed as TrajectoryJson);
+    const prevRunId = prevExtra.runId;
+    const runChanged = Boolean(prevRunId && currentRunId && prevRunId !== currentRunId);
+
+    let sessionReset = false;
+    let seenStepNumbers = new Set<number>(prevExtra.seenStepNumbers ?? []);
+    let runCompletionEmitted = Boolean(prevExtra.runCompletionEmitted);
+    if (runChanged) {
+      this.logger.info('trajectory run identity changed, resetting dedup state', {
+        file: trajectoryFile,
+        prevRunId,
+        currentRunId,
+      });
+      seenStepNumbers = new Set<number>();
+      sessionReset = true;
+      runCompletionEmitted = false;
+    } else if (prevFingerprint && prevFingerprint !== currentFp) {
+      const truncated = this.isTruncation(prevFingerprint, currentFp, stat);
+      if (truncated) {
+        this.logger.info('trajectory truncated or replaced, resetting dedup state', {
+          file: trajectoryFile,
+          prev: prevFingerprint,
+          current: currentFp,
+        });
+        seenStepNumbers = new Set<number>();
+        sessionReset = true;
+        runCompletionEmitted = false;
+      }
     }
 
     const ctx: TrajectoryEmitContext = {
       seenStepNumbers,
       sessionReset,
+      runCompletionEmitted,
       prevFingerprint,
       currentFingerprint: currentFp,
     };
-    const { entries, emittedStepNumbers } = await this.parseTrajectory(parsed as TrajectoryJson, ctx);
+    const { entries, emittedStepNumbers, runCompletionEmitted: terminalEmitted } =
+      await this.parseTrajectory(parsed as TrajectoryJson, ctx);
     for (const n of emittedStepNumbers) seenStepNumbers.add(n);
 
     this.stateStore.update(stateKey, {
       extra: {
         fingerprint: currentFp,
+        runId: currentRunId,
         seenStepNumbers: Array.from(seenStepNumbers).sort((a, b) => a - b),
         sessionReset,
+        runCompletionEmitted: Boolean(terminalEmitted),
         lastProcessedAt: Date.now(),
       },
     } as unknown as Partial<InputState>);
 
     return entries;
+  }
+
+  /**
+   * Resolve the trajectory file to poll this cycle. Defaults to the fixed
+   * `trajectoryFile` from options; subclasses that discover the active file
+   * (e.g. trae-agent's timestamped `trajectory_<ts>.json` in a watched
+   * directory) override this to re-resolve every cycle. Returning an empty
+   * string skips the cycle.
+   */
+  protected async resolveTrajectoryFile(): Promise<string> {
+    return this.trajectoryFile;
+  }
+
+  /**
+   * Derive a stable LOGICAL RUN identity from a freshly-parsed trajectory. The
+   * default keys on `start_time` + `task`, which trae-agent stamps once per run
+   * in start_recording, so a new run reusing the same file path yields a new
+   * identity. Returns '' when neither field is present (identity unknown →
+   * callers must not treat '' as a run change).
+   */
+  protected deriveRunIdentity(json: TrajectoryJson): string {
+    const start = typeof json?.start_time === 'string' ? json.start_time : '';
+    const task = typeof json?.task === 'string' ? json.task : '';
+    if (!start && !task) return '';
+    return `${start}|${task}`;
   }
 
   /**
@@ -164,19 +218,25 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   protected abstract parseTrajectory(
     json: TrajectoryJson,
     ctx: TrajectoryEmitContext,
-  ): Promise<{ entries: AgentActivityEntry[]; emittedStepNumbers: number[] }>;
+  ): Promise<{ entries: AgentActivityEntry[]; emittedStepNumbers: number[]; runCompletionEmitted?: boolean }>;
 }
 
 export interface TrajectoryExtra {
   fingerprint?: string;
+  /** Logical run identity (start_time|task); a change resets dedup (P1-3). */
+  runId?: string;
   seenStepNumbers?: number[];
   sessionReset?: boolean;
+  /** True once the finalize (turn.end) terminal was emitted for this run (P1-2). */
+  runCompletionEmitted?: boolean;
   lastProcessedAt?: number;
 }
 
 export interface TrajectoryEmitContext {
   seenStepNumbers: Set<number>;
   sessionReset: boolean;
+  /** A prior cycle already emitted this run's finalize terminal (P1-2). */
+  runCompletionEmitted: boolean;
   prevFingerprint?: string;
   currentFingerprint: string;
 }
