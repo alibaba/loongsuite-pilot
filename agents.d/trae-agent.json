@@ -8,6 +8,6 @@
   },
   "input": {
     "type": "log-watch-polling",
-    "trajectoryFile": "~/.trae-agent/trajectories/trajectory.json"
+    "trajectoryDir": "~/.trae-agent/trajectories"
   }
 }
