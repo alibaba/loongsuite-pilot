@@ -137,6 +137,8 @@ interface CachedCodexTranscriptMeta {
   lastSeenAtMs: number;
 }
 
+type TranscriptMetaCacheAccess = 'discovery' | 'active';
+
 interface DynamicDirectoryWalkBudget {
   remainingDirectories: number;
   remainingRolloutFiles: number;
@@ -188,6 +190,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
   private readonly transcriptPathByThreadId = new Map<string, string>();
   private readonly transcriptMetaCacheByPath = new Map<string, CachedCodexTranscriptMeta>();
+  private readonly transcriptMetaCacheMaxEntries = MAX_LINK_DESCRIPTORS;
   private readonly transcriptMetaCacheMaxBytes = MAX_CACHED_TRANSCRIPT_META_BYTES;
   private transcriptMetaCacheBytes = 0;
 
@@ -416,11 +419,20 @@ export class CodexTranscriptInput extends BaseInput {
       );
       checkpointChanged = true;
     }
+    const ownerMetaCacheAccess: TranscriptMetaCacheAccess = (
+      checkpoint.scanOffset < stat.size
+      || checkpoint.activeTurn !== null
+      || checkpoint.pendingTerminal !== null
+      || checkpoint.pendingFusion !== null
+      || checkpoint.pendingSubagent !== null
+      || checkpoint.forkBootstrap?.state === 'live-pending'
+    ) ? 'active' : 'discovery';
     await this.registerSubagentOwnerMeta(
       filePath,
       checkpoint.inode,
       stat.size,
       checkpoint.ownerSessionMetaOffset,
+      ownerMetaCacheAccess,
     );
 
     const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
@@ -1023,14 +1035,32 @@ export class CodexTranscriptInput extends BaseInput {
     inode: number,
     fileSize: number,
     ownerSessionMetaOffset: number | null,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
   ): Promise<void> {
     if (ownerSessionMetaOffset === null) return;
+    const indexedMeta = cacheAccess === 'active'
+      && !this.transcriptMetaCacheByPath.has(filePath)
+      ? this.transcriptMetaByPath.get(filePath)
+      : null;
+    if (indexedMeta) {
+      this.rememberTranscriptOwnerMeta(
+        filePath,
+        inode,
+        fileSize,
+        ownerSessionMetaOffset,
+        indexedMeta,
+        'active',
+      );
+      this.publishTranscriptOwnerMeta(filePath, indexedMeta);
+      return;
+    }
     const meta = await this.loadTranscriptOwnerMeta(
       filePath,
       inode,
       fileSize,
       ownerSessionMetaOffset,
       this.getInputRuntimeAccumulator(),
+      cacheAccess,
     );
     if (meta) this.publishTranscriptOwnerMeta(filePath, meta);
   }
@@ -1065,6 +1095,7 @@ export class CodexTranscriptInput extends BaseInput {
         stat.size,
         ownerOffset,
         this.getInputRuntimeAccumulator(),
+        'discovery',
       );
       if (!meta) continue;
       this.publishTranscriptOwnerMeta(filePath, meta);
@@ -1077,13 +1108,16 @@ export class CodexTranscriptInput extends BaseInput {
     fileSize: number,
     ownerSessionMetaOffset: number,
     runtime?: InputRuntimeAccumulator | null,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
   ): Promise<CodexTranscriptMeta | null> {
     const cached = this.transcriptMetaCacheByPath.get(filePath);
     if (cached && reusableCachedTranscriptMeta(cached, inode, fileSize, ownerSessionMetaOffset)) {
       cached.fileSize = fileSize;
       cached.lastSeenAtMs = Date.now();
-      this.transcriptMetaCacheByPath.delete(filePath);
-      this.transcriptMetaCacheByPath.set(filePath, cached);
+      if (cacheAccess === 'active') {
+        this.transcriptMetaCacheByPath.delete(filePath);
+        this.transcriptMetaCacheByPath.set(filePath, cached);
+      }
       return cached.meta;
     }
     if (cached) this.removeTranscriptMetaCacheEntry(filePath);
@@ -1092,7 +1126,14 @@ export class CodexTranscriptInput extends BaseInput {
     const record = await readJsonLineAt(filePath, ownerSessionMetaOffset, runtime);
     const meta = record ? extractCodexTranscriptMeta(record) : null;
     if (!meta) return null;
-    this.rememberTranscriptOwnerMeta(filePath, inode, fileSize, ownerSessionMetaOffset, meta);
+    this.rememberTranscriptOwnerMeta(
+      filePath,
+      inode,
+      fileSize,
+      ownerSessionMetaOffset,
+      meta,
+      cacheAccess,
+    );
     return meta;
   }
 
@@ -1102,10 +1143,23 @@ export class CodexTranscriptInput extends BaseInput {
     fileSize: number,
     ownerSessionMetaOffset: number,
     meta: CodexTranscriptMeta,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
   ): void {
     this.removeTranscriptMetaCacheEntry(filePath);
     const estimatedBytes = estimateCachedTranscriptMetaBytes(filePath, meta);
     if (estimatedBytes > this.transcriptMetaCacheMaxBytes) return;
+    // A periodic inventory scan proves that a transcript still exists, not
+    // that the user is actively using it. Do not let an uncached historical
+    // path evict the small set of sessions that are actually growing.
+    if (
+      cacheAccess === 'discovery'
+      && (
+        this.transcriptMetaCacheByPath.size >= this.transcriptMetaCacheMaxEntries
+        || this.transcriptMetaCacheBytes + estimatedBytes > this.transcriptMetaCacheMaxBytes
+      )
+    ) {
+      return;
+    }
     const cached: CachedCodexTranscriptMeta = {
       inode,
       fileSize,
@@ -1164,7 +1218,7 @@ export class CodexTranscriptInput extends BaseInput {
 
   private trimTranscriptMetaCache(): void {
     while (
-      this.transcriptMetaCacheByPath.size > MAX_LINK_DESCRIPTORS
+      this.transcriptMetaCacheByPath.size > this.transcriptMetaCacheMaxEntries
       || this.transcriptMetaCacheBytes > this.transcriptMetaCacheMaxBytes
     ) {
       const oldest = this.transcriptMetaCacheByPath.keys().next().value as string | undefined;
