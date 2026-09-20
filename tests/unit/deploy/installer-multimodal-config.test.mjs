@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const installerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8');
-const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8');
+const installerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8').replaceAll('\r\n', '\n');
+const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8').replaceAll('\r\n', '\n');
 
 describe('public installer multimodal mode flag', () => {
   it('shell installer accepts --multimodal-mode and writes uploadMode', () => {
