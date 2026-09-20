@@ -28,4 +28,14 @@ describe('Copilot native OTel / transcript contract',()=>{
   spans.push({type:'span',traceId:spans[0].traceId,spanId:'tool-span',startTime:spans[0].endTime,endTime:spans[1].endTime,status:{code:2},attributes:{'gen_ai.operation.name':'execute_tool','gen_ai.conversation.id':'session-test','gen_ai.tool.call.id':'tool-a','error.type':'cancelled'}});
   const records=parseInteractions(events,spans,{requireOtel:true})[0].records;const tool=records.find(r=>r['event.name']==='tool.result');expect(tool['gen_ai.tool.success']).toBe(false);expect(tool['error.type']).toBe('cancelled');expect(tool['gen_ai.tool.call.result']).toBeUndefined();
  });
+ it('retains a provider failure with no assistant output or fabricated usage',()=>{
+  const {events,spans}=conversation();
+  spans[0].status={code:2};spans[0].attributes['error.type']='provider_error';
+  for(const key of Object.keys(spans[0].attributes))if(key.startsWith('gen_ai.usage.'))delete spans[0].attributes[key];
+  spans[1].status={code:2};spans[1].attributes['error.type']='provider_error';
+  const batch=parseInteractions(events.filter(e=>e.type!=='assistant.message'),spans,{requireOtel:true});
+  expect(batch).toHaveLength(1);const response=batch[0].records.find(r=>r['event.name']==='llm.response');
+  expect(response['error.type']).toBe('provider_error');expect(response['gen_ai.usage.input_tokens']).toBeUndefined();expect(response['gen_ai.output.messages']).toBeUndefined();
+ });
+
 });
