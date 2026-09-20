@@ -1,229 +1,144 @@
 // Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
-
-/**
- * CopilotLogInput — polls Copilot CLI session-state event files.
- *
- * Copilot writes one `events.jsonl` per session under
- *   `~/.copilot/session-state/<sessionId>/events.jsonl`
- * (nested layout — Codex is flat `rollout-*.jsonl` — so discoverSessionFiles
- * must be overridden to walk one directory level).
- *
- * The Copilot parser reconstructs STEP/TOOL spans by `data.turnId` +
- * `data.toolCallId`, which requires the whole session file. We therefore
- * override `collect()` to do per-file parsing: on each poll, if a session
- * file has grown, re-parse it whole and emit any newly-observed spans,
- * tracking the last emitted byte offset per file.
- *
- * Best-effort wakeup: hook processor writes a marker to
- *   `~/.loongsuite-pilot/state/copilot/session-wakeups/<sessionId>.json`
- * on each hook event. We discover those markers and ensure the corresponding
- * session-state file is included in the poll cycle even before the file
- * watcher fires.
- */
-
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
-import {
-  BaseSessionInput,
-  type SessionInputOptions,
-} from '../base/base-session-input.js';
-import { parseTranscript, hasSessionShutdown } from '../../../assets/hooks/copilot/transcript-parser.mjs';
+import { resolveDataDir } from '../../utils/data-dir.js';
+import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
+import { parseInteractions } from '../../../assets/hooks/copilot/interaction-parser.mjs';
 
-const DEFAULT_SESSION_DIR = '~/.copilot/session-state';
-const DEFAULT_FILE_PATTERN = '*/events.jsonl';
-const WAKEUP_DIR = '~/.loongsuite-pilot/state/copilot/session-wakeups';
-const SHUTDOWN_TIMEOUT_MS = 5 * 60 * 1000;
-
-export interface CopilotLogInputOptions
-  extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
+const copilotHome = () => process.env.COPILOT_HOME || resolveHome('~/.copilot');
+const READ_BYTES = 4 * 1024 * 1024;
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
+interface CachedFile { inode: number; offset: number; records: any[] }
+export interface CopilotLogInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
   sessionDir?: string;
   filePattern?: string;
-  /** Reserved for parity with CodexTranscriptInput; Copilot spans carry no
-   *  multimodal payload today. Accepted but currently unused. */
+  dataDir?: string;
+  otelDir?: string;
   multimodal?: unknown;
 }
 
+/** Replay source files on restart; checkpoint only complete queued interactions.
+ * Read progress is an in-memory optimization, never evidence of delivery.
+ */
 export class CopilotLogInput extends BaseSessionInput {
   readonly id = 'copilot-log';
   readonly agentType = ClientType.CopilotCli;
   override readonly collectionMethod = CollectionMethod.SessionFilePolling;
+  private readonly otelDir: string;
+  private readonly wakeupDir: string;
+  private readonly cache = new Map<string, CachedFile>();
+  private queuedMarks: Array<{ stateKey: string; keys: string[] }> = [];
+  private watcher?: fsSync.FSWatcher;
 
   constructor(opts: CopilotLogInputOptions) {
-    super({
-      stateStore: opts.stateStore,
-      sessionDir: opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR),
-      filePattern: opts.filePattern ?? DEFAULT_FILE_PATTERN,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
-    });
+    super({ stateStore: opts.stateStore, sessionDir: opts.sessionDir ?? path.join(copilotHome(), 'session-state'),
+      filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: opts.pollIntervalMs ?? 5_000 });
+    const dataDir = opts.dataDir || resolveDataDir();
+    this.otelDir = opts.otelDir || path.join(dataDir, 'state', 'copilot', 'otel');
+    this.wakeupDir = path.join(dataDir, 'state', 'copilot', 'session-wakeups');
   }
-
-  static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome(DEFAULT_SESSION_DIR));
+  static async checkAvailability(): Promise<boolean> { return directoryExists(copilotHome()); }
+  static getWatchPaths(): string[] { return [copilotHome()]; }
+  protected override async onStart(): Promise<void> {
+    await fs.mkdir(this.wakeupDir, { recursive: true, mode: 0o700 });
+    try { this.watcher = fsSync.watch(this.wakeupDir, () => this.requestCollection()); } catch { /* polling fallback */ }
   }
-
-  static getWatchPaths(): string[] {
-    return [resolveHome(DEFAULT_SESSION_DIR)];
-  }
-
+  protected override async onStop(): Promise<void> { this.watcher?.close(); this.watcher = undefined; this.cache.clear(); }
   protected async discoverSessionFiles(): Promise<string[]> {
-    const root = this.sessionDir;
-    const found: string[] = [];
-    let top: string[];
-    try {
-      top = await fs.readdir(root);
-    } catch {
-      return found;
-    }
-    for (const name of top) {
-      const sessionDir = path.join(root, name);
-      let stat;
-      try {
-        stat = await fs.stat(sessionDir);
-      } catch {
-        continue;
-      }
-      if (!stat.isDirectory()) continue;
-      const eventsFile = path.join(sessionDir, 'events.jsonl');
-      try {
-        await fs.access(eventsFile);
-        found.push(eventsFile);
-      } catch {
-        // session directory without events.jsonl — skip
-      }
-    }
-    // Best-effort: also probe wakeup markers to include sessions that the
-    // file watcher has not yet picked up.
-    const wakeupDir = resolveHome(WAKEUP_DIR);
-    try {
-      const markers = await fs.readdir(wakeupDir);
-      for (const marker of markers) {
-        if (!marker.endsWith('.json')) continue;
-        const markerPath = path.join(wakeupDir, marker);
-        let raw;
-        try {
-          raw = await fs.readFile(markerPath, 'utf8');
-        } catch {
-          continue;
-        }
-        let parsed: any = null;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        const sessionId = parsed?.session_id || parsed?.sessionId;
-        if (!sessionId) continue;
-        const eventsFile = path.join(root, String(sessionId), 'events.jsonl');
-        if (!found.includes(eventsFile)) {
-          try {
-            await fs.access(eventsFile);
-            found.push(eventsFile);
-          } catch {
-            // marker exists but session file no longer present
-          }
-        }
-      }
-    } catch {
-      // wakeup directory absent — normal on first run
-    }
-    return found;
+    const names = await fs.readdir(this.sessionDir, { withFileTypes: true });
+    return names.filter(n => n.isDirectory()).map(n => path.join(this.sessionDir, n.name, 'events.jsonl'));
   }
+  protected async processSessionLine(): Promise<AgentActivityEntry | null> { return null; }
 
-  protected async processSessionLine(
-    _record: Record<string, unknown>,
-    _filePath: string,
-  ): Promise<AgentActivityEntry | null> {
-    // Copilot spans are reconstructed at the session-file level by
-    // parseTranscript (the parser needs the whole file to join
-    // permission.requested/completed across events by toolCallId). Per-line
-    // emission is intentionally a no-op.
-    return null;
+  private async readComplete(file: string): Promise<{ records: any[]; complete: boolean }> {
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) throw new Error('Copilot source exceeds 64 MiB per-file limit');
+    let cache = this.cache.get(file);
+    if (!cache || cache.inode !== Number(stat.ino) || stat.size < cache.offset) {
+      cache = { inode: Number(stat.ino), offset: 0, records: [] }; this.cache.set(file, cache);
+    }
+    if (stat.size > cache.offset) {
+      const handle = await fs.open(file, 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(READ_BYTES, stat.size - cache.offset));
+        const { bytesRead } = await handle.read(buf, 0, buf.length, cache.offset);
+        const end = buf.subarray(0, bytesRead).lastIndexOf(10);
+        if (end >= 0) {
+          const parsed: any[] = [];
+          for (const line of buf.subarray(0, end + 1).toString('utf8').split('\n')) {
+            if (!line.trim()) continue;
+            const record = JSON.parse(line); // never advance past an invalid complete line
+            if (record && typeof record === 'object' && !Array.isArray(record)) parsed.push(record);
+          }
+          cache.records.push(...parsed);
+          cache.offset += end + 1;
+        }
+      } finally { await handle.close(); }
+    }
+    return { records: cache.records, complete: cache.offset === stat.size };
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
-    const files = await this.discoverSessionFiles();
-    const entries: AgentActivityEntry[] = [];
-    for (const filePath of files) {
-      try {
-        entries.push(...(await this.processSessionFile(filePath)));
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM') continue;
-        this.logger.warn('copilot session file parse failed', {
-          file: filePath,
-          error: String(err),
-        });
-      }
+    this.queuedMarks = [];
+    let files: string[];
+    try { files = await this.discoverSessionFiles(); } catch { return []; }
+    // Only prune state after a complete directory enumeration and definite deletion.
+    for (const key of this.stateStore.keys().filter(k => k.startsWith(`${this.id}:v2:`))) {
+      const file = key.slice(`${this.id}:v2:`.length);
+      if (!files.includes(file)) { this.stateStore.delete(key); this.cache.delete(file); }
     }
+    const otelFiles = new Set<string>();
+    try { for (const n of await fs.readdir(this.otelDir)) if (n.endsWith('.jsonl')) otelFiles.add(path.join(this.otelDir, n)); } catch { /* first launch */ }
+    const externalOtel = new Map<string, string>();
+    const markerSessions = new Set<string>();
+    const managedOtel = fsSync.existsSync(path.join(this.otelDir, '..', 'otel-enabled'));
+    try {
+      for (const name of await fs.readdir(this.wakeupDir)) {
+        if (!name.endsWith('.json')) continue;
+        try {
+          const marker = JSON.parse(await fs.readFile(path.join(this.wakeupDir, name), 'utf8'));
+          if (typeof marker.session_id === 'string') markerSessions.add(marker.session_id);
+          if (typeof marker.otel_file === 'string' && path.isAbsolute(marker.otel_file) && typeof marker.session_id === 'string') {
+            externalOtel.set(marker.session_id, marker.otel_file); otelFiles.add(marker.otel_file);
+          }
+        } catch { /* markers are advisory */ }
+      }
+    } catch { /* no hooks yet */ }
+    const native: any[] = [];
+    for (const file of otelFiles) {
+      try { native.push(...(await this.readComplete(file)).records); }
+      catch (err) { this.logger.warn('Copilot OTel source unavailable; retaining transcript', { file, error: String(err) }); }
+    }
+    const entries: AgentActivityEntry[] = [];
+    // Bound the number of active cached files; do not silently evict unread sources.
+    for (const file of files) {
+      try {
+        const snapshot = await this.readComplete(file);
+        if (!snapshot.complete) continue;
+        const sid = snapshot.records.find(e => e.type === 'session.start')?.data?.sessionId;
+        const requireOtel = (managedOtel && !markerSessions.has(sid)) || externalOtel.has(sid) || native.some(s => s.attributes?.['gen_ai.conversation.id'] === sid);
+        const stateKey = `${this.id}:v2:${file}`;
+        const done = new Set(this.stateStore.get(stateKey).extra?.interactions as string[] || []);
+        const batches = parseInteractions(snapshot.records, native, { requireOtel });
+        const fresh = batches.filter(b => !done.has(b.key));
+        if (fresh.length) {
+          entries.push(...fresh.flatMap(b => b.records));
+          this.queuedMarks.push({ stateKey, keys: [...done, ...fresh.map(b => b.key)] });
+        }
+      } catch (err) { this.logger.warn('Copilot source unavailable; checkpoint retained', { file, error: String(err) }); }
+    }
+    // Cache is only an optimization: eviction replays source and the queued
+    // interaction ledger prevents duplicate delivery. No file is skipped.
+    while (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value!);
     return entries;
   }
-
-  private async processSessionFile(filePath: string): Promise<AgentActivityEntry[]> {
-    const stateKey = `${this.id}:${filePath}`;
-    let stat;
-    try {
-      stat = await fs.stat(filePath);
-    } catch {
-      return [];
-    }
-    const prevOffset = this.stateStore.getOffset(stateKey);
-    if (prevOffset >= stat.size) {
-      return this.maybeFlushTimeoutBuffer(stateKey);
-    }
-
-    let parsed: AgentActivityEntry[] = [];
-    try {
-      parsed = parseTranscript(filePath);
-    } catch (err) {
-      this.logger.warn('copilot parseTranscript failed', {
-        file: filePath,
-        error: String(err),
-      });
-      return [];
-    }
-    this.stateStore.setOffset(stateKey, stat.size);
-    this.stateStore.update(stateKey, { extra: { inode: Number(stat.ino) } });
-
-    let hasShutdown = false;
-    try {
-      hasShutdown = hasSessionShutdown(filePath);
-    } catch {
-      hasShutdown = false;
-    }
-
-    const now = Date.now();
-    const existing = this.sessionBuffers.get(stateKey);
-    const firstSeenMs = existing ? existing.firstSeenMs : now;
-    this.sessionBuffers.set(stateKey, { records: parsed, firstSeenMs });
-
-    if (hasShutdown) {
-      this.sessionBuffers.delete(stateKey);
-      return parsed;
-    }
-    if (now - firstSeenMs >= SHUTDOWN_TIMEOUT_MS) {
-      this.sessionBuffers.delete(stateKey);
-      return parsed;
-    }
-    return [];
+  protected override onEntriesQueued(): void {
+    for (const mark of this.queuedMarks) this.stateStore.update(mark.stateKey, { extra: { interactions: mark.keys } });
+    this.queuedMarks = [];
   }
-
-  private maybeFlushTimeoutBuffer(stateKey: string): AgentActivityEntry[] {
-    const buf = this.sessionBuffers.get(stateKey);
-    if (!buf) return [];
-    const now = Date.now();
-    if (now - buf.firstSeenMs < SHUTDOWN_TIMEOUT_MS) return [];
-    this.sessionBuffers.delete(stateKey);
-    return buf.records;
-  }
-
-  private readonly sessionBuffers = new Map<
-    string,
-    { records: AgentActivityEntry[]; firstSeenMs: number }
-  >();
 }

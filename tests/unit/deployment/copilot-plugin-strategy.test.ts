@@ -99,7 +99,7 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'copilot-plugin-'));
-    strategy = new CopilotPluginStrategy();
+    strategy = new CopilotPluginStrategy({ homeDir: tmpDir, dataDir: path.join(tmpDir, 'pilot data') });
     pluginRoot = path.join(tmpDir, 'installed-plugins', 'loongsuite-pilot', 'loongsuite-pilot');
     settingsPath = path.join(tmpDir, '.copilot', 'settings.json');
     configPath = path.join(tmpDir, '.copilot', 'config.json');

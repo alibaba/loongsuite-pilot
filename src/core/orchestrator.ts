@@ -1411,6 +1411,7 @@ export class Orchestrator extends EventEmitter {
     // --- Copilot CLI (session events.jsonl polling) ---
     const copilotLogInput = new CopilotLogInput({
       stateStore: this.stateStore,
+      dataDir: this.config.dataDir,
     });
     this.inputManager.registerInput(copilotLogInput);
     entries.push(

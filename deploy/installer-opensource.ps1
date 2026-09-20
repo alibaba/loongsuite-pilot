@@ -3244,6 +3244,40 @@ function Remove-DshYamlPatch {
 # ============================================================
 # CMD: uninstall
 # ============================================================
+function Remove-CopilotPlugin {
+    $copilotHome = Join-Path $env:USERPROFILE '.copilot'
+    $cleaned = $true
+    foreach ($name in @('settings.json', 'config.json')) {
+        $file = Join-Path $copilotHome $name
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        try {
+            $data = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+            $changed = $false
+            if ($data.enabledPlugins -and $data.enabledPlugins.PSObject.Properties['loongsuite-pilot@loongsuite-pilot']) {
+                $data.enabledPlugins.PSObject.Properties.Remove('loongsuite-pilot@loongsuite-pilot'); $changed = $true
+            }
+            if ($null -ne $data.installedPlugins) {
+                $next = @($data.installedPlugins | Where-Object { -not ($_.name -eq 'loongsuite-pilot' -and $_.marketplace -eq 'loongsuite-pilot') })
+                if ($next.Count -ne @($data.installedPlugins).Count) { $data.installedPlugins = $next; $changed = $true }
+            }
+            if ($changed) { [System.IO.File]::WriteAllText($file, ($data | ConvertTo-Json -Depth 100)) }
+        } catch { $cleaned = $false; Write-Warning "Copilot config cleanup skipped: $file" }
+    }
+    if ($cleaned) { Remove-Item -LiteralPath (Join-Path $copilotHome 'installed-plugins/loongsuite-pilot/loongsuite-pilot') -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-CopilotOtelEnvironment {
+    foreach ($relative in @('Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1')) {
+        $profilePath = Join-Path $env:USERPROFILE $relative
+        if (Test-Path -LiteralPath $profilePath) {
+            $before = [System.IO.File]::ReadAllText($profilePath)
+            $after = [regex]::Replace($before, '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n")
+            if ($before -ne $after) { [System.IO.File]::WriteAllText($profilePath, $after, (New-Object System.Text.UTF8Encoding($false))) }
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $DATA_DIR 'state/copilot/otel-enabled') -Force -ErrorAction SilentlyContinue
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -3296,6 +3330,8 @@ function Cmd-Uninstall {
     # pinned runtime can disappear, matching the POSIX uninstall ordering.
     Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
     Remove-GrokBuildHookConfig
+    Remove-CopilotOtelEnvironment
+    Remove-CopilotPlugin
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."

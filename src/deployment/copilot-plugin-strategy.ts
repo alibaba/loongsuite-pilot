@@ -12,6 +12,8 @@ import { ensureDir, resolveHome, fileExists } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
+import { installCopilotShellIntegration, needsCopilotShellIntegration, removeCopilotShellIntegration } from './copilot-shell-integration.js';
+
 const logger = createLogger('CopilotPluginStrategy');
 
 const DEFAULT_PLUGIN_NAME = 'loongsuite-pilot';
@@ -180,6 +182,8 @@ export function buildPluginHooksJson(
  * by Copilot itself without user-authored comments).
  */
 export class CopilotPluginStrategy implements DeployStrategy {
+  constructor(private readonly options: { homeDir?: string; dataDir?: string } = {}) {}
+  private dataDir(cfg: CopilotPluginHookConfig): string { return this.options.dataDir || path.dirname(path.dirname(cfg.hookCommand)); }
   async detect(def: AgentDefinition): Promise<boolean> {
     return detectAgent(def.detection);
   }
@@ -215,6 +219,8 @@ export class CopilotPluginStrategy implements DeployStrategy {
       if (entries[0].command !== expectedCmd) return true;
     }
 
+    if (await needsCopilotShellIntegration(this.dataDir(cfg), this.options.homeDir)) return true;
+
     // settings.json enabledPlugins must contain the plugin id (object map form)
     const settingsPath = resolveHome(cfg.settingsPath);
     const settings = readJsoncSync<Record<string, unknown>>(settingsPath);
@@ -246,6 +252,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
 
       await this.registerInSettings(cfg);
       await this.registerInConfig(cfg);
+      await installCopilotShellIntegration(this.dataDir(cfg), this.options.homeDir);
 
       logger.info('copilot plugin deployed', {
         agentId: def.id,
@@ -263,6 +270,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
     if (!cfg) return true;
 
     let ok = true;
+    try { await removeCopilotShellIntegration(this.dataDir(cfg), this.options.homeDir); } catch { ok = false; }
     try {
       const pluginRoot = resolveHome(cfg.pluginRoot);
       await fs.rm(pluginRoot, { recursive: true, force: true });

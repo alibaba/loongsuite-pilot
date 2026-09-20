@@ -1,111 +1,46 @@
-// Copyright 2026 Alibaba Group Holding Limited
-// SPDX-License-Identifier: Apache-2.0
-
 import { afterEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs/promises';
-import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CopilotLogInput } from '../../../../src/inputs/copilot-log/copilot-log-input.js';
-import type { AgentActivityEntry } from '../../../../src/types/index.js';
-
-const tempDirs: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
-});
-
-// Fixture source: tests/unit/hooks/copilot/fixtures/events-session2.jsonl
-// — real Copilot CLI v1.0.86 session capture by pilot-researcher-v2.
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES = path.join(__dirname, '..', '..', 'hooks', 'copilot', 'fixtures');
-const SESSION2 = path.join(FIXTURES, 'events-session2.jsonl');
-
-function readRawEvents(filePath: string): any[] {
-  return fsSync.readFileSync(filePath, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
+const dirs:string[]=[];
+afterEach(async()=>{await Promise.all(dirs.splice(0).map(d=>fs.rm(d,{recursive:true,force:true})));});
+const lines=(xs:any[])=>xs.map(x=>JSON.stringify(x)).join('\n')+'\n';
+async function setup(){
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'copilot-hybrid-'));dirs.push(dir);
+ const sessions=path.join(dir,'sessions');const session=path.join(sessions,'session-test');const otel=path.join(dir,'otel');await fs.mkdir(session,{recursive:true});await fs.mkdir(otel);
+ const stateFile=path.join(dir,'state.json');const state=new StateStore(stateFile);await state.load();
+ const input=new CopilotLogInput({stateStore:state,sessionDir:sessions,dataDir:dir,otelDir:otel});
+ return {dir,sessions,session,otel,stateFile,state,input,file:path.join(session,'events.jsonl'),native:path.join(otel,'native.jsonl')};
 }
-
-async function makeInput(sessionDir: string): Promise<CopilotLogInput> {
-  const stateFile = path.join(sessionDir, 'state.json');
-  const stateStore = new StateStore(stateFile);
-  await stateStore.load();
-  return new CopilotLogInput({ stateStore, sessionDir });
-}
-
-async function writeSession(sessionDir: string, sessionId: string, events: any[]): Promise<string> {
-  const sessionDirFull = path.join(sessionDir, sessionId);
-  await fs.mkdir(sessionDirFull, { recursive: true });
-  const eventsFile = path.join(sessionDirFull, 'events.jsonl');
-  await fs.writeFile(eventsFile, events.map(e => JSON.stringify(e)).join('\n') + '\n');
-  return eventsFile;
-}
-
-async function callCollect(input: CopilotLogInput): Promise<AgentActivityEntry[]> {
-  const collect = (input as unknown as { collect: () => Promise<AgentActivityEntry[]> }).collect.bind(input);
-  return collect();
-}
-
-describe('CopilotLogInput — CP5 v8 Bug #3: session.shutdown gate with 5-min timeout', () => {
-  it('partial poll (no session.shutdown) → emits zero records; buffer holds them', async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'copi-v8-'));
-    tempDirs.push(tmp);
-    const input = await makeInput(tmp);
-    const raw = readRawEvents(SESSION2);
-    const stripped = raw.filter(e => e.type !== 'session.shutdown');
-    await writeSession(tmp, 'sess-1', stripped);
-
-    const out1 = await callCollect(input);
-    expect(out1.length).toBe(0);
-    // Buffer should be holding records (STEP/LLM/TOOL would have been emitted
-    // if not gated). Inspect via private map.
-    const buffers = (input as unknown as { sessionBuffers: Map<string, { records: AgentActivityEntry[] }> }).sessionBuffers;
-    expect(buffers.size).toBe(1);
-    for (const buf of buffers.values()) {
-      expect(buf.records.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('session.shutdown present → emits all records on first poll', async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'copi-v8-'));
-    tempDirs.push(tmp);
-    const input = await makeInput(tmp);
-    const raw = readRawEvents(SESSION2);
-    await writeSession(tmp, 'sess-1', raw);
-
-    const out1 = await callCollect(input);
-    expect(out1.length).toBeGreaterThan(0);
-    // At least one ENTRY record (event.name='other' + gen_ai.session.start_time)
-    const entryAgent = out1.filter(e => typeof e['gen_ai.session.start_time'] === 'string'
-      && e['gen_ai.turn.start'] === undefined);
-    expect(entryAgent.length).toBeGreaterThanOrEqual(1);
-    // Buffer cleared after shutdown flush
-    const buffers = (input as unknown as { sessionBuffers: Map<string, { records: AgentActivityEntry[] }> }).sessionBuffers;
-    expect(buffers.size).toBe(0);
-  });
-
-  it('partial poll → next poll appends shutdown line → emits all records (re-parse)', async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'copi-v8-'));
-    tempDirs.push(tmp);
-    const input = await makeInput(tmp);
-    const raw = readRawEvents(SESSION2);
-    const stripped = raw.filter(e => e.type !== 'session.shutdown');
-    const eventsFile = await writeSession(tmp, 'sess-1', stripped);
-
-    const out1 = await callCollect(input);
-    expect(out1.length).toBe(0);
-
-    // Append shutdown event (simulating the file growing mid-session)
-    const shutdownEvent = raw.find(e => e.type === 'session.shutdown');
-    expect(shutdownEvent).toBeDefined();
-    await fs.appendFile(eventsFile, JSON.stringify(shutdownEvent) + '\n');
-
-    // Second poll: file grew, re-parse, shutdown now present → emit all
-    const out2 = await callCollect(input);
-    expect(out2.length).toBeGreaterThan(0);
-    const entryAgent = out2.filter(e => typeof e['gen_ai.session.start_time'] === 'string'
-      && e['gen_ai.turn.start'] === undefined);
-    expect(entryAgent.length).toBeGreaterThanOrEqual(1);
-  });
+const collect=(i:CopilotLogInput)=>(i as any).collect();
+const queued=(i:CopilotLogInput)=>(i as any).onEntriesQueued();
+describe('Copilot incremental recovery',()=>{
+ it('reconstructs read-but-not-queued data after restart',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));
+  const first=await collect(x.input);expect(first.length).toBeGreaterThan(0);await x.state.save();
+  const restored=new StateStore(x.stateFile);await restored.load();const next=new CopilotLogInput({stateStore:restored,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel});
+  expect((await collect(next)).map((r:any)=>r['event.id'])).toEqual(first.map((r:any)=>r['event.id']));
+  queued(next);await restored.save();const third=new CopilotLogInput({stateStore:restored,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel});expect(await collect(third)).toEqual([]);
+ });
+ it('does not emit a pending interaction before native root arrival',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans.slice(0,1)));expect(await collect(x.input)).toEqual([]);
+  await x.state.save();const next=new CopilotLogInput({stateStore:x.state,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel});await fs.appendFile(x.native,lines(f.spans.slice(1)));expect((await collect(next)).length).toBeGreaterThan(0);
+ });
+ it('appends only the next interaction and then a separate shutdown summary',async()=>{
+  const x=await setup(),a=conversation(),b=conversation({interaction:'interaction-b',base:10});await fs.writeFile(x.file,lines(a.events));await fs.writeFile(x.native,lines(a.spans));await collect(x.input);queued(x.input);
+  await fs.appendFile(x.file,lines(b.events.slice(1)));await fs.appendFile(x.native,lines(b.spans));const second=await collect(x.input);expect(second.every((r:any)=>r['gen_ai.copilot.interaction.id']==='interaction-b')).toBe(true);queued(x.input);
+  await fs.appendFile(x.file,lines([{type:'session.shutdown',id:'s-end',timestamp:'2026-09-01T00:00:30Z',data:{modelMetrics:{model:{usage:{inputTokens:200}}}}}]));const summary=await collect(x.input);expect(summary).toHaveLength(1);expect(summary[0]['gen_ai.copilot.session_summary']).toBe(true);queued(x.input);expect(await collect(x.input)).toEqual([]);
+ });
+ it('retains state across missing directory and partial line',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));await collect(x.input);queued(x.input);await x.state.save();
+  await fs.rename(x.sessions,x.sessions+'-away');expect(await collect(x.input)).toEqual([]);expect(x.state.keys().length).toBe(1);await fs.rename(x.sessions+'-away',x.sessions);
+  const b=conversation({interaction:'interaction-b',base:10});const text=lines(b.events.slice(1));await fs.appendFile(x.file,text.slice(0,-2));await fs.appendFile(x.native,lines(b.spans));expect(await collect(x.input)).toEqual([]);await fs.appendFile(x.file,text.slice(-2));expect((await collect(x.input)).length).toBeGreaterThan(0);
+ });
+ it('handles replaced native files without replaying queued interactions',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));await collect(x.input);queued(x.input);
+  await fs.rename(x.native,x.native+'.old');await fs.writeFile(x.native,lines(f.spans));expect(await collect(x.input)).toEqual([]);
+ });
 });

@@ -707,6 +707,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    // Session totals are independent log events, not a new trace or late turn update.
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -895,6 +897,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -1322,6 +1325,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
     spans: ReadableSpan[],
     records: AgentActivityEntry[],
   ): void {
+    const interactionError = records.find(r => r['gen_ai.copilot.interaction.error'])?.['gen_ai.copilot.interaction.error'];
+    if (interactionError) for (const span of spans) {
+      if (span.attributes['gen_ai.operation.name'] === 'invoke_agent') {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = interactionError;
+      }
+    }
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response' || !record['error.type']) continue;
+      const span = spans.find(s => s.attributes['gen_ai.response.id'] === record['gen_ai.response.id']);
+      if (span) {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = record['error.type'];
+      }
+    }
     const ENTRY_ATTR_KEYS = [
       'gen_ai.session.usage.input_tokens',
       'gen_ai.session.usage.output_tokens',
@@ -1416,6 +1434,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (typeof callId !== 'string' || !callId) continue;
         const span = toolSpans.find(s => s.attributes['gen_ai.tool.call.id'] === callId);
         if (!span) continue;
+        if (rec['gen_ai.tool.success'] === false) {
+          (span as any).status = { code: 2 };
+          (span.attributes as Record<string, unknown>)['error.type'] = rec['error.type'] || rec['error.code'] || 'tool_error';
+        }
         for (const key of TOOL_ATTR_KEYS) {
           const v = (rec as Record<string, unknown>)[key];
           if (v !== undefined && v !== null) {

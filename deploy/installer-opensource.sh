@@ -1524,6 +1524,46 @@ INTERCEPTBLOCK
     echo ""
 }
 
+# Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
+remove_copilot_plugin() {
+    command -v node >/dev/null 2>&1 || return 0
+    node - "$HOME/.copilot" <<'COPILOT_CLEANUP'
+const fs = require('fs'), path = require('path');
+const home = process.argv[2];
+let ok = true;
+for (const name of ['settings.json', 'config.json']) {
+  const file = path.join(home, name);
+  if (!fs.existsSync(file)) continue;
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    let changed = false;
+    if (data.enabledPlugins && Object.hasOwn(data.enabledPlugins, 'loongsuite-pilot@loongsuite-pilot')) {
+      delete data.enabledPlugins['loongsuite-pilot@loongsuite-pilot']; changed = true;
+    }
+    if (Array.isArray(data.installedPlugins)) {
+      const next = data.installedPlugins.filter(p => !(p?.name === 'loongsuite-pilot' && p?.marketplace === 'loongsuite-pilot'));
+      if (next.length !== data.installedPlugins.length) { data.installedPlugins = next; changed = true; }
+    }
+    if (changed) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
+  } catch { ok = false; console.error('Copilot config cleanup skipped: ' + file); }
+}
+if (ok) fs.rmSync(path.join(home, 'installed-plugins/loongsuite-pilot/loongsuite-pilot'), {recursive:true,force:true});
+COPILOT_CLEANUP
+}
+
+remove_copilot_otel_environment() {
+    local file
+    for file in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$file" ] || continue
+        local tmp="${file}.pilot-copilot-$$.tmp"
+        if sed '/^# >>> loongsuite-pilot copilot otel >>>$/,/^# <<< loongsuite-pilot copilot otel <<<$/{d;}' "$file" > "$tmp"; then
+            cat "$tmp" > "$file"
+        fi
+        rm -f "$tmp"
+    done
+    rm -f "$DATA_DIR/state/copilot/otel-enabled"
+}
+
 remove_claude_code_fetch_intercept() {
     for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
@@ -2883,6 +2923,8 @@ cmd_uninstall() {
     remove_qoderclicn_token_intercept
     retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
+    remove_copilot_otel_environment
+    remove_copilot_plugin
     echo ""
 
     # Remove OTel Claude plugin

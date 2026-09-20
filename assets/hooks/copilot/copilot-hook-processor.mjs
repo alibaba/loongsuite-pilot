@@ -4,8 +4,7 @@
 /**
  * Copilot (GitHub Copilot CLI) Hook entry point.
  *
- * Copilot's events.jsonl is the single telemetry source of truth (parsed by
- * transcript-parser.mjs). The hook processor only writes an atomic wakeup
+ * Copilot's transcript and native OTel file are correlated by the input. The hook processor only writes an atomic wakeup
  * marker per session so the session-file poller can discover task-scoped
  * session roots promptly. It never parses a transcript, never writes
  * telemetry JSONL, and never throws — fail-open means stdout is always '{}'
@@ -35,6 +34,7 @@ const ROUTABLE_SUBCOMMANDS = new Set([
   'post-tool-use-failure',
   'session-end',
   'stop',
+  'agent-stop',
 ]);
 
 function pilotDataDir() {
@@ -66,8 +66,8 @@ function writeAtomicJson(directory, fileName, payload) {
   const marker = path.join(directory, fileName);
   const temporary = path.join(directory, `.${fileName}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(temporary, JSON.stringify(payload), 'utf8');
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temporary, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
     try {
       fs.renameSync(temporary, marker);
     } catch (renameError) {
@@ -122,7 +122,8 @@ function writeWakeupMarker(input, hookEvent) {
     ...(interactionId ? { interaction_id: interactionId } : {}),
     ...(cwd ? { cwd } : {}),
     hook_event: hookEvent,
-    copilot_session_dir: path.join(os.homedir(), '.copilot', 'session-state', sessionId),
+    copilot_session_dir: path.join(process.env.COPILOT_HOME || path.join(os.homedir(), '.copilot'), 'session-state', sessionId),
+    otel_file: process.env.COPILOT_OTEL_FILE_EXPORTER_PATH || undefined,
     received_at: new Date().toISOString(),
   };
   writeAtomicJson(directory, fileName, payload);
