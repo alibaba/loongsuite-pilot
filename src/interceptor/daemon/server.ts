@@ -10,6 +10,7 @@ import { RuleEngine } from '../rules/engine.js';
 import {
   INTERCEPTOR_SERVICE,
   SUPPORTED_HOOK_EVENTS,
+  isInterceptorAgent,
   type EvaluateHookResponse,
   type HookRequest,
   type InterceptorHealth,
@@ -93,7 +94,7 @@ function isHookRequest(value: unknown): value is HookRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const req = value as HookRequest;
   return (SUPPORTED_HOOK_EVENTS as readonly string[]).includes(req.event)
-    && (req.agent === 'qoder' || req.agent === 'qodercli');
+    && isInterceptorAgent(req.agent);
 }
 
 async function readJson<T>(req: http.IncomingMessage): Promise<T> {

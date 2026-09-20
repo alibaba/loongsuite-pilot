@@ -24,6 +24,21 @@ dist/interceptor/cli.cjs  hook --agent qoder-auto
 顺序规则引擎（首个 block 短路）
 ```
 
+OpenClaw 不走 stdin command hook：采集插件在进程内调用同一 daemon。
+
+```
+OpenClaw Gateway（≥ 2026.5.12）
+        │ api.on(before_agent_run / before_tool_call / tool_result_persist)
+        ▼
+assets/plugins/openclaw/plugin.mjs
+        │ 采集 JSONL 之后，进程内问 daemon（4s；runtime 缺失则静默 fail-open）
+        ▼
+共享 interceptor daemon（127.0.0.1）
+        │
+        ▼
+{ outcome:"block" } / { block:true, blockReason } / { message }
+```
+
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）
@@ -58,6 +73,20 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 正常放行、未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错一律 **fail-open**：`exit 0` 且 stdout 为空。每次判定（拦截 / 放行 / fail-open）写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，至少包含 `event`（hook 类型）、`input`（请求输入）、`result`（判定结果）。运维日志仍在 `interceptor/logs/interceptor.log`。
 
 Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 请求 daemon 的超时是 4 秒。
+
+## OpenClaw 协议
+
+OpenClaw 是 `plugin-inject`，不能安装第二条 `interceptor-hook.sh`。拦截判定复用采集插件，只覆盖现代 adapter（OpenClaw ≥ 2026.5.12）。3.8 legacy 路径保持 sync/void，不拦截。
+
+| OpenClaw hook | 对应 interceptor 事件 | 拦截信号 |
+|---------------|----------------------|----------|
+| `before_agent_run` | `UserPromptSubmit` | `{ outcome: "block", reason, message }`。`reason` 是内部原因（如 `[APIKEY_MASKED]`），`message` 是包装后的用户可见文本 |
+| `before_tool_call` | `PreToolUse` | `{ block: true, blockReason }` |
+| `tool_result_persist` | `PostToolUse` | `{ message }`，替换回写给模型的工具结果。该 hook 必须同步，因此走 `interceptor-cli hook --agent openclaw` 的 spawnSync |
+
+daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 **fail-closed**，所以插件在 4 秒内 abort 并 fail-open，避免落到宿主 15 秒默认超时。interceptor runtime 缺失时静默放行，不写 access.log（采集插件始终在跑，不能把「未启用拦截」当成失败刷屏）。
+
+规则 reason 的中文包装与 Qoder 相同。CLI `--agent openclaw` 用于同步 persist 路径和单测。
 
 ## 规则开关
 
@@ -111,8 +140,8 @@ loongsuite-pilot start-interceptor
 1. 在 `src/interceptor/adapters/` 增加 adapter：解析宿主 stdin、渲染该宿主的 block JSON。
 2. 如需自动识别运行面，扩展 CLI `--agent` 与 surface 解析。
 3. 实现 `LocalRule` 并注册到 `builtinRules()`。
-4. 在对应 `agents.d/*.json` 增加独立的 `hook.interceptor` 声明（events、command、timeout、`insert: "head"`），不要改采集 `hookCommand`。
-5. 补测试：开关、顺序、短路、该宿主的精确 stdout、fail-open。
+4. Hook 型 Agent：在对应 `agents.d/*.json` 增加独立的 `hook.interceptor` 声明（events、command、timeout、`insert: "head"`），不要改采集 `hookCommand`。插件型 Agent（如 OpenClaw）：在采集插件里对接同一 daemon，不要假装再装一条 command hook。
+5. 补测试：开关、顺序、短路、该宿主的精确 stdout / 插件返回值、fail-open。
 
 ## 排障
 

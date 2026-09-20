@@ -1,10 +1,16 @@
 export const SUPPORTED_HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'] as const;
 export type HookEventName = (typeof SUPPORTED_HOOK_EVENTS)[number];
+export const INTERCEPTOR_AGENTS = ['qoder', 'qodercli', 'openclaw'] as const;
+export type InterceptorAgent = (typeof INTERCEPTOR_AGENTS)[number];
 export type QoderSurface = 'qoder' | 'qodercli';
 export type VerdictAction = 'allow' | 'block';
 
+export function isInterceptorAgent(value: unknown): value is InterceptorAgent {
+  return value === 'qoder' || value === 'qodercli' || value === 'openclaw';
+}
+
 export interface HookRequest {
-  agent: QoderSurface;
+  agent: InterceptorAgent;
   event: HookEventName;
   sessionId?: string;
   transcriptPath?: string;

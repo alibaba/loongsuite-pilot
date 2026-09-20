@@ -24,6 +24,8 @@ describe('interceptor daemon HTTP API', () => {
       supports: () => true,
       evaluate: async (request) => (
         request.prompt === 'secret'
+          || (request.toolInput && typeof request.toolInput === 'object'
+            && (request.toolInput as { command?: string }).command === 'secret')
           ? { matched: true, reason: 'blocked by demo' }
           : { matched: false }
       ),
@@ -79,7 +81,24 @@ describe('interceptor daemon HTTP API', () => {
         ruleId: 'demo',
       });
 
-      expect(access).toHaveLength(2);
+      const openclaw = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent: 'openclaw',
+          event: 'PreToolUse',
+          toolName: 'exec',
+          toolInput: { command: 'secret' },
+          raw: { openclaw_hook: 'before_tool_call' },
+        }),
+      });
+      await expect(openclaw.json()).resolves.toMatchObject({
+        action: 'block',
+        reason: 'blocked by demo',
+        ruleId: 'demo',
+      });
+
+      expect(access).toHaveLength(3);
       expect(access[0]).toMatchObject({
         event: 'PostToolUse',
         input: { prompt: 'hello', toolName: 'Bash', toolResponse: { stdout: 'ok' } },
@@ -88,6 +107,11 @@ describe('interceptor daemon HTTP API', () => {
       expect(access[1]).toMatchObject({
         event: 'UserPromptSubmit',
         input: { prompt: 'secret' },
+        result: { action: 'block', reason: 'blocked by demo', ruleId: 'demo' },
+      });
+      expect(access[2]).toMatchObject({
+        event: 'PreToolUse',
+        agent: 'openclaw',
         result: { action: 'block', reason: 'blocked by demo', ruleId: 'demo' },
       });
     } finally {

@@ -42,7 +42,7 @@
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [临时异常下的 Checkpoint](docs/zh-CN/agent-onboarding.md#临时异常下的-checkpoint) |
 | 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [安装与服务管理](docs/zh-CN/installation.md) |
-| 本地拦截 | `src/interceptor/` | Qoder Desktop/CLI 同步拦截 hook + 机器级共享 daemon | [本地拦截](docs/zh-CN/interceptor.md) |
+| 本地拦截 | `src/interceptor/` | Qoder Desktop/CLI 同步拦截 hook + OpenClaw 插件内拦截 + 机器级共享 daemon | [本地拦截](docs/zh-CN/interceptor.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 本地 Dashboard | `src/dashboard/` + `src/status-bar/metrics-summary-writer.ts` | 默认随主进程启停的本地页面；生成并展示 `metrics-summary.json` 汇总 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |

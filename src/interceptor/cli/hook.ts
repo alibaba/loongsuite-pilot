@@ -6,9 +6,11 @@ import {
   writeInterceptorAccessLog,
   type InterceptorAccessLogEntry,
 } from '../access-log.js';
+import { parseOpenClawHookRequest, renderOpenClawBlock } from '../adapters/openclaw.js';
 import { parseHookRequest, renderQoderBlock } from '../adapters/qoder.js';
+import { wrapHostReason } from '../adapters/reason.js';
 import { interceptorRuntimePath } from '../paths.js';
-import type { HookRequest, InterceptorRuntime } from '../types.js';
+import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
 import { DaemonClient } from './daemon-client.js';
 import { resolveQoderSurface } from './qoder-surface.js';
 
@@ -52,13 +54,17 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
   }
 
   const eventHint = flagValue(args, '--event');
-  const eventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : (eventHint ?? 'unknown');
+  const eventName = typeof payload.hook_event_name === 'string'
+    ? payload.hook_event_name
+    : typeof payload.openclaw_hook === 'string'
+      ? payload.openclaw_hook
+      : (eventHint ?? 'unknown');
   const input = accessInputFromPayload(payload);
 
   const agentFlag = flagValue(args, '--agent');
   const surface = agentFlag === 'qoder-auto'
     ? (deps.resolveSurface ?? resolveQoderSurface)()
-    : agentFlag === 'qoder' || agentFlag === 'qodercli'
+    : isInterceptorAgent(agentFlag)
       ? agentFlag
       : null;
   if (!surface) {
@@ -67,7 +73,9 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
     return 0;
   }
 
-  const request = parseHookRequest(payload, surface, eventHint);
+  const request = surface === 'openclaw'
+    ? parseOpenClawHookRequest(payload, eventHint)
+    : parseHookRequest(payload, surface, eventHint);
   if (!request) {
     deps.log('skipping unsupported hook event');
     recordFailOpen(deps, eventName, input, 'unsupported hook event', surface);
@@ -141,22 +149,7 @@ function recordFailOpen(
   }
 }
 
-export function wrapHostReason(event: HookRequest['event'], interceptorReason?: string): string {
-  const detail = interceptorReason?.trim() ?? '';
-  if (event === 'UserPromptSubmit') {
-    return detail
-      ? `检测到敏感信息：${detail}，本轮对话终止`
-      : '检测到敏感信息，本轮对话终止';
-  }
-  if (event === 'PostToolUse') {
-    return detail
-      ? `检测到非预期行为：${detail}，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。`
-      : '检测到非预期行为，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。';
-  }
-  return detail
-    ? `检测到非预期行为：${detail}，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。`
-    : '检测到非预期行为，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。';
-}
+export { wrapHostReason } from '../adapters/reason.js';
 
 export function emitVerdict(
   request: HookRequest,
@@ -165,7 +158,11 @@ export function emitVerdict(
   writeStdout: (text: string) => void,
 ): void {
   if (action !== 'block') return;
-  writeStdout(renderQoderBlock(request, wrapHostReason(request.event, reason)));
+  writeStdout(
+    request.agent === 'openclaw'
+      ? renderOpenClawBlock(request, reason)
+      : renderQoderBlock(request, wrapHostReason(request.event, reason)),
+  );
 }
 
 function flagValue(args: string[], name: string): string | undefined {

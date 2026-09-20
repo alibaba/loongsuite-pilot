@@ -1,4 +1,4 @@
-import type { HookEventName, HookRequest, QoderSurface } from '../types.js';
+import type { HookEventName, HookRequest, InterceptorAgent } from '../types.js';
 
 const EVENT_ALIASES: Record<string, HookEventName> = {
   UserPromptSubmit: 'UserPromptSubmit',
@@ -22,7 +22,7 @@ export function canonicalizeHookEvent(raw: unknown): HookEventName | null {
 
 export function parseHookRequest(
   payload: Record<string, unknown>,
-  agent: QoderSurface,
+  agent: InterceptorAgent,
   eventHint?: string,
 ): HookRequest | null {
   const event = canonicalizeHookEvent(eventHint) ?? canonicalizeHookEvent(payload.hook_event_name);

@@ -34,6 +34,7 @@ import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
+import { evaluateInterceptor, SYNC_INTERCEPT_HOOKS } from "./interceptor.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -1328,8 +1329,8 @@ function handleAgentEnd(event, ctx, userId, emit) {
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
-function makeHandler(fn) {
-  // Keep this wrapper synchronous: OpenClaw's tool_result_persist and
+function makeHandler(fn, interceptHook) {
+  // Keep persistence hooks synchronous: OpenClaw's tool_result_persist and
   // before_message_write hooks reject Promise-returning handlers.
   return function safeHandler(event, ctx) {
     try {
@@ -1339,6 +1340,15 @@ function makeHandler(fn) {
       fn(event, ctx, userId, emit, cfg);
     } catch (err) {
       writeError(fn.name || "handler", err);
+    }
+    if (!interceptHook) return;
+    try {
+      return evaluateInterceptor(interceptHook, event, ctx, {
+        cwd: agentCwd,
+        sync: SYNC_INTERCEPT_HOOKS.has(interceptHook),
+      });
+    } catch (err) {
+      writeError("interceptor", err);
     }
   };
 }
@@ -1399,8 +1409,17 @@ export default {
       debugFailureOnce("register", err);
     }
 
-    const on = (name, fn) => {
-      api.on(name, makeHandler(fn));
+    const on = (name, fn, opts) => {
+      const intercept = opts?.intercept;
+      const hookOpts = {};
+      if (opts) {
+        for (const [key, value] of Object.entries(opts)) {
+          if (key !== "intercept") hookOpts[key] = value;
+        }
+      }
+      const handler = makeHandler(fn, intercept);
+      if (Object.keys(hookOpts).length > 0) api.on(name, handler, hookOpts);
+      else api.on(name, handler);
     };
 
     if (capabilities.adapter === "legacy") {
@@ -1423,15 +1442,25 @@ export default {
     on("llm_output", handleLlmOutput);
     on("before_agent_finalize", handleBeforeAgentFinalize);
     on("agent_end", handleAgentEnd);
-    on("before_agent_run", handleBeforeAgentRun);
+    on("before_agent_run", handleBeforeAgentRun, {
+      intercept: "before_agent_run",
+      priority: 1000,
+      timeoutMs: 8_000,
+    });
 
     // 9 default-active hooks (prompt / model / tool / session / message write)
     on("before_prompt_build", handleBeforePromptBuild);
     on("model_call_started", handleModelCallStarted);
     on("model_call_ended", handleModelCallEnded);
-    on("before_tool_call", handleBeforeToolCall);
+    on("before_tool_call", handleBeforeToolCall, {
+      intercept: "before_tool_call",
+      priority: 1000,
+      timeoutMs: 8_000,
+    });
     on("after_tool_call", handleAfterToolCall);
-    on("tool_result_persist", handleToolResultPersist);
+    on("tool_result_persist", handleToolResultPersist, {
+      intercept: "tool_result_persist",
+    });
     on("before_message_write", handleBeforeMessageWrite);
     on("session_start", handleSessionStart);
     on("session_end", handleSessionEnd);
