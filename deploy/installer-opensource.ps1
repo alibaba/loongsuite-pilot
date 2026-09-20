@@ -12,7 +12,8 @@
 #     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
-#     -SlsApiKey "your-api-key"
+#     -SlsApiKey "your-api-key" `
+#     -MultimodalMode all
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -54,8 +55,12 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [switch]$AllAgents,
+    [AllowEmptyString()]
+    [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
+    [string]$MaskReplacementMode,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -125,9 +130,36 @@ if ($MaskTypes -and $MaskMode -ne "custom") {
     Write-Error "-MaskTypes can only be used with -MaskMode custom"
     exit 1
 }
+if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "preview")) {
+    Write-Error "Unknown mask replacement mode: $MaskReplacementMode (use 'placeholder' or 'preview')"
+    exit 1
+}
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
+}
+if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode) {
+    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'all'"
+    exit 1
+}
+$script:MultimodalMode = $MultimodalMode
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+$script:MultimodalSupportedAgents = "codex,qoder"
+if ($MultimodalMode) {
+    if ($MultimodalMode -notin @("none", "input", "output", "all")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
+        exit 1
+    }
+}
+if ($MultimodalMode -and $Command -ne "install") {
+    Write-Error "-MultimodalMode is only supported with install (got $Command)"
+    exit 1
+}
+if ($MultimodalMode -and $MultimodalMode -ne "none") {
+    if ($SlsEndpoint -notmatch '\S' -or $SlsProject -notmatch '\S' -or $SlsLogstore -notmatch '\S' -or $SlsApiKey -notmatch '\S') {
+        Write-Error "-MultimodalMode $MultimodalMode requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey"
+        exit 1
+    }
 }
 
 # ============================================================
@@ -883,6 +915,21 @@ $script:SELECTED_AGENTS = $Agents
 $script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
+    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
+    # in config (other agent settings survive), so pilot auto-detects all
+    # agents at runtime -- including ones installed after this run.
+    if ($AllAgents) {
+        if ($script:SELECTED_AGENTS) {
+            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
+                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
+            $script:SELECTED_AGENTS = ""
+        }
+        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        Write-Host ""
+        return
+    }
+
     if ($script:SELECTED_AGENTS) {
         Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -1035,10 +1082,14 @@ function Confirm-ConfigOverwrite {
         dashboardPort = $DashboardPort
         maskMode = $MaskMode
         maskTypes = $MaskTypes
+        maskReplacementMode = $MaskReplacementMode
+        multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $diffs = & $script:NODE_BIN -e @'
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
@@ -1063,12 +1114,18 @@ const checks = [
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
   { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
-for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
+for (const c of changed) {
+  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
+}
 '@ $configFile $jsonArg 2>$null
-    $ErrorActionPreference = $prevEAP
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
 
     if (-not $diffs) { return }
 
@@ -1329,9 +1386,13 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })
+        multimodalMode    = "$($script:MultimodalMode)"
+        multimodalSupportedAgents = "$($script:MultimodalSupportedAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
+        maskReplacementMode = "$MaskReplacementMode"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
@@ -1344,8 +1405,13 @@ function Write-Config {
     # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
     $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
     Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $script:NODE_BIN -e @'
+    # Native node does not throw; read $LASTEXITCODE on the next line so a JSON
+    # or write failure cannot print "Config written" and keep installing.
+    $cfgExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e @'
 const fs = require('fs');
 let raw = fs.readFileSync(process.argv[1], 'utf-8');
 if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
@@ -1414,11 +1480,18 @@ if (opts.maskMode) {
     config.mask.types = opts.maskTypes.split(',').map(t => t.trim()).filter(Boolean);
   } else { delete config.mask.types; }
 }
-if (opts.selectedAgents) {
+if (opts.maskReplacementMode) {
+  config.mask = config.mask || {};
+  config.mask.replacementMode = opts.maskReplacementMode;
+}
+const allAgents = JSON.parse(opts.probeResult || '[]');
+if (opts.allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1428,30 +1501,59 @@ if (opts.selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (opts.allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
+}
+if (opts.multimodalMode) {
+  config.agents = config.agents || {};
+  const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = opts.allAgentsMode === '1' && opts.multimodalMode !== 'none';
+  for (const id of supported) {
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
+    if (opts.multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? opts.multimodalMode : 'none' };
+  }
+}
+
+if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
+  config.multimodal = { storage: { type: 'sls' } };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
-    $ErrorActionPreference = $prevEAP
-    Remove-PilotPathQuietly $cfgTmp
+        $cfgExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-PilotPathQuietly $cfgTmp
+    }
+    if ($cfgExit -ne 0) {
+        Msg "❌ 配置写入失败 (exit=$cfgExit)" "❌ Failed to write config (exit=$cfgExit)"
+        exit 1
+    }
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
 }
 
-# ============================================================
-# QoderWork-family runtime wrapper: persist the dedicated User-level overrides
-# in HKCU\Environment. reg.exe is the CLM-safe source of truth; the guarded
-# .NET call broadcasts WM_SETTINGCHANGE so Explorer-spawned apps see updates.
-# ============================================================
+# reg.exe removes overrides under CLM; the guarded .NET call notifies Explorer.
 function Get-PilotRuntimeOverride {
     param([string]$Name)
     $prevEAP = $ErrorActionPreference
@@ -1471,37 +1573,6 @@ function Get-PilotRuntimeOverride {
     return ""
 }
 
-function Test-AgentCollectionEnabled {
-    param([string]$AgentId)
-    $configFile = Join-Path $DataDir "config.json"
-    if (-not (Test-Path $configFile)) { return $false }
-
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $enabled = & $script:NODE_BIN -e @'
-try {
-  const config = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
-  const agentId = process.argv[2];
-  process.stdout.write(config?.agents?.[agentId]?.enabled === false ? 'false' : 'true');
-} catch {
-  process.stdout.write('false');
-}
-'@ $configFile $AgentId 2>$null
-    $ErrorActionPreference = $prevEAP
-    return "$enabled".Trim() -eq "true"
-}
-
-function Set-PilotRuntimeOverride {
-    param([string]$Name, [string]$Value)
-    reg.exe add "HKCU\Environment" /v $Name /t REG_SZ /d "$Value" /f | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to set $Name" }
-    try {
-        [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
-        return $true
-    } catch {
-        return $false
-    }
-}
-
 function Remove-PilotRuntimeOverride {
     param([string]$Name)
     reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
@@ -1514,68 +1585,30 @@ function Remove-PilotRuntimeOverride {
     }
 }
 
-function Sync-PilotRuntimeOverride {
-    param(
-        [string]$Name,
-        [bool]$ShouldEnable,
-        [string]$WrapperPath,
-        [string]$ProductName
-    )
+function Retire-PilotRuntimeOverride {
+    param([string]$Name, [string]$WrapperPath)
     $current = Get-PilotRuntimeOverride -Name $Name
-    if (-not (Test-Path $WrapperPath)) {
-        $script:RUNTIME_WRAPPER_MISSING = $true
-        if ($current -and $current -ieq $WrapperPath) {
-            $broadcasted = Remove-PilotRuntimeOverride -Name $Name
-            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-            Msg "    ⚠️  wrapper 缺失，已清理 $Name" "    ⚠️  Wrapper missing; cleaned $Name"
-        } else {
-            Msg "    ⚠️  wrapper 缺失，未设置 $Name" "    ⚠️  Wrapper missing; did not set $Name"
-        }
-        return
-    }
-
-    if ($ShouldEnable) {
-        if ($current -ine $WrapperPath) {
-            $broadcasted = Set-PilotRuntimeOverride -Name $Name -Value $WrapperPath
-            if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-            Msg "    ✅ $Name ($ProductName)" "    ✅ $Name ($ProductName)"
-        }
-    } elseif ($current -and $current -ieq $WrapperPath) {
+    if (-not $current) { return }
+    # Pilot-owned only: a third-party override must survive untouched.
+    if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {
         $broadcasted = Remove-PilotRuntimeOverride -Name $Name
         if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-        Msg "    ✅ 已清理 $Name" "    ✅ Cleaned $Name"
+        Msg "    ✅ 已退役 $Name" "    ✅ Retired $Name"
     }
 }
 
-function Inject-QoderworkRuntimeWrapper {
+function Retire-QoderworkRuntimeOverrides {
     $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $localAppData = $env:LOCALAPPDATA
-    if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
-
-    $qwenInstalled = Test-Path (Join-Path $localAppData "Programs\QwenWorkCN")
-    $qoderInstalled = Test-Path (Join-Path $localAppData "Programs\QoderWork")
-    $qoderCNInstalled = (Test-Path (Join-Path $localAppData "Programs\QoderWorkCN")) -or `
-                        (Test-Path (Join-Path $localAppData "Programs\QoderWork CN"))
-    $qwenShouldEnable = $qwenInstalled -and (Test-AgentCollectionEnabled -AgentId 'qwen-work-cn')
-    $qoderShouldEnable = ($qoderInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work')) -or `
-                         ($qoderCNInstalled -and (Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'))
-
     $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    $script:RUNTIME_WRAPPER_MISSING = $false
-    Sync-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' `
-        -ShouldEnable $qwenShouldEnable -WrapperPath $wrapperPath -ProductName 'QwenWorkCN'
-    Sync-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' `
-        -ShouldEnable $qoderShouldEnable -WrapperPath $wrapperPath -ProductName 'QoderWork'
+    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
+    Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
 
-    if ($script:RUNTIME_WRAPPER_MISSING) {
-        Msg "    ⚠️  runtime wrapper 未完整部署，已跳过 token 拦截以避免影响应用" `
-            "    ⚠️  Runtime wrapper is missing; token interception was skipped to protect the apps"
-    } elseif ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    ⚠️  环境变量已持久化，但无法通知 Explorer；请注销并重新登录 Windows" `
-            "    ⚠️  Environment persisted but Explorer could not be notified; sign out and back in"
+    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
+        Msg "    环境变量已清理，但无法通知 Explorer；请注销并重新登录 Windows" `
+            "    Environment overrides removed but Explorer could not be notified; sign out and back in"
     } else {
-        Msg "    ⚠️  请完全退出并重新打开对应应用以生效" `
-            "    ⚠️  Fully quit and restart the corresponding apps for changes to take effect"
+        Msg "    请完全退出并重新打开对应应用以生效" `
+            "    Fully quit and restart the corresponding apps for changes to take effect"
     }
     Write-Host ""
 }
@@ -2611,7 +2644,7 @@ function Cmd-Install {
         }
         Write-Config
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
@@ -2681,7 +2714,7 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:INSTALL_SRC
         Install-Command
-        Inject-QoderworkRuntimeWrapper
+        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."

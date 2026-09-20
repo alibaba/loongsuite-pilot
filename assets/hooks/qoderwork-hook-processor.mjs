@@ -409,8 +409,8 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
   });
   const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
 
-  // Prefer message.id (chatcmpl-xxx, matches qoderwork-intercept.jsonl) for direct token matching.
-  // Fall back to parentUuid for backward compat with older QoderWork versions.
+  // Prefer message.id (chatcmpl-xxx) so segment pairing can match by response id;
+  // fall back to parentUuid for older QoderWork versions.
   const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
 
   const { outputParts, toolCalls } = assistantOutput;

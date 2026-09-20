@@ -7,9 +7,11 @@ import type {
 } from './types.js';
 import {
   DEFAULT_STRING_MASK_OPTIONS,
+  MASKED_PREVIEW_TOKEN_PATTERN,
   MASKED_TOKEN_PATTERN,
 } from './types.js';
 import { collectPiiRanges } from './pii-detectors.js';
+import { buildMaskReplacement } from './masked-preview.js';
 
 const URL_CANDIDATE_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+/gi;
 const EMPTY_PII_TYPES: MaskPlan['piiTypes'] = new Set();
@@ -34,22 +36,74 @@ export function maskString(
 
   const resolvedOptions = resolveStringMaskOptions(options);
   const ranges: MaskRange[] = [];
+  const protectedPreviewRanges = collectMaskedPreviewRanges(value);
+  const scanValue = blankProtectedPreviewRanges(value, protectedPreviewRanges);
 
   if (plan.rules.length > 0) {
-    const normalizedValue = value.toLowerCase();
+    const normalizedValue = scanValue.toLowerCase();
     if (hasAnyPrefilter(normalizedValue, plan.rules)) {
       ranges.push(
         ...(isLargeString(value, resolvedOptions.largeStringThresholdBytes)
-          ? collectLargeStringRanges(value, normalizedValue, plan.rules, resolvedOptions)
-          : collectRangesForSegment(value, normalizedValue, 0, plan.rules, resolvedOptions)),
+          ? collectLargeStringRanges(
+              scanValue,
+              normalizedValue,
+              plan.rules,
+              plan.replacementMode,
+              resolvedOptions,
+            )
+          : collectRangesForSegment(
+              scanValue,
+              normalizedValue,
+              0,
+              plan.rules,
+              plan.replacementMode,
+              resolvedOptions,
+            )),
       );
     }
   }
   if (plan.piiTypes.size > 0) {
-    ranges.push(...collectPiiRanges(value, plan.piiTypes));
+    ranges.push(
+      ...collectPiiRanges(scanValue, plan.piiTypes, plan.replacementMode),
+    );
   }
 
   return applyMaskRanges(value, ranges);
+}
+
+interface ProtectedPreviewRange {
+  start: number;
+  end: number;
+}
+
+function collectMaskedPreviewRanges(value: string): ProtectedPreviewRange[] {
+  if (!value.includes('_MASKED]{')) return [];
+
+  const ranges: ProtectedPreviewRange[] = [];
+  const pattern = new RegExp(MASKED_PREVIEW_TOKEN_PATTERN.source, 'g');
+  for (const match of value.matchAll(pattern)) {
+    ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return ranges;
+}
+
+function blankProtectedPreviewRanges(
+  value: string,
+  protectedRanges: readonly ProtectedPreviewRange[],
+): string {
+  if (protectedRanges.length === 0) return value;
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const range of protectedRanges) {
+    chunks.push(
+      value.slice(cursor, range.start),
+      ' '.repeat(range.end - range.start),
+    );
+    cursor = range.end;
+  }
+  chunks.push(value.slice(cursor));
+  return chunks.join('');
 }
 
 function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): MaskPlan {
@@ -57,6 +111,7 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
     return {
       rules: planOrRules,
       piiTypes: EMPTY_PII_TYPES,
+      replacementMode: 'placeholder',
     };
   }
   return planOrRules as MaskPlan;
@@ -91,6 +146,7 @@ function collectLargeStringRanges(
   value: string,
   normalizedValue: string,
   rules: readonly CompiledMaskRule[],
+  replacementMode: MaskPlan['replacementMode'],
   options: ResolvedStringMaskOptions,
 ): MaskRange[] {
   const windows = buildKeywordWindows(normalizedValue, rules, options.keywordContextWindow);
@@ -101,7 +157,14 @@ function collectLargeStringRanges(
     const segment = value.slice(window.start, window.end);
     const normalizedSegment = normalizedValue.slice(window.start, window.end);
     ranges.push(
-      ...collectRangesForSegment(segment, normalizedSegment, window.start, rules, options),
+      ...collectRangesForSegment(
+        segment,
+        normalizedSegment,
+        window.start,
+        rules,
+        replacementMode,
+        options,
+      ),
     );
   }
   return ranges;
@@ -153,6 +216,7 @@ function collectRangesForSegment(
   normalizedSegment: string,
   offset: number,
   rules: readonly CompiledMaskRule[],
+  replacementMode: MaskPlan['replacementMode'],
   options: ResolvedStringMaskOptions,
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
@@ -160,11 +224,21 @@ function collectRangesForSegment(
     if (!ruleHasPrefilter(normalizedSegment, rule)) continue;
 
     if (rule.kind === 'regex' && rule.regex) {
-      ranges.push(...collectRegexRanges(segment, offset, rule));
+      ranges.push(...collectRegexRanges(segment, offset, rule, replacementMode));
     } else if (rule.kind === 'block' && rule.blockRegex) {
-      ranges.push(...collectBlockRanges(segment, offset, rule, options.privateKeyBlockLimit));
+      ranges.push(
+        ...collectBlockRanges(
+          segment,
+          offset,
+          rule,
+          replacementMode,
+          options.privateKeyBlockLimit,
+        ),
+      );
     } else if (rule.kind === 'urlWithPassword' && rule.schemeSet) {
-      ranges.push(...collectUrlWithPasswordRanges(segment, offset, rule));
+      ranges.push(
+        ...collectUrlWithPasswordRanges(segment, offset, rule, replacementMode),
+      );
     }
   }
   return ranges;
@@ -174,6 +248,7 @@ function collectRegexRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
   const regex = rule.regex!;
@@ -184,7 +259,12 @@ function collectRegexRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + match[0].length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(
+        rule.replacement,
+        rule.type,
+        match[0],
+        replacementMode,
+      ),
       ruleId: rule.id,
       type: rule.type,
     });
@@ -197,6 +277,7 @@ function collectBlockRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
   blockLimit: number,
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
@@ -209,7 +290,12 @@ function collectBlockRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + match[0].length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(
+        rule.replacement,
+        rule.type,
+        match[0],
+        replacementMode,
+      ),
       ruleId: rule.id,
       type: rule.type,
     });
@@ -222,6 +308,7 @@ function collectUrlWithPasswordRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
   URL_CANDIDATE_PATTERN.lastIndex = 0;
@@ -233,7 +320,12 @@ function collectUrlWithPasswordRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + candidate.length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(
+        rule.replacement,
+        rule.type,
+        candidate,
+        replacementMode,
+      ),
       ruleId: rule.id,
       type: rule.type,
     });

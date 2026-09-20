@@ -222,7 +222,13 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
     // acp-correlate store so agent spans reparent under the upstream span.
@@ -276,6 +282,19 @@ export class Orchestrator extends EventEmitter {
     });
     await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
+    // Build the watchdog immediately after deployment so its constructor records
+    // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
+    // started later, after discovery and retention services are ready.
+    const hookWatchdogTargets = this.buildHookWatchdogTargets();
+    const interceptTargets = [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
+    ];
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
+
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
       pilotDir,
@@ -313,15 +332,6 @@ export class Orchestrator extends EventEmitter {
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
-    const hookWatchdogTargets = this.buildHookWatchdogTargets();
-    const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
-      ...this.buildGrokBuildInterceptTargets(),
-      ...this.buildPluginInjectInterceptTargets(),
-      ...this.buildDirectoryPluginInterceptTargets(),
-      ...this.buildDshYamlPatchInterceptTargets(),
-    ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -572,6 +582,12 @@ export class Orchestrator extends EventEmitter {
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        ...(def.id === 'codex' && def.hook.trustToml ? {
+          changeWatchPath: resolveHome(def.hook.trustToml.configPath),
+          // Reuse the deployment strategy's exact hook/trust inspection. The
+          // watchdog only decides when to run it; it owns no TOML logic.
+          needsRepairOnChange: () => this.deploymentManager.needsRedeploy(def),
+        } : {}),
       });
     }
 
@@ -1149,15 +1165,12 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
-    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
-      interceptFile: qwenWorkCNInterceptFile,
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1171,7 +1184,6 @@ export class Orchestrator extends EventEmitter {
         watchPaths: QwenWorkCNTraceInput.getWatchPaths({
           logDir: qwenWorkCNLogDir,
           segmentsRoot: qwenWorkCNSegmentsRoot,
-          interceptFile: qwenWorkCNInterceptFile,
         }),
         isAvailable: QwenWorkCNTraceInput.checkAvailability,
         enabled: qwenWorkCNTraceEnabled,
@@ -1369,8 +1381,13 @@ export class Orchestrator extends EventEmitter {
     const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
+    const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
+    const codexSpanContextDir = path.join(this.dataDir, 'state', 'codex', 'transcript-span-contexts');
+    await ensureDir(codexWakeupDir);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      wakeupDir: codexWakeupDir,
+      spanContextDir: codexSpanContextDir,
       multimodal: {
         enabled: codexMultimodalEnabled,
         uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
@@ -1380,8 +1397,8 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
       this.inputManager.buildDetectionEntry(codexTranscriptInput, {
-        watchPaths: CodexTranscriptInput.getWatchPaths(),
-        isAvailable: CodexTranscriptInput.checkAvailability,
+        watchPaths: CodexTranscriptInput.getWatchPaths(codexWakeupDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(codexWakeupDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
             'codex-transcript',

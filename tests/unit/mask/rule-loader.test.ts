@@ -52,6 +52,7 @@ describe('mask rule loader', () => {
 
     expect([...plan.piiTypes]).toEqual(PII_MASK_TYPES);
     expect(plan.rules).toHaveLength(loadSensitiveRules().length);
+    expect(plan.replacementMode).toBe('placeholder');
   });
 
   it('enables every type from the canonical supported-type list in all mode', () => {

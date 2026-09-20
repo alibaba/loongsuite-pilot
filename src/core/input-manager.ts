@@ -83,8 +83,16 @@ export class InputManager extends EventEmitter {
   private userId: string = '';
   private configuredUserId: string = '';
   private agentsConfig: AgentsConfig = {};
-  private maskConfig: MaskConfig = { mode: 'none', types: [] };
-  private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
+  private maskConfig: MaskConfig = {
+    mode: 'none',
+    types: [],
+    replacementMode: 'placeholder',
+  };
+  private maskPlan: MaskPlan = {
+    rules: [],
+    piiTypes: new Set(),
+    replacementMode: 'placeholder',
+  };
   private traceLinker: TraceLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();

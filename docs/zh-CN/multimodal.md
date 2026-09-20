@@ -11,7 +11,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 - `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`）。
 - `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
 
-开启多模态还需要全局 `config.multimodal` 对象存储基础设施，见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
+开启多模态还需要对象存储（唯一的 SLS `apiKey` flusher，或显式的 `config.multimodal.storage`），见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 
 ## 当前能力范围
 
@@ -25,7 +25,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 两处同时就绪：
 
-1. 全局 `config.multimodal.storage`（`type` / `target` / `auth`）。
+1. 全局对象存储：显式写 `multimodal.storage`，或在特定条件下复用 SLS flusher。规则见 [配置指南](configuration.md#多模态对象存储)。
 2. 目标 Agent 的 `uploadMode` 不为 `none`，且该 Agent 已实现提取。
 
 示例（Codex + Qoder IDE）：
@@ -50,13 +50,13 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
     "codex": {
       "enabled": true,
       "captureMessageContent": true,
-      "multimodal": { "uploadMode": "both" }
+      "multimodal": { "uploadMode": "all" }
     },
     "qoder": {
       "enabled": true,
       "captureMessageContent": true,
       "multimodal": {
-        "uploadMode": "both",
+        "uploadMode": "all",
         "allowedRootPaths": ["~/workspace/loongsuite-pilot"]
       }
     }
@@ -77,10 +77,9 @@ loongsuite-pilot restart
 | 模式 | 行为 |
 |------|------|
 | `none` | 关闭多模态转换（默认）。 |
-| `input` | 仅转换用户/非助手消息中的支持图片。 |
-| `tool` | 仅转换工具结果中的支持图片。 |
-| `output` | 仅转换助手/模型输出中的支持图片（需该 Agent 有对应提取路径）。 |
-| `both` | 同时开启上述全部表面（对已接线的路径生效）。 |
+| `input` | 转换用户/非助手消息以及工具结果中的支持图片。 |
+| `output` | 转换助手/模型输出以及工具结果中的支持图片（output 需该 Agent 有对应提取路径）。 |
+| `all` | 同时开启已接线的全部表面。 |
 
 未知取值会回落到 `none`。
 
@@ -114,10 +113,9 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 | `uploadMode` | Codex 采集表面 | 典型用户操作 |
 |--------------|----------------|--------------|
 | `none` | 不转换 | — |
-| `input` | 用户消息中的 `input_image` | 粘贴剪贴板、Add file / Files mentioned 等（`response_item/message` + `role=user`） |
-| `tool` | 工具结果中的 `input_image` | 提示里只贴绝对路径后由 `view_image` 读入；生成图像后再 `view_image` 等（`function_call_output`） |
-| `output` | 无 | 预留给助手消息中的图片；Codex 当前无提取落点 |
-| `both` | `input` + `tool`（以及未来的 `output`） | 同时覆盖粘贴/加文件与工具读图/生成图 |
+| `input` | 用户消息与工具结果中的 `input_image` | 粘贴剪贴板、Add file / Files mentioned；提示里贴路径后由 `view_image` 读入；生成后再 `view_image`（`function_call_output`） |
+| `output` | 工具结果中的 `input_image` | 提示里贴路径后 `view_image`；生成后再 `view_image`。助手消息尚无提取落点。 |
+| `all` | 用户消息与工具结果 | 同时覆盖粘贴/加文件与工具读图/生成图 |
 
 注意：
 
@@ -131,10 +129,9 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 | `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image） | 粘贴 / @ 图像；挂到对应 `llm.request` / 用户 `messages_delta` |
-| `tool` | `tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | Read 读图、ImageGen 生成图；结果改写为 text + `uri` parts |
-| `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名） | 助手回复中嵌入已读/生成图 |
-| `both` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
+| `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image）；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；Read 读图、ImageGen 生成图 |
+| `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名）；以及与 `input` 相同的 `tool.result` 路径 | 助手回复中嵌入已读/生成图；Read 读图、ImageGen 生成图 |
+| `all` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
 
 注意：
 
@@ -143,15 +140,14 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 
 ### Qoder CLI
 
-Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一条 `qoder-trace` 采集路径，在 CLI token 富化之后做写时转换。不查 SQLite；助手最终回复通常不含嵌入图，因此 **没有 output 表面**（`uploadMode=output` 对 CLI 无效果，`both` = input + tool）。失败 fail-open。
+Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一条 `qoder-trace` 采集路径，在 CLI token 富化之后做写时转换。不查 SQLite；助手最终回复通常不含嵌入图，因此 `output` 仍会转工具结果图，但没有助手文本表面。失败 fail-open。
 
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`），再按解析后路径去重 | 粘贴图像、`@` / `--attachment` |
-| `tool` | `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
-| `output` | 无 | CLI 终端不把图嵌进最终助手文本 |
-| `both` | `input` + `tool` | 覆盖粘贴/`@` 与工具读图/生成 |
+| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
+| `output` | 与 `input` 相同的 `tool.result` 路径 | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览。CLI 终端不把图嵌进最终助手文本。 |
+| `all` | 用户附件与工具结果图 | 覆盖粘贴/`@` 与工具读图/生成 |
 
 注意：
 
