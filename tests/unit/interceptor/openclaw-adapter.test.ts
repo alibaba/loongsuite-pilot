@@ -22,6 +22,7 @@ describe('OpenClaw adapter', () => {
   it('maps native OpenClaw hook names onto interceptor events', () => {
     expect(canonicalizeOpenClawHook('before_agent_run')).toBe('UserPromptSubmit');
     expect(canonicalizeOpenClawHook('before_tool_call')).toBe('PreToolUse');
+    expect(canonicalizeOpenClawHook('tool_result_middleware')).toBe('PostToolUse');
     expect(canonicalizeOpenClawHook('tool_result_persist')).toBe('PostToolUse');
     expect(canonicalizeOpenClawHook('Stop')).toBeNull();
   });
@@ -86,6 +87,24 @@ describe('OpenClaw adapter', () => {
     expect(result).toEqual({
       message: {
         toolCallId: 't1',
+        content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
+      },
+    });
+  });
+
+  it('renders tool_result_middleware as result for the same-turn model path', () => {
+    const original = {
+      content: [{ type: 'text', text: 'mysql://user:pass@127.0.0.1/db' }],
+      details: { status: 'completed' },
+    };
+    const result = openClawBlockResult(baseRequest({
+      event: 'PostToolUse',
+      toolResponse: original,
+      raw: { openclaw_hook: 'tool_result_middleware' },
+    }), '[DATABASEURL_MASKED]');
+    expect(result).toEqual({
+      result: {
+        ...original,
         content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
       },
     });

@@ -5,9 +5,11 @@
  * runtime is silent fail-open so collection-only installs do not fill
  * access.log. Errors after a runtime is present are logged as fail-open.
  *
- * before_agent_run / before_tool_call may return a Promise (OpenClaw awaits
- * them). tool_result_persist must stay synchronous, so it uses spawnSync of
- * interceptor-cli when a daemon runtime exists.
+ * before_agent_run / before_tool_call / tool_result_middleware may return a
+ * Promise (OpenClaw awaits them). tool_result_persist must stay synchronous,
+ * so it uses spawnSync of interceptor-cli when a daemon runtime exists.
+ * Same-turn PostToolUse intercept is middleware `{ result }`; persist only
+ * rewrites the transcript `{ message }` and reuses a short TTL cache.
  */
 
 import { spawnSync } from "node:child_process";
@@ -27,10 +29,15 @@ export const OPENCLAW_HOOK_TO_EVENT = {
   llm_input: "UserPromptSubmit",
   before_tool_call: "PreToolUse",
   after_tool_call: "PostToolUse",
+  tool_result_middleware: "PostToolUse",
   tool_result_persist: "PostToolUse",
 };
 
 export const SYNC_INTERCEPT_HOOKS = new Set(["tool_result_persist"]);
+export const SAME_TURN_POST_TOOL_HOOK = "tool_result_middleware";
+
+const POST_TOOL_CACHE_TTL_MS = 30_000;
+const POST_TOOL_CACHE_MAX = 256;
 
 function resolveDataDir() {
   return (
@@ -99,6 +106,13 @@ export function buildHookRequest(hookName, event, ctx, cwd) {
   };
 }
 
+function rewritePostToolContent(original, wrapped) {
+  return {
+    ...(isRecord(original) ? original : {}),
+    content: [{ type: "text", text: wrapped }],
+  };
+}
+
 export function openClawBlockResult(request, interceptorReason) {
   const wrapped = wrapHostReason(request.event, interceptorReason);
   const detail = interceptorReason?.trim() || "Blocked by security policy";
@@ -106,13 +120,11 @@ export function openClawBlockResult(request, interceptorReason) {
     return { outcome: "block", reason: detail, message: wrapped };
   }
   if (request.event === "PostToolUse") {
-    const original = isRecord(request.toolResponse) ? request.toolResponse : {};
-    return {
-      message: {
-        ...original,
-        content: [{ type: "text", text: wrapped }],
-      },
-    };
+    const rewritten = rewritePostToolContent(request.toolResponse, wrapped);
+    if (request.raw?.openclaw_hook === SAME_TURN_POST_TOOL_HOOK) {
+      return { result: rewritten };
+    }
+    return { message: rewritten };
   }
   return { block: true, blockReason: wrapped };
 }
@@ -222,6 +234,41 @@ export function createOpenClawInterceptor(overrides = {}) {
     return readRuntime(interceptorRuntimePath(deps.resolveDataDir()));
   }
 
+  const postToolCache = new Map();
+
+  function postToolCacheKey(request) {
+    return typeof request.toolUseId === "string" && request.toolUseId.length > 0
+      ? request.toolUseId
+      : undefined;
+  }
+
+  function readPostToolCache(request) {
+    if (request.event !== "PostToolUse") return { miss: true };
+    const key = postToolCacheKey(request);
+    if (!key) return { miss: true };
+    const hit = postToolCache.get(key);
+    if (!hit) return { miss: true };
+    if (Date.now() - hit.ts > POST_TOOL_CACHE_TTL_MS) {
+      postToolCache.delete(key);
+      return { miss: true };
+    }
+    postToolCache.delete(key);
+    postToolCache.set(key, hit);
+    if (hit.action !== "block") return { hit: true, result: undefined };
+    return { hit: true, result: openClawBlockResult(request, hit.reason) };
+  }
+
+  function rememberPostToolVerdict(request, action, reason) {
+    if (request.event !== "PostToolUse") return;
+    const key = postToolCacheKey(request);
+    if (!key) return;
+    if (postToolCache.size >= POST_TOOL_CACHE_MAX) {
+      const oldest = postToolCache.keys().next().value;
+      postToolCache.delete(oldest);
+    }
+    postToolCache.set(key, { ts: Date.now(), action, reason });
+  }
+
   async function evaluateAsync(request, runtime) {
     try {
       const health = await doJson(
@@ -247,7 +294,11 @@ export function createOpenClawInterceptor(overrides = {}) {
         request,
         INTERCEPTOR_HOOK_TIMEOUT_MS,
       );
-      if (verdict?.action !== "block") return undefined;
+      if (verdict?.action !== "block") {
+        rememberPostToolVerdict(request, "allow");
+        return undefined;
+      }
+      rememberPostToolVerdict(request, "block", verdict.reason);
       return openClawBlockResult(request, verdict.reason);
     } catch (err) {
       writeFailOpen(deps.resolveDataDir(), request, err instanceof Error ? err.message : String(err));
@@ -290,7 +341,10 @@ export function createOpenClawInterceptor(overrides = {}) {
       return undefined;
     }
     const text = typeof result.stdout === "string" ? result.stdout.trim() : "";
-    if (!text) return undefined;
+    if (!text) {
+      rememberPostToolVerdict(request, "allow");
+      return undefined;
+    }
     try {
       return JSON.parse(text);
     } catch {
@@ -302,6 +356,8 @@ export function createOpenClawInterceptor(overrides = {}) {
   function evaluate(hookName, event, ctx, opts = {}) {
     const request = buildHookRequest(hookName, event, ctx, opts.cwd);
     if (!request) return undefined;
+    const cached = readPostToolCache(request);
+    if (!cached.miss) return cached.result;
     const runtime = currentRuntime();
     if (!runtime) return undefined;
     if (opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName)) {

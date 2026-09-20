@@ -31,7 +31,7 @@ async function loadPlugin() {
   return mod.default;
 }
 
-function registerPlugin(plugin, { onOptions } = {}) {
+function registerPlugin(plugin, { onOptions, api: apiExtras } = {}) {
   const handlers = {};
   const options = {};
   plugin.register({
@@ -41,6 +41,7 @@ function registerPlugin(plugin, { onOptions } = {}) {
       handlers[name] = handler;
       if (opts) options[name] = opts;
     },
+    ...apiExtras,
   });
   if (onOptions) Object.assign(onOptions, options);
   return handlers;
@@ -159,6 +160,70 @@ describe('OpenClaw interceptor client', () => {
       },
     });
   });
+
+  it('blocks tool_result_middleware with { result } and reuses that verdict for persist', async () => {
+    const { createOpenClawInterceptor, wrapHostReason } = await import(/* @vite-ignore */ `${INTERCEPTOR_PATH}?mw=${Date.now()}`);
+    let evaluateCount = 0;
+    const { server, port } = await listen((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: 4242,
+          version: '1.0.2',
+          daemon_port: port,
+        }));
+        return;
+      }
+      evaluateCount += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        action: 'block',
+        reason: '[DATABASEURL_MASKED]',
+        ruleId: 'databaseUrl',
+        evaluatedRules: ['databaseUrl'],
+      }));
+    });
+    writeRuntime(port);
+    const spawnSyncImpl = vi.fn();
+    const interceptor = createOpenClawInterceptor({
+      resolveDataDir: () => tmpDir,
+      spawnSyncImpl,
+      execPath: '/usr/bin/node',
+    });
+    const original = {
+      content: [{ type: 'text', text: 'mysql://agent:secret@127.0.0.1:3306/pilot' }],
+      details: { status: 'completed' },
+    };
+    try {
+      await expect(interceptor.evaluate('tool_result_middleware', {
+        toolName: 'read',
+        toolCallId: 't1',
+        result: original,
+      }, {})).resolves.toEqual({
+        result: {
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
+        },
+      });
+      expect(interceptor.evaluate('tool_result_persist', {
+        toolName: 'read',
+        toolCallId: 't1',
+        message: { toolCallId: 't1', ...original },
+      }, {}, { sync: true })).toEqual({
+        message: {
+          toolCallId: 't1',
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
+        },
+      });
+      expect(evaluateCount).toBe(1);
+      expect(spawnSyncImpl).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('OpenClaw plugin interceptor wiring', () => {
@@ -223,5 +288,109 @@ describe('OpenClaw plugin interceptor wiring', () => {
     } finally {
       server.close();
     }
+  });
+
+  it('registers same-turn tool-result middleware when the host API exists', async () => {
+    const registerAgentToolResultMiddleware = vi.fn();
+    registerPlugin(await loadPlugin(), { api: { registerAgentToolResultMiddleware } });
+    expect(registerAgentToolResultMiddleware).toHaveBeenCalledTimes(1);
+    expect(registerAgentToolResultMiddleware.mock.calls[0][1]).toEqual({ runtimes: ['openclaw'] });
+  });
+
+  it('does not register tool-result middleware on the legacy adapter', async () => {
+    const registerAgentToolResultMiddleware = vi.fn();
+    const plugin = await loadPlugin();
+    plugin.register({
+      registrationMode: 'full',
+      runtime: { version: '2026.3.8' },
+      on: () => undefined,
+      registerAgentToolResultMiddleware,
+    });
+    expect(registerAgentToolResultMiddleware).not.toHaveBeenCalled();
+  });
+
+  it('fail-opens when middleware registration is rejected by the host', async () => {
+    const plugin = await loadPlugin();
+    expect(() => registerPlugin(plugin, {
+      api: {
+        registerAgentToolResultMiddleware: () => {
+          throw new Error('only bundled plugins can register agent tool result middleware');
+        },
+      },
+    })).not.toThrow();
+  });
+
+  it('middleware fail-opens without throwing when interceptor runtime is missing', async () => {
+    const middlewares = [];
+    registerPlugin(await loadPlugin(), {
+      api: {
+        registerAgentToolResultMiddleware: (handler) => {
+          middlewares.push(handler);
+        },
+      },
+    });
+    await expect(middlewares[0]({
+      toolName: 'read',
+      toolCallId: 't1',
+      result: { content: [{ type: 'text', text: 'ok' }] },
+    }, {})).resolves.toBeUndefined();
+  });
+
+  it('returns { result } from tool-result middleware when the daemon blocks', async () => {
+    const { wrapHostReason } = await import(/* @vite-ignore */ `${INTERCEPTOR_PATH}?mw-plugin=${Date.now()}`);
+    const { server, port } = await listen((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (req.url === '/health') {
+        res.end(JSON.stringify({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: 4242,
+          version: '1.0.2',
+          daemon_port: port,
+        }));
+        return;
+      }
+      res.end(JSON.stringify({
+        action: 'block',
+        reason: '[DATABASEURL_MASKED]',
+        ruleId: 'databaseUrl',
+        evaluatedRules: ['databaseUrl'],
+      }));
+    });
+    writeRuntime(port);
+    const middlewares = [];
+    try {
+      registerPlugin(await loadPlugin(), {
+        api: {
+          registerAgentToolResultMiddleware: (handler, opts) => {
+            middlewares.push({ handler, opts });
+          },
+        },
+      });
+      expect(middlewares).toHaveLength(1);
+      const original = {
+        content: [{ type: 'text', text: 'mysql://agent:secret@127.0.0.1:3306/pilot' }],
+        details: { status: 'completed' },
+      };
+      await expect(middlewares[0].handler({
+        toolName: 'read',
+        toolCallId: 't1',
+        args: { path: '/tmp/notes' },
+        result: original,
+      }, { sessionId: 's1' })).resolves.toEqual({
+        result: {
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
+        },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('declares the installed-plugin middleware contract', () => {
+    const manifestPath = path.resolve(__dirname, '../../../../assets/plugins/openclaw/openclaw.plugin.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    expect(manifest.contracts.agentToolResultMiddleware).toEqual(['openclaw']);
   });
 });

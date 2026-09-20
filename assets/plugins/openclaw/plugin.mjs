@@ -34,7 +34,7 @@ import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
-import { evaluateInterceptor, SYNC_INTERCEPT_HOOKS } from "./interceptor.mjs";
+import { evaluateInterceptor, SAME_TURN_POST_TOOL_HOOK, SYNC_INTERCEPT_HOOKS } from "./interceptor.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -1353,6 +1353,50 @@ function makeHandler(fn, interceptHook) {
   };
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+// Same-turn PostToolUse: OpenClaw awaits tool-result middleware before the
+// current ReAct model call. tool_result_persist only rewrites transcript.
+function registerSameTurnToolResultIntercept(api) {
+  if (typeof api?.registerAgentToolResultMiddleware !== "function") {
+    debugFailureOnce(
+      "interceptor-middleware",
+      new Error("registerAgentToolResultMiddleware is unavailable; PostToolUse same-turn intercept disabled"),
+    );
+    return;
+  }
+  try {
+    api.registerAgentToolResultMiddleware(async (event, ctx) => {
+      try {
+        const payload = isPlainObject(event) ? event : {};
+        const decision = await evaluateInterceptor(
+          SAME_TURN_POST_TOOL_HOOK,
+          {
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            params: payload.args ?? payload.params,
+            result: payload.result,
+            sessionId: payload.sessionId,
+          },
+          isPlainObject(ctx) ? ctx : {},
+          { cwd: agentCwd },
+        );
+        if (isPlainObject(decision) && isPlainObject(decision.result)) {
+          return { result: decision.result };
+        }
+        return undefined;
+      } catch (err) {
+        writeError("interceptor-middleware", err);
+        return undefined;
+      }
+    }, { runtimes: ["openclaw"] });
+  } catch (err) {
+    writeError("interceptor-middleware-register", err);
+  }
+}
+
 function reportUnsupportedHost(api, detail) {
   const message =
     `[${PLUGIN_ID}] incompatible OpenClaw plugin API: `
@@ -1464,5 +1508,6 @@ export default {
     on("before_message_write", handleBeforeMessageWrite);
     on("session_start", handleSessionStart);
     on("session_end", handleSessionEnd);
+    registerSameTurnToolResultIntercept(api);
   },
 };

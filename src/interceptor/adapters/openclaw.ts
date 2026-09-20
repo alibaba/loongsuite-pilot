@@ -8,6 +8,7 @@ export const OPENCLAW_HOOK_TO_EVENT = {
   llm_input: 'UserPromptSubmit',
   before_tool_call: 'PreToolUse',
   after_tool_call: 'PostToolUse',
+  tool_result_middleware: 'PostToolUse',
   tool_result_persist: 'PostToolUse',
 } as const satisfies Record<string, HookEventName>;
 
@@ -27,6 +28,13 @@ function pickString(...values: unknown[]): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function rewritePostToolContent(original: unknown, wrapped: string): Record<string, unknown> {
+  return {
+    ...(isRecord(original) ? original : {}),
+    content: [{ type: 'text', text: wrapped }],
+  };
 }
 
 export function parseOpenClawHookRequest(
@@ -67,13 +75,12 @@ export function openClawBlockResult(
     };
   }
   if (request.event === 'PostToolUse') {
-    const original = isRecord(request.toolResponse) ? request.toolResponse : {};
-    return {
-      message: {
-        ...original,
-        content: [{ type: 'text', text: wrapped }],
-      },
-    };
+    const rewritten = rewritePostToolContent(request.toolResponse, wrapped);
+    // Same-turn model path uses middleware `{ result }`. Persist is transcript-only `{ message }`.
+    if (request.raw.openclaw_hook === 'tool_result_middleware') {
+      return { result: rewritten };
+    }
+    return { message: rewritten };
   }
   return {
     block: true,
