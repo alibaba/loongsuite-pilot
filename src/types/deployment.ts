@@ -282,6 +282,8 @@ export interface DeployResult {
   /** Set whenever `skipped` is true. */
   reason?: DeploySkipReason;
   error?: string;
+  /** Absolute config file PluginInjectStrategy actually wrote or confirmed. */
+  pluginInjectConfigPath?: string;
 }
 
 // ─── Deploy Strategy ───
@@ -304,6 +306,10 @@ export interface DeployedAgentRecord {
   targetDir?: string;
   /** Resolved cordis.patch.yml path used by the DSH integration lifecycle. */
   dshPatchPath?: string;
+  /** Resolved Grok hook settings file written during deploy. */
+  hookSettingsPath?: string;
+  /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
+  pluginInjectConfigPath?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

@@ -18,6 +18,11 @@ import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import {
+  applyPersistedDeployTargets,
+  backfillLifecycleFields,
+  lifecycleFieldsForDeploy,
+} from './persisted-deploy-paths.js';
 
 const logger = createLogger('DeploymentManager');
 
@@ -148,9 +153,10 @@ export class DeploymentManager {
     });
     let ok = false;
     try {
-      ok = def.deployMode === 'hook'
-        ? await this.hookStrategy.undeploy(def)
-        : await this.dshYamlPatchStrategy.undeploy(def, this.state[def.id]);
+      const target = applyPersistedDeployTargets(def, this.state[def.id]);
+      ok = target.deployMode === 'hook'
+        ? await this.hookStrategy.undeploy(target)
+        : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
@@ -186,9 +192,10 @@ export class DeploymentManager {
     if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
       return false;
     }
-    const ok = def.deployMode === 'dsh-yaml-patch'
-      ? await this.dshYamlPatchStrategy.undeploy(def, this.state[def.id])
-      : await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
+    const target = applyPersistedDeployTargets(def, this.state[def.id]);
+    const ok = target.deployMode === 'dsh-yaml-patch'
+      ? await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id])
+      : await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(target);
     if (ok && this.state[def.id]) {
       delete this.state[def.id];
       await this.saveState();
@@ -204,10 +211,11 @@ export class DeploymentManager {
   isAgentDetected(def: AgentDefinition): Promise<boolean> {
     return this.runExclusive(async () => {
       await this.loadState();
-      if (def.deployMode === 'dsh-yaml-patch') {
-        return this.dshYamlPatchStrategy.detect(def, this.state[def.id]);
+      const target = applyPersistedDeployTargets(def, this.state[def.id]);
+      if (target.deployMode === 'dsh-yaml-patch') {
+        return this.dshYamlPatchStrategy.detect(target, this.state[def.id]);
       }
-      return this.getStrategy(def).detect(def);
+      return this.getStrategy(target).detect(target);
     });
   }
 
@@ -219,12 +227,13 @@ export class DeploymentManager {
   needsRedeploy(def: AgentDefinition): Promise<boolean> {
     return this.runExclusive(async () => {
       await this.loadState();
-      if (def.deployMode === 'dsh-yaml-patch') {
-        const target = await this.dshYamlPatchStrategy.resolveTarget(def, this.state[def.id]);
-        return target ? this.dshYamlPatchStrategy.needsDeployAt(def, target) : true;
+      const defTarget = applyPersistedDeployTargets(def, this.state[def.id]);
+      if (defTarget.deployMode === 'dsh-yaml-patch') {
+        const target = await this.dshYamlPatchStrategy.resolveTarget(defTarget, this.state[def.id]);
+        return target ? this.dshYamlPatchStrategy.needsDeployAt(defTarget, target) : true;
       }
-      const strategy = this.getStrategy(def);
-      return strategy.needsDeploy(def, this.state[def.id]);
+      const strategy = this.getStrategy(defTarget);
+      return strategy.needsDeploy(defTarget, this.state[def.id]);
     });
   }
 
@@ -240,8 +249,9 @@ export class DeploymentManager {
   }
 
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
-    const strategy = this.getStrategy(def);
     const record = this.state[def.id];
+    def = applyPersistedDeployTargets(def, record);
+    const strategy = this.getStrategy(def);
     const dshTarget = def.deployMode === 'dsh-yaml-patch'
       ? await this.dshYamlPatchStrategy.resolveTarget(def, record)
       : null;
@@ -273,6 +283,13 @@ export class DeploymentManager {
       }
       if (def.deployMode === 'dsh-yaml-patch' && record && !record.dshPatchPath) {
         record.dshPatchPath = dshTarget?.patchPath;
+      }
+      if (record) {
+        backfillLifecycleFields(record, def);
+        if (def.id === 'pi-coding-agent' && def.pluginInject) {
+          const selected = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
+          if (selected) record.pluginInjectConfigPath = path.resolve(selected);
+        }
       }
       // Also the terminal state for detection-only agents: they share another
       // agent's hook, so needsDeploy() is always false and "detected but nothing
@@ -316,6 +333,8 @@ export class DeploymentManager {
       if (def.deployMode === 'dsh-yaml-patch' && dshTarget) {
         newRecord.dshPatchPath = dshTarget.patchPath;
       }
+
+      Object.assign(newRecord, lifecycleFieldsForDeploy(def, result));
 
       this.state[def.id] = newRecord;
     } else if (!result.skipped) {
