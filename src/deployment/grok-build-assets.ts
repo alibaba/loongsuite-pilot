@@ -46,11 +46,29 @@ async function sameFile(source: string, target: string): Promise<boolean> {
   }
 }
 
+/**
+ * Host installs keep the gold copy at `$PILOT_DIR/assets/hooks` and postinstall
+ * copies it to `$PILOT_DATA/hooks`. The K8s payload flattens `assets/hooks/`
+ * into top-level `hooks/` and historically did not keep `assets/hooks`, so a
+ * hard-coded gold path ENOENTs and the Grok watchdog repair-fails forever.
+ * Prefer the packaged tree when it exists; otherwise use the flattened layout.
+ */
+export async function resolveGrokBuildHookSourceRoot(pilotDir: string): Promise<string> {
+  const packaged = path.join(pilotDir, 'assets', 'hooks');
+  try {
+    await fs.access(packaged);
+    return packaged;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return path.join(pilotDir, 'hooks');
+  }
+}
+
 export async function areGrokBuildHookAssetsHealthy(
   pilotDir: string,
   dataDir: string,
 ): Promise<boolean> {
-  const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
+  const sourceRoot = await resolveGrokBuildHookSourceRoot(pilotDir);
   const targetRoot = path.join(dataDir, 'hooks');
   const results = await Promise.all(GROK_BUILD_HOOK_ASSETS.map(relativePath =>
     sameFile(path.join(sourceRoot, relativePath), path.join(targetRoot, relativePath))));
@@ -61,7 +79,7 @@ export async function restoreGrokBuildHookAssets(
   pilotDir: string,
   dataDir: string,
 ): Promise<void> {
-  const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
+  const sourceRoot = await resolveGrokBuildHookSourceRoot(pilotDir);
   const targetRoot = path.join(dataDir, 'hooks');
 
   for (const relativePath of GROK_BUILD_HOOK_ASSETS) {
