@@ -46,21 +46,19 @@ async function newStore(): Promise<StateStore> {
 }
 
 describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
-  test('polls the newest trajectory*.json in the configured directory', async () => {
+  test('polls every trajectory*.json in stable oldest-first order', async () => {
     const dir = path.join(tmpDir, 'trajectories');
     await fs.mkdir(dir, { recursive: true });
-    // old file = 3-step truncation (12 entries); new file = full fixture (58).
+    // Two distinct runs are created between polling cycles. The old 3-step run
+    // contributes 12 entries and the newer full run contributes 58 entries.
     const oldFile = path.join(dir, 'trajectory_20260101_000000.json');
     const newFile = path.join(dir, 'trajectory_20260102_000000.json');
-    await fs.writeFile(oldFile, truncated(3));
-    await fs.writeFile(newFile, full());
+    await fs.writeFile(oldFile, truncated(3, '2026-08-24T10:00:17.058504'));
+    await fs.writeFile(newFile, full('2026-08-25T10:00:17.058504'));
     const now = Date.now();
     await fs.utimes(oldFile, new Date(now - 20_000), new Date(now - 20_000));
     await fs.utimes(newFile, new Date(now), new Date(now));
 
-    // trajectoryFile is the DIRECTORY (mirrors the orchestrator wiring): if
-    // discovery were broken and fell back to it, stat(dir).isFile() is false and
-    // collect() would return [] — so 58 entries proves discovery picked newFile.
     const input = new TraeAgentTrajectoryInput({
       stateStore: await newStore(),
       trajectoryFile: dir,
@@ -70,7 +68,12 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     });
     // @ts-expect-error: protected
     const out = (await input.collect()) as AgentActivityEntry[];
-    expect(out.length).toBe(58);
+    expect(out.length).toBe(12 + 58);
+    const oldSession = out[0]['gen_ai.session.id'];
+    const newSession = out[12]['gen_ai.session.id'];
+    expect(newSession).not.toBe(oldSession);
+    expect(out.slice(0, 12).every(entry => entry['gen_ai.session.id'] === oldSession)).toBe(true);
+    expect(out.slice(12).every(entry => entry['gen_ai.session.id'] === newSession)).toBe(true);
   });
 
   test('successive runs: a newer timestamped file is discovered on the next cycle', async () => {
@@ -106,6 +109,118 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     expect(b.filter(e => e['agent.trajectory.session_reset'] === true).length).toBe(b.length);
   });
 
+  test('A -> B -> A file order keeps independent per-run dedup checkpoints', async () => {
+    const dir = path.join(tmpDir, 'trajectories');
+    await fs.mkdir(dir, { recursive: true });
+    const fileA = path.join(dir, 'trajectory_A.json');
+    const fileB = path.join(dir, 'trajectory_B.json');
+    await fs.writeFile(fileA, full('2026-08-25T10:00:17.058504'));
+    await fs.writeFile(fileB, full('2026-08-26T10:00:17.058504'));
+    const now = Date.now();
+    await fs.utimes(fileA, new Date(now - 20_000), new Date(now - 20_000));
+    await fs.utimes(fileB, new Date(now - 10_000), new Date(now - 10_000));
+
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: await newStore(),
+      trajectoryFile: dir,
+      trajectoryDir: dir,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+    // First cycle processes A then B.
+    // @ts-expect-error: protected
+    const first = (await input.collect()) as AgentActivityEntry[];
+    expect(first.length).toBe(58 + 58);
+
+    // Make A newest so the next scan processes B then A. Neither run may emit
+    // again: switching between known runs must not clear either seen-step set.
+    await fs.utimes(fileA, new Date(now), new Date(now));
+    // @ts-expect-error: protected
+    const second = (await input.collect()) as AgentActivityEntry[];
+    expect(second).toEqual([]);
+  });
+
+  test('run identity is a stable digest and never persists raw task content', async () => {
+    const dir = path.join(tmpDir, 'trajectories');
+    await fs.mkdir(dir, { recursive: true });
+    const firstRaw = fixtureJson();
+    const secondRaw = fixtureJson();
+    firstRaw.task = 'private task alpha with secret-shaped text';
+    secondRaw.task = 'private task beta with other sensitive text';
+    // Same start time ensures task content participates in the digest.
+    secondRaw.start_time = firstRaw.start_time;
+    await fs.writeFile(path.join(dir, 'trajectory_A.json'), JSON.stringify(firstRaw));
+    await fs.writeFile(path.join(dir, 'trajectory_B.json'), JSON.stringify(secondRaw));
+    const store = await newStore();
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: store,
+      trajectoryFile: dir,
+      trajectoryDir: dir,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+
+    // @ts-expect-error: protected
+    const first = (await input.collect()) as AgentActivityEntry[];
+    expect(first.length).toBe(58 + 58);
+    // @ts-expect-error: protected
+    expect(await input.collect()).toEqual([]);
+    const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
+    const runIds = Object.keys(extra.runsById);
+    expect(runIds).toHaveLength(2);
+    expect(new Set(runIds).size).toBe(2);
+    expect(runIds.every(runId => /^trajectory-run-v3:[0-9a-f]{32}$/.test(runId))).toBe(true);
+    const persisted = JSON.stringify(extra);
+    expect(persisted).not.toContain(firstRaw.task);
+    expect(persisted).not.toContain(secondRaw.task);
+  });
+
+  test('migrates v2 per-run plaintext keys without replay or task persistence', async () => {
+    const dir = path.join(tmpDir, 'trajectories');
+    await fs.mkdir(dir, { recursive: true });
+    const rawA = fixtureJson();
+    const rawB = fixtureJson();
+    rawB.start_time = '2026-08-26T10:00:17.058504';
+    const fileA = path.join(dir, 'trajectory_A.json');
+    const fileB = path.join(dir, 'trajectory_B.json');
+    await fs.writeFile(fileA, JSON.stringify(rawA));
+    await fs.writeFile(fileB, JSON.stringify(rawB));
+    const statA = await fs.stat(fileA);
+    const statB = await fs.stat(fileB);
+    const legacyA = `${rawA.start_time}|${rawA.task}`;
+    const legacyB = `${rawB.start_time}|${rawB.task}`;
+    const seen = Array.from({ length: 15 }, (_, index) => index + 1);
+    const store = await newStore();
+    store.set('trae-agent-trajectory', {
+      extra: {
+        trajectoryStateVersion: 2,
+        activeRunId: legacyB,
+        runId: legacyB,
+        runsById: {
+          [legacyA]: { fingerprint: `${statA.ino}:${statA.size}:${statA.mtimeMs}`, seenStepNumbers: seen, runCompletionEmitted: true, lastFile: fileA },
+          [legacyB]: { fingerprint: `${statB.ino}:${statB.size}:${statB.mtimeMs}`, seenStepNumbers: seen, runCompletionEmitted: true, lastFile: fileB },
+        },
+      },
+    });
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: store,
+      trajectoryFile: dir,
+      trajectoryDir: dir,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+
+    // @ts-expect-error: protected
+    expect(await input.collect()).toEqual([]);
+    const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
+    expect(extra.trajectoryStateVersion).toBe(3);
+    expect(Object.keys(extra.runsById)).toHaveLength(2);
+    expect(Object.keys(extra.runsById).every(key => /^trajectory-run-v3:[0-9a-f]{32}$/.test(key))).toBe(true);
+    expect(JSON.stringify(extra)).not.toContain(rawA.task);
+    expect(JSON.stringify(extra)).not.toContain(legacyA);
+    expect(JSON.stringify(extra)).not.toContain(legacyB);
+  });
+
   test('ignores files that do not match the trajectory*.json pattern', async () => {
     const dir = path.join(tmpDir, 'trajectories');
     await fs.mkdir(dir, { recursive: true });
@@ -131,6 +246,33 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     // @ts-expect-error: protected
     const out = (await input.collect()) as AgentActivityEntry[];
     expect(out.length).toBe(12);   // only trajectory_keep.json, decoys ignored
+  });
+
+  test('one malformed trajectory does not block other valid files in the same cycle', async () => {
+    const dir = path.join(tmpDir, 'trajectories');
+    await fs.mkdir(dir, { recursive: true });
+    const fileA = path.join(dir, 'trajectory_A.json');
+    const badFile = path.join(dir, 'trajectory_B.json');
+    const fileC = path.join(dir, 'trajectory_C.json');
+    await fs.writeFile(fileA, truncated(3, '2026-08-24T10:00:17.058504'));
+    await fs.writeFile(badFile, '{not-json');
+    await fs.writeFile(fileC, truncated(3, '2026-08-26T10:00:17.058504'));
+    const now = Date.now();
+    await fs.utimes(fileA, new Date(now - 30_000), new Date(now - 30_000));
+    await fs.utimes(badFile, new Date(now - 20_000), new Date(now - 20_000));
+    await fs.utimes(fileC, new Date(now - 10_000), new Date(now - 10_000));
+
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: await newStore(),
+      trajectoryFile: dir,
+      trajectoryDir: dir,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+    // @ts-expect-error: protected
+    const out = (await input.collect()) as AgentActivityEntry[];
+    expect(out.length).toBe(12 + 12);
+    expect(new Set(out.map(entry => entry['gen_ai.session.id'])).size).toBe(2);
   });
 
   test('no matching file in the directory produces no entries (no crash)', async () => {

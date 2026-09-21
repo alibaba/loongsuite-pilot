@@ -27,8 +27,9 @@
  *     (input/output/cache_creation/cache_read/reasoning_tokens) and is the
  *     authoritative source. `agent_steps[i].llm_response.usage` only has
  *     {input, output} and MUST NOT be used for span emission.
- *   - input_messages normalization: trae-agent stores messages as
- *     `{role, content}` for text and `{role:'user', content:null,
+ *   - input_messages is request-local DELTA, not the complete accumulated
+ *     model history. trae-agent stores each new message as `{role, content}`
+ *     for text and `{role:'user', content:null,
  *     tool_result:{call_id, result, error, ...}}` for tool responses. The
  *     ARMS GenAI spec wants `{role, parts:[{type, ...}]}` — text parts use
  *     `{type:'text', content}` and tool responses become a separate message

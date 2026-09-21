@@ -36,6 +36,10 @@
  *     input_tokens already includes cache are left untouched. (P1-5)
  *   - tool_calls are read from `llm_interactions[i].response.tool_calls`,
  *     not from the interaction's top level.
+ *   - `llm_interactions[i].input_messages` contains only messages added since
+ *     the previous model call. It maps to `gen_ai.input.messages_delta` on
+ *     every request; the downstream converter accumulates those deltas into
+ *     each LLM span's full `gen_ai.input.messages` history. (P2)
  *   - output.messages tool parts use `type: 'tool_call'` (NOT `tool_use`)
  *     and `type: 'tool_call_response'` for results — the validate-trace
  *     rule set recognizes only those part types. The final step's real
@@ -57,10 +61,11 @@
  *     converter no longer appends a synthetic 'stop'. Because trae-agent
  *     saves the last agent_step BEFORE finalize_recording writes end_time,
  *     a poll can observe the last step while the run is still in progress;
- *     the cycle that first sees end_time then re-emits that step's
- *     llm.response ONCE with turn.end so the buffered turn still closes
- *     (deterministic event.id/span_id make the re-emission idempotent
- *     downstream). (P1-2)
+ *     the cycle that first sees end_time then emits one flush-only `other`
+ *     control record. The OTLP flusher consumes that marker to close the
+ *     buffered turn and removes it before EventLog-to-Trace conversion, so it
+ *     cannot double-count usage or replace the parent span's final output.
+ *     (P1-2)
  */
 
 import crypto from 'node:crypto';
@@ -116,25 +121,12 @@ export function convertTrajectory(json, opts = {}) {
   // the poller routinely observes partial trajectories whose current tail step
   // is NOT the real last step.
   const runComplete = Boolean(parsed.endTime);
-  let firstEmittedLlmRequest = true;
   let emittedTurnEnd = false;
 
-  /**
-   * Build the llm.response record for a step. Shared by the main loop and the
-   * P1-2 finalize-only completion marker so both produce deterministically-IDed
-   * records that collapse onto the same span downstream.
-   *
-   * `markerOnly` builds the P1-2 turn-end signal: it carries gen_ai.turn.end but
-   * OMITS gen_ai.output.messages. The downstream converter
-   * (mergeResponsesByResponseId) collapses records sharing gen_ai.response.id by
-   * CONCATENATING their output.messages parts, so a marker that repeated the last
-   * step's payload would double it (text + task_done emitted twice) on the merged
-   * span. The already-buffered record from the poll that first saw the last step
-   * carries the real payload; the marker only needs to close the turn.
-   */
-  const buildLlmResponse = ({ step, interaction, stepSpanId, llmSpanId, stepId, turnId, providerName, llmEndNano, isLastStep, markerOnly }) => {
+  /** Build the single authoritative llm.response record for a step. */
+  const buildLlmResponse = ({ step, interaction, stepSpanId, llmSpanId, stepId, turnId, providerName, llmEndNano, isLastStep }) => {
     const usage = normalizeUsageTokens(interaction.response.usage, providerName);
-    const outputMessages = markerOnly ? [] : buildOutputMessages(interaction);
+    const outputMessages = buildOutputMessages(interaction);
     const finishReasons = buildFinishReasons(interaction.response.finishReason);
     return {
       time_unix_nano: String(llmEndNano),
@@ -218,14 +210,10 @@ export function convertTrajectory(json, opts = {}) {
 
     if (interaction) {
       // ── LLM_CALL request ──
-      // On the first emitted LLM request of the turn, also populate
-      // gen_ai.input.messages_delta with the initial prompt. The OTLP converter
-      // library reads _delta from the first llm.request to build ENTRY/AGENT
-      // input.messages (it does NOT read the full gen_ai.input.messages field
-      // for ENTRY/AGENT). Without _delta, those synthesized spans carry no
-      // input.messages and fail the data-quality checks.
-      const isFirstEmitted = firstEmittedLlmRequest;
-      firstEmittedLlmRequest = false;
+      // trae-agent records only messages added since the previous model call,
+      // not the complete request history. Emit that source truth as delta on
+      // every request. @loongsuite/otel-util-genai accumulates the deltas across
+      // the buffered turn to reconstruct each LLM span's full input.messages.
       entries.push({
         time_unix_nano: String(llmStartNano),
         observed_time_unix_nano: String(llmEndNano),
@@ -238,12 +226,7 @@ export function convertTrajectory(json, opts = {}) {
         'gen_ai.request.model': interaction.model || parsed.model,
         'gen_ai.response.id': `${sessionId}:r${step.stepNumber}`,
         ...(interaction.inputMessages.length > 0
-          ? {
-              'gen_ai.input.messages': interaction.inputMessages,
-              ...(isFirstEmitted
-                ? { 'gen_ai.input.messages_delta': interaction.inputMessages }
-                : {}),
-            }
+          ? { 'gen_ai.input.messages_delta': interaction.inputMessages }
           : {}),
       });
 
@@ -308,30 +291,38 @@ export function convertTrajectory(json, opts = {}) {
   // trae-agent saves the last agent_step BEFORE finalize_recording writes
   // end_time. A poll that observed the last step while the run was still in
   // progress emitted it WITHOUT turn.end and recorded it as seen. On the poll
-  // that first sees end_time every step is skipped, so the turn would never
-  // close. Re-emit the finalized last step's llm.response ONCE as a turn-end
-  // SIGNAL: its deterministic event.id/span_id/response.id collapse onto the
-  // already-buffered record downstream, and the flusher only needs turn.end to
-  // close the turn. markerOnly omits output.messages so that collapse does not
-  // double the last step's payload (see buildLlmResponse).
+  // that first sees end_time every step is skipped, so the turn still needs a
+  // boundary signal. Do NOT re-emit llm.response here: the downstream library
+  // aggregates usage and chooses the final parent output before response-id
+  // merging, so even a deterministic duplicate over-counts tokens and an empty
+  // payload clears ENTRY/AGENT output. Emit a control-plane `other` record that
+  // the OTLP flusher removes before EventLog-to-Trace conversion.
   if (runComplete && !emittedTurnEnd && !runCompletionEmitted && lastStepIndex >= 0) {
     const lastStep = parsed.steps[lastStepIndex];
     const lastInteraction = parsed.interactions[lastStepIndex] ?? null;
-    if (lastStep?.stepNumber && lastInteraction && seen.has(lastStep.stepNumber)) {
-      const providerName = lastInteraction.provider || parsed.provider || PROVIDER_FALLBACK;
-      const llmEndNano = nanoOf(lastInteraction.timestamp || lastStep.timestamp);
-      entries.push(buildLlmResponse({
-        step: lastStep,
-        interaction: lastInteraction,
-        stepSpanId: hashId([sessionId, 'step', String(lastStep.stepNumber)], 16),
-        llmSpanId: hashId([sessionId, 'llm', String(lastStep.stepNumber)], 16),
-        stepId: `${sessionId}:s${lastStep.stepNumber}`,
-        turnId: sessionId,
-        providerName,
-        llmEndNano,
-        isLastStep: true,
-        markerOnly: true,
-      }));
+    if (lastStep?.stepNumber) {
+      // An exhausted API retry can record a final error step without a matching
+      // llm_interaction. The finalized trajectory must still close the existing
+      // turn buffer, but must not fabricate an LLM request/response span.
+      const providerName = lastInteraction?.provider || parsed.provider || PROVIDER_FALLBACK;
+      const markerTime = lastInteraction?.timestamp || lastStep.timestamp || parsed.endTime;
+      const llmEndNano = nanoOf(markerTime);
+      entries.push({
+        time_unix_nano: String(llmEndNano),
+        observed_time_unix_nano: String(llmEndNano),
+        'event.id': hashId([sessionId, 'turn', 'completion'], 32),
+        'user.id': '',
+        'event.name': 'other',
+        trace_id: traceId,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': sessionId,
+        'gen_ai.step.id': `${sessionId}:s${lastStep.stepNumber}`,
+        'gen_ai.agent.type': AGENT_TYPE,
+        'gen_ai.agent.id': sessionId,
+        'gen_ai.provider.name': providerName,
+        'gen_ai.turn.end': true,
+        'agent.trajectory.flush_only': true,
+      });
       emittedTurnEnd = true;
     }
   }

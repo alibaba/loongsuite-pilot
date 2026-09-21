@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
+import { createHash } from 'node:crypto';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { BaseInput, type InputOptions } from './base-input.js';
@@ -10,10 +11,13 @@ export interface TrajectoryPollingOptions extends InputOptions {
   /** Polling interval, defaults to 30s via BaseInput. */
 }
 
+const TRAJECTORY_STATE_VERSION = 3;
+const RUN_ID_PREFIX = 'trajectory-run-v3:';
+
 /**
- * Base input for tools that overwrite a single trajectory JSON file each
- * cycle (e.g. trae-agent `TrajectoryRecorder.save_trajectory()` does an
- * integral `json.dump` rewrite on every record_* call).
+ * Base input for tools that write one or more trajectory JSON files
+ * (e.g. trae-agent `TrajectoryRecorder.save_trajectory()` does an integral
+ * `json.dump` rewrite on every record_* call).
  *
  * Subclass implements parseTrajectory(json, ctx): convert a freshly-read
  * trajectory into the AgentActivityEntry set emitted this cycle. The
@@ -30,18 +34,14 @@ export interface TrajectoryPollingOptions extends InputOptions {
  * the library synthesizes a duplicate bare ENTRY/AGENT pair from it.
  *
  * Dedup model:
- *   - Persistent `state.extra.seenStepNumbers` is a Set<number> (serialised
- *     as a sorted array). The base class clears the set when truncation or
- *     file replacement is detected (see isTruncation).
+ *   - Persistent `state.extra.runsById` stores one checkpoint per logical run;
+ *     each checkpoint owns its own sorted `seenStepNumbers` and completion bit.
+ *     Switching A -> B -> A therefore restores A instead of clearing it.
  *   - Length-only comparisons (`len(agent_steps)`) are explicitly forbidden:
- *     same length with mutated content would silently lose events. The
- *     dedup key is `step_number` (a 1-based monotonic in trae-agent's
- *     trajectory schema) and persists across cycles via stateStore.
- *   - When the file fingerprint (inode+size+mtime) indicates truncation or
- *     replacement (size shrinks, or inode changes), the base class clears
- *     the seen set, sets `extra.sessionReset=true` on the next emitted
- *     batch so downstream consumers can mark a fresh session, and
- *     re-emits the full trajectory.
+ *     the dedup key is the 1-based monotonic `step_number` within each run.
+ *   - When one run's file fingerprint (inode+size+mtime) indicates truncation
+ *     or replacement on the same path, only that run's seen set is cleared and
+ *     the next emitted batch is stamped as a session reset.
  */
 export abstract class BaseTrajectoryPollingInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.LogWatchPolling;
@@ -54,9 +54,22 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    const trajectoryFiles = await this.resolveTrajectoryFiles();
+    const entries: AgentActivityEntry[] = [];
+    for (const trajectoryFile of trajectoryFiles) {
+      try {
+        entries.push(...await this.processTrajectoryFile(trajectoryFile));
+      } catch (err) {
+        // One corrupt or concurrently-removed file must not block other runs
+        // discovered in the same polling cycle.
+        this.logger.warn('trajectory processing failed', { file: trajectoryFile, error: String(err) });
+      }
+    }
+    return entries;
+  }
+
+  private async processTrajectoryFile(trajectoryFile: string): Promise<AgentActivityEntry[]> {
     const stateKey = this.id;
-    const trajectoryFile = await this.resolveTrajectoryFile();
-    if (!trajectoryFile) return [];
     let stat: fsSync.Stats;
     try {
       stat = await fs.stat(trajectoryFile);
@@ -77,9 +90,9 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     }
     if (!raw.trim()) return [];
 
-    let parsed: unknown;
+    let parsed: TrajectoryJson;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(raw) as TrajectoryJson;
     } catch (err) {
       this.logger.warn('trajectory json parse failed', { file: trajectoryFile, error: String(err) });
       return [];
@@ -87,38 +100,74 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
 
     const prevState = this.stateStore.get(stateKey);
     const prevExtra = (prevState.extra ?? {}) as TrajectoryExtra;
-    const prevFingerprint = prevExtra.fingerprint;
+    let runsById = this.cloneRunCheckpoints(prevExtra.runsById);
     const currentFp = this.trajectoryFingerprint(stat);
+    const currentRunId = this.deriveRunIdentity(parsed);
+    // Identity-less files still need isolated checkpoints; otherwise two such
+    // files share a seen-step set and suppress each other.
+    const currentRunKey = currentRunId || `file:${trajectoryFile}`;
 
-    // P1-3: dedup state is scoped to a LOGICAL RUN, not to the physical file.
-    // trae-agent rewrites its trajectory via `open(path, "w")` (inode stable);
-    // a new run reusing the same configured path can therefore present a larger
-    // file with the same inode, so the size-shrink / inode-change truncation
-    // heuristic alone would keep the previous run's seenStepNumbers and drop
-    // the new run's same-numbered steps (a whole silent turn loss). Derive a
-    // run identity from the trajectory content and reset dedup whenever it
-    // changes, independent of the file fingerprint.
-    const currentRunId = this.deriveRunIdentity(parsed as TrajectoryJson);
-    const prevRunId = prevExtra.runId;
-    const runChanged = Boolean(prevRunId && currentRunId && prevRunId !== currentRunId);
+    // Version 3 replaces plaintext `${start_time}|${task}` keys with a stable
+    // SHA-256 digest. Migrate every v2 map key before lookup so no raw task is
+    // written back to checkpoint state, including runs not active this cycle.
+    if (prevExtra.trajectoryStateVersion !== TRAJECTORY_STATE_VERSION) {
+      runsById = this.migrateRunCheckpoints(runsById);
+    }
 
-    let sessionReset = false;
-    let seenStepNumbers = new Set<number>(prevExtra.seenStepNumbers ?? []);
-    let runCompletionEmitted = Boolean(prevExtra.runCompletionEmitted);
-    if (runChanged) {
-      this.logger.info('trajectory run identity changed, resetting dedup state', {
-        file: trajectoryFile,
-        prevRunId,
-        currentRunId,
-      });
-      seenStepNumbers = new Set<number>();
-      sessionReset = true;
-      runCompletionEmitted = false;
-    } else if (prevFingerprint && prevFingerprint !== currentFp) {
+    // Backward-compatible migration from the former input-level single slot.
+    // A known legacy run is restored under its digest key before any other file
+    // in this cycle is processed, so an upgrade does not replay seen steps.
+    if (prevExtra.trajectoryStateVersion !== TRAJECTORY_STATE_VERSION
+      && Object.keys(runsById).length === 0) {
+      const hasLegacyState = Boolean(
+        prevExtra.runId
+        || prevExtra.fingerprint
+        || (prevExtra.seenStepNumbers && prevExtra.seenStepNumbers.length > 0)
+        || prevExtra.runCompletionEmitted,
+      );
+      if (hasLegacyState) {
+        const legacyRunKey = prevExtra.runId
+          ? this.normalizeStoredRunKey(prevExtra.runId)
+          : currentRunKey;
+        runsById[legacyRunKey] = {
+          fingerprint: prevExtra.fingerprint,
+          seenStepNumbers: [...(prevExtra.seenStepNumbers ?? [])],
+          runCompletionEmitted: Boolean(prevExtra.runCompletionEmitted),
+          lastProcessedAt: prevExtra.lastProcessedAt,
+        };
+      }
+    }
+
+    // A fixed path may be overwritten by a brand-new logical run. Once the new
+    // identity is visible, an older checkpoint for that same physical path can
+    // never be reached from the current file and would otherwise grow forever.
+    for (const [runKey, checkpoint] of Object.entries(runsById)) {
+      if (runKey !== currentRunKey && checkpoint.lastFile === trajectoryFile) {
+        delete runsById[runKey];
+      }
+    }
+
+    const checkpoint = runsById[currentRunKey];
+    const storedActiveRunId = prevExtra.activeRunId ?? prevExtra.runId;
+    const previousActiveRunId = storedActiveRunId
+      ? this.normalizeStoredRunKey(storedActiveRunId)
+      : undefined;
+    let sessionReset = !checkpoint
+      && Boolean(previousActiveRunId && previousActiveRunId !== currentRunKey);
+    let seenStepNumbers = new Set<number>(checkpoint?.seenStepNumbers ?? []);
+    let runCompletionEmitted = Boolean(checkpoint?.runCompletionEmitted);
+    const prevFingerprint = checkpoint?.fingerprint;
+
+    // Truncation is meaningful only for the same logical run observed through
+    // the same physical file. Switching A -> B -> A must restore A's checkpoint,
+    // not clear it merely because B was processed most recently.
+    const samePhysicalFile = !checkpoint?.lastFile || checkpoint.lastFile === trajectoryFile;
+    if (prevFingerprint && prevFingerprint !== currentFp && samePhysicalFile) {
       const truncated = this.isTruncation(prevFingerprint, currentFp, stat);
       if (truncated) {
-        this.logger.info('trajectory truncated or replaced, resetting dedup state', {
+        this.logger.info('trajectory truncated or replaced, resetting run checkpoint', {
           file: trajectoryFile,
+          runId: currentRunId,
           prev: prevFingerprint,
           current: currentFp,
         });
@@ -136,21 +185,103 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       currentFingerprint: currentFp,
     };
     const { entries, emittedStepNumbers, runCompletionEmitted: terminalEmitted } =
-      await this.parseTrajectory(parsed as TrajectoryJson, ctx);
+      await this.parseTrajectory(parsed, ctx);
     for (const n of emittedStepNumbers) seenStepNumbers.add(n);
+
+    const lastProcessedAt = Date.now();
+    const sortedSeenStepNumbers = Array.from(seenStepNumbers).sort((a, b) => a - b);
+    const completionEmitted = Boolean(terminalEmitted || runCompletionEmitted);
+    runsById[currentRunKey] = {
+      fingerprint: currentFp,
+      seenStepNumbers: sortedSeenStepNumbers,
+      runCompletionEmitted: completionEmitted,
+      lastProcessedAt,
+      lastFile: trajectoryFile,
+      lastMtimeMs: stat.mtimeMs,
+    };
 
     this.stateStore.update(stateKey, {
       extra: {
+        trajectoryStateVersion: TRAJECTORY_STATE_VERSION,
+        activeRunId: currentRunKey,
+        runsById,
+        // Compatibility mirror for diagnostics and downgrade tolerance. Runtime
+        // dedup reads runsById exclusively once state version 3 is present.
         fingerprint: currentFp,
         runId: currentRunId,
-        seenStepNumbers: Array.from(seenStepNumbers).sort((a, b) => a - b),
+        seenStepNumbers: sortedSeenStepNumbers,
         sessionReset,
-        runCompletionEmitted: Boolean(terminalEmitted),
-        lastProcessedAt: Date.now(),
+        runCompletionEmitted: completionEmitted,
+        lastProcessedAt,
       },
     } as unknown as Partial<InputState>);
 
     return entries;
+  }
+
+  private cloneRunCheckpoints(
+    raw: TrajectoryExtra['runsById'],
+  ): Record<string, TrajectoryRunCheckpoint> {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out: Record<string, TrajectoryRunCheckpoint> = {};
+    for (const [runId, value] of Object.entries(raw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      out[runId] = {
+        ...value,
+        seenStepNumbers: Array.isArray(value.seenStepNumbers)
+          ? value.seenStepNumbers.filter((n): n is number => Number.isInteger(n) && n > 0)
+          : [],
+      };
+    }
+    return out;
+  }
+
+  private migrateRunCheckpoints(
+    checkpoints: Record<string, TrajectoryRunCheckpoint>,
+  ): Record<string, TrajectoryRunCheckpoint> {
+    const migrated: Record<string, TrajectoryRunCheckpoint> = {};
+    for (const [storedRunId, checkpoint] of Object.entries(checkpoints)) {
+      const safeRunId = this.normalizeStoredRunKey(storedRunId);
+      const existing = migrated[safeRunId];
+      if (!existing) {
+        migrated[safeRunId] = checkpoint;
+        continue;
+      }
+      const newer = (checkpoint.lastProcessedAt ?? 0) >= (existing.lastProcessedAt ?? 0)
+        ? checkpoint
+        : existing;
+      migrated[safeRunId] = {
+        ...existing,
+        ...newer,
+        seenStepNumbers: [...new Set([
+          ...(existing.seenStepNumbers ?? []),
+          ...(checkpoint.seenStepNumbers ?? []),
+        ])].sort((a, b) => a - b),
+        runCompletionEmitted: Boolean(
+          existing.runCompletionEmitted || checkpoint.runCompletionEmitted,
+        ),
+      };
+    }
+    return migrated;
+  }
+
+  private normalizeStoredRunKey(storedRunId: string): string {
+    if (storedRunId.startsWith(RUN_ID_PREFIX) || storedRunId.startsWith('file:')) {
+      return storedRunId;
+    }
+    const separator = storedRunId.indexOf('|');
+    if (separator >= 0) {
+      return this.hashRunIdentity(
+        storedRunId.slice(0, separator),
+        storedRunId.slice(separator + 1),
+      );
+    }
+    return `${RUN_ID_PREFIX}${createHash('sha256').update(storedRunId).digest('hex').slice(0, 32)}`;
+  }
+
+  private hashRunIdentity(startTime: string, task: string): string {
+    const seed = JSON.stringify([startTime, task]);
+    return `${RUN_ID_PREFIX}${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
   }
 
   /**
@@ -165,17 +296,25 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   }
 
   /**
-   * Derive a stable LOGICAL RUN identity from a freshly-parsed trajectory. The
-   * default keys on `start_time` + `task`, which trae-agent stamps once per run
-   * in start_recording, so a new run reusing the same file path yields a new
-   * identity. Returns '' when neither field is present (identity unknown →
-   * callers must not treat '' as a run change).
+   * Resolve every trajectory file that should be processed this cycle. The
+   * default preserves the historical single-file contract; directory-backed
+   * subclasses can override this to return all matching files in stable order.
+   */
+  protected async resolveTrajectoryFiles(): Promise<string[]> {
+    const trajectoryFile = await this.resolveTrajectoryFile();
+    return trajectoryFile ? [trajectoryFile] : [];
+  }
+
+  /**
+   * Derive a stable, non-reversible logical run identity. Raw task content is
+   * used only as hash input and must never enter checkpoint keys or logs.
+   * Returns '' when both fields are absent so callers can fall back to the path.
    */
   protected deriveRunIdentity(json: TrajectoryJson): string {
     const start = typeof json?.start_time === 'string' ? json.start_time : '';
     const task = typeof json?.task === 'string' ? json.task : '';
     if (!start && !task) return '';
-    return `${start}|${task}`;
+    return this.hashRunIdentity(start, task);
   }
 
   /**
@@ -221,13 +360,27 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   ): Promise<{ entries: AgentActivityEntry[]; emittedStepNumbers: number[]; runCompletionEmitted?: boolean }>;
 }
 
-export interface TrajectoryExtra {
+export interface TrajectoryRunCheckpoint {
   fingerprint?: string;
-  /** Logical run identity (start_time|task); a change resets dedup (P1-3). */
+  seenStepNumbers?: number[];
+  /** True once the finalize (turn.end) terminal was emitted for this run (P1-2). */
+  runCompletionEmitted?: boolean;
+  lastProcessedAt?: number;
+  lastFile?: string;
+  lastMtimeMs?: number;
+}
+
+export interface TrajectoryExtra {
+  /** Version 3 stores per-run state under task-safe digest identities. */
+  trajectoryStateVersion?: number;
+  activeRunId?: string;
+  runsById?: Record<string, TrajectoryRunCheckpoint>;
+  // Legacy single-slot fields retained as a compatibility mirror/migration source.
+  fingerprint?: string;
+  /** Versioned SHA-256 logical run identity; never contains raw task text. */
   runId?: string;
   seenStepNumbers?: number[];
   sessionReset?: boolean;
-  /** True once the finalize (turn.end) terminal was emitted for this run (P1-2). */
   runCompletionEmitted?: boolean;
   lastProcessedAt?: number;
 }
