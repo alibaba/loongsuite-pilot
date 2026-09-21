@@ -1712,6 +1712,44 @@ describe('CodexTranscriptInput', () => {
     expect(entryTimestampMs(response)).toBe(Date.parse('2026-06-24T06:00:08.000Z'));
   });
 
+  it('prefers token_usage_record response_id over response item ids', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-response-id-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'check it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'response_item', {
+        type: 'reasoning', id: 'rs-provider-item', summary: [], content: null, encrypted_content: null,
+      }),
+      record('2026-06-24T06:00:05.000Z', 'response_item', {
+        type: 'message', id: 'msg-provider-item', role: 'assistant',
+        content: [{ type: 'output_text', text: 'done' }],
+      }),
+      record('2026-06-24T06:00:06.000Z', 'token_usage_record', {
+        thread_id: 'session-1', turn_id: 'turn-1', session_id: 'session-1',
+        response_id: 'resp-provider-response',
+        usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+      }),
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(100, 10)),
+      record('2026-06-24T06:00:08.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+      }),
+    ].join('\n') + '\n');
+
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'llm.response'));
+    await input.stop();
+
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    expect(request?.['gen_ai.response.id']).toBe('resp-provider-response');
+    expect(response?.['gen_ai.response.id']).toBe('resp-provider-response');
+  });
+
   it('rebuilds completed transcript waves without collapsing reasoning or token usage', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-'));
     tempDirs.push(root);

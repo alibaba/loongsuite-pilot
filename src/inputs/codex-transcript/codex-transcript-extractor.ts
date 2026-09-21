@@ -280,6 +280,17 @@ function extractCodexTurn(
 
     if (currentTurnId !== expectedTurnId) continue;
 
+    if (record.type === 'token_usage_record') {
+      const turnId = stringValue(payload.turn_id);
+      const responseId = stringValue(payload.response_id);
+      const envelope = activeStep();
+      if ((!turnId || turnId === expectedTurnId) && responseId && envelope?.step.hasResponseEvidence) {
+        envelope.step.responseId = responseId;
+        touchStep(envelope, source);
+      }
+      continue;
+    }
+
     if (record.type === 'event_msg') {
       if (payload.type === 'user_message') {
         appendPrompt(stringValue(payload.message));
