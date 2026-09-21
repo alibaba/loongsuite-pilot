@@ -110,7 +110,7 @@ export abstract class BaseInput extends EventEmitter {
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
   /** Commit source progress only after the batch has entered the shared output queue. */
-  protected onEntriesQueued(): void {}
+  protected onEntriesQueued(): void | Promise<void> {}
 
   /** Request an immediate serialized collection cycle from an input-owned watcher. */
   protected requestCollection(): void {
@@ -133,7 +133,7 @@ export abstract class BaseInput extends EventEmitter {
       const entries = await this.collect();
       if (entries.length > 0) {
         this.emit('entries', entries);
-        this.onEntriesQueued();
+        await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
       await this.stateStore.save();

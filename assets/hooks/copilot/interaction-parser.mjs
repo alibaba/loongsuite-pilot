@@ -10,7 +10,7 @@ const id = value => crypto.createHash('sha256').update(value).digest('hex').slic
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
 /** Return complete, independently checkpointable interactions. No observation-time closure. */
-export function parseInteractions(events, spans = [], { requireOtel = false } = {}) {
+export function parseInteractions(events, spans = [], { requireOtel = false, contextEvents = events } = {}) {
   const session = events.find(e => e.type === 'session.start');
   const sessionId = session?.data?.sessionId;
   if (!sessionId) return [];
@@ -42,14 +42,19 @@ export function parseInteractions(events, spans = [], { requireOtel = false } = 
     const transcriptClosed = Boolean(abort || (finalMessage && !finalMessage.data?.toolRequests?.length
       && lastEnd && lastEnd.timestamp >= finalMessage.timestamp));
     if (requireOtel && !root) continue;
-    if (!root && !transcriptClosed) continue;
+    if (!transcriptClosed && root?.status?.code !== 2) continue;
     // Root may reach disk before transcript messages. Wait rather than checkpoint
     // a half-correlated interaction. Failed calls legitimately have no message.
     if (requireOtel && chats.some(c => c.status?.code !== 2 && !messages.some(m => m.data?.apiCallId === c.attributes['gen_ai.response.id']))) continue;
     if (requireOtel && messages.some(m => !chats.some(c => c.attributes['gen_ai.response.id'] === m.data?.apiCallId))) continue;
     const trace = id(`copilot:${sessionId}:${interaction}`);
     const turn = `copilot:${sessionId}:${interaction}`;
-    const entries = [];
+    const entries = history.filter(e => e.type === 'user.message' && typeof e.data?.content === 'string').map(e => ({
+      'event.name': 'other', 'event.id': id(`${turn}:input:${e.id}`), 'user.id': '',
+      'gen_ai.session.id': sessionId, 'gen_ai.agent.type': 'copilot',
+      time_unix_nano: legacy.isoToUnixNanos(e.timestamp),
+      'gen_ai.input.messages': JSON.stringify([{role:'user',parts:[{type:'text',content:e.data.content}]}]),
+    }));
     const scoped = records => records.map(r => {
       const result = { ...r, trace_id: trace, 'gen_ai.turn.id': turn,
         'gen_ai.copilot.interaction.id': interaction, 'gen_ai.copilot.source': 'hybrid-v2' };
@@ -76,7 +81,7 @@ export function parseInteractions(events, spans = [], { requireOtel = false } = 
       const endNs = ns(c?.endTime) || legacy.isoToUnixNanos(ms.at(-1)?.timestamp);
       if (!startNs || !endNs) continue;
       const input = [];
-      for (const e of events) {
+      for (const e of contextEvents) {
         const when = legacy.isoToUnixNanos(e.timestamp);
         if (!when || BigInt(when) >= BigInt(startNs)) continue;
         if (e.type === 'system.message' || e.type === 'user.message') {
@@ -138,7 +143,7 @@ export function parseInteractions(events, spans = [], { requireOtel = false } = 
     }
     // One step endpoint per round-trip keeps all child end timestamps visible to
     // the converter; it must not act as an independent interaction boundary.
-    for (const step of new Set(entries.map(e => e['gen_ai.step.id']))) {
+    for (const step of new Set(entries.map(e => e['gen_ai.step.id']).filter(s => s != null))) {
       const children = entries.filter(e => e['gen_ai.step.id'] === step);
       const end = children.map(e => e._merged_end_time_unix_nano || e.time_unix_nano).reduce((a,b) => BigInt(a)>BigInt(b)?a:b);
       const first = children.reduce((a,b) => BigInt(a.time_unix_nano)<BigInt(b.time_unix_nano)?a:b);
