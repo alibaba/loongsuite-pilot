@@ -1676,11 +1676,10 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Remove OTel Claude plugin
+# Remove legacy OTel plugin assets owned by Pilot
 # ============================================================
 remove_otel_plugin() {
     local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
-    local OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
     # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
     # after the Claude plugin directory (and intercept.js) is deleted
@@ -1761,137 +1760,6 @@ try {
         fi
     fi
 
-    # --- Codex OTel plugin cleanup ---
-    if [ -f "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" ]; then
-        bash "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" 2>/dev/null || true
-        msg "    ✅ Codex 插件 hooks 已清理" \
-            "    ✅ Codex plugin hooks cleaned"
-    else
-        # Clean hooks.json (new format)
-        local codex_hooks_json="$HOME/.codex/hooks.json"
-        if [ -f "$codex_hooks_json" ] && grep -qE "otel-codex-hook|hook-entry\.sh" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
-            node -e "
-const fs = require('fs');
-const f = process.argv[1];
-const isOurs = c => c.includes('otel-codex-hook') || c.includes('hook-entry.sh');
-try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (d && d.hooks) {
-    for (const ev of Object.keys(d.hooks)) {
-      d.hooks[ev] = d.hooks[ev].filter(g => {
-        if (!g.hooks) return true;
-        g.hooks = g.hooks.filter(h => !(h.command && isOurs(h.command)));
-        return g.hooks.length > 0;
-      });
-      if (d.hooks[ev].length === 0) delete d.hooks[ev];
-    }
-    if (Object.keys(d.hooks).length === 0) {
-      fs.unlinkSync(f);
-    } else {
-      fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
-    }
-  }
-} catch {}
-" "$codex_hooks_json" 2>/dev/null || true
-        fi
-
-        # Clean config.toml (legacy hooks + trust block)
-        local codex_config="$HOME/.codex/config.toml"
-        if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-            # Remove legacy hook block (# OpenTelemetry instrumentation hooks ... stop)
-            local marker="# OpenTelemetry instrumentation hooks"
-            local end_str='command = "otel-codex-hook stop"'
-            if grep -q "$marker" "$codex_config" 2>/dev/null && grep -qF "$end_str" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v m="$marker" -v e="$end_str" '
-                    BEGIN { skip=0 }
-                    skip==0 && index($0, m) { skip=1; next }
-                    skip==1 { if (index($0, e)) { skip=2 }; next }
-                    skip==2 && /^[[:space:]]*$/ { next }
-                    { skip=0; print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Remove trust entries (逐条精确删除,不用 BEGIN/END 范围删以免误伤用户数据)
-            # Step a: 删 BEGIN/END marker 注释行(仅注释行本身)
-            if grep -qE "# (BEGIN|END) otel-codex-hook trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "# BEGIN otel-codex-hook trust\|# END otel-codex-hook trust" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step b: 删 bypass_hook_trust 行
-            if grep -q "bypass_hook_trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*bypass_hook_trust\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step c: 逐条删 [hooks.state."<hooks.json path>:<event>:<group>:0"] section
-            # 匹配 key 中包含 hooks.json 路径的条目(pilot 写的),不动其他 path 的条目
-            local codex_hooks_json_path
-            codex_hooks_json_path="$(cd "$HOME/.codex" 2>/dev/null && pwd)/hooks.json"
-            if grep -q "$codex_hooks_json_path" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v owned_path="$codex_hooks_json_path" '
-                    /^\[hooks\.state\."/ {
-                        if (index($0, owned_path) > 0) { skip=1; next }
-                    }
-                    /^\[/ && !/^\[hooks\.state\."/ { skip=0 }
-                    skip { next }
-                    { print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Step d: 删 otel-codex-hook 相关的剩余行(legacy catch-all,不删 hooks.state section)
-            if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up codex_hooks = true
-            if grep -q "codex_hooks" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*codex_hooks\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up multiple blank lines
-            if [ -f "$codex_config" ]; then
-                local tmp; tmp=$(mktemp)
-                awk 'NF{blank=0} !NF{blank++} blank<=1' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            msg "    ✅ Codex hooks 已从 config.toml 清理" \
-                "    ✅ Codex hooks cleaned from config.toml"
-        fi
-    fi
-
-    local codex_otel_config="$HOME/.codex/otel-config.json"
-    if [ -f "$codex_otel_config" ] && command -v node &>/dev/null; then
-        node -e "
-const fs = require('fs');
-try {
-  const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
-  delete cfg.log_enabled;
-  delete cfg.log_dir;
-  delete cfg.log_filename_format;
-  fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2) + '\n');
-} catch {}
-" "$codex_otel_config" 2>/dev/null || true
-    fi
-
-    if [ -d "$OTEL_CODEX_DIR" ]; then
-        if [ "$PURGE" -eq 1 ]; then
-            rm -rf "$OTEL_CODEX_DIR"
-            msg "    ✅ Codex 插件目录已完全删除 (--purge): $OTEL_CODEX_DIR" \
-                "    ✅ Codex plugin directory fully removed (--purge): $OTEL_CODEX_DIR"
-        else
-            find "$OTEL_CODEX_DIR" -maxdepth 1 \
-              ! -name sessions \
-              ! -name "$(basename "$OTEL_CODEX_DIR")" \
-              -exec rm -rf {} + 2>/dev/null || true
-            msg "    ✅ Codex 插件文件已删除（sessions/ 已保留）" \
-                "    ✅ Codex plugin files removed (sessions/ preserved)"
-        fi
-    fi
 }
 
 print_summary() {
@@ -2996,8 +2864,8 @@ cmd_uninstall() {
     remove_claude_code_fetch_intercept
     echo ""
 
-    # Remove OTel Claude plugin
-    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    # Remove legacy OTel plugin assets owned by Pilot
+    msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     remove_otel_plugin
     echo ""
 
