@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import { convertTrajectory } from '../../../../assets/hooks/trae-agent/trajectory-converter.mjs';
 import { parseTrajectory } from '../../../../assets/hooks/trae-agent/trajectory-parser.mjs';
 import { TERMINAL_CONTROL_TOOLS } from '../../../../scripts/validate-trace.mjs';
@@ -178,11 +179,12 @@ describe('convertTrajectory - non-zero duration (P1-4)', () => {
 });
 
 describe('convertTrajectory - LLM input/output message shape (P1-5, P1-7)', () => {
-  test('LLM request gen_ai.input.messages parts are non-empty text/tool_call_response', () => {
+  test('LLM request messages_delta parts are non-empty text/tool_call_response', () => {
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     for (let sn = 1; sn <= 15; sn++) {
       const req = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
-      const msgs = req['gen_ai.input.messages'];
+      const msgs = req['gen_ai.input.messages_delta'];
+      expect(req['gen_ai.input.messages']).toBeUndefined();
       expect(Array.isArray(msgs)).toBe(true);
       expect(msgs.length).toBeGreaterThan(0);
       for (const m of msgs) {
@@ -395,42 +397,91 @@ describe('convertTrajectory - incremental polling terminal gating (run-in-progre
     expect(turnEndResponses(entries).length).toBe(0);
   });
 
-  test('P1-2: run finalized with no new steps re-emits the seen tail once with turn.end', () => {
+  test('P2: finalized API failure without a last interaction still closes the turn', () => {
+    const failed = partialTrajectory(3);
+    failed.end_time = RAW.end_time;
+    failed.agent_steps[2].error = 'upstream API retries exhausted';
+    failed.agent_steps[2].tool_calls = [];
+    failed.agent_steps[2].tool_results = [];
+    failed.llm_interactions = failed.llm_interactions.slice(0, 2);
+
+    const result = convertTrajectory(failed, { seenStepNumbers: new Set() });
+    expect(result.emittedStepNumbers).toEqual([1, 2, 3]);
+    expect(result.entries.some(entry =>
+      entry['event.name'] === 'llm.response' && entry['gen_ai.step.id']?.endsWith(':s3'))).toBe(false);
+    const markers = turnEndResponses(result.entries);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      'event.name': 'other',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+    });
+    expect(markers[0]['gen_ai.step.id'].endsWith(':s3')).toBe(true);
+    expect(result.runCompletionEmitted).toBe(true);
+  });
+
+  test('P2: API failure seen before end_time emits one completion marker on finalize', () => {
+    const failed = partialTrajectory(3);
+    failed.agent_steps[2].error = 'upstream API retries exhausted';
+    failed.agent_steps[2].tool_calls = [];
+    failed.agent_steps[2].tool_results = [];
+    failed.llm_interactions = failed.llm_interactions.slice(0, 2);
+
+    const first = convertTrajectory(failed, { seenStepNumbers: new Set() });
+    expect(first.emittedStepNumbers).toEqual([1, 2, 3]);
+    expect(turnEndResponses(first.entries)).toHaveLength(0);
+
+    failed.end_time = RAW.end_time;
+    const second = convertTrajectory(failed, {
+      seenStepNumbers: new Set(first.emittedStepNumbers),
+      runCompletionEmitted: first.runCompletionEmitted,
+    });
+    expect(second.emittedStepNumbers).toEqual([]);
+    expect(turnEndResponses(second.entries)).toHaveLength(1);
+    expect(second.runCompletionEmitted).toBe(true);
+
+    const third = convertTrajectory(failed, {
+      seenStepNumbers: new Set(first.emittedStepNumbers),
+      runCompletionEmitted: second.runCompletionEmitted,
+    });
+    expect(third.entries).toEqual([]);
+  });
+
+  test('P1-2: run finalized with no new steps emits one flush-only turn marker', () => {
     // trae-agent saves the last agent_step BEFORE finalize_recording writes
     // end_time, so a poll can observe the REAL last step while the run is still in
-    // progress: it emits that step WITHOUT turn.end and records it as seen. The
-    // next poll sees end_time but every step is already seen, so the main loop
-    // emits nothing — the P1-2 marker must re-emit the finalized tail's
-    // llm.response ONCE with turn.end so the buffered turn still closes.
+    // progress. The completion poll must close the buffered turn without exposing
+    // a second llm.response to the downstream converter: a duplicate response
+    // double-counts usage before merge, while an empty output replaces the parent
+    // ENTRY/AGENT final output.
     const inProgress = JSON.parse(JSON.stringify(RAW));
-    inProgress.end_time = '';       // last step present, run not yet finalized
+    inProgress.end_time = '';
     inProgress.success = false;
     const r1 = convertTrajectory(inProgress, { seenStepNumbers: new Set() });
     expect(r1.emittedStepNumbers).toEqual([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
-    expect(turnEndResponses(r1.entries).length).toBe(0);   // not final yet
+    expect(turnEndResponses(r1.entries).length).toBe(0);
     expect(r1.runCompletionEmitted).toBe(false);
 
     // Poll 2: run finalized (end_time present), all 15 steps already seen.
     const seen = new Set(r1.emittedStepNumbers);
     const r2 = convertTrajectory(RAW, { seenStepNumbers: seen, runCompletionEmitted: r1.runCompletionEmitted });
-    expect(r2.emittedStepNumbers).toEqual([]);             // nothing new from the loop
+    expect(r2.emittedStepNumbers).toEqual([]);
     const turnEnds = turnEndResponses(r2.entries);
-    expect(turnEnds.length).toBe(1);                       // marker re-emitted the tail
-    expect(turnEnds[0]['event.name']).toBe('llm.response');
-    expect(turnEnds[0]['gen_ai.step.id'].endsWith(':s15')).toBe(true);
+    expect(turnEnds).toHaveLength(1);
+    const marker = turnEnds[0];
+    expect(marker['event.name']).toBe('other');
+    expect(marker['agent.trajectory.flush_only']).toBe(true);
+    expect(marker['gen_ai.step.id'].endsWith(':s15')).toBe(true);
     expect(r2.runCompletionEmitted).toBe(true);
-    // deterministic id/span make the re-emission collapse onto the buffered record
-    const p1Tail = r1.entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
-    expect(turnEnds[0]['event.id']).toBe(p1Tail['event.id']);
-    expect(turnEnds[0].span_id).toBe(p1Tail.span_id);
-    // The marker is a turn-end SIGNAL only: it shares response.id with poll1's
-    // tail (the downstream mergeResponsesByResponseId key) but OMITS
-    // output.messages, because that merge CONCATENATES parts — a marker carrying
-    // the payload again would double the last step's text + task_done on the
-    // merged span. poll1's buffered record is the sole payload authority.
-    expect(turnEnds[0]['gen_ai.response.id']).toBe(p1Tail['gen_ai.response.id']);
-    expect(turnEnds[0]['gen_ai.output.messages']).toBeUndefined();
-    expect(p1Tail['gen_ai.output.messages']).toBeDefined();
+
+    // The marker is control-plane only. In particular it must not look like a
+    // response or carry any fields that affect usage or final output selection.
+    expect(marker['gen_ai.response.id']).toBeUndefined();
+    expect(marker['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(marker['gen_ai.output.messages']).toBeUndefined();
+    expect(marker['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(marker['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(marker.span_id).toBeUndefined();
 
     // Poll 3: the runCompletionEmitted guard stops the marker re-firing forever.
     const r3 = convertTrajectory(RAW, { seenStepNumbers: seen, runCompletionEmitted: r2.runCompletionEmitted });
@@ -438,8 +489,54 @@ describe('convertTrajectory - incremental polling terminal gating (run-in-progre
     expect(r3.entries.length).toBe(0);
     expect(turnEndResponses(r3.entries).length).toBe(0);
   });
-});
 
+  test('P1: filtered flush-only marker preserves downstream AGENT usage and final output', async () => {
+    const inProgress = JSON.parse(JSON.stringify(RAW));
+    inProgress.end_time = '';
+    inProgress.success = false;
+    const r1 = convertTrajectory(inProgress, { seenStepNumbers: new Set() });
+    const r2 = convertTrajectory(RAW, {
+      seenStepNumbers: new Set(r1.emittedStepNumbers),
+      runCompletionEmitted: r1.runCompletionEmitted,
+    });
+    const conversionRecords = [...r1.entries, ...r2.entries]
+      .filter(entry => entry['agent.trajectory.flush_only'] !== true);
+    const responses = conversionRecords.filter(entry => entry['event.name'] === 'llm.response');
+    const expectedInputTokens = responses.reduce(
+      (sum, entry) => sum + Number(entry['gen_ai.usage.input_tokens'] ?? 0),
+      0,
+    );
+    const expectedOutputTokens = responses.reduce(
+      (sum, entry) => sum + Number(entry['gen_ai.usage.output_tokens'] ?? 0),
+      0,
+    );
+    expect(expectedInputTokens).toBe(26_052);
+    const expectedFinalOutput = responses.at(-1)['gen_ai.output.messages'];
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const result = await convertEventLogToReadableSpans(conversionRecords, { strict: false });
+      const entry = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      const agent = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+      expect(agent.attributes['gen_ai.usage.input_tokens']).toBe(expectedInputTokens);
+      expect(agent.attributes['gen_ai.usage.output_tokens']).toBe(expectedOutputTokens);
+      const agentOutput = JSON.parse(String(agent.attributes['gen_ai.output.messages']));
+      const entryOutput = JSON.parse(String(entry.attributes['gen_ai.output.messages']));
+      expect(agentOutput).toEqual(entryOutput);
+      expect(agentOutput[0].role).toBe(expectedFinalOutput[0].role);
+      expect(agentOutput[0].parts).toEqual(expectedFinalOutput[0].parts);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
+  });
+
+});
 describe('convertTrajectory - preserve real task_done tool_call on last step (P1-6)', () => {
   test('last step output.messages preserves the real task_done tool_call verbatim', () => {
     // P1-6: trae-agent ends a run with a real `task_done` control tool_call. The
@@ -523,39 +620,58 @@ describe('convertTrajectory - preserve real task_done tool_call on last step (P1
   });
 });
 
-describe('convertTrajectory - ENTRY/AGENT input.messages (P1-#4)', () => {
-  test('first emitted LLM request carries gen_ai.input.messages_delta', () => {
-    // The OTLP converter library reads _delta (NOT full messages) from the
-    // first llm.request to populate ENTRY/AGENT input.messages. Without it,
-    // those synthesized spans have no input.messages.
+describe('convertTrajectory - incremental input messages (P2)', () => {
+  test('every request maps upstream input_messages to messages_delta only', () => {
+    const parsed = parseTrajectory(RAW);
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
-    const firstReq = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(':s1'));
-    expect(firstReq['gen_ai.input.messages_delta']).toBeDefined();
-    expect(Array.isArray(firstReq['gen_ai.input.messages_delta'])).toBe(true);
-    expect(firstReq['gen_ai.input.messages_delta'].length).toBeGreaterThan(0);
-    // full messages also present (LLM span uses this)
-    expect(firstReq['gen_ai.input.messages']).toBeDefined();
-  });
-
-  test('non-first LLM requests do NOT carry messages_delta (avoid double-accumulation)', () => {
-    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
-    for (let sn = 2; sn <= 15; sn++) {
+    for (let sn = 1; sn <= 15; sn++) {
       const req = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
-      expect(req['gen_ai.input.messages_delta']).toBeUndefined();
+      expect(req['gen_ai.input.messages']).toBeUndefined();
+      expect(req['gen_ai.input.messages_delta']).toEqual(parsed.interactions[sn - 1].inputMessages);
     }
   });
 
-  test('with seen-step skipping, first EMITTED LLM request carries messages_delta', () => {
-    // If step 1 is already seen (skipped), the first emitted step is step 2;
-    // its LLM request should carry _delta so ENTRY/AGENT input.messages populates.
-    const seen = new Set([1]);
-    const { entries } = convertTrajectory(RAW, { seenStepNumbers: seen });
-    const firstEmittedReq = entries.find(e => e['event.name'] === 'llm.request');
-    expect(firstEmittedReq['gen_ai.step.id']?.endsWith(':s2')).toBe(true);
-    expect(firstEmittedReq['gen_ai.input.messages_delta']).toBeDefined();
-    // only the first emitted carries _delta
-    const allReqsWithDelta = entries.filter(e => e['event.name'] === 'llm.request' && e['gen_ai.input.messages_delta'] !== undefined);
-    expect(allReqsWithDelta.length).toBe(1);
+  test('second-step delta is only the newly-added tool message, not fabricated full history', () => {
+    const parsed = parseTrajectory(RAW);
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const second = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id']?.endsWith(':s2'));
+    expect(second['gen_ai.input.messages_delta']).toEqual(parsed.interactions[1].inputMessages);
+    expect(second['gen_ai.input.messages_delta']).toHaveLength(1);
+    expect(second['gen_ai.input.messages_delta'][0].role).toBe('tool');
+    expect(second['gen_ai.input.messages']).toBeUndefined();
+  });
+
+  test('seen-step skipping preserves each newly emitted step own delta', () => {
+    const parsed = parseTrajectory(RAW);
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set([1]) });
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(requests[0]['gen_ai.step.id']?.endsWith(':s2')).toBe(true);
+    expect(requests[0]['gen_ai.input.messages_delta']).toEqual(parsed.interactions[1].inputMessages);
+    expect(requests.every(request => request['gen_ai.input.messages'] === undefined)).toBe(true);
+    expect(requests.filter(request => request['gen_ai.input.messages_delta'] !== undefined)).toHaveLength(14);
+  });
+
+  test('downstream reconstructs accumulated history for later LLM spans from deltas', async () => {
+    const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const result = await convertEventLogToReadableSpans(entries, { strict: false });
+      const llmSpans = result.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .sort((a, b) => a.startTime[0] - b.startTime[0] || a.startTime[1] - b.startTime[1]);
+      const secondInput = JSON.parse(String(llmSpans[1].attributes['gen_ai.input.messages']));
+      expect(secondInput.some(message => message.role === 'user')).toBe(true);
+      expect(secondInput.some(message => message.role === 'tool')).toBe(true);
+      expect(secondInput.length).toBeGreaterThan(1);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
   });
 });
 

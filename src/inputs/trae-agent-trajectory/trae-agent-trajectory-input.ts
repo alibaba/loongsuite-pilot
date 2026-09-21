@@ -36,10 +36,10 @@ export interface TraeAgentTrajectoryOptions extends TrajectoryPollingOptions {
    */
   converterPath: string;
   /**
-   * Directory to scan for trae-agent trajectory files (P1-1). When set, the
-   * active file is RE-DISCOVERED every poll cycle (newest matching mtime)
-   * instead of polling a single fixed path — this handles trae-agent's default
-   * timestamped `trajectory_<ts>.json` naming and successive runs. When
+   * Directory to scan for trae-agent trajectory files (P1-1). When set, every
+   * matching file is re-discovered and processed each poll cycle in stable
+   * oldest-first order. Per-run checkpoints suppress files already consumed,
+   * while ensuring multiple runs created between polls are never skipped. When
    * omitted, the input falls back to the fixed `trajectoryFile`.
    */
   trajectoryDir?: string;
@@ -55,8 +55,8 @@ export interface TraeAgentTrajectoryOptions extends TrajectoryPollingOptions {
  * STEP → {LLM_CALL, TOOL*} span tree. The ENTRY/AGENT/STEP layers are
  * synthesized by the OTLP converter library from the LLM/TOOL records'
  * gen_ai.session.id / gen_ai.step.id / gen_ai.agent.type fields; the
- * converter mjs here only emits llm.request/llm.response/tool.call/
- * tool.result records.
+ * converter mjs emits LLM/TOOL records plus a flush-only `other` control
+ * marker when end_time appears after the final business record.
  *
  * Conversion logic lives in `assets/hooks/trae-agent/trajectory-converter.mjs`
  * so the same code backs the runtime input and the standalone smoke-test CLI.
@@ -64,9 +64,10 @@ export interface TraeAgentTrajectoryOptions extends TrajectoryPollingOptions {
  * to align with the existing per-agent asset directory convention.
  *
  * P1-1: the trajectory source is discovered, not hardcoded. When `trajectoryDir`
- * is configured the input scans it each cycle for the newest `trajectory*.json`
- * so trae-agent's default timestamped filenames and successive runs are picked
- * up automatically. Because LogWatchStrategy cannot redirect the CLI's output
+ * is configured the input scans it each cycle for every `trajectory*.json` and
+ * processes them oldest-first, so two runs produced between polls are both
+ * collected. Per-run checkpoints make repeated scans idempotent. Because
+ * LogWatchStrategy cannot redirect the CLI's output
  * location, an operator running trae-cli with its CWD-relative default should
  * either pass `--trajectory-file <watchedDir>/trajectory.json` so the file lands
  * where discovery scans, or set `listeners['trae-agent-trajectory'].trajectoryDir`
@@ -101,15 +102,14 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
   }
 
   /**
-   * Re-resolve the active trajectory file each cycle (P1-1). With a configured
-   * directory, scan it for files matching the pattern and return the newest by
-   * mtime; successive trae-agent runs produce new timestamped files, and the
-   * base class's run-identity dedup reset (P1-3) keeps their step numbers from
-   * colliding. Without a directory, fall back to the fixed configured file.
-   * Returns '' when nothing is discoverable yet (cycle skipped).
+   * Re-resolve all trajectory files each cycle (P1-1). A newest-only scan loses
+   * run A forever when A and B both appear between polls and B is newer. Return
+   * every matching file ordered by mtime then path; the base class's per-run
+   * checkpoints make repeated scans idempotent. Without a directory, preserve
+   * the fixed-file behavior.
    */
-  protected async resolveTrajectoryFile(): Promise<string> {
-    if (!this.trajectoryDir) return this.trajectoryFile;
+  protected async resolveTrajectoryFiles(): Promise<string[]> {
+    if (!this.trajectoryDir) return this.trajectoryFile ? [this.trajectoryFile] : [];
     let names: string[];
     try {
       names = await fs.readdir(this.trajectoryDir);
@@ -117,25 +117,22 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         this.logger.warn('trajectory dir scan failed', { dir: this.trajectoryDir, error: String(err) });
       }
-      return '';
+      return [];
     }
-    let newestFile = '';
-    let newestMtime = -1;
+    const discovered: Array<{ file: string; mtimeMs: number }> = [];
     for (const name of names) {
+      this.trajectoryFilePattern.lastIndex = 0;
       if (!this.trajectoryFilePattern.test(name)) continue;
       const full = path.join(this.trajectoryDir, name);
       try {
         const st = await fs.stat(full);
-        if (!st.isFile()) continue;
-        if (st.mtimeMs > newestMtime) {
-          newestMtime = st.mtimeMs;
-          newestFile = full;
-        }
+        if (st.isFile()) discovered.push({ file: full, mtimeMs: st.mtimeMs });
       } catch {
         // A file that vanished mid-scan is simply skipped this cycle.
       }
     }
-    return newestFile;
+    discovered.sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
+    return discovered.map(item => item.file);
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {

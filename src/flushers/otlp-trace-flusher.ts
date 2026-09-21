@@ -67,6 +67,14 @@ const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.collection.end_reason',
   'agent.openclaw.correlation.ambiguous',
 ] as const;
+const TRAE_FLUSH_ONLY_MARKER = 'agent.trajectory.flush_only';
+
+function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
+  return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
+    && record['event.name'] === 'other'
+    && record['gen_ai.turn.end'] === true
+    && record[TRAE_FLUSH_ONLY_MARKER] === true;
+}
 
 function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
@@ -957,7 +965,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    await this.convertAndExport(buf.agentType, buf.records);
+    // A late trae-agent finalize poll emits a control-plane marker when the
+    // actual last llm.response was already buffered in an earlier cycle. The
+    // marker closes the turn, but must never reach EventLog-to-Trace conversion:
+    // the downstream library aggregates usage and selects parent output before
+    // response-id merging, so a second response double-counts tokens or clears
+    // ENTRY/AGENT output. A marker-only buffer has no reconstructible payload.
+    const recordsForConversion = buf.records.filter(record => !isTraeFlushOnlyMarker(record));
+    if (recordsForConversion.length === 0) return;
+    await this.convertAndExport(buf.agentType, recordsForConversion);
   }
 
   private async convertAndExport(

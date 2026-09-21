@@ -168,6 +168,42 @@ describe('TraeAgentTrajectoryInput - incremental dedup (P0-2)', () => {
     expect(stamped.length).toBe(second.length);
   });
 
+  test('migrates the legacy single-run checkpoint without replaying the run', async () => {
+    const raw = JSON.parse(await fs.readFile(trajectoryFile, 'utf8'));
+    const stat = await fs.stat(trajectoryFile);
+    const runId = `${raw.start_time}|${raw.task}`;
+    stateStore.set('trae-agent-trajectory', {
+      extra: {
+        fingerprint: `${stat.ino}:${stat.size}:${stat.mtimeMs}`,
+        runId,
+        seenStepNumbers: Array.from({ length: 15 }, (_, index) => index + 1),
+        runCompletionEmitted: true,
+        lastProcessedAt: Date.now() - 1_000,
+      },
+    });
+    const input = new TraeAgentTrajectoryInput({
+      stateStore,
+      trajectoryFile,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+
+    // @ts-expect-error: protected
+    const out = (await input.collect()) as AgentActivityEntry[];
+    expect(out).toEqual([]);
+    const extra = stateStore.get('trae-agent-trajectory').extra as Record<string, any>;
+    expect(extra.trajectoryStateVersion).toBe(3);
+    expect(extra.runId).toMatch(/^trajectory-run-v3:[0-9a-f]{32}$/);
+    expect(extra.activeRunId).toBe(extra.runId);
+    expect(Object.keys(extra.runsById)).toEqual([extra.runId]);
+    expect(extra.runsById[extra.runId].seenStepNumbers).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 1),
+    );
+    expect(extra.runsById[extra.runId].runCompletionEmitted).toBe(true);
+    expect(JSON.stringify(extra)).not.toContain(raw.task);
+    expect(JSON.stringify(extra)).not.toContain(runId);
+  });
+
   test('missing trajectory file produces no entries (no crash)', async () => {
     const input = new TraeAgentTrajectoryInput({
       stateStore,

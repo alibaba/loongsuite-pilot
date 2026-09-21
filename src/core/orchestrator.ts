@@ -1579,8 +1579,9 @@ export class Orchestrator extends EventEmitter {
     // assets/hooks/trae-agent/trajectory-converter.mjs.
     // P1-1: trae-agent defaults to a TIMESTAMPED `trajectory_<ts>.json` under a
     // CWD-relative `trajectories/` dir, so a single hardcoded path misses real
-    // runs. Discovery scans a watched directory for the newest `trajectory*.json`
-    // each cycle. Operators can override via listeners['trae-agent-trajectory']:
+    // runs. Discovery processes every matching file oldest-first each cycle;
+    // per-run checkpoints suppress already-consumed steps. Operators can override
+    // via listeners['trae-agent-trajectory']:
     //   - trajectoryDir  → directory to scan (default ~/.trae-agent/trajectories)
     //   - trajectoryFile → pin one exact file (skips discovery; testing/advanced)
     // The converter path is the pilot install root + the per-agent asset subdir
@@ -1597,7 +1598,7 @@ export class Orchestrator extends EventEmitter {
       : traeDefaultDir;
     // When an explicit file is pinned, poll exactly it (no dir discovery);
     // otherwise pass the dir as the required fallback path and let
-    // resolveTrajectoryFile() discover the newest match each cycle.
+    // resolveTrajectoryFiles() discover every match each cycle.
     const traeWatchDir = traeExplicitFile ? path.dirname(traeExplicitFile) : traeTrajectoryDir;
     const traeConverterPath = path.join(
       traePilotDir,
