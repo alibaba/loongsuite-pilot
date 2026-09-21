@@ -115,14 +115,14 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 | `idCard` | `[IDCARD_MASKED]` |
 | `phone` | `[PHONE_MASKED]` |
 | `email` | `[EMAIL_MASKED]` |
-| `ipAddress` | `[IPADDRESS_MASKED]` |
-| `bankCard` | `[BANKCARD_MASKED]` |
+| `ipAddress` | `[IP_ADDRESS_MASKED]` |
+| `bankCard` | `[CREDIT_CARD_MASKED]` |
 
 `preview` 输出示例：
 
 ```text
 [PHONE_MASKED]{138****1234}
-[IPADDRESS_MASKED]{192.*.*.10}
+[IP_ADDRESS_MASKED]{192.*.*.10}
 [DATABASEURL_MASKED]{mysql://user:****@db.example.com/orders}
 ```
 
