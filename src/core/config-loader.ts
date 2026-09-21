@@ -38,7 +38,7 @@ import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
-import { parseInterceptorSwitches } from '../interceptor/config.js';
+import { buildInterceptorConfig } from '../interceptor/config.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -129,7 +129,10 @@ export interface ConfigFile {
     repairCooldownMs?: number;
   };
 
-  interceptor?: Record<string, unknown>;
+  interceptor?: {
+    mode?: string;
+    types?: string[];
+  };
 
   collectLog?: boolean;
   collectTrace?: boolean;
@@ -313,7 +316,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     upstreamLink: buildUpstreamLinkConfig(file),
     multimodal: buildMultimodalConfig(file, flushers.sls),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
-    interceptor: parseInterceptorSwitches(file?.interceptor),
+    interceptor: buildInterceptorConfig(file?.interceptor),
   };
 }
 

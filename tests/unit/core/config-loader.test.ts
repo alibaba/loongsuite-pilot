@@ -2223,19 +2223,34 @@ describe('ConfigLoader', () => {
     });
   });
 
-  describe('interceptor switches', () => {
-    it('defaults to an empty object', async () => {
+  describe('interceptor config', () => {
+    it('defaults to none when interceptor config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({});
+      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
     });
 
-    it('keeps only boolean rule switches', async () => {
+    it('loads all mode and custom types as a mask-type subset', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        interceptor: { keep: true, drop: false, skip: 'yes' },
+        interceptor: {
+          mode: 'custom',
+          types: ['apiKey', 'idCard', 'cloudAccessKey'],
+        },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ keep: true, drop: false });
+      expect(config.interceptor).toEqual({
+        mode: 'custom',
+        types: ['apiKey', 'cloudAccessKey'],
+      });
+    });
+
+    it('uses interceptor env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: { mode: 'none', types: ['apiKey'] },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'all', types: [] });
     });
   });
 });

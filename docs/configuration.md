@@ -24,7 +24,8 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
   "collectLog": true,
   "collectTrace": true,
   "dashboard": { "port": 8765 },
-  "serviceName": "my-agent-service"
+  "serviceName": "my-agent-service",
+  "interceptor": { "mode": "none" }
 }
 ```
 
@@ -38,6 +39,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
 | `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
+| `interceptor` | Local interception. Same `{ mode, types }` shape as `mask`; `types` is the credential subset of mask types. See [Local Interception](zh-CN/interceptor.md). |
 
 Equivalent environment variables:
 
@@ -52,6 +54,8 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all`, `none`, or `custom`. |
+| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | Comma-separated interceptor types. Used only with `custom` mode. |
 
 ## SLS Secret Configuration
 
@@ -236,6 +240,7 @@ If `multimodal.storage` is omitted and a unique SLS `apiKey` destination exists,
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |
 | POST events to a custom HTTP endpoint | [HTTP Output](http-output.md) |
 | Mask API keys, access keys, private keys, database URLs, and personal sensitive data | [Data Masking](masking.md) |
+| Intercept secrets in prompts and tool calls | [Local Interception](zh-CN/interceptor.md) |
 
 ## Retention
 

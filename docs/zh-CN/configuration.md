@@ -25,7 +25,7 @@ Pilot 按以下顺序解析配置：
   "collectTrace": true,
   "dashboard": { "port": 8765 },
   "serviceName": "my-agent-service",
-  "interceptor": {}
+  "interceptor": { "mode": "none" }
 }
 ```
 
@@ -39,7 +39,7 @@ Pilot 按以下顺序解析配置：
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
-| `interceptor` | 本地拦截规则开关。扁平 `Record<string, boolean>`，只有值为 `true` 的已注册规则会执行。详见 [本地拦截](interceptor.md)。 |
+| `interceptor` | 本地拦截。格式与 `mask` 相同（`mode` + `types`），`types` 为 mask 类型的密钥子集。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 
@@ -54,6 +54,8 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |
 
 ## SLS 密钥配置
 
@@ -238,6 +240,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |
 | POST 到自定义 HTTP 接口 | [HTTP 输出](http-output.md) |
 | 脱敏 API Key、AccessKey、私钥、数据库 URL 和个人敏感信息 | [数据脱敏](masking.md) |
+| 本地拦截 Prompt / 工具调用中的密钥 | [本地拦截](interceptor.md) |
 
 ## 日志保留
 

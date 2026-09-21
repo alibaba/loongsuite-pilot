@@ -33,8 +33,8 @@ function rule(
 }
 
 describe('RuleEngine', () => {
-  it('allows builtin rules when their switches are off', async () => {
-    const engine = new RuleEngine(builtinRules(), { anything: true });
+  it('allows builtin rules when they are not enabled', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set(['anything']));
     await expect(engine.evaluate(request({ prompt: 'testing' }))).resolves.toEqual({
       action: 'allow',
       evaluatedRules: [],
@@ -45,10 +45,10 @@ describe('RuleEngine', () => {
     });
   });
 
-  it('bypasses rules unless the switch is exactly true', async () => {
+  it('bypasses rules unless they are in the enabled set', async () => {
     const engine = new RuleEngine(
       [rule('alpha', { matched: true }), rule('beta', { matched: true })],
-      { alpha: false, gamma: true },
+      new Set(['gamma']),
     );
     await expect(engine.evaluate(request())).resolves.toEqual({
       action: 'allow',
@@ -85,7 +85,7 @@ describe('RuleEngine', () => {
           },
         },
       ],
-      { first: true, blocker: true, later: true },
+      new Set(['first', 'blocker', 'later']),
     );
 
     await expect(engine.evaluate(request())).resolves.toEqual({
@@ -100,7 +100,7 @@ describe('RuleEngine', () => {
   it('fail-opens when a rule throws', async () => {
     const engine = new RuleEngine(
       [rule('boom', { throws: true }), rule('later', { matched: true })],
-      { boom: true, later: true },
+      new Set(['boom', 'later']),
     );
     await expect(engine.evaluate(request())).resolves.toEqual({
       action: 'allow',
@@ -111,7 +111,7 @@ describe('RuleEngine', () => {
   it('skips rules that do not support the request', async () => {
     const engine = new RuleEngine(
       [rule('prompt-only', { supports: false, matched: true }), rule('tool', { matched: true, reason: 'tool blocked' })],
-      { 'prompt-only': true, tool: true },
+      new Set(['prompt-only', 'tool']),
     );
     await expect(engine.evaluate(request({ event: 'PreToolUse', toolName: 'Bash' }))).resolves.toEqual({
       action: 'block',

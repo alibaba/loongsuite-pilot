@@ -1,18 +1,12 @@
 import { findFirstSensitiveMatch } from '../../mask/detect.js';
 import { loadSensitiveRules } from '../../mask/rule-loader.js';
-import type { MaskType } from '../../types/index.js';
+import { SUPPORTED_INTERCEPTOR_TYPES, type InterceptorType } from '../../types/index.js';
 import type { CompiledMaskRule } from '../../mask/types.js';
 import type { HookRequest, LocalRule } from '../types.js';
 import { collectHookText } from './hook-text.js';
 
-export const SENSITIVE_INTERCEPT_TYPES = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-] as const satisfies readonly MaskType[];
-
-export type SensitiveInterceptType = (typeof SENSITIVE_INTERCEPT_TYPES)[number];
+export const SENSITIVE_INTERCEPT_TYPES = SUPPORTED_INTERCEPTOR_TYPES;
+export type SensitiveInterceptType = InterceptorType;
 
 export function createSensitiveTypeRule(type: SensitiveInterceptType): LocalRule {
   let rules: CompiledMaskRule[] | undefined;

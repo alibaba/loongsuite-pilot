@@ -72,6 +72,8 @@ SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
 MASK_MODE=""
 MASK_TYPES=""
+INTERCEPTOR_MODE=""
+INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -141,6 +143,10 @@ while [[ $# -gt 0 ]]; do
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
+        --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
+        --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
+        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
+        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -174,6 +180,22 @@ if [ "$MASK_MODE" = "custom" ] && [ -z "$MASK_TYPES" ]; then
 fi
 if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
+    exit 1
+fi
+if [ -n "$INTERCEPTOR_MODE" ]; then
+    case "$INTERCEPTOR_MODE" in
+        all|none|custom) ;;
+        *)
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            exit 1 ;;
+    esac
+fi
+if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
+    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
+    exit 1
+fi
+if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
+    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
     exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
@@ -776,6 +798,21 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all'
+  ? INTERCEPTOR_TYPE_SET.slice()
+  : interceptorModeFinal === 'custom'
+    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
+    : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -793,8 +830,10 @@ const checks = [
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
-  { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: coveredMaskMode },
+  { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
+  { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
+  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -803,8 +842,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","interceptorMode":"%s","interceptorTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1087,6 +1126,8 @@ const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
+const interceptorMode = '${INTERCEPTOR_MODE}';
+const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1112,6 +1153,39 @@ if (maskMode) {
     delete config.mask.types;
   }
 }
+
+if (interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = interceptorMode;
+  if (interceptorMode === 'custom') {
+    config.interceptor.types = interceptorTypes
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+  } else {
+    delete config.interceptor.types;
+  }
+}
+
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all'
+    ? INTERCEPTOR_TYPE_SET.slice()
+    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
+      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
+      : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
 
 if (selectedAgents) {
   config.agents = config.agents || {};

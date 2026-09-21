@@ -56,6 +56,8 @@ param(
     [string]$Agents,
     [string]$MaskMode,
     [string]$MaskTypes,
+    [string]$InterceptorMode,
+    [string]$InterceptorTypes,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -123,6 +125,20 @@ if ($MaskMode -eq "custom" -and -not $MaskTypes) {
 }
 if ($MaskTypes -and $MaskMode -ne "custom") {
     Write-Error "-MaskTypes can only be used with -MaskMode custom"
+    exit 1
+}
+if ($InterceptorMode) {
+    if ($InterceptorMode -notin @("all", "none", "custom")) {
+        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all', 'custom', or 'none')"
+        exit 1
+    }
+}
+if ($InterceptorMode -eq "custom" -and -not $InterceptorTypes) {
+    Write-Error "--InterceptorTypes is required when -InterceptorMode custom"
+    exit 1
+}
+if ($InterceptorTypes -and $InterceptorMode -ne "custom") {
+    Write-Error "-InterceptorTypes can only be used with -InterceptorMode custom"
     exit 1
 }
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
@@ -1035,6 +1051,8 @@ function Confirm-ConfigOverwrite {
         dashboardPort = $DashboardPort
         maskMode = $MaskMode
         maskTypes = $MaskTypes
+        interceptorMode = $InterceptorMode
+        interceptorTypes = $InterceptorTypes
     } | ConvertTo-Json -Compress
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
@@ -1044,6 +1062,21 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all'
+  ? INTERCEPTOR_TYPE_SET.slice()
+  : interceptorModeFinal === 'custom'
+    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
+    : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -1061,8 +1094,10 @@ const checks = [
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
-  { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: coveredMaskMode },
+  { label: 'mask.types',        oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
+  { label: 'interceptor.mode',  oldVal: (old.interceptor||{}).mode||'',  newVal: newVals.interceptorMode },
+  { label: 'interceptor.types', oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
@@ -1334,6 +1369,8 @@ function Write-Config {
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
+        interceptorMode   = "$InterceptorMode"
+        interceptorTypes  = "$InterceptorTypes"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
@@ -1416,6 +1453,32 @@ if (opts.maskMode) {
     config.mask.types = opts.maskTypes.split(',').map(t => t.trim()).filter(Boolean);
   } else { delete config.mask.types; }
 }
+if (opts.interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = opts.interceptorMode;
+  if (opts.interceptorMode === 'custom') {
+    config.interceptor.types = opts.interceptorTypes.split(',').map(t => t.trim()).filter(Boolean);
+  } else { delete config.interceptor.types; }
+}
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all'
+    ? INTERCEPTOR_TYPE_SET.slice()
+    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
+      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
+      : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
 if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;

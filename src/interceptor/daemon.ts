@@ -4,7 +4,7 @@ import { createLogger, initFileLogging, flushLogsSync } from '../utils/logger.js
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
 import { INTERCEPTOR_PROCESS_PATTERNS } from '../utils/pid-utils.js';
-import { loadInterceptorSwitches } from './config.js';
+import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from './config.js';
 import { createInterceptorServer } from './daemon/server.js';
 import { removeOwnPid, writeRuntime } from './daemon/runtime.js';
 import {
@@ -40,8 +40,8 @@ async function main(): Promise<void> {
     removeOwnPid(dataDir);
   });
 
-  const switches = await loadInterceptorSwitches();
-  const engine = new RuleEngine(builtinRules(), switches);
+  const interceptorConfig = await loadInterceptorConfig();
+  const engine = new RuleEngine(builtinRules(), resolveEnabledInterceptorTypes(interceptorConfig));
   const version = readInstalledVersion(dataDir);
   const gitCommit = readInstalledGitCommit(dataDir);
   const serverOpts = {

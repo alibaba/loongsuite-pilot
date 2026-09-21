@@ -33,7 +33,7 @@ export type RuleResult =
   | { matched: false }
   | { matched: true; reason: string };
 
-export type InterceptorConfig = Record<string, boolean>;
+export type { InterceptorConfig, InterceptorType } from '../types/index.js';
 
 export interface EvaluateHookResponse {
   action: VerdictAction;

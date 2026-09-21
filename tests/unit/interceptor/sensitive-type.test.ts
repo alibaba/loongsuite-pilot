@@ -22,8 +22,8 @@ describe('sensitive-type interceptor rules', () => {
     expect(builtinRules().map(rule => rule.id)).toEqual([...SENSITIVE_INTERCEPT_TYPES]);
   });
 
-  it('stays bypassed until the type switch is true', async () => {
-    const engine = new RuleEngine(builtinRules(), {});
+  it('stays bypassed until the type is enabled', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set());
     await expect(engine.evaluate(request({ prompt: 'LTAI1234567890ABCD' }))).resolves.toEqual({
       action: 'allow',
       evaluatedRules: [],
@@ -41,7 +41,7 @@ describe('sensitive-type interceptor rules', () => {
     ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot', '[DATABASEURL_MASKED]'],
     ['databaseUrl', 'jdbc:mysql://localhost:3306/db?user=root&password=MySynthMysql12', '[DATABASEURL_MASKED]'],
   ] as const)('blocks %s text through the engine', async (type, prompt, reason) => {
-    const engine = new RuleEngine(builtinRules(), { [type]: true });
+    const engine = new RuleEngine(builtinRules(), new Set([type]));
     await expect(engine.evaluate(request({ prompt }))).resolves.toEqual({
       action: 'block',
       reason,
@@ -51,7 +51,7 @@ describe('sensitive-type interceptor rules', () => {
   });
 
   it('blocks secrets in tool input', async () => {
-    const engine = new RuleEngine(builtinRules(), { apiKey: true });
+    const engine = new RuleEngine(builtinRules(), new Set(['apiKey']));
     await expect(engine.evaluate(request({
       event: 'PreToolUse',
       toolName: 'Bash',
@@ -65,7 +65,7 @@ describe('sensitive-type interceptor rules', () => {
   });
 
   it('blocks secrets in tool response', async () => {
-    const engine = new RuleEngine(builtinRules(), { apiKey: true });
+    const engine = new RuleEngine(builtinRules(), new Set(['apiKey']));
     await expect(engine.evaluate(request({
       event: 'PostToolUse',
       toolName: 'Bash',
@@ -79,7 +79,7 @@ describe('sensitive-type interceptor rules', () => {
   });
 
   it('blocks secrets in nested Read file content after a newline', async () => {
-    const engine = new RuleEngine(builtinRules(), { databaseUrl: true });
+    const engine = new RuleEngine(builtinRules(), new Set(['databaseUrl']));
     await expect(engine.evaluate(request({
       event: 'PostToolUse',
       toolName: 'Read',

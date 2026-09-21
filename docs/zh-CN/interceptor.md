@@ -43,7 +43,7 @@ assets/plugins/openclaw/plugin.mjs
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/daemon.cjs`
-- 规则开关：现有 `~/.loongsuite-pilot/config.json` 的扁平 `interceptor` 对象，daemon **启动时读一次**，不热加载
+- 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），daemon **启动时读一次**，不热加载
 
 ## Qoder 协议
 
@@ -90,24 +90,70 @@ daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 *
 
 ## 规则开关
 
+配置格式与 [数据脱敏](masking.md) 完全对齐：`mode` + `types`。区别只是 interceptor 的 `types` 是 mask 的密钥子集，不含 `idCard`、`phone`、`email`、`ipAddress`、`bankCard`。
+
+安装参数：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --interceptor-mode all
+```
+
+自定义模式安装参数：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --interceptor-mode custom --interceptor-types apiKey,cloudAccessKey,privateKey,databaseUrl
+```
+
+Windows 对应 `-InterceptorMode` / `-InterceptorTypes`。
+
+安装 interceptor 时，安装器会把已启用的拦截类型自动补进 `mask`：`mask.mode=all` 已覆盖全部类型则不动；否则写成 `custom`，并并入这些 type（`interceptor.mode=all` 会并入全部拦截类型）。这样被拦截的密钥在采集输出里也会被脱敏。
+
+配置文件：
+
 ```json
 {
   "interceptor": {
-    "cloudAccessKey": true,
-    "apiKey": true,
-    "privateKey": true,
-    "databaseUrl": true
+    "mode": "all"
   }
 }
 ```
 
-- 只有 `interceptor[rule.id] === true` 的已注册规则会执行
-- 缺失、`false` 或未知 key 均 bypass
-- 敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`，开关按 **type** 打开（不是子规则 id）。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask.types` 独立，默认关闭，打开后需重启 interceptor
-- 按注册顺序执行，首个拦截立即短路
-- 规则抛错视为该次判定 fail-open
+自定义模式：
 
-后续新增规则：实现 `LocalRule`，加入 `src/interceptor/rules/registry.ts`，然后在 `config.json` 里把同名 key 设为 `true`。
+```json
+{
+  "interceptor": {
+    "mode": "custom",
+    "types": ["apiKey", "cloudAccessKey", "privateKey", "databaseUrl"]
+  }
+}
+```
+
+等价环境变量：
+
+```bash
+export LOONGSUITE_PILOT_INTERCEPTOR_MODE=custom
+export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,databaseUrl
+```
+
+| 模式 | 行为 |
+|------|------|
+| `none` | 不拦截。未配置 interceptor mode 时默认使用该模式。 |
+| `all` | 开启全部 interceptor 类型（mask 的密钥子集）。 |
+| `custom` | 只开启 `interceptor.types` 中列出、且属于 interceptor 子集的类型。未知或 PII 类型会被忽略。 |
+
+| 类型 | 覆盖内容 |
+|------|----------|
+| `cloudAccessKey` | 阿里云、AWS、腾讯云风格的 Access Key ID。 |
+| `apiKey` | OpenAI-compatible 和 GitHub 风格 API Key。 |
+| `privateKey` | PEM 或 OpenSSH 私钥块。 |
+| `databaseUrl` | 包含密码的数据库 URL。 |
+
+敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask` 独立，默认关闭，修改后需重启 interceptor。
+
+按注册顺序执行，首个拦截立即短路。规则抛错视为该次判定 fail-open。
+
+后续新增规则：实现 `LocalRule`，加入 `src/interceptor/rules/registry.ts`，并把它登记到 `SUPPORTED_INTERCEPTOR_TYPES`（必须是已有 mask type 的子集）。
 
 预留有序 evaluator / provider 接口给未来远程判定，首版不产生任何远程请求。
 
@@ -149,6 +195,6 @@ loongsuite-pilot start-interceptor
 |------|------|
 | hook 总是放行 | `loongsuite-pilot status` 是否显示 interceptor running；`~/.loongsuite-pilot/interceptor/runtime.json` 是否新鲜；`interceptor/logs/access.log` 是否有对应 `event`/`result` |
 | 看每次判定 | `~/.loongsuite-pilot/interceptor/logs/access.log`：`event`、`input`、`result.action`（`block` / `allow` / `fail-open`） |
-| 想打开某条规则 | 确认 `config.json` 里 `"interceptor": { "<id>": true }` 后**重启 interceptor** |
+| 想打开拦截 | 确认 `config.json` 里 `"interceptor": { "mode": "all" }`（或 `custom` + `types`）后**重启 interceptor** |
 | stdout 被吃掉 | Windows 拦截 hook 禁止 `Out-Null`；不要复用采集 processor |
 | 端口冲突 | daemon 优先绑定 `127.0.0.1:18791`，占用则改绑 `0` 并把实际端口写入 runtime |

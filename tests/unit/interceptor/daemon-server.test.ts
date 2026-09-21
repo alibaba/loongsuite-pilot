@@ -34,7 +34,7 @@ describe('interceptor daemon HTTP API', () => {
     const opts = {
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([rule], { demo: true }),
+      engine: new RuleEngine([rule], new Set(['demo'])),
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
