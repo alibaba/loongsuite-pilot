@@ -2551,11 +2551,10 @@ try {
 }
 
 # ============================================================
-# Remove OTel plugin (Claude/Codex)
+# Remove legacy OTel plugin assets owned by Pilot
 # ============================================================
 function Remove-OtelPlugin {
     $OTEL_CLAUDE_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.claude"
-    $OTEL_CODEX_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.codex"
 
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
@@ -2590,7 +2589,7 @@ try {
     }
 
     # Remove plugin directories
-    foreach ($dir in @($OTEL_CLAUDE_DIR, $OTEL_CODEX_DIR)) {
+    foreach ($dir in @($OTEL_CLAUDE_DIR)) {
         if (Test-Path $dir) {
             if ($Purge) {
                 Remove-Item $dir -Recurse -Force
@@ -2849,7 +2848,7 @@ function Remove-CodexTrustState {
 function Test-IsPilotCodexHookCommand {
     param([object]$Command)
     if ($null -eq $Command) { return $false }
-    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook|otel-codex-hook)'
+    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook)'
 }
 
 function Remove-CodexHookConfig {
@@ -3472,7 +3471,7 @@ function Cmd-Uninstall {
     }
     Write-Host ""
 
-    Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     Remove-OtelPlugin
     Write-Host ""
 

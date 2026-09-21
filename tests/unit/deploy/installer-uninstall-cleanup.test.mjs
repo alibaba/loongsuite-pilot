@@ -427,7 +427,7 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(cleanup).toContain('function Remove-CodexHookConfig');
     expect(cleanup).toContain('.codex\\hooks.json');
     expect(cleanup).toContain('codex-loongsuite-pilot-hook');
-    expect(cleanup).toContain('otel-codex-hook');
+    expect(cleanup).not.toContain('otel-codex-hook');
     expect(cleanup).toContain('Pilot Codex nested hook command is still present');
     expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
     expect(cleanup).toContain('$null -eq $entry');
@@ -479,6 +479,22 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
     expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+  });
+});
+
+describe('legacy OTel uninstall leaves non-Pilot Codex assets untouched', () => {
+  it('shell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = sh.slice(sh.indexOf('remove_otel_plugin()'), sh.indexOf('\nprint_summary()'));
+    expect(cleanup).not.toContain('.cache/opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex/otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
+  });
+
+  it('PowerShell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = ps1.slice(ps1.indexOf('function Remove-OtelPlugin'), ps1.indexOf('\nfunction Start-PilotAndWait'));
+    expect(cleanup).not.toContain('.cache\\opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex\\otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
   });
 });
 
@@ -550,7 +566,7 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
     );
     const psCleanup = ps1.slice(
       ps1.indexOf('function Remove-OpenClawPlugin'),
-      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+      ps1.indexOf('# Remove legacy OTel plugin assets owned by Pilot', ps1.indexOf('function Remove-OpenClawPlugin')),
     );
 
     expect(shCleanup).not.toMatch(/node\s+-e/);
