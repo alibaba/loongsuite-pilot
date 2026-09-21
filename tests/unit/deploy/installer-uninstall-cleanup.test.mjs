@@ -18,6 +18,15 @@ const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8')
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf-8');
 const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf-8');
 
+function extractPowerShellCodexTrustCleanupScript() {
+  const start = ps1.indexOf('function Remove-CodexTrustState');
+  const end = ps1.indexOf('function Test-IsPilotCodexHookCommand', start);
+  const body = ps1.slice(start, end);
+  const match = body.match(/\$cleanupScript = @'\r?\n([\s\S]*?)\r?\n'@/);
+  if (!match) throw new Error('failed to extract PowerShell Codex trust cleanup script');
+  return match[1];
+}
+
 function extractPiCleanupNodeScript(source, style) {
   const functionMarker = style === 'sh'
     ? 'remove_pi_coding_agent_extension()'
@@ -445,8 +454,77 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('calls dedicated Codex cleanup from uninstall', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toContain('Remove-CodexHookConfig');
-    expect(uninstall.indexOf('Remove-CodexHookConfig'))
-      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+    expect(uninstall.indexOf('Remove-CodexTrustState'))
+      .toBeLessThan(uninstall.indexOf('Remove-CodexHookConfig'));
+  });
+
+  it('removes only trust keys proven from installed Pilot handlers', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-trust-uninstall-'));
+    try {
+      const hooksPath = join(root, 'hooks.json');
+      const configPath = join(root, 'config.toml');
+      const pilotKey = `${resolve(hooksPath)}:stop:0:0`;
+      const thirdPartyKey = `${resolve(hooksPath)}:stop:1:0`;
+      writeFileSync(hooksPath, JSON.stringify({
+        hooks: {
+          Stop: [
+            { hooks: [{ type: 'command', command: 'bash C:/Users/test/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh stop' }] },
+            { hooks: [{ type: 'command', command: 'otel-codex-hook stop' }] },
+          ],
+        },
+      }));
+      writeFileSync(configPath, [
+        '# BEGIN otel-codex-hook trust',
+        `[hooks.state.${JSON.stringify(pilotKey)}]`,
+        'trusted_hash = "sha256:pilot"',
+        '',
+        `[hooks.state.${JSON.stringify(thirdPartyKey)}]`,
+        'trusted_hash = "sha256:third-party"',
+        '# END otel-codex-hook trust',
+        '',
+        '[other]',
+        'value = "preserved"',
+        '',
+      ].join('\r\n'));
+
+      const run = spawnSync(process.execPath, [
+        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath,
+      ], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toBe('cleaned');
+      const content = readFileSync(configPath, 'utf8');
+      expect(content).not.toContain(pilotKey.replaceAll('\\', '\\\\'));
+      expect(content).not.toContain('sha256:pilot');
+      expect(content).toContain(thirdPartyKey.replaceAll('\\', '\\\\'));
+      expect(content).toContain('sha256:third-party');
+      expect(content).toContain('# BEGIN otel-codex-hook trust');
+      expect(content).toContain('# END otel-codex-hook trust');
+      expect(content).toContain('value = "preserved"');
+      expect(content).toContain('\r\n');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves trust config byte-for-byte unchanged when no Pilot handler is installed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'third-party-codex-trust-uninstall-'));
+    try {
+      const hooksPath = join(root, 'hooks.json');
+      const configPath = join(root, 'config.toml');
+      writeFileSync(hooksPath, JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: 'otel-codex-hook stop' }] }] },
+      }));
+      const before = '# BEGIN otel-codex-hook trust\r\n[hooks.state."third-party"]\r\ntrusted_hash = "sha256:third-party"\r\n# END otel-codex-hook trust\r\n';
+      writeFileSync(configPath, before);
+      const run = spawnSync(process.execPath, [
+        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath,
+      ], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toBe('nochange');
+      expect(readFileSync(configPath, 'utf8')).toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('passes a valid fs module literal to node when rewriting Codex files', () => {
@@ -476,8 +554,8 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
 
   it('continues uninstall when dedicated Codex cleanup fails', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
     expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
+    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
   });
 });

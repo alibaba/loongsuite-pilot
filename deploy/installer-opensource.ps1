@@ -2832,17 +2832,97 @@ fs.writeFileSync(process.argv[2], content);
 }
 
 function Remove-CodexTrustState {
+    $hooksPath = Join-Path $env:USERPROFILE ".codex\hooks.json"
     $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
-    if (-not (Test-Path -LiteralPath $configPath)) { return }
+    if (-not (Test-Path -LiteralPath $hooksPath) -or
+        -not (Test-Path -LiteralPath $configPath)) { return }
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  跳过 Codex trust 清理（无 Node.js，无法确认 Pilot 所有权）" `
+            "    ⚠️  Skipped Codex trust cleanup (Node.js unavailable; Pilot ownership cannot be proven)"
+        return
+    }
 
-    $content = Get-Content -LiteralPath $configPath -Raw
-    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
-    $updated = $content -replace $pattern, ""
-    if ($updated -eq $content) { return }
+    # Resolve exact position-based keys from the still-installed Pilot handlers.
+    # Marker comments are shared scope hints, not ownership evidence.
+    $cleanupScript = @'
+const fs = require('fs');
+const path = require('path');
+const hooksPath = path.resolve(process.argv[1]);
+const configPath = process.argv[2];
+const eventKeys = {
+  SessionStart: 'session_start',
+  UserPromptSubmit: 'user_prompt_submit',
+  SubagentStart: 'subagent_start',
+  SubagentStop: 'subagent_stop',
+  Stop: 'stop',
+  PreToolUse: 'pre_tool_use',
+  PostToolUse: 'post_tool_use',
+  PostToolUseFailure: 'post_tool_use_failure',
+};
+const isPilot = command => typeof command === 'string' &&
+  /codex-loongsuite-pilot-hook/i.test(command);
+const document = JSON.parse(fs.readFileSync(hooksPath, 'utf-8').replace(/^\uFEFF/, ''));
+const owned = new Set();
+for (const [eventName, eventKey] of Object.entries(eventKeys)) {
+  const groups = document.hooks && document.hooks[eventName];
+  if (!Array.isArray(groups)) continue;
+  groups.forEach((group, groupIndex) => {
+    if (!group || typeof group !== 'object') return;
+    const handlers = Array.isArray(group.hooks) ? group.hooks : [group];
+    handlers.forEach((handler, handlerIndex) => {
+      if (handler && isPilot(handler.command)) {
+        owned.add(`${hooksPath}:${eventKey}:${groupIndex}:${Array.isArray(group.hooks) ? handlerIndex : 0}`);
+      }
+    });
+  });
+}
+if (owned.size === 0) { process.stdout.write('nochange'); process.exit(0); }
 
-    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
-    Write-FileUtf8NoBom -Path $configPath -Content $updated
-    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
+let content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+const eol = content.includes('\r\n') ? '\r\n' : '\n';
+const lines = content.split(/\r?\n/);
+const output = [];
+const stateHeader = /^\s*\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*$/;
+let removingOwnedSection = false;
+let changed = false;
+for (const line of lines) {
+  if (/^\s*\[/.test(line)) {
+    const match = line.match(stateHeader);
+    let key;
+    if (match) {
+      try { key = JSON.parse(match[1]); } catch { key = undefined; }
+    }
+    removingOwnedSection = key !== undefined && owned.has(key);
+    if (removingOwnedSection) { changed = true; continue; }
+    output.push(line);
+    continue;
+  }
+  if (removingOwnedSection) {
+    // Preserve comments, including shared BEGIN/END markers; only the proven
+    // Pilot table and its values are owned by this uninstall.
+    if (line.trimStart().startsWith('#')) output.push(line);
+    else if (line.trim() !== '') changed = true;
+    continue;
+  }
+  output.push(line);
+}
+if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+fs.writeFileSync(configPath, output.join(eol), 'utf-8');
+process.stdout.write('cleaned');
+'@
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $result = & $script:NODE_BIN -e $cleanupScript $hooksPath $configPath 2>&1
+        $cleanupExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($cleanupExit -ne 0) { throw "Failed to clean Pilot Codex trust: $result" }
+    if ($result -eq "cleaned") {
+        Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
+    }
 }
 
 function Test-IsPilotCodexHookCommand {
@@ -3434,16 +3514,16 @@ function Cmd-Uninstall {
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
     try {
-        Remove-CodexHookConfig
-    } catch {
-        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
-            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
-    }
-    try {
         Remove-CodexTrustState
     } catch {
         Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
             "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
+    try {
+        Remove-CodexHookConfig
+    } catch {
+        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
     }
     Write-Host ""
 
