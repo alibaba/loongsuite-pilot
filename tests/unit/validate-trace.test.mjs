@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   hasModelToolSpanForOutput,
   isRuntimeSkillLoadSpan,
+  TERMINAL_CONTROL_TOOLS,
   unmatchedToolsForLlmOutput,
   validateMessageField,
 } from '../../scripts/validate-trace.mjs';
@@ -86,6 +87,18 @@ describe('semantic.tool_matches_llm_output runtime Skill handling', () => {
 
     expect(isRuntimeSkillLoadSpan(extensionTool)).toBe(false);
     expect(unmatchedToolsForLlmOutput([extensionTool], [])).toEqual([extensionTool]);
+  });
+});
+
+describe('semantic.last_step_no_tool_call terminal-control exemption (P1-6)', () => {
+  test('exempts trae-agent task_done but not real tools', () => {
+    // P1-6: the converter preserves trae-agent's real `task_done` control call on
+    // the finalized last step; the validator treats that name as a completion
+    // signal, not an unfinished tool invocation, so last_step_no_tool_call passes.
+    // A real tool on the last step must still be flagged.
+    expect(TERMINAL_CONTROL_TOOLS.has('task_done')).toBe(true);
+    expect(TERMINAL_CONTROL_TOOLS.has('bash')).toBe(false);
+    expect(TERMINAL_CONTROL_TOOLS.has('str_replace_based_edit_tool')).toBe(false);
   });
 });
 

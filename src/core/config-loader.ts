@@ -10,6 +10,7 @@ import type {
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
+  ListenerConfig,
   LogRetentionConfig,
   MaskConfig,
   MaskReplacementMode,
@@ -111,6 +112,16 @@ export interface ConfigFile {
   listeners?: Record<string, {
     enabled?: boolean;
     pollInterval?: number;
+    /**
+     * log-watch trajectory agents (e.g. trae-agent): directory scanned for
+     * `trajectory*.json` files. Overrides the built-in default watch dir.
+     */
+    trajectoryDir?: string;
+    /**
+     * log-watch trajectory agents: explicit single trajectory file to poll.
+     * Takes precedence over `trajectoryDir` discovery when set.
+     */
+    trajectoryFile?: string;
   }>;
 
   retention?: {
@@ -791,8 +802,8 @@ function buildMaskConfig(file: ConfigFile | null): MaskConfig {
 
 function buildListenersConfig(
   file: ConfigFile | null,
-): Record<string, { enabled: boolean; pollInterval: number }> {
-  const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
+): Record<string, ListenerConfig> {
+  const defaults: Record<string, ListenerConfig> = {
     qoder: { enabled: true, pollInterval: 30_000 },
     'qoder-trace': { enabled: true, pollInterval: 30_000 },
     'qoder-work': { enabled: true, pollInterval: 30_000 },
@@ -813,6 +824,7 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
     workbuddy: { enabled: true, pollInterval: 30_000 },
     'hermes-agent-log': { enabled: true, pollInterval: 30_000 },
+    'trae-agent-trajectory': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -820,10 +832,18 @@ function buildListenersConfig(
   // Merge file-level listener overrides
   if (file?.listeners) {
     for (const [key, val] of Object.entries(file.listeners)) {
-      result[key] = {
+      const merged: ListenerConfig = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
       };
+      // Preserve log-watch trajectory discovery overrides (P1-1) so an operator
+      // can point trae-agent at a custom dir or pin one exact file. Fall back to
+      // any previously-resolved value so a partial override doesn't drop the other.
+      const trajectoryDir = val.trajectoryDir ?? result[key]?.trajectoryDir;
+      const trajectoryFile = val.trajectoryFile ?? result[key]?.trajectoryFile;
+      if (trajectoryDir !== undefined) merged.trajectoryDir = trajectoryDir;
+      if (trajectoryFile !== undefined) merged.trajectoryFile = trajectoryFile;
+      result[key] = merged;
     }
   }
 

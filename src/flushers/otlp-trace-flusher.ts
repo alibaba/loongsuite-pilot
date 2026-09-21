@@ -67,6 +67,14 @@ const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.collection.end_reason',
   'agent.openclaw.correlation.ambiguous',
 ] as const;
+const TRAE_FLUSH_ONLY_MARKER = 'agent.trajectory.flush_only';
+
+function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
+  return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
+    && record['event.name'] === 'other'
+    && record['gen_ai.turn.end'] === true
+    && record[TRAE_FLUSH_ONLY_MARKER] === true;
+}
 
 function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
@@ -872,6 +880,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
             GROK_TERMINAL_FINISH_REASONS,
           ));
     }
+    // trae-agent trajectories are polled incrementally, so an intermediate step
+    // can carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run) while trae-agent keeps going to a later task_done step. Only the
+    // converter-stamped gen_ai.turn.end on the finalized last step is the real
+    // turn boundary; flushing on the intermediate 'stop' would split one ReAct
+    // run into two duplicate traces under the same traceId.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'trae-agent') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'claude-code') {
       // A failed attempt carries finish_reasons=['error']: a mid-turn retry
       // must not end the turn (its later records still arrive), so 'error' is
@@ -948,7 +965,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    await this.convertAndExport(buf.agentType, buf.records);
+    // A late trae-agent finalize poll emits a control-plane marker when the
+    // actual last llm.response was already buffered in an earlier cycle. The
+    // marker closes the turn, but must never reach EventLog-to-Trace conversion:
+    // the downstream library aggregates usage and selects parent output before
+    // response-id merging, so a second response double-counts tokens or clears
+    // ENTRY/AGENT output. A marker-only buffer has no reconstructible payload.
+    const recordsForConversion = buf.records.filter(record => !isTraeFlushOnlyMarker(record));
+    if (recordsForConversion.length === 0) return;
+    await this.convertAndExport(buf.agentType, recordsForConversion);
   }
 
   private async convertAndExport(

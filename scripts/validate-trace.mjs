@@ -11,6 +11,12 @@ const TAG = '[validate-trace]';
 const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
+// Terminal-control tool calls: a ReAct-style agent's completion SIGNAL, not a
+// pending tool invocation. trae-agent ends a run by emitting a `task_done`
+// tool_call (preserved verbatim per P1-6); the last STEP carrying it IS the
+// final answer, so `last_step_no_tool_call` must not flag these names.
+// Exported so producers/tests can assert against this set instead of hand-copying.
+export const TERMINAL_CONTROL_TOOLS = new Set(['task_done']);
 // TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
 // Kept in sync with the Finish Reasons table in docs/output-event-schema.md.
 // `cancelled` is documented there and is terminal in otlp-trace-flusher's
@@ -1003,7 +1009,13 @@ function validateSemantic(trace, rules) {
               for (const msg of msgs) {
                 if (Array.isArray(msg.parts)) {
                   for (const part of msg.parts) {
-                    if (part.type === 'tool_call') hasToolCall = true;
+                    // A terminal-control call (e.g. trae-agent's `task_done`) is
+                    // the completion signal, not an unfinished tool invocation, so
+                    // it does not violate "final answer without tool calls". Any
+                    // other tool_call on the last STEP still fails. (P1-6)
+                    if (part.type === 'tool_call' && !TERMINAL_CONTROL_TOOLS.has(part.name)) {
+                      hasToolCall = true;
+                    }
                   }
                 }
               }

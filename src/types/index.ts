@@ -8,6 +8,16 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /**
+   * log-watch trajectory agents (e.g. trae-agent): directory scanned for
+   * `trajectory*.json` files. Overrides the built-in default watch dir (P1-1).
+   */
+  trajectoryDir?: string;
+  /**
+   * log-watch trajectory agents: pin one exact trajectory file to poll.
+   * Takes precedence over `trajectoryDir` discovery when set (testing/advanced).
+   */
+  trajectoryFile?: string;
 }
 
 /**

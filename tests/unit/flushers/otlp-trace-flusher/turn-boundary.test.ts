@@ -146,6 +146,118 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
   });
 
+  it('trae-agent: a mid-run natural stop does not close the turn, only the stamped turn.end does', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const turnId = 'trae-session:t1';
+    const base = {
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'trae-agent',
+      'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+    };
+
+    // Step 1: ordinary tool-call step.
+    await flusher.send(makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }));
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'llm.response',
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.response.finish_reasons': ['tool_calls'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Step 2: the model returns plain text mid-run -> natural finish_reason='stop'.
+    // trae-agent keeps going, so this must NOT be treated as the turn boundary.
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'llm.response',
+      'gen_ai.step.id': `${turnId}:s2`,
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Step 3: finalized last step — the converter stamps the explicit turn.end.
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'llm.response',
+      'gen_ai.step.id': `${turnId}:s3`,
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.turn.end': true,
+    }));
+
+    // Exactly ONE flush carrying all 4 records — no duplicate/split trace.
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+  });
+
+  it('trae-agent: flush-only completion marker closes the turn but is hidden from conversion', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const base = {
+      'gen_ai.turn.id': 'trae-finalize-late',
+      'gen_ai.session.id': 'trae-finalize-late',
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.provider.name': 'openrouter',
+      'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+    };
+    const request = makeEntry({
+      ...base,
+      'event.name': 'llm.request',
+      'gen_ai.step.id': 'trae-finalize-late:s1',
+    });
+    const response = makeEntry({
+      ...base,
+      'event.name': 'llm.response',
+      'gen_ai.step.id': 'trae-finalize-late:s1',
+      'gen_ai.response.id': 'response-1',
+      'gen_ai.response.finish_reasons': ['tool_calls'],
+      'gen_ai.usage.input_tokens': 26_052,
+      'gen_ai.usage.output_tokens': 381,
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'final answer' }] }],
+    });
+    await flusher.sendBatch([request, response]);
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'other',
+      'gen_ai.step.id': 'trae-finalize-late:s1',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+      'gen_ai.response.finish_reasons': undefined,
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    const records = mockConvert.mock.calls[0][0] as Record<string, unknown>[];
+    expect(records).toHaveLength(2);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records.some(record => record['agent.trajectory.flush_only'] === true)).toBe(false);
+    expect(records.reduce((sum, record) => sum + Number(record['gen_ai.usage.input_tokens'] ?? 0), 0)).toBe(26_052);
+    expect(records.at(-1)?.['gen_ai.output.messages']).toEqual(response['gen_ai.output.messages']);
+  });
+
+  it('trae-agent: a marker-only buffer does not synthesize an empty trace', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({
+      'event.name': 'other',
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.turn.id': 'trae-marker-only',
+      'gen_ai.session.id': 'trae-marker-only',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+      'gen_ai.response.finish_reasons': undefined,
+    }));
+
+    expect(mockConvert).not.toHaveBeenCalled();
+  });
+
   it('claude-code: a mid-turn error span does NOT end the turn; turn.end does', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
@@ -486,6 +598,52 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
           'gen_ai.agent.scope': 'subagent',
           'gen_ai.subagent.parent_tool_call.id': 'call-sub',
           'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+    });
+
+    it('trae-agent: a mid-run stop across polls does not split the turn (single flush)', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'trae-session:t1';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'trae-agent',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+      };
+
+      // Poll 1 — partial trajectory (step 1), run still in progress, no terminal.
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s1`,
+          'gen_ai.response.finish_reasons': ['tool_calls'],
+        }),
+      ]);
+      expect(mockConvert).not.toHaveBeenCalled();
+
+      // Poll 2 — finalized: step 2 carries a natural mid-run stop, step 3 is the
+      // stamped tail. Only the tail closes the turn; one flush with all records.
+      await flusher.sendBatch([
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s2`,
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s3`,
+          'gen_ai.response.finish_reasons': ['stop'],
+          'gen_ai.turn.end': true,
         }),
       ]);
 
