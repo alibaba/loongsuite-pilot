@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { filterWorkspaceJsonLines } from './workspace-privacy.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -370,6 +371,7 @@ export function getHistoryLogFile(agentId, logPrefix) {
 }
 
 export function appendRowsToHistory(agentId, logPrefix, rows) {
+  rows = filterWorkspaceJsonLines(rows, agentId);
   if (!rows.length) return true;
   const logFile = getHistoryLogFile(agentId, logPrefix);
   try {

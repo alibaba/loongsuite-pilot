@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { WorkspacePolicy } from '../../core/workspace-policy.js';
 import * as fs from 'node:fs/promises';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
@@ -37,6 +38,9 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private _running = false;
+  protected workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void { this.workspacePolicy = policy; }
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
@@ -128,7 +132,7 @@ export abstract class BaseInput extends EventEmitter {
     this.activeRuntimeAccumulator = runtime;
     const collectStartedAt = runtime.now();
     try {
-      const entries = await this.collect();
+      const entries = this.workspacePolicy.filter(await this.collect(), this.agentType);
       if (entries.length > 0) {
         this.emit('entries', entries);
         this.logger.debug('cycle produced entries', { count: entries.length });

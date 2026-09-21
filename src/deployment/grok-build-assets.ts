@@ -24,6 +24,8 @@ export const GROK_BUILD_HOOK_ASSETS = [
   'shared/decode-payload.mjs',
   'shared/error-logger.mjs',
   'shared/event-emitter.mjs',
+  'shared/workspace-policy.mjs',
+  'shared/workspace-privacy.mjs',
   'shared/qoder-db-utils.mjs',
   'shared/resource-context.mjs',
   'shared/stdin-reader.mjs',

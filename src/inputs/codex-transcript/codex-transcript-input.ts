@@ -2352,7 +2352,7 @@ export class CodexTranscriptInput extends BaseInput {
         ? { lastCumulativeTokenTotal: activeTurn.lastCumulativeTokenTotal }
         : {}),
       ...(this.includeMultimodal && this.multimodalProcessor
-        ? { blobToUri: this.blobToUri(filePath), uploadMode: this.multimodalUploadMode }
+        ? { blobToUri: this.blobToUri(filePath, activeTurn.cwd), uploadMode: this.multimodalUploadMode }
         : {}),
       ...(activeTurn.model ? { model: activeTurn.model } : {}),
       ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
@@ -2363,8 +2363,13 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   /** blob→uri with per-transcript replay cache. */
-  private blobToUri(transcriptPath: string): BlobToUriFn {
+  private blobToUri(transcriptPath: string, cwd?: string): BlobToUriFn {
     return (params) => {
+      const meta = this.transcriptMetaByPath.get(transcriptPath);
+      if (!this.workspacePolicy.allows({
+        'gen_ai.session.id': meta?.rootSessionId ?? sessionIdFromTranscriptPath(transcriptPath),
+        cwd,
+      }, this.agentType)) return null;
       if (!this.multimodalProcessor) return null;
       const cacheKey = params.reuseKey ? `${transcriptPath}\0${params.reuseKey}` : undefined;
       if (cacheKey) {

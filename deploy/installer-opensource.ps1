@@ -48,6 +48,7 @@ param(
     [string]$UserId,
     [string]$Lang,
     [string]$Version,
+    [string[]]$ExcludeWorkspace,
     [string]$CollectLog,
     [string]$CollectTrace,
     [string]$CmsLicenseKey,
@@ -66,6 +67,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+foreach ($excludedWorkspace in $ExcludeWorkspace) {
+    if ($excludedWorkspace -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') {
+        throw "-ExcludeWorkspace requires absolute local directories"
+    }
+}
 # Wrap in try/catch: setting a static property on [Console] throws under Constrained
 # Language Mode (WDAC), and with $ErrorActionPreference=Stop that would abort the whole
 # script at load. Console encoding is cosmetic, so degrade silently.
@@ -1379,6 +1385,7 @@ function Write-Config {
         slsApiKey         = "$SlsApiKey"
         logLevel          = "$LogLevel"
         userId            = "$($script:UserId)"
+        excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ })
         collectLog        = "$CollectLog"
         collectTrace      = "$CollectTrace"
         cmsLicenseKey     = "$CmsLicenseKey"
@@ -1425,6 +1432,12 @@ const config = {
   enabled: true,
   dataDir: opts.dataDir,
 };
+if (Array.isArray(opts.excludeWorkspaces) && opts.excludeWorkspaces.length > 0) {
+  if (opts.excludeWorkspaces.some(value => typeof value !== 'string' || !require('path').win32.isAbsolute(value))) {
+    throw new Error('-ExcludeWorkspace requires absolute local directories');
+  }
+  config.privacy = { ...config.privacy, excludeWorkspaces: opts.excludeWorkspaces };
+}
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }

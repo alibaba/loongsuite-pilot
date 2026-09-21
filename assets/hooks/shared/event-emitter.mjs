@@ -21,6 +21,7 @@
  */
 
 import fs from 'node:fs';
+import { filterWorkspaceRecords } from './workspace-privacy.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
@@ -87,6 +88,8 @@ export function getJsonlFilePath(logDir, agentId) {
 
 export function writeJsonlRecords(logDir, agentId, records) {
   if (!records || records.length === 0) return;
+  records = filterWorkspaceRecords(records, agentId);
+  if (records.length === 0) return;
   const filePath = getJsonlFilePath(logDir, agentId);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const lines = records.map((r) => JSON.stringify(r)).join('\n') + '\n';

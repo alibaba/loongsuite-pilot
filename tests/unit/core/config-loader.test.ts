@@ -26,6 +26,13 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('loads workspace exclusions and rejects invalid privacy rules', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
+    expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['relative'] } });
+    await expect(loadConfig()).rejects.toThrow('absolute local directories');
+  });
+
   it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
     vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
     mockReadJsonFile.mockResolvedValueOnce({

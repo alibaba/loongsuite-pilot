@@ -28,7 +28,7 @@ export class PipelineManager {
   private rescanInProgress = false;
   private rescanQueued = false;
 
-  constructor(opts: PipelineManagerOptions) {
+  constructor(private readonly opts: PipelineManagerOptions) {
     this.configDir = opts.configDir;
     this.stateDir = opts.stateDir;
     this.failedLogDir = opts.failedLogDir;
@@ -337,6 +337,7 @@ export class PipelineManager {
       let pipeline: Pipeline;
       const opts = {
         config,
+        workspacePolicy: this.opts.workspacePolicy,
         stateDir: this.stateDir,
         failedLogDir: this.failedLogDir,
         dataDir: this.dataDir,
