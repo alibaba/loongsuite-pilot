@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
+import { parse as parseToml } from 'smol-toml';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
@@ -488,7 +489,7 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
       ].join('\r\n'));
 
       const run = spawnSync(process.execPath, [
-        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath,
+        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath, resolve('.'),
       ], { encoding: 'utf8' });
       expect(run.status, run.stderr).toBe(0);
       expect(run.stdout).toBe('cleaned');
@@ -517,11 +518,54 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
       const before = '# BEGIN otel-codex-hook trust\r\n[hooks.state."third-party"]\r\ntrusted_hash = "sha256:third-party"\r\n# END otel-codex-hook trust\r\n';
       writeFileSync(configPath, before);
       const run = spawnSync(process.execPath, [
-        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath,
+        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath, resolve('.'),
       ], { encoding: 'utf8' });
       expect(run.status, run.stderr).toBe(0);
       expect(run.stdout).toBe('nochange');
       expect(readFileSync(configPath, 'utf8')).toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a multiline string contains a Pilot-shaped trust header', () => {
+    const root = mkdtempSync(join(tmpdir(), 'multiline-codex-trust-uninstall-'));
+    try {
+      const hooksPath = join(root, 'hooks.json');
+      const configPath = join(root, 'config.toml');
+      const pilotKey = `${resolve(hooksPath)}:stop:0:0`;
+      writeFileSync(hooksPath, JSON.stringify({
+        hooks: {
+          Stop: [{
+            hooks: [{
+              type: 'command',
+              command: 'bash C:/Users/test/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh stop',
+            }],
+          }],
+        },
+      }));
+      const before = [
+        'developer_instructions = """',
+        'Example only:',
+        `[hooks.state.${JSON.stringify(pilotKey)}]`,
+        'trusted_hash = "sha256:not-a-real-table"',
+        '"""',
+        '',
+        '[other]',
+        'value = "preserved"',
+        '',
+      ].join('\r\n');
+      expect(() => parseToml(before)).not.toThrow();
+      writeFileSync(configPath, before);
+
+      const run = spawnSync(process.execPath, [
+        '-e', extractPowerShellCodexTrustCleanupScript(), hooksPath, configPath, resolve('.'),
+      ], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toBe('unsafe');
+      const after = readFileSync(configPath, 'utf8');
+      expect(after).toBe(before);
+      expect(() => parseToml(after)).not.toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

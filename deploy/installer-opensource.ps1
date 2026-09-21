@@ -2847,8 +2847,10 @@ function Remove-CodexTrustState {
     $cleanupScript = @'
 const fs = require('fs');
 const path = require('path');
+const { createRequire } = require('module');
 const hooksPath = path.resolve(process.argv[1]);
 const configPath = process.argv[2];
+const pilotRoot = process.argv[3];
 const eventKeys = {
   SessionStart: 'session_start',
   UserPromptSubmit: 'user_prompt_submit',
@@ -2879,6 +2881,21 @@ for (const [eventName, eventKey] of Object.entries(eventKeys)) {
 if (owned.size === 0) { process.stdout.write('nochange'); process.exit(0); }
 
 let content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+let parseToml;
+try {
+  ({ parse: parseToml } = createRequire(path.join(pilotRoot, 'package.json'))('smol-toml'));
+  parseToml(content);
+} catch {
+  process.stdout.write('unsafe');
+  process.exit(0);
+}
+// A header-looking line inside a TOML multiline string is data, not a table.
+// Even with parser validation, the line-oriented edit cannot safely distinguish
+// that data from a table boundary, so preserve the original file.
+if (content.includes('"""') || content.includes("'''")) {
+  process.stdout.write('unsafe');
+  process.exit(0);
+}
 const eol = content.includes('\r\n') ? '\r\n' : '\n';
 const lines = content.split(/\r?\n/);
 const output = [];
@@ -2907,14 +2924,19 @@ for (const line of lines) {
   output.push(line);
 }
 if (!changed) { process.stdout.write('nochange'); process.exit(0); }
-fs.writeFileSync(configPath, output.join(eol), 'utf-8');
+const updated = output.join(eol);
+try { parseToml(updated); } catch {
+  process.stdout.write('unsafe');
+  process.exit(0);
+}
+fs.writeFileSync(configPath, updated, 'utf-8');
 process.stdout.write('cleaned');
 '@
 
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $result = & $script:NODE_BIN -e $cleanupScript $hooksPath $configPath 2>&1
+        $result = & $script:NODE_BIN -e $cleanupScript $hooksPath $configPath $script:PERMANENT_DIR 2>&1
         $cleanupExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
@@ -2922,6 +2944,9 @@ process.stdout.write('cleaned');
     if ($cleanupExit -ne 0) { throw "Failed to clean Pilot Codex trust: $result" }
     if ($result -eq "cleaned") {
         Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
+    } elseif ($result -eq "unsafe") {
+        Msg "    ⚠️  跳过 Codex trust 清理（config.toml 含多行字符串，无法安全确认表边界）" `
+            "    ⚠️  Skipped Codex trust cleanup (config.toml contains multiline strings; table boundaries are ambiguous)"
     }
 }
 
