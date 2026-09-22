@@ -14,6 +14,7 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
+import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
@@ -419,6 +420,9 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
   'gen_ai.subagent.parent_tool_call.id',
+  'agent.qwen-code-cli.subagent.collection',
+  'agent.qwen-code-cli.subagent.status',
+  'agent.qwen-code-cli.timing.source',
 ];
 
 function estimateSpanSize(span: ReadableSpan): number {
@@ -838,6 +842,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwen-code-cli'
+      && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
+      return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
+    }
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -1078,7 +1086,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const convertStarted = performance.now();
         let succeeded = false;
         try {
-          result = convertEventLogToTrace(
+          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents : convertEventLogToTrace;
+          result = convert(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },
           );

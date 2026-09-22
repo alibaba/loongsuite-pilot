@@ -16,11 +16,11 @@
  *     resource_attributes?,         // invocation context captured by the latest Stop hook
  *     span_attributes?,             // per-invocation span attributes captured by Stop
  *     stop_time?,
- *     events: []                   // v2 subagent_start/stop accumulator (unused in v1)
+ *     events: []                   // legacy accumulator, cleared at Stop
  *   }
  *
- * Atomic write via temp + rename to avoid half-written reads when concurrent
- * hooks fire (qwen-code's SubagentStart/Stop hooks run alongside Stop).
+ * Atomic write via temp + rename avoids half-written reads. Child Hooks no
+ * longer update parent session state; only Stop owns the transcript offset.
  */
 
 import fs from 'node:fs';
@@ -87,23 +87,6 @@ export function saveState(sessionId, state) {
 export function clearState(sessionId) {
   const sf = stateFilePath(sessionId);
   try { fs.unlinkSync(sf); } catch {}
-}
-
-/**
- * Read a child (subagent) session state and delete it — used by SubagentStop
- * to merge child state into parent. v1 stores child events but doesn't process
- * them; v2 will unfurl subagent records into the trace.
- */
-export function readAndDeleteChildState(childSessionId) {
-  const sf = stateFilePath(childSessionId);
-  if (!fs.existsSync(sf)) return null;
-  try {
-    const data = JSON.parse(fs.readFileSync(sf, 'utf-8'));
-    try { fs.unlinkSync(sf); } catch {}
-    return data;
-  } catch {
-    return null;
-  }
 }
 
 // ─── Cleanup helpers (for hook-watchdog) ───
