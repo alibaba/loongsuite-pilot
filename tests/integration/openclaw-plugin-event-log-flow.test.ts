@@ -6,6 +6,10 @@ import { convertEventLogToReadableSpans, type EventLogRecord } from '@loongsuite
 import { InputManager } from '../../src/core/input-manager.js';
 import { OpenClawPluginInput } from '../../src/inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { ClientType } from '../../src/types/index.js';
+import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
+import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
+import { ExportResultCode } from '@opentelemetry/core';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
 
@@ -141,11 +145,46 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       [13874, 197, ['stop']],
     ]);
 
+    const outputDir = path.join(root, 'logs', 'output');
+    const jsonl = new JsonlFlusher({ enabled: true, outputDir, rotateDaily: true, maxFileSizeMb: 100 });
+    await jsonl.start();
+    await jsonl.sendBatch(records);
+    const files = await fs.readdir(outputDir);
+    const output = (await fs.readFile(path.join(outputDir, files[0]), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line));
+    expect(output.map(r => r.span_id)).toEqual(records.map(r => r.span_id));
+    for (const request of records.filter(r => r['event.name'] === 'llm.request')) {
+      expect(request.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(responses.find(r => r['gen_ai.step.id'] === request['gen_ai.step.id'])?.span_id).toBe(request.span_id);
+    }
+
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
     try {
+      // Exercise Pilot's real flusher as well as the library converter: TOOL
+      // spans must retain the new event IDs through the reservation adapter.
+      const exported: ReadableSpan[] = [];
+      const otlp = new OtlpTraceFlusher({
+        enabled: true, endpoints: [{ name: 'test', endpoint: 'http://localhost:4318/v1/traces' }],
+        serviceName: 'test-openclaw', protocol: 'http/protobuf', dataDir: root,
+      }, undefined, () => ({
+        export(spans, callback) { exported.push(...spans); callback({ code: ExportResultCode.SUCCESS }); },
+        async shutdown() {},
+      }));
+      try {
+        await otlp.sendBatch(records);
+        const tools = exported.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+        expect(tools).toHaveLength(2);
+        expect(new Set(tools.map(span => span.spanContext().spanId))).toEqual(new Set(
+          records.filter(r => r['event.name'] === 'tool.call').map(r => r.span_id),
+        ));
+        expect(exported).toHaveLength(8);
+        expect(new Set(exported.map(span => span.spanContext().spanId)).size).toBe(8);
+      } finally {
+        await otlp.shutdown();
+      }
       const traceRecords = records.filter(record => record['event.name'] !== 'agent.input');
       const converted = await convertEventLogToReadableSpans(traceRecords as EventLogRecord[], { strict: false });
       expect(converted.warnings).toEqual([]);

@@ -116,7 +116,33 @@ async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {
     if (contextPatch) Object.assign(ctx, contextPatch(env) || {});
     await h(env.event, ctx);
   }
-  return readOutputRecords();
+  const records = readOutputRecords();
+  assertInvocationSpanIds(records);
+  return records;
+}
+
+// Apply the ID contract to every fixture replay, including errors, fallback,
+// privacy-off and delayed tool results, not just the happy-path fixture.
+function assertInvocationSpanIds(records) {
+  const idsByInvocation = new Map();
+  const ownersById = new Map();
+  for (const record of records) {
+    const name = record['event.name'];
+    if (!['llm.request', 'llm.response', 'tool.call', 'tool.result'].includes(name)) {
+      expect(record.span_id).toBeUndefined();
+      continue;
+    }
+    expect(record.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(record.span_id).not.toBe('0000000000000000');
+    const isTool = name.startsWith('tool.');
+    const callId = isTool ? record['gen_ai.tool.call.id'] : record['gen_ai.step.id'];
+    if (!callId) continue;
+    const key = JSON.stringify([record.trace_id, record['gen_ai.step.id'], isTool, callId]);
+    if (idsByInvocation.has(key)) expect(record.span_id).toBe(idsByInvocation.get(key));
+    if (ownersById.has(record.span_id)) expect(key).toBe(ownersById.get(record.span_id));
+    idsByInvocation.set(key, record.span_id);
+    ownersById.set(record.span_id, key);
+  }
 }
 
 function todayStamp() {
@@ -159,6 +185,39 @@ describe('OpenClaw plugin stateful pipeline', () => {
       expect(record['agent.openclaw.session_key']).toBeUndefined();
       expect(record['agent.openclaw.session_key.ambiguous']).toBe(true);
     }
+  });
+
+  it('uses distinct paired span IDs for models and parallel tools across runs', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const first = await replay(plugin, envelopes);
+    const second = await replay(plugin, envelopes);
+    const starts = records => records.filter(r => ['llm.request', 'tool.call'].includes(r['event.name']));
+    expect(starts(first)).toHaveLength(4);
+    expect(new Set(starts(first).map(r => r.span_id)).size).toBe(4);
+    const firstIds = new Set(starts(first).map(r => r.span_id));
+    expect(starts(second).every(r => !firstIds.has(r.span_id))).toBe(true);
+  });
+
+  it('separates reused tool IDs across model steps and does not correlate missing IDs', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const ctx = { runId: 'span-run', sessionId: 'span-session', sessionKey: 'span-key' };
+    for (let step = 0; step < 2; step++) {
+      handlers.model_call_started({ callId: 'reused-model-id' }, ctx);
+      handlers.before_tool_call({ toolName: 'read', toolCallId: 'reused-tool-id' }, ctx);
+      handlers.after_tool_call({ toolName: 'read', toolCallId: 'reused-tool-id', result: 'ok' }, ctx);
+    }
+    handlers.before_tool_call({ toolName: 'read' }, ctx);
+    handlers.after_tool_call({ toolName: 'read', result: 'ok' }, ctx);
+    const records = readOutputRecords();
+    assertInvocationSpanIds(records);
+    const calls = records.filter(r => r['event.name'] === 'tool.call');
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map(r => r.span_id)).size).toBe(3);
+    const missing = records.filter(r => r['event.name'].startsWith('tool.') && !r['gen_ai.tool.call.id']);
+    expect(missing).toHaveLength(2);
+    expect(missing[0].span_id).not.toBe(missing[1].span_id);
   });
 
   it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {

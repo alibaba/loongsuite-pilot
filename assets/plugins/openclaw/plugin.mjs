@@ -147,6 +147,15 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+// Allocate once per invocation, so both event boundaries carry the same ID.
+function invocationSpanId(ids, key) {
+  if (key && ids.has(key)) return ids.get(key);
+  let id;
+  do { id = crypto.randomBytes(8).toString("hex"); } while (id === "0000000000000000");
+  if (key) setBounded(ids, key, id);
+  return id;
+}
+
 let legacyClock;
 function nowNanos() {
   return legacyClock ? legacyClock() : `${Date.now()}000000`;
@@ -445,6 +454,8 @@ function getRun(runId, event, ctx) {
       currentStepCallId: null,
       lastCallId: null,
       nativeCallIds: new Map(),
+      modelSpanIds: new Map(),
+      toolSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
       completed: false,
@@ -527,6 +538,8 @@ function resetCompletedRunState(run) {
   run.currentStepCallId = null;
   run.lastCallId = null;
   run.nativeCallIds.clear();
+  run.modelSpanIds.clear();
+  run.toolSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
   run.userPromptText = null;
@@ -784,6 +797,7 @@ function emitUnmatchedModelResponse(run, callId, userId, emit) {
   const record = {
     ...buildCommonFields(run, run.sessionId, userId),
     "event.name": "llm.response",
+    span_id: invocationSpanId(run.modelSpanIds, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(ended.provider || run.provider, ended.model || run.model),
@@ -980,6 +994,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const record = {
     ...common,
     "event.name": "llm.request",
+    span_id: invocationSpanId(run.modelSpanIds, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(event?.provider || run.provider, event?.model || run.model),
@@ -1069,6 +1084,8 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const record = {
     ...common,
     "event.name": "tool.call",
+    span_id: invocationSpanId(run.toolSpanIds, event?.toolCallId
+      ? JSON.stringify([stepId, event.toolCallId]) : undefined),
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,
@@ -1128,6 +1145,8 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     ...common,
     ...(completedAtNanos ? { time_unix_nano: completedAtNanos } : {}),
     "event.name": "tool.result",
+    span_id: invocationSpanId(run.toolSpanIds, event?.toolCallId
+      ? JSON.stringify([stepId, event.toolCallId]) : undefined),
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,
@@ -1234,6 +1253,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
     const record = {
       ...buildCommonFields(run, run.sessionId, userId),
       "event.name": "llm.response",
+      span_id: invocationSpanId(run.modelSpanIds, targetCallId),
       "gen_ai.step.id": targetCallId,
       "gen_ai.response.id": responseId,
       "gen_ai.provider.name": inferProviderName(message.provider || run.provider, message.model || run.model),
