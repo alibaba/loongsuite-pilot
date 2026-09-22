@@ -100,6 +100,7 @@ export class AgentDefLoader {
       && mode !== 'directory-plugin'
       && mode !== 'detection-only'
       && mode !== 'dsh-yaml-patch'
+      && mode !== 'copilot-plugin'
     ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;

@@ -1,6 +1,7 @@
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
+import { SpanKind } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -108,6 +109,15 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  // Dedup index: event.id → position in `records`. Copilot session files are
+  // re-parsed in full on every poll (parser is stateless over the whole file),
+  // so without dedup the buffer accumulates N× duplicates of the same record
+  // across polls when Signal A doesn't fire mid-session (LLMs with tool_calls
+  // have finish_reasons=['tool_calls'], non-terminal). On flush, converter
+  // would then see N× records and emit N× TOOL / ENTRY / AGENT spans.
+  // Dedup by event.id keeps the latest copy (later polls carry richer fields
+  // like tool.result's success/error_code/permission.* that arrive late).
+  recordIndex: Map<string, number>;
   completed: boolean;
   lastActivityMs: number;
   logicalBytes: number;
@@ -438,6 +448,7 @@ function estimateSpanSize(span: ReadableSpan): number {
 }
 
 /**
+/**
  * Apply QoderWork's explicit loop.iteration boundaries to STEP spans without
  * changing the enclosed LLM timestamps. The converter otherwise derives STEP
  * start/end from child records, which loses the small but real orchestration
@@ -510,6 +521,33 @@ function hrTimeToNano(value: readonly [number, number]): bigint {
 
 function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+}
+
+/**
+ * Deep-merge a new AgentActivityEntry into an existing one, preserving
+ * earlier non-empty values when the new record's field is empty. Earlier
+ * polls carry some fields (e.g. gen_ai.llm.reasoning.text on the first
+ * reasoning-event poll) that later polls lack — replace semantics (v7)
+ * silently dropped them, causing tester CP5 v6 to see reasoning.text=0/6
+ * and resolved_model missing from ENTRY spans. Deep merge keeps the
+ * first non-empty value per field; later non-empty values are ignored
+ * (first-write-wins to avoid flapping on transient field changes).
+ */
+function mergeRecordFields(
+  existing: AgentActivityEntry,
+  incoming: AgentActivityEntry,
+): AgentActivityEntry {
+  const merged = { ...existing } as Record<string, unknown>;
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.length === 0) continue;
+    const cur = merged[k];
+    if (cur === undefined || cur === null || (typeof cur === 'string' && cur.length === 0)) {
+      merged[k] = v;
+    }
+    // cur is non-empty → keep first-write value, ignore incoming
+  }
+  return merged as AgentActivityEntry;
 }
 
 export class OtlpTraceFlusher extends BaseFlusher {
@@ -669,6 +707,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    // Session totals are independent log events, not a new trace or late turn update.
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -735,6 +775,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agentType,
         sessionId: incomingSessionId,
         records: [],
+        recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
         logicalBytes: 0,
@@ -746,7 +787,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
-    buf.records.push(entry);
+    // Dedup by event.id: if the same event.id was already pushed (from a prior
+    // re-parse of the same session file), deep-merge fields so earlier polls'
+    // fields (e.g. gen_ai.llm.reasoning.text that only appears on the first
+    // poll) are preserved when a later poll's record lacks them. Replace
+    // semantics (v7) lost reasoning.text + gen_ai.session.resolved_model —
+    // deep merge keeps first-non-empty value per field. Records without
+    // event.id fall through to normal append.
+    const eventId = (entry['event.id'] as string | undefined) ?? undefined;
+    if (typeof eventId === 'string' && eventId.length > 0) {
+      const existingIdx = buf.recordIndex.get(eventId);
+      if (existingIdx !== undefined) {
+        buf.records[existingIdx] = mergeRecordFields(buf.records[existingIdx], entry);
+      } else {
+        buf.recordIndex.set(eventId, buf.records.length);
+        buf.records.push(entry);
+      }
+    } else {
+      buf.records.push(entry);
+    }
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
@@ -838,6 +897,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -1129,6 +1189,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
+      // Post-convert patch: the otel-util-genai converter auto-creates ENTRY
+      // and LLM spans but does not natively pass through Copilot-specific
+      // `gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
+      // `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`,
+      // or `gen_ai.llm.reasoning.text` fields from the input records. Copy
+      // them onto the auto-created spans here so otlp-debug + downstream
+      // consumers see them on the exported span attributes.
+      this.patchCopilotCustomAttributes(spans, records);
+
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
@@ -1232,6 +1301,151 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   getEndpointCounters(): Map<string, OtlpEndpointCounter> {
     return this.endpointCounters;
+  }
+
+  /**
+   * Copy Copilot-specific custom attributes from input records onto the
+   * auto-created ENTRY and LLM spans.
+   *
+   * The otel-util-genai converter creates ENTRY/AGENT/STEP/LLM/TOOL spans
+   * automatically from records, but `buildEntryInvocation` and
+   * `buildLlmInvocation` do not extract Copilot's session-level usage fields
+   * (`gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
+   * `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`)
+   * or `gen_ai.llm.reasoning.text` from records — so they never reach the
+   * span attributes via the standard conversion path. Patch them here.
+   *
+   * ENTRY spans are matched by kind=SERVER + name="enter_ai_application_system".
+   * For multi-turn sessions the converter emits one ENTRY per turn group; we
+   * apply session-level fields to ALL of them (they share the same session).
+   *
+   * LLM spans are matched by `gen_ai.response.id` between record and span.
+   */
+  private patchCopilotCustomAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
+    const interactionError = records.find(r => r['gen_ai.copilot.interaction.error'])?.['gen_ai.copilot.interaction.error'];
+    if (interactionError) for (const span of spans) {
+      if (span.attributes['gen_ai.operation.name'] === 'invoke_agent') {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = interactionError;
+      }
+    }
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response' || !record['error.type']) continue;
+      const span = spans.find(s => s.attributes['gen_ai.response.id'] === record['gen_ai.response.id']);
+      if (span) {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = record['error.type'];
+      }
+    }
+    const ENTRY_ATTR_KEYS = [
+      'gen_ai.session.usage.input_tokens',
+      'gen_ai.session.usage.output_tokens',
+      'gen_ai.session.usage.cache_read.input_tokens',
+      'gen_ai.session.usage.cache_creation.input_tokens',
+      'gen_ai.session.usage.reasoning_tokens',
+      'gen_ai.session.usage.total_api_duration_ms',
+      'gen_ai.session.abort.reason',
+      'gen_ai.session.total_premium_requests',
+      'gen_ai.session.conversation_tokens',
+      'gen_ai.session.code_changes.lines_added',
+      'gen_ai.session.code_changes.lines_removed',
+      'gen_ai.session.code_changes.files_modified',
+      'gen_ai.session.current_model',
+      'gen_ai.session.resolved_model',
+    ];
+
+    // Find the session-level carrier record (ENTRY record emitted by Copilot
+    // transcript-parser — event.name='other' with session-level fields).
+    const entryRecord = records.find(r =>
+      (r as Record<string, unknown>)['gen_ai.session.usage.input_tokens'] !== undefined
+      || (r as Record<string, unknown>)['gen_ai.session.abort.reason'] !== undefined
+    );
+
+    if (entryRecord) {
+      const entrySpans = spans.filter(s =>
+        s.kind === SpanKind.SERVER && s.name === 'enter_ai_application_system'
+      );
+      for (const span of entrySpans) {
+        for (const key of ENTRY_ATTR_KEYS) {
+          const v = (entryRecord as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
+
+    // LLM: copy gen_ai.llm.reasoning.text + gen_ai.input.messages from
+    // llm.response records onto the matching LLM span (matched by
+    // gen_ai.response.id). The converter passes output.messages through but
+    // drops input.messages on the standard LLM attribute path, so we reattach
+    // it here.
+    const llmRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'llm.response'
+      && (
+        typeof (r as Record<string, unknown>)['gen_ai.llm.reasoning.text'] === 'string'
+        || typeof (r as Record<string, unknown>)['gen_ai.input.messages'] === 'string'
+      )
+    );
+    if (llmRecords.length > 0) {
+      const llmSpans = spans.filter(s => s.kind === SpanKind.CLIENT);
+      for (const rec of llmRecords) {
+        const respId = (rec as Record<string, unknown>)['gen_ai.response.id'];
+        if (typeof respId !== 'string' || !respId) continue;
+        const span = llmSpans.find(s => s.attributes['gen_ai.response.id'] === respId);
+        if (!span) continue;
+        const reasoning = (rec as Record<string, unknown>)['gen_ai.llm.reasoning.text'];
+        if (typeof reasoning === 'string') {
+          (span.attributes as Record<string, unknown>)['gen_ai.llm.reasoning.text'] = reasoning;
+        }
+        const inputMsgs = (rec as Record<string, unknown>)['gen_ai.input.messages'];
+        if (typeof inputMsgs === 'string' && inputMsgs.length > 0) {
+          (span.attributes as Record<string, unknown>)['gen_ai.input.messages'] = inputMsgs;
+        }
+      }
+    }
+
+    // TOOL: copy gen_ai.tool.success / error.code / error.message /
+    // permission.* from tool.result records onto the matching TOOL span
+    // (matched by gen_ai.tool.call.id). The converter's
+    // applyExecuteToolFinishAttributes only sets standard fields
+    // (gen_ai.tool.call.id / gen_ai.tool.name / gen_ai.tool.call.arguments /
+    // gen_ai.tool.call.result) — it does not propagate Copilot's
+    // permission/denied-state fields. Without this patch, scenario B
+    // (permission denied) TOOL spans lose success/error context.
+    const toolResultRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'tool.result'
+    );
+    if (toolResultRecords.length > 0) {
+      const toolSpans = spans.filter(s => s.kind === SpanKind.INTERNAL
+        && typeof s.attributes['gen_ai.tool.call.id'] === 'string');
+      const TOOL_ATTR_KEYS = [
+        'gen_ai.tool.success',
+        'error.code',
+        'error.message',
+        'permission.result.kind',
+        'permission.decision_source',
+      ];
+      for (const rec of toolResultRecords) {
+        const callId = (rec as Record<string, unknown>)['gen_ai.tool.call.id'];
+        if (typeof callId !== 'string' || !callId) continue;
+        const span = toolSpans.find(s => s.attributes['gen_ai.tool.call.id'] === callId);
+        if (!span) continue;
+        if (rec['gen_ai.tool.success'] === false) {
+          (span as any).status = { code: 2 };
+          (span.attributes as Record<string, unknown>)['error.type'] = rec['error.type'] || rec['error.code'] || 'tool_error';
+        }
+        for (const key of TOOL_ATTR_KEYS) {
+          const v = (rec as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
   }
 
   private getOrCreateConvertState(
