@@ -17,7 +17,8 @@ import {
   logDebug,
   parseArgs,
   parseStdinPayload,
-  readTranscriptLines,
+  readTranscriptSnapshotLines,
+  sliceTranscriptLines,
   updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
@@ -35,9 +36,10 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const range = getLineRangeInfo(agentId, payload.transcriptPath, payload.sessionId);
+  const snapshot = readTranscriptSnapshotLines(payload.transcriptPath);
+  const range = getLineRangeInfo(agentId, payload.transcriptPath, payload.sessionId, snapshot.lineCount);
   if (!range) return;
-  const lines = readTranscriptLines(payload.transcriptPath, range.startLine, range.endLine);
+  const lines = sliceTranscriptLines(snapshot.allLines, range.startLine, range.endLine);
   if (!lines.length) {
     updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
     return;
