@@ -24,10 +24,18 @@ afterEach(async () => {
 function fixtureJson(): Record<string, any> {
   return JSON.parse(fsSync.readFileSync(FIXTURE_SRC, 'utf8'));
 }
+
+function retimeFinalizedRun(j: Record<string, any>, startTime?: string): void {
+  if (!startTime) return;
+  const durationMs = Date.parse(j.end_time) - Date.parse(j.start_time);
+  j.start_time = startTime;
+  j.end_time = new Date(Date.parse(startTime) + durationMs).toISOString();
+}
+
 /** Full 15-step trajectory (=> 58 entries), optionally with a new start_time. */
 function full(startTime?: string): string {
   const j = fixtureJson();
-  if (startTime) j.start_time = startTime;
+  retimeFinalizedRun(j, startTime);
   return JSON.stringify(j, null, 2);
 }
 /** Trajectory truncated to `n` steps (n req + n resp + n call + n result entries). */
@@ -35,7 +43,20 @@ function truncated(n: number, startTime?: string): string {
   const j = fixtureJson();
   j.agent_steps = j.agent_steps.slice(0, n);
   j.llm_interactions = j.llm_interactions.slice(0, n);
-  if (startTime) j.start_time = startTime;
+  retimeFinalizedRun(j, startTime);
+  return JSON.stringify(j, null, 2);
+}
+
+/** In-progress trajectory whose finalization fields have not been written yet. */
+function inProgress(n: number, startTime: string): string {
+  const j = fixtureJson();
+  j.agent_steps = j.agent_steps.slice(0, n);
+  j.llm_interactions = j.llm_interactions.slice(0, n);
+  j.start_time = startTime;
+  j.end_time = '';
+  j.success = false;
+  j.final_result = null;
+  j.execution_time = 0;
   return JSON.stringify(j, null, 2);
 }
 
@@ -307,6 +328,47 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
 });
 
 describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () => {
+  test('closes an unfinished old run before a new run overwrites the same file', async () => {
+    const file = path.join(tmpDir, 'trajectory.json');
+    await fs.writeFile(file, inProgress(3, '2026-08-25T10:00:17.058504'));
+    const store = await newStore();
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: store,
+      trajectoryFile: file,
+      converterPath: CONVERTER_PATH,
+      pollIntervalMs: 1000,
+    });
+
+    // @ts-expect-error: protected
+    const first = (await input.collect()) as AgentActivityEntry[];
+    const firstSession = first[0]['gen_ai.session.id'];
+    expect(first).toHaveLength(12);
+    expect(first.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+
+    await fs.writeFile(file, full('2026-08-26T10:00:17.058504'));
+    // @ts-expect-error: protected
+    const second = (await input.collect()) as AgentActivityEntry[];
+    const replacementMarkers = second.filter(entry =>
+      entry['agent.trajectory.flush_only'] === true
+      && entry['agent.trajectory.completion.reason'] === 'source_replaced');
+    expect(replacementMarkers).toHaveLength(1);
+    expect(replacementMarkers[0]).toMatchObject({
+      'event.name': 'other',
+      'gen_ai.session.id': firstSession,
+      'gen_ai.turn.id': firstSession,
+      'gen_ai.turn.end': true,
+      'agent.trajectory.collection.incomplete': true,
+    });
+    const currentRunEntries = second.filter(entry => entry['gen_ai.session.id'] !== firstSession);
+    expect(currentRunEntries).toHaveLength(58);
+
+    // @ts-expect-error: protected
+    expect(await input.collect()).toEqual([]);
+    const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
+    expect(Object.keys(extra.runsById)).toHaveLength(1);
+    expect(Object.values(extra.runsById)[0]).toMatchObject({ runCompletionEmitted: true });
+  });
+
   test('a new run reusing the same file (same inode, same size) resets dedup', async () => {
     // trae-agent rewrites its trajectory via open(path, "w"): inode stays stable
     // and a new run can present an equal-or-larger file, so the size-shrink /

@@ -81,12 +81,30 @@ const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.correlation.ambiguous',
 ] as const;
 const TRAE_FLUSH_ONLY_MARKER = 'agent.trajectory.flush_only';
+const TRAE_COLLECTION_PASSTHROUGH_KEYS = [
+  'agent.trajectory.collection.incomplete',
+  'agent.trajectory.completion.reason',
+] as const;
 
 function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
   return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
     && record['event.name'] === 'other'
     && record['gen_ai.turn.end'] === true
     && record[TRAE_FLUSH_ONLY_MARKER] === true;
+}
+
+function prepareTraeCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const incompleteMarker = records.find(record =>
+    isTraeFlushOnlyMarker(record)
+    && record['agent.trajectory.collection.incomplete'] === true);
+  if (!incompleteMarker) return records;
+  const diagnostics = {
+    'agent.trajectory.collection.incomplete': true,
+    'agent.trajectory.completion.reason': incompleteMarker['agent.trajectory.completion.reason'],
+  };
+  return records.map(record => isTraeFlushOnlyMarker(record)
+    ? record
+    : { ...record, ...diagnostics });
 }
 
 function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
@@ -1177,7 +1195,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // the downstream library aggregates usage and selects parent output before
     // response-id merging, so a second response double-counts tokens or clears
     // ENTRY/AGENT output. A marker-only buffer has no reconstructible payload.
-    const recordsForConversion = buf.records.filter(record => !isTraeFlushOnlyMarker(record));
+    const preparedRecords = buf.agentType === 'trae-agent'
+      ? prepareTraeCollectionRecords(buf.records)
+      : buf.records;
+    const recordsForConversion = preparedRecords.filter(record => !isTraeFlushOnlyMarker(record));
     if (recordsForConversion.length === 0) return;
     const exported = await this.convertAndExport(buf.agentType, recordsForConversion);
     if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
@@ -1264,6 +1285,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
           : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : agentType === 'trae-agent' ? TRAE_COLLECTION_PASSTHROUGH_KEYS
           : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,

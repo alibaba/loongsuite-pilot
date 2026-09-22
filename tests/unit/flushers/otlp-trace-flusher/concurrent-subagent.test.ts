@@ -210,8 +210,8 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
   it('preempts an abandoned same-session buffer with no llm.response when a new same-session turn arrives', async () => {
     // PR #115 review issue 3: an abandoned same-session turn that only has
     // llm.request / tool.call records (the user moved on or MiMo crashed
-    // mid-stream) must be flushed when a new same-session turn arrives —
-    // otherwise it accumulates forever (turnIdleTimeoutMs defaults to 0).
+    // mid-stream) must be flushed when a new same-session turn arrives instead
+    // of waiting for the idle fallback (which callers can explicitly disable).
     // Same-session signals "user moved on" so the hasLlmResponse guard is
     // dropped for this case. Different-session (concurrent subagent) is
     // still covered by the test above.
