@@ -22,7 +22,7 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
     },
     "captureMessageContent": false,
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```
@@ -37,7 +37,7 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
 | `otlpTrace.captureMessageContent` | Whether trace export may include message content. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
-| `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
+| `otlpTrace.turnIdleTimeoutMs` | Idle fallback for incomplete turn buffers. Defaults to `300000` (5 minutes), well above the default 30-second polling interval. Set `0` to disable it. |
 
 Environment variables:
 

@@ -120,7 +120,7 @@ export function convertTrajectory(json, opts = {}) {
   // (record_llm_interaction / record_agent_step both call save_trajectory), so
   // the poller routinely observes partial trajectories whose current tail step
   // is NOT the real last step.
-  const runComplete = Boolean(parsed.endTime);
+  const runComplete = isRunComplete(parsed.startTime, parsed.endTime);
   let emittedTurnEnd = false;
 
   /** Build the single authoritative llm.response record for a step. */
@@ -460,27 +460,49 @@ function nanoOf(ts) {
 
 /**
  * P1-4 guard: a span START derived from an earlier boundary. If the boundary is
- * missing or not strictly before `endNano` (clock skew / same-millisecond
- * stamps), clamp to endNano-1 so the span keeps a positive, non-zero duration
- * without borrowing a later event's time.
+ * missing or less than one millisecond before `endNano` (clock skew /
+ * same-millisecond stamps), clamp to endNano-1ms. The downstream converter
+ * stores timestamps at millisecond precision, so a 1ns delta still becomes a
+ * zero-duration exported span.
  */
+const MIN_EXPORTED_SPAN_DURATION_NANOS = 1_000_000n;
+
 function lowerBoundNano(boundaryTs, endNano) {
-  if (!boundaryTs) return endNano > 0n ? endNano - 1n : 0n;
+  const fallback = endNano >= MIN_EXPORTED_SPAN_DURATION_NANOS
+    ? endNano - MIN_EXPORTED_SPAN_DURATION_NANOS
+    : 0n;
+  if (!boundaryTs) return fallback;
   const startNano = nanoOf(boundaryTs);
-  if (startNano <= 0n || startNano >= endNano) return endNano > 0n ? endNano - 1n : 0n;
+  if (startNano <= 0n || endNano - startNano < MIN_EXPORTED_SPAN_DURATION_NANOS) {
+    return fallback;
+  }
   return startNano;
 }
 
 /**
  * P1-4 guard: a span END derived from a later boundary. If the boundary is
- * missing or not strictly after `startNano`, clamp to startNano+1 so tool
- * spans keep a positive duration.
+ * missing or less than one millisecond after `startNano`, clamp to
+ * startNano+1ms so exported tool spans keep a positive duration.
  */
 function upperBoundNano(boundaryTs, startNano) {
-  if (!boundaryTs) return startNano + 1n;
+  if (!boundaryTs) return startNano + MIN_EXPORTED_SPAN_DURATION_NANOS;
   const endNano = nanoOf(boundaryTs);
-  if (endNano <= startNano) return startNano + 1n;
+  if (endNano - startNano < MIN_EXPORTED_SPAN_DURATION_NANOS) {
+    return startNano + MIN_EXPORTED_SPAN_DURATION_NANOS;
+  }
   return endNano;
+}
+
+function isRunComplete(startTime, endTime) {
+  if (!endTime) return false;
+  const startMs = Date.parse(startTime);
+  const endMs = Date.parse(endTime);
+  // trae-agent interactive mode reuses one recorder. Its start_recording()
+  // clears steps and interactions but may leave the previous run's end_time in
+  // the rewritten file until the new run is finalized. Treat an end before the
+  // current start as stale instead of prematurely closing the new turn.
+  if (Number.isFinite(startMs) && Number.isFinite(endMs)) return endMs >= startMs;
+  return true;
 }
 
 // ── CLI entry: read trajectory file, emit JSONL ──

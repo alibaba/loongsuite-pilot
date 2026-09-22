@@ -1064,7 +1064,10 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
-    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    // Keep a bounded fallback for agents whose explicit terminal record can be
+    // lost (for example when a trajectory file is overwritten between polls).
+    // Five minutes is deliberately much larger than the default 30s poll cycle.
+    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 300_000,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),

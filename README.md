@@ -66,6 +66,7 @@ Pilot is designed to answer practical questions:
 | OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
+| trae-agent    | Native trajectory polling | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       |

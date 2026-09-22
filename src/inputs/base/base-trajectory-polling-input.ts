@@ -138,11 +138,28 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       }
     }
 
-    // A fixed path may be overwritten by a brand-new logical run. Once the new
-    // identity is visible, an older checkpoint for that same physical path can
-    // never be reached from the current file and would otherwise grow forever.
-    for (const [runKey, checkpoint] of Object.entries(runsById)) {
-      if (runKey !== currentRunKey && checkpoint.lastFile === trajectoryFile) {
+    // A fixed path may be overwritten by a brand-new logical run. If the old
+    // run was observed before it was finalized, close its already-buffered OTLP
+    // turn with a control-only marker before discarding the unreachable
+    // checkpoint. Keeping the checkpoint alone cannot recover content that the
+    // producer has overwritten; silently deleting it leaves the old turn open.
+    const replacementEntries: AgentActivityEntry[] = [];
+    for (const [runKey, staleCheckpoint] of Object.entries(runsById)) {
+      if (runKey !== currentRunKey && staleCheckpoint.lastFile === trajectoryFile) {
+        const completionEntry = this.buildReplacementCompletionEntry(runKey, staleCheckpoint);
+        if (completionEntry) {
+          replacementEntries.push(completionEntry);
+          this.logger.warn('trajectory run replaced before completion; closing buffered turn', {
+            file: trajectoryFile,
+            runId: runKey,
+          });
+        } else if (!staleCheckpoint.runCompletionEmitted
+          && (staleCheckpoint.seenStepNumbers?.length ?? 0) > 0) {
+          this.logger.warn('trajectory run replaced before completion without terminal context', {
+            file: trajectoryFile,
+            runId: runKey,
+          });
+        }
         delete runsById[runKey];
       }
     }
@@ -191,6 +208,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     const lastProcessedAt = Date.now();
     const sortedSeenStepNumbers = Array.from(seenStepNumbers).sort((a, b) => a - b);
     const completionEmitted = Boolean(terminalEmitted || runCompletionEmitted);
+    const terminalContext = this.captureTerminalContext(entries) ?? checkpoint?.terminalContext;
     runsById[currentRunKey] = {
       fingerprint: currentFp,
       seenStepNumbers: sortedSeenStepNumbers,
@@ -198,6 +216,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       lastProcessedAt,
       lastFile: trajectoryFile,
       lastMtimeMs: stat.mtimeMs,
+      terminalContext,
     };
 
     this.stateStore.update(stateKey, {
@@ -216,7 +235,67 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       },
     } as unknown as Partial<InputState>);
 
-    return entries;
+    return replacementEntries.length > 0 ? [...replacementEntries, ...entries] : entries;
+  }
+
+  private captureTerminalContext(
+    entries: AgentActivityEntry[],
+  ): TrajectoryTerminalContext | undefined {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry['agent.trajectory.flush_only'] === true) continue;
+      const sessionId = this.nonEmptyString(entry['gen_ai.session.id']);
+      const turnId = this.nonEmptyString(entry['gen_ai.turn.id']);
+      const agentType = this.nonEmptyString(entry['gen_ai.agent.type']);
+      if (!sessionId || !turnId || !agentType) continue;
+      return {
+        timeUnixNano: entry.observed_time_unix_nano || entry.time_unix_nano,
+        traceId: this.nonEmptyString(entry.trace_id),
+        sessionId,
+        turnId,
+        stepId: this.nonEmptyString(entry['gen_ai.step.id']),
+        agentType,
+        agentId: this.nonEmptyString(entry['gen_ai.agent.id']),
+        providerName: this.nonEmptyString(entry['gen_ai.provider.name']),
+      };
+    }
+    return undefined;
+  }
+
+  private buildReplacementCompletionEntry(
+    runKey: string,
+    checkpoint: TrajectoryRunCheckpoint,
+  ): AgentActivityEntry | undefined {
+    if (checkpoint.runCompletionEmitted || (checkpoint.seenStepNumbers?.length ?? 0) === 0) {
+      return undefined;
+    }
+    const context = checkpoint.terminalContext;
+    if (!context) return undefined;
+    return {
+      time_unix_nano: context.timeUnixNano,
+      observed_time_unix_nano: context.timeUnixNano,
+      'event.id': createHash('sha256')
+        .update(JSON.stringify([runKey, 'source-replaced']))
+        .digest('hex')
+        .slice(0, 32),
+      'user.id': '',
+      'event.name': 'other',
+      ...(context.traceId ? { trace_id: context.traceId } : {}),
+      'gen_ai.session.id': context.sessionId,
+      'gen_ai.turn.id': context.turnId,
+      ...(context.stepId ? { 'gen_ai.step.id': context.stepId } : {}),
+      'gen_ai.agent.type': context.agentType,
+      ...(context.agentId ? { 'gen_ai.agent.id': context.agentId } : {}),
+      'gen_ai.provider.name': context.providerName || 'unknown',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+      'agent.trajectory.collection.incomplete': true,
+      'agent.trajectory.completion.reason': 'source_replaced',
+    };
+  }
+
+  private nonEmptyString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
   }
 
   private cloneRunCheckpoints(
@@ -360,6 +439,17 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   ): Promise<{ entries: AgentActivityEntry[]; emittedStepNumbers: number[]; runCompletionEmitted?: boolean }>;
 }
 
+export interface TrajectoryTerminalContext {
+  timeUnixNano: string;
+  traceId?: string;
+  sessionId: string;
+  turnId: string;
+  stepId?: string;
+  agentType: string;
+  agentId?: string;
+  providerName?: string;
+}
+
 export interface TrajectoryRunCheckpoint {
   fingerprint?: string;
   seenStepNumbers?: number[];
@@ -368,6 +458,8 @@ export interface TrajectoryRunCheckpoint {
   lastProcessedAt?: number;
   lastFile?: string;
   lastMtimeMs?: number;
+  /** Content-free context used to close a buffered turn if its file is overwritten. */
+  terminalContext?: TrajectoryTerminalContext;
 }
 
 export interface TrajectoryExtra {

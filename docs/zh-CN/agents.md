@@ -23,6 +23,7 @@
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
+| trae-agent | `trae-agent` | 轮询原生 trajectory JSON，采集 LLM、工具、Token 以及成功和失败生命周期。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
 | Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
@@ -42,6 +43,24 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## trae-agent trajectory 采集
+
+Pilot 轮询 trae-agent 原生的 `trajectory*.json` 文件，并将每次运行转换为
+ENTRY → AGENT → STEP → LLM/TOOL span。trae-agent 默认把 trajectory 写到
+其当前工作目录下的 `trajectories/`，而 Pilot 的零配置监听目录是
+`~/.trae-agent/trajectories`。为保证稳定采集，请显式让 trae-agent 写入该目录：
+
+```bash
+mkdir -p "$HOME/.trae-agent/trajectories"
+trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajectory.json"
+```
+
+也可以在 `config.json` 中将
+`listeners["trae-agent-trajectory"].trajectoryDir` 设置为 trae-agent 实际使用的
+绝对目录。Pilot 会扫描目录内所有匹配文件，并按逻辑 run 隔离 checkpoint。
+如果未配置顶层精确 `serviceName`，最终上报服务名为
+`<serviceNamePrefix>-trae-agent`。
 
 ## Grok Build 采集与生命周期
 

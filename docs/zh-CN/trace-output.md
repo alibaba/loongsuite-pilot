@@ -22,7 +22,7 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
     },
     "captureMessageContent": false,
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```
@@ -37,7 +37,7 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
 | `otlpTrace.captureMessageContent` | Trace 输出是否可以包含消息内容。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
-| `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
+| `otlpTrace.turnIdleTimeoutMs` | 未完整结束的 turn buffer 的空闲兜底超时。默认 `300000`（5 分钟），显著大于默认 30 秒轮询周期；设为 `0` 可禁用。 |
 
 环境变量：
 

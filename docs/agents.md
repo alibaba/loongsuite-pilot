@@ -24,6 +24,7 @@ type differences are called out in the notes.
 | OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.3.8 or later. Automatic legacy/modern adaptation; model-call timing is inferred before 2026.5.12. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
+| trae-agent | `trae-agent` | Native trajectory JSON polling; captures LLM, tool, token, success, and failure lifecycle data. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
@@ -44,6 +45,25 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
+
+## trae-agent Trajectory Collection
+
+Pilot polls trae-agent's native `trajectory*.json` files and converts each run
+into ENTRY → AGENT → STEP → LLM/TOOL spans. trae-agent writes trajectories to a
+`trajectories/` directory relative to its current working directory by default,
+while Pilot's zero-configuration watch directory is `~/.trae-agent/trajectories`.
+Point trae-agent at that directory explicitly so collection is reliable:
+
+```bash
+mkdir -p "$HOME/.trae-agent/trajectories"
+trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajectory.json"
+```
+
+Alternatively, set `listeners["trae-agent-trajectory"].trajectoryDir` in
+`config.json` to the absolute directory used by trae-agent. Pilot scans every
+matching trajectory file and isolates checkpoints per logical run. Unless an
+exact top-level `serviceName` is configured, the exported service is named
+`<serviceNamePrefix>-trae-agent`.
 
 ## Grok Build Collection And Lifecycle
 

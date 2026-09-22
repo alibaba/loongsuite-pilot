@@ -15,6 +15,12 @@ const FIXTURE = path.join(__dirname, 'fixtures', 'fixture_trajectory_qwen_max.js
 // Tool sequence: str_replace_based_edit_tool x12 (failed) -> bash x2 (ok) -> task_done.
 const RAW = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
 
+function spanDurationNanos(span) {
+  const start = BigInt(span.startTime[0]) * 1_000_000_000n + BigInt(span.startTime[1]);
+  const end = BigInt(span.endTime[0]) * 1_000_000_000n + BigInt(span.endTime[1]);
+  return end - start;
+}
+
 describe('parseTrajectory - field location (architect P1)', () => {
   test('llm_interactions[i].tool_calls lives at .response.tool_calls (not top-level)', () => {
     const parsed = parseTrajectory(RAW);
@@ -129,6 +135,16 @@ describe('convertTrajectory - non-zero duration (P1-4)', () => {
       const result = entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.step.id']?.endsWith(`:s${sn}`));
       expect(BigInt(result.time_unix_nano)).toBeGreaterThan(BigInt(call.time_unix_nano));
     }
+  });
+
+  test('same-millisecond TOOL boundaries remain non-zero after downstream conversion', async () => {
+    const sameMillisecond = JSON.parse(JSON.stringify(RAW));
+    sameMillisecond.agent_steps[0].timestamp = sameMillisecond.llm_interactions[0].timestamp;
+    const { entries } = convertTrajectory(sameMillisecond, { seenStepNumbers: new Set() });
+    const result = await convertEventLogToReadableSpans(entries, { strict: false });
+    const firstTool = result.spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(firstTool).toBeDefined();
+    expect(spanDurationNanos(firstTool)).toBeGreaterThanOrEqual(1_000_000n);
   });
 
   test('last step LLM response time = its own interaction completion, NOT end_time (P1-4)', () => {
@@ -343,6 +359,18 @@ describe('convertTrajectory - incremental polling terminal gating (run-in-progre
     const { entries, emittedStepNumbers } = convertTrajectory(partialTrajectory(1), { seenStepNumbers: new Set() });
     expect(emittedStepNumbers).toEqual([1]);
     expect(stopResponses(entries).length).toBe(0);
+  });
+
+  test('ignores a previous interactive run end_time that predates the new start_time', () => {
+    const reusedRecorder = partialTrajectory(2);
+    reusedRecorder.start_time = '2026-08-25T11:00:00.000000';
+    reusedRecorder.end_time = '2026-08-25T10:00:56.847269';
+    reusedRecorder.success = true;
+
+    const result = convertTrajectory(reusedRecorder, { seenStepNumbers: new Set() });
+    expect(result.emittedStepNumbers).toEqual([1, 2]);
+    expect(turnEndResponses(result.entries)).toHaveLength(0);
+    expect(result.runCompletionEmitted).toBe(false);
   });
 
   test('incremental sequence: turn.end appears only once the run is finalized', () => {

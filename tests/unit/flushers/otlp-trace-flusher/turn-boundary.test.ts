@@ -240,6 +240,43 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(records.at(-1)?.['gen_ai.output.messages']).toEqual(response['gen_ai.output.messages']);
   });
 
+  it('trae-agent: source-replacement marker closes the old turn and preserves incomplete diagnostics', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const base = {
+      'gen_ai.turn.id': 'trae-replaced-run',
+      'gen_ai.session.id': 'trae-replaced-run',
+      'gen_ai.agent.type': 'trae-agent',
+      'gen_ai.provider.name': 'openrouter',
+      'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+    };
+    await flusher.sendBatch([
+      makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': 'trae-replaced-run:s1' }),
+      makeEntry({ ...base, 'event.name': 'llm.response', 'gen_ai.step.id': 'trae-replaced-run:s1' }),
+    ]);
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'other',
+      'gen_ai.step.id': 'trae-replaced-run:s1',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+      'agent.trajectory.collection.incomplete': true,
+      'agent.trajectory.completion.reason': 'source_replaced',
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    const records = mockConvert.mock.calls[0][0] as Record<string, unknown>[];
+    expect(records).toHaveLength(2);
+    expect(records.every(record => record['agent.trajectory.collection.incomplete'] === true)).toBe(true);
+    expect(records.every(record =>
+      record['agent.trajectory.completion.reason'] === 'source_replaced')).toBe(true);
+    expect(records.some(record => record['agent.trajectory.flush_only'] === true)).toBe(false);
+  });
+
   it('trae-agent: a marker-only buffer does not synthesize an empty trace', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
