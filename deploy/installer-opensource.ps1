@@ -2831,20 +2831,6 @@ fs.writeFileSync(process.argv[2], content);
     if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
-function Remove-CodexTrustState {
-    $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
-    if (-not (Test-Path -LiteralPath $configPath)) { return }
-
-    $content = Get-Content -LiteralPath $configPath -Raw
-    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
-    $updated = $content -replace $pattern, ""
-    if ($updated -eq $content) { return }
-
-    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
-    Write-FileUtf8NoBom -Path $configPath -Content $updated
-    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
-}
-
 function Test-IsPilotCodexHookCommand {
     param([object]$Command)
     if ($null -eq $Command) { return $false }
@@ -3438,12 +3424,6 @@ function Cmd-Uninstall {
     } catch {
         Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
             "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
-    }
-    try {
-        Remove-CodexTrustState
-    } catch {
-        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
-            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
     }
     Write-Host ""
 

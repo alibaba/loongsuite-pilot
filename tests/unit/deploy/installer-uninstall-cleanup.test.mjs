@@ -445,14 +445,18 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('calls dedicated Codex cleanup from uninstall', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toContain('Remove-CodexHookConfig');
-    expect(uninstall.indexOf('Remove-CodexHookConfig'))
-      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+  });
+
+  it('does not modify the shared Codex trust config during uninstall', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(ps1).not.toContain('function Remove-CodexTrustState');
+    expect(uninstall).not.toContain('Remove-CodexTrustState');
   });
 
   it('passes a valid fs module literal to node when rewriting Codex files', () => {
     const writer = ps1.slice(
       ps1.indexOf('function Write-FileUtf8NoBom'),
-      ps1.indexOf('function Remove-CodexTrustState'),
+      ps1.indexOf('function Test-IsPilotCodexHookCommand'),
     );
     expect(writer).toContain("$rewriteScript = @'");
     expect(writer).toContain("const fs = require('fs');");
@@ -477,7 +481,6 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('continues uninstall when dedicated Codex cleanup fails', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
   });
 });
