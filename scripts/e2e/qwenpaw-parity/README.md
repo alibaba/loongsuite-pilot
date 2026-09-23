@@ -160,3 +160,5 @@ is loaded. Compare raw stderr as well as outputs and context state; native
 async-generator close errors must not be hidden by successful marker checks.
 
 Use `--mapping-only` for the entry message-mapping failure and following healthy request. The failure deliberately omits ENTRY content, but must preserve its native request/session identity and child relationships. The harness locates either the supplied plugin or the copy installed by newer PluginLoader versions.
+
+`--dream` selects native `dream(...)` or `run_action("auto_dream", ...)` by availability and records the selected entry in results. Use `--agent-name` to verify distinct configured owners; keep separate run roots for the two compatibility environments.

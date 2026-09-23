@@ -933,14 +933,22 @@ class PilotPlugin:
             from qwenpaw.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
         except ImportError:
             return False
-        original = getattr(ReMeLightMemoryManager, "dream", None)
-        if not inspect.iscoroutinefunction(original):
+        # QwenPaw 2.2 moved Dream to the shared memory-action API. Select one
+        # boundary only so a legacy adapter delegating to run_action cannot
+        # produce two nested Dream roots.
+        method_name = next((name for name in ("dream", "run_action")
+                            if inspect.iscoroutinefunction(getattr(ReMeLightMemoryManager, name, None))), None)
+        if method_name is None:
             return False
+        original = getattr(ReMeLightMemoryManager, method_name)
         if getattr(original, "_loongsuite_pilot", False):
             return
 
         @functools.wraps(original)
         async def dream(instance, *args, **kwargs):
+            if not self.active or (method_name == "run_action" and
+                                   (args[0] if args else kwargs.get("action")) != "auto_dream"):
+                return await original(instance, *args, **kwargs)
             try:
                 owner = None
                 try:
@@ -962,7 +970,16 @@ class PilotPlugin:
                 self._diagnose("Dream setup")
                 return await original(instance, *args, **kwargs)
             try:
-                return await original(instance, *args, **kwargs)
+                result = await original(instance, *args, **kwargs)
+                try:
+                    if method_name == "run_action":
+                        if result is None:
+                            scope.error = RuntimeError("QwenPaw Dream action unavailable")
+                        elif _get(result, "success") is False:
+                            scope.error = RuntimeError("QwenPaw Dream action failed")
+                except Exception:
+                    self._diagnose("Dream result")
+                return result
             except BaseException as exc:
                 scope.error = exc
                 raise
@@ -975,8 +992,8 @@ class PilotPlugin:
                     _scope.reset(token)
 
         dream._loongsuite_pilot = True
-        ReMeLightMemoryManager.dream = dream
-        self._dream_patch = (ReMeLightMemoryManager, original, dream)
+        setattr(ReMeLightMemoryManager, method_name, dream)
+        self._dream_patch = (ReMeLightMemoryManager, method_name, original, dream)
 
     async def shutdown(self, **_kwargs):
         self.active = False
@@ -987,9 +1004,9 @@ class PilotPlugin:
             self._agent_class.__init__ = self._original_init
         self._original_init = self._wrapped_init = None
         if self._dream_patch:
-            cls, original, wrapped = self._dream_patch
-            if cls.dream is wrapped:
-                cls.dream = original
+            cls, method_name, original, wrapped = self._dream_patch
+            if getattr(cls, method_name, None) is wrapped:
+                setattr(cls, method_name, original)
             self._dream_patch = None
 
 
