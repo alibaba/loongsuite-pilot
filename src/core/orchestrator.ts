@@ -59,6 +59,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { QwenPawLogInput } from '../inputs/qwenpaw-log/qwenpaw-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
@@ -143,6 +144,7 @@ export class Orchestrator extends EventEmitter {
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
+    'qwenpaw-log': 'qwenpaw',
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
@@ -1525,6 +1527,23 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
       }),
     );
+
+    // --- QwenPaw (request hooks + AgentScope middleware JSONL) ---
+    const qwenPawLogDir = path.join(this.dataDir, 'logs', 'qwenpaw');
+    await ensureDir(qwenPawLogDir);
+    const qwenPawLogInput = new QwenPawLogInput({
+      stateStore: this.stateStore,
+      sessionDir: qwenPawLogDir,
+      pollIntervalMs: listenerCfg['qwenpaw-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(qwenPawLogInput);
+    entries.push(this.inputManager.buildDetectionEntry(qwenPawLogInput, {
+      watchPaths: [qwenPawLogDir],
+      isAvailable: async () => directoryExists(qwenPawLogDir),
+      enabled: () => this.isAgentGatedEnabled('qwenpaw') &&
+        this.agentControlManager.resolveEnabled('qwenpaw-log', listenerCfg['qwenpaw-log']?.enabled ?? true),
+      pollIntervalMs: listenerCfg['qwenpaw-log']?.pollInterval,
+    }));
 
     // --- Hermes Agent (native Python directory plugin JSONL) ---
     const hermesLogDir = path.join(this.dataDir, 'logs', 'hermes-agent');

@@ -177,6 +177,7 @@ export class AgentDefLoader {
     let result = s
       .replace(/\$PILOT_DIR/g, this.pilotDir)
       .replace(/\$PILOT_DATA/g, this.dataDir)
+      .replace(/\$QWENPAW_WORKING_DIR/g, process.env.QWENPAW_WORKING_DIR || '~/.qwenpaw')
       .replace(/\$HERMES_CLI/g, hermesCli)
       .replace(/\$HERMES_HOME/g, hermesHome)
       .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)

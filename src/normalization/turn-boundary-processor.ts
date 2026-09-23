@@ -89,6 +89,10 @@ export class TurnBoundaryProcessor {
 
 /** Agent-aware terminal signal used only for additive boundary enrichment. */
 export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
+  if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+    return entry['agent.qwenpaw.boundary'] === 'entry.end'
+      && entry['gen_ai.turn.end'] === true;
+  }
   if (entry['gen_ai.agent.scope'] === 'subagent') return false;
   if (entry['gen_ai.turn.end'] === true) return true;
 

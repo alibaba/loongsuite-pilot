@@ -22,3 +22,25 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  qwenpaw-plugin:
+    runs-on: loongsuite-pilot
+    strategy:
+      matrix:
+        include:
+          - qwenpaw: '2.1.0'
+            agentscope: '2.0.4.post1'
+            reme: '0.4.1.5'
+          - qwenpaw: '2.2.1b1'
+            agentscope: '2.0.7.post1'
+            reme: '0.4.1.11'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m venv "$RUNNER_TEMP/qwenpaw-venv"
+          "$RUNNER_TEMP/qwenpaw-venv/bin/python" -m pip install 'qwenpaw==${{ matrix.qwenpaw }}' 'agentscope==${{ matrix.agentscope }}' 'reme-ai==${{ matrix.reme }}'
+          "$RUNNER_TEMP/qwenpaw-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/qwenpaw-venv/bin/python" tests/unit/hooks/qwenpaw-plugin/test_plugin.py

@@ -2,6 +2,10 @@ import { describe, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
+  buildTraces,
+  validateStructure,
+  validateSemantic,
+  validateTime,
   hasModelToolSpanForOutput,
   isRuntimeSkillLoadSpan,
   unmatchedToolsForLlmOutput,
@@ -187,5 +191,121 @@ describe('gen_ai.input.messages schema validation', () => {
         detail: expect.stringContaining(expectedDetail),
       }),
     ]));
+  });
+});
+
+
+const historicalRules = JSON.parse(readFileSync(new URL('../fixtures/qwenpaw/trace-validation-rules.json', import.meta.url)));
+const spanId = value => value.toString(16).padStart(16, '0');
+const input = [{ role: 'user', parts: [{ type: 'text', content: 'question' }] }];
+const output = [{ role: 'assistant', parts: [{ type: 'text', content: 'answer' }], finish_reason: 'stop' }];
+
+function sample(kind, value, parent, options = {}) {
+  return {
+    traceId: '1234567890abcdef1234567890abcdef', spanId: spanId(value),
+    parentSpanId: parent ? spanId(parent) : undefined, name: kind,
+    startTimeUnixNano: String((options.start ?? 1) * 1_000_000),
+    endTimeUnixNano: String((options.end ?? 1000) * 1_000_000),
+    status: { code: options.error ? 2 : 0 },
+    attributes: {
+      'gen_ai.span.kind': kind, 'gen_ai.session.id': 'session', 'gen_ai.user.id': 'user',
+      'gen_ai.agent.name': 'agent',
+      ...(kind === 'LLM' ? { 'gen_ai.input.messages': input, 'gen_ai.output.messages': output } : {}),
+      ...options.attributes,
+    },
+  };
+}
+function trace(spans) { return buildTraces(spans)[0]; }
+function errors(checks, id) { return checks.filter(check => check.status === 'error' && (!id || check.id === id)); }
+
+describe('validator native agent lifecycle compatibility', () => {
+  test('restores the exact historical rules, not a permissive replacement', () => {
+    // Source: git show 73c13d44af385b711a56314f4ceaab35b56a3706:docs/trace-validation-rules.json
+    const bytes = readFileSync(new URL('../fixtures/qwenpaw/trace-validation-rules.json', import.meta.url));
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe('b136289d5b500b1180ed838a667d9a8bf0305e16b9b1d6a62b721387d9756ab2');
+    expect(historicalRules.timeRules.find(rule => rule.id === 'time.parent_contains_children').toleranceMs).toBe(0);
+  });
+
+  test('accepts multiple direct Agents and helpers under TOOL or AGENT', () => {
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1), sample('STEP', 3, 2), sample('LLM', 4, 3),
+      sample('TOOL', 5, 3), sample('AGENT', 6, 5), sample('STEP', 7, 6), sample('LLM', 8, 7),
+      sample('AGENT', 9, 1), sample('STEP', 10, 9), sample('LLM', 11, 10),
+      sample('AGENT', 12, 2), sample('STEP', 13, 12), sample('LLM', 14, 13)];
+    expect(errors(validateStructure(trace(spans)))).toEqual([]);
+  });
+
+  test('still rejects missing parents, parent cycles, duplicate IDs and disallowed Agent parents', () => {
+    expect(errors(validateStructure(trace([sample('ENTRY', 1), sample('AGENT', 2, 99)])))).not.toEqual([]);
+    const cyclic = validateStructure(trace([sample('ENTRY', 1), sample('AGENT', 2, 3), sample('AGENT', 3, 2)]));
+    expect(errors(cyclic, 'structure.no_cycles')).toHaveLength(2);
+    expect(errors(cyclic, 'structure.no_orphan_spans')).toHaveLength(1);
+    const duplicated = validateStructure(trace([sample('ENTRY', 1), sample('AGENT', 2, 1), sample('AGENT', 2, 1)]));
+    expect(errors(duplicated, 'structure.unique_span_ids')).toHaveLength(1);
+    const wrongParent = validateStructure(trace([sample('ENTRY', 1), sample('AGENT', 2, 1), sample('STEP', 3, 2), sample('LLM', 4, 3), sample('AGENT', 5, 4)]));
+    expect(errors(wrongParent, 'structure.agent_under_entry')).toHaveLength(1);
+  });
+
+  test('requires distinct explicit native attempts for a QwenPaw STEP with multiple LLMs', () => {
+    const explicit = (value, parent, attempt) => ({ 'gen_ai.agent.type': 'qwenpaw',
+      'gen_ai.step.id': attempt });
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1),
+      sample('STEP', 3, 2, { attributes: explicit(3, 2) }),
+      sample('LLM', 4, 3, { error: true, attributes: { ...explicit(4, 3, 'attempt-1'), 'gen_ai.output.messages': undefined } }),
+      sample('LLM', 5, 3, { attributes: explicit(5, 3, 'attempt-2') })];
+    expect(errors(validateStructure(trace(spans)), 'structure.step_has_one_llm')).toEqual([]);
+    spans[4].attributes['gen_ai.step.id'] = 'attempt-1';
+    expect(errors(validateStructure(trace(spans)), 'structure.step_has_one_llm')).toHaveLength(1);
+    spans[4].attributes['gen_ai.step.id'] = 'attempt-2';
+    delete spans[2].attributes['gen_ai.agent.type'];
+    expect(errors(validateStructure(trace(spans)), 'structure.step_has_one_llm')).toHaveLength(1);
+  });
+
+  test('sums tokens per nearest owning Agent and detects cross-Agent double counting', () => {
+    const usage = tokens => ({ 'gen_ai.usage.input_tokens': tokens });
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1, { attributes: usage(5) }), sample('STEP', 3, 2),
+      sample('LLM', 4, 3, { attributes: usage(5) }), sample('TOOL', 5, 3),
+      sample('AGENT', 6, 5, { attributes: usage(7) }), sample('STEP', 7, 6), sample('LLM', 8, 7, { attributes: usage(7) }),
+      sample('AGENT', 9, 1, { attributes: usage(9) }), sample('STEP', 10, 9), sample('LLM', 11, 10, { attributes: usage(9) })];
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.agent_token_sum')).toEqual([]);
+    spans[1].attributes['gen_ai.usage.input_tokens'] = 12;
+    spans[5].attributes['gen_ai.usage.input_tokens'] = 21;
+    const findings = errors(validateSemantic(trace(spans), historicalRules), 'semantic.agent_token_sum');
+    expect(findings.map(finding => finding.spanId)).toEqual([spanId(2), spanId(6)]);
+  });
+
+  test('allows parallel steps across Agents but still rejects same-Agent overlap and child overrun', () => {
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1), sample('STEP', 3, 2, { attributes: { 'gen_ai.react.round': 1 } }),
+      sample('AGENT', 4, 1), sample('STEP', 5, 4, { attributes: { 'gen_ai.react.round': 1 } })];
+    expect(errors(validateTime(trace(spans), historicalRules))).toEqual([]);
+    expect(validateTime(trace(spans), historicalRules).filter(check => check.id === 'time.chronological_steps' && check.status === 'warn')).toEqual([]);
+    spans.push(sample('STEP', 6, 2), sample('TOOL', 7, 6, { end: 1001 }));
+    const findings = validateTime(trace(spans), historicalRules);
+    expect(errors(findings, 'time.no_step_overlap')).toHaveLength(1);
+    expect(errors(findings, 'time.parent_contains_children')).toHaveLength(1);
+  });
+
+  test('permits absent provider-error output but still requires its input', () => {
+    const spans = [sample('ENTRY', 1, undefined, { attributes: { 'gen_ai.input.messages': input } }), sample('AGENT', 2, 1),
+      sample('STEP', 3, 2), sample('LLM', 4, 3, { error: true, attributes: { 'error.type': 'NotFoundError', 'gen_ai.output.messages': undefined } })];
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.llm_has_input_output')).toEqual([]);
+    spans[3].attributes['gen_ai.input.messages'] = [];
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.llm_has_input_output')).toHaveLength(1);
+  });
+
+  test.each([undefined, [], '[]', null])('successful LLM missing/empty output remains an error (%j)', badOutput => {
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1), sample('STEP', 3, 2),
+      sample('LLM', 4, 3, { attributes: { 'error.type': 'NotFoundError', 'gen_ai.output.messages': badOutput } })];
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.llm_has_input_output')).toHaveLength(1);
+  });
+
+  test('matches tools against successful retry output rather than only the first failed attempt', () => {
+    const toolOutput = [{ role: 'assistant', finish_reason: 'tool_calls', parts: [{ type: 'tool_call', id: 'call', name: 'search' }] }];
+    const spans = [sample('ENTRY', 1), sample('AGENT', 2, 1), sample('STEP', 3, 2),
+      sample('LLM', 4, 3, { error: true, attributes: { 'gen_ai.output.messages': undefined } }),
+      sample('LLM', 5, 3, { attributes: { 'gen_ai.output.messages': toolOutput } }),
+      sample('TOOL', 6, 3, { attributes: { 'gen_ai.tool.call.id': 'call', 'gen_ai.tool.name': 'search' } })];
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.tool_matches_llm_output')).toEqual([]);
+    spans[5].attributes['gen_ai.tool.call.id'] = 'wrong'; spans[5].attributes['gen_ai.tool.name'] = 'wrong';
+    expect(errors(validateSemantic(trace(spans), historicalRules), 'semantic.tool_matches_llm_output').length).toBeGreaterThan(0);
   });
 });
