@@ -622,6 +622,10 @@ export class Updater {
         });
       }
 
+      // The node that will actually run the new version (managed runtime when
+      // provisioning succeeded, otherwise this process). The probe require()s
+      // node:sqlite with no version bypass. Failure throws before current is
+      // written, so the previous version stays.
       logger.info('checking node:sqlite runtime', { node: nodeBin });
       await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,

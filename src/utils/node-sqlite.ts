@@ -3,20 +3,13 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 /**
- * node:sqlite was added in 22.5.0 behind --experimental-sqlite and became
- * available without that flag in 22.13.0 and 23.4.0. The probe and the startup
- * guard share these floors: an older Node exits 0 and SQLite reads degrade.
- */
-const UNFLAGGED_22_MINOR = 13;
-const UNFLAGGED_23_MINOR = 4;
-
-/**
  * Probe passed to `node -e` before an upgrade is activated.
- * Below the unflagged floor the builtin is absent or still flagged, so the
- * probe exits 0. On 22.13+ / 23.4+ / 24+ it must actually load.
+ * It must actually load node:sqlite. A version check that skips require()
+ * exits 0 on Node 20 and on 22.0–22.12 / 23.0–23.3, so the upgrade looks
+ * successful and later SQLite reads fail. Any failure here is non-zero:
+ * activation stops and the previous version stays.
  */
-export const NODE_SQLITE_PROBE =
-  `const [M,m]=process.versions.node.split('.').map(Number);if((M===22&&m>=${UNFLAGGED_22_MINOR})||(M===23&&m>=${UNFLAGGED_23_MINOR})||M>23)require('node:sqlite')`;
+export const NODE_SQLITE_PROBE = "require('node:sqlite')";
 
 /** Max rows one synchronous DatabaseSync.all() may materialize. */
 export const SQLITE_SYNC_PAGE = 1000;

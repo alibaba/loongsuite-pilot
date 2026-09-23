@@ -28,7 +28,7 @@ Cursor、Qoder IDE/CLI、Claude Code、Codex 的数据自动采集与上报。
 
 ## 1. 前置条件
 
-- Node.js >= 18，**必须通过 nvm 安装并使用 nvm 管理的 Node**（推荐 v22）
+- Node.js 必须能加载 `node:sqlite`（22.13+、23.4+ 或更新版本），**必须通过 nvm 安装并使用 nvm 管理的 Node**（安装 `nvm install 22`，托管运行时为 22.22）
 - 支持 **Mac** / **Linux 8U 开发机** / **Linux ECS**（Linux 需 `sudo` 权限）
 - **Linux 7U 开发机**：需额外执行 glibc 兼容补丁（见第 5 节）
 
@@ -41,7 +41,7 @@ Cursor、Qoder IDE/CLI、Claude Code、Codex 的数据自动采集与上报。
 >
 > ```bash
 > which node    # 路径应包含 .nvm，例如 ~/.nvm/versions/node/v22.x.x/bin/node
-> node -v       # 输出应 >= v18.0.0
+> node -v       # 输出应 >= v22.13.0（或 23.4+ / 24+），以便加载 node:sqlite
 > ```
 >
 > 若 `which node` 指向任一 Agent 的私有目录（如 `~/.codex/`、Agent 安装目录等），
@@ -54,7 +54,7 @@ Cursor、Qoder IDE/CLI、Claude Code、Codex 的数据自动采集与上报。
 执行以下两步完成标准安装（Mac / Linux 8U / ECS）：
 
 ```bash
-# 步骤一：安装 nvm + Node.js（已有 node >= 18 可跳过）
+# 步骤一：安装 nvm + Node.js（已有可加载 node:sqlite 的 node，即 22.13+ / 23.4+，可跳过）
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
 nvm install 22
 
@@ -146,7 +146,7 @@ curl -fsSL https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliy
 **Agent 操作规范：**
 1. 先确认用户明确选择的是 WebTracking 匿名上报，不涉及 AK/SK
 2. 如果用户提供的是 `region + project + logstore`，先按上文转换出 `--sls-endpoint`
-3. 执行前确认当前 `node` 来自 `nvm`，且 `node -v` >= 18；否则先切换到 `nvm use 22`
+3. 执行前确认当前 `node` 来自 `nvm`，且 `node -e "require('node:sqlite')"` 成功（22.13+ 或 23.4+）；否则先切换到 `nvm use 22`
 4. 信息完整时，Agent **可以代替用户执行此命令**，并在安装后继续执行 `status` / `info` 验证
 5. 提醒用户需要**提前在 SLS 控制台将对应 Logstore 开启 WebTracking**；如果安装或上报验证失败，优先提示检查 WebTracking 是否已开启
 

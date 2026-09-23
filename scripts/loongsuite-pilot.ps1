@@ -130,15 +130,30 @@ function Ensure-Dirs {
     }
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. A major check still accepts Node 20 and 22.12.
+# Native stderr under EAP=Stop becomes a terminating error and hides $LASTEXITCODE.
+function Test-NodeSupportsSqlite {
+    param([string]$bin)
+    if (-not $bin -or -not (Test-Path -LiteralPath $bin)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 1
+    try {
+        $sqliteProbe = & $bin -e "require('node:sqlite')" 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } catch {
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return ($code -eq 0)
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not $bin -or -not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge 18
-    } catch { return $false }
+    return (Test-NodeSupportsSqlite $bin)
 }
 
 # The pin file holds one absolute path to node.exe, and for a managed runtime that path
@@ -1516,7 +1531,7 @@ function Cmd-RestartCollector {
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
         Write-RestartFailure -Target "collector" -Stage "node-missing" `
-            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
+            -Detail "Resolve-Node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         exit 1
     }
@@ -1718,7 +1733,7 @@ function Cmd-RestartUpdater {
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
         Write-RestartFailure -Target "updater" -Stage "node-missing" `
-            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
+            -Detail "Resolve-Node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         return
     }

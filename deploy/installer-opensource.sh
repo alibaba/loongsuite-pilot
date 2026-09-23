@@ -283,15 +283,18 @@ _node_is_app_bundle() {
     return 1
 }
 
+# node:sqlite is unflagged from 22.13 and 23.4. A major-version check accepts
+# Node 20 and 22.12, whose require('node:sqlite') throws, so install would
+# succeed and SQLite collection would not. The require is the check.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -552,7 +555,12 @@ check_deps() {
 
     NODE_BIN=""
     if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
-        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        NODE_BIN=$(resolve_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" \
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        fi
     else
         NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
         if [ -z "$NODE_BIN" ]; then
@@ -562,15 +570,16 @@ check_deps() {
         fi
     fi
     if [ -z "$NODE_BIN" ]; then
-        msg "❌ 缺少依赖: node，请先安装后重试" \
-            "❌ Missing dependency: node — please install it first"
+        msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" \
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     fi
 
-    NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
-    if [ "$NODE_MAJOR" -lt 18 ]; then
-        msg "❌ 需要 Node.js >= 18，当前版本: $("$NODE_BIN" --version)" \
-            "❌ Requires Node.js >= 18, current: $("$NODE_BIN" --version)"
+    if ! _node_supports_sqlite "$NODE_BIN"; then
+        local node_ver
+        node_ver="$("$NODE_BIN" --version 2>/dev/null || echo unknown)"
+        msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
+            "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     fi
 

@@ -678,15 +678,17 @@ updater_process_exists() {
     pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. Major >= 18 or >= 22 still accepts Node 20 and 22.12.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -1164,7 +1166,7 @@ start_collector_after_stop() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure collector "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }
@@ -1428,7 +1430,7 @@ cmd_restart_updater() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure updater "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }

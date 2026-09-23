@@ -227,12 +227,17 @@ describe('Updater integration (real filesystem)', () => {
 
     expect(mockExecFile).toHaveBeenCalledWith(
       process.execPath,
-      ['-e', expect.stringContaining("require('node:sqlite')")],
+      ['-e', "require('node:sqlite')"],
       expect.objectContaining({
         cwd: path.join(testDir, 'versions', '1.0.2_bbb.candidate'),
         env: expect.any(Object),
       }),
     );
+    const probe = mockExecFile.mock.calls.find(
+      ([, args]: [string, string[]]) => args?.[0] === '-e' && String(args?.[1]).includes('node:sqlite'),
+    )?.[1]?.[1];
+    expect(probe).toBe("require('node:sqlite')");
+    expect(String(probe)).not.toMatch(/process\.versions|m>=|M===/);
     expect(await readPointer('current')).toBe('1.0.1_aaa');
     expect(await readPointer('previous')).toBe('1.0.0_old');
     const restartCalls = mockExecFile.mock.calls.filter(

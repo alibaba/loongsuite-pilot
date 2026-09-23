@@ -2,18 +2,17 @@
 //
 // SQLite reads go through the builtin. It is unflagged from Node 22.13 and
 // 23.4 (added in 22.5 behind --experimental-sqlite). The managed runtime is
-// 22.22.x, so a failure there means the binary was built without SQLite or is
-// damaged. That used to be a dlopen crash of the sqlite3 addon, invisible
-// because it happened before logging and the spawners dropped stderr.
-// build.mjs still prepends `import './native-deps-guard.cjs'` so this runs
-// first and turns that into a thrown error plus a daemon.fatal marker. The
+// 22.22.x and already includes it. A load failure means this process is not
+// a usable Pilot runtime: Node 18/20, 22.0–22.12, and 23.0–23.3 cannot load
+// the builtin without a flag, and a damaged 22.22 build cannot either.
+// There is no degrade path — continuing would report a healthy collector
+// whose SQLite reads then fail. Install and upgrade must pick a node that
+// passes the same require(), or refuse and keep the previous version.
+//
+// build.mjs prepends `import './native-deps-guard.cjs'` so this runs first
+// and turns the failure into a thrown error plus a daemon.fatal marker. The
 // throw is what collector-daemon.js's import().catch uses to write
 // last-startup-crash.json; process.exit here would skip that breadcrumb.
-//
-// Older Node (the documented floor is 18, and 22.5–22.12 / 23.0–23.3 still
-// need --experimental-sqlite; musl / Windows ARM64 may be on a system node)
-// degrades: the collector still starts, and SQLite-backed agents skip reads.
-// Writing daemon.fatal there would stop the preload from ever respawning.
 //
 // Never import this from the daemon itself — it must run before the daemon's
 // imports execute, which is only possible from a separately loaded module.
@@ -33,11 +32,12 @@ function loadBuiltin(id: string): unknown {
   return require(id);
 }
 
-export type SqliteGuardDecision = 'ok' | 'degrade' | 'fatal';
+export type SqliteGuardDecision = 'ok' | 'fatal';
 
 /**
  * True when node:sqlite is part of the binary without --experimental-sqlite.
- * That starts at 22.13.0, 23.4.0, and every major after 23.
+ * That starts at 22.13.0, 23.4.0, and every major after 23. The guard does
+ * not trust this predicate alone: a failed require() is fatal on every version.
  */
 export function sqliteBuiltinExpected(version: string): boolean {
   const [major = 0, minor = 0] = version.split('.').map(Number);
@@ -45,10 +45,9 @@ export function sqliteBuiltinExpected(version: string): boolean {
   return major > 23 || (major === 23 && minor >= 4) || (major === 22 && minor >= 13);
 }
 
-/** Missing builtin on an old or still-flagged Node degrades; on an unflagged runtime it is fatal. */
-export function decideSqliteGuard(nodeVersion: string, loadError: unknown): SqliteGuardDecision {
-  if (!loadError) return 'ok';
-  return sqliteBuiltinExpected(nodeVersion) ? 'fatal' : 'degrade';
+/** A failed require('node:sqlite') is fatal. A successful load is ok. */
+export function decideSqliteGuard(loadError: unknown): SqliteGuardDecision {
+  return loadError ? 'fatal' : 'ok';
 }
 
 /** Best-effort libc identification for the diagnostic; never throws. */
@@ -118,9 +117,10 @@ function fail(moduleName: string, err: unknown): never {
     `[pilot]   loader said: ${firstLine}`,
     `[pilot]   system libc: ${libcInfo()}`,
     '[pilot]',
-    '[pilot] node:sqlite ships unflagged from Node.js 22.13 and 23.4. The',
-    '[pilot] process printing this is already running, so a load failure means',
-    '[pilot] this Node was built without SQLite, or the binary is damaged.',
+    '[pilot] node:sqlite ships unflagged from Node.js 22.13 and 23.4.',
+    '[pilot] Node.js 18/20 and 22.0-22.12 / 23.0-23.3 cannot load it.',
+    '[pilot] On 22.13+ a load failure means this Node was built without',
+    '[pilot] SQLite, or the binary is damaged.',
     '[pilot]',
     '[pilot] Impact: the collector cannot start. Hooks already installed keep',
     '[pilot] writing events to local files, but nothing will ship them.',
@@ -147,25 +147,14 @@ function probeNodeSqlite(): unknown {
   }
 }
 
-function warnDegraded(): void {
-  const lines = [
-    `[pilot] node:sqlite is not available on Node.js ${process.versions.node}.`,
-    '[pilot] SQLite-backed agents (Qoder / Qwen Work) will not collect until Node.js',
-    '[pilot] has unflagged node:sqlite (22.13+ or 23.4+).',
-    '[pilot] The collector will continue.',
-  ];
-  try {
-    process.stderr.write(lines.join('\n') + '\n');
-  } catch { /* stderr may be closed; degrade must not become a crash */ }
-}
-
-export function runSqliteGuard(nodeVersion: string, loadError: unknown): void {
-  const decision = decideSqliteGuard(nodeVersion, loadError);
-  if (decision === 'degrade') warnDegraded();
-  else if (decision === 'fatal') fail('node:sqlite', loadError);
+export function runSqliteGuard(loadError: unknown): void {
+  if (decideSqliteGuard(loadError) === 'fatal') fail('node:sqlite', loadError);
 }
 
 // Top-level on purpose: the daemon banner imports this module, and the check
-// has to run then. Importing it from a unit test is safe — ok/degrade return,
-// and fatal only fires when an unflagged Node cannot load node:sqlite.
-runSqliteGuard(process.versions.node, probeNodeSqlite());
+// has to run then. Vitest imports this file for the pure helpers; skipping
+// the side effect there keeps a Node 18/20 test worker from exiting before
+// those assertions. The spawned CJS (VITEST unset) is the production check.
+if (process.env.VITEST !== 'true') {
+  runSqliteGuard(probeNodeSqlite());
+}
