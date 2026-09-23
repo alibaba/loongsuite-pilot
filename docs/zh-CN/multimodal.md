@@ -145,7 +145,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
+| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
 | `output` | 与 `input` 相同的 `tool.result` 路径 | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览。CLI 终端不把图嵌进最终助手文本。 |
 | `all` | 用户附件与工具结果图 | 覆盖粘贴/`@` 与工具读图/生成 |
 

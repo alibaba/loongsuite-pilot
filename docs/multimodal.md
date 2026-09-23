@@ -145,7 +145,7 @@ Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, and `@path` (relative paths join `agent.qoder.cwd`), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
+| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
 | `output` | Same `tool.result` paths as `input` | Path in the prompt then Read; ImageGen then Read to preview. CLI does not embed images in the final assistant text. |
 | `all` | User attachments and tool-result images | Paste/`@` plus tool read/generate |
 

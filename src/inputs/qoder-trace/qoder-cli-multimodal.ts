@@ -25,6 +25,10 @@ const AT_IMAGE_RE = new RegExp(
   `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
   'gi',
 );
+const FILE_CITATION_IMAGE_RE = new RegExp(
+  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+  'gi',
+);
 const READ_IMAGE_RE = new RegExp(`Read image:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
 const IMAGE_FILE_RE = new RegExp(`Image file:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
 const IMAGE_GEN_PATH_RE = new RegExp(
@@ -46,8 +50,8 @@ export interface EnrichCliMultimodalOptions {
 
 /**
  * CLI-only multimodal enrichment. Mutates entries in place.
- * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`, and
- * `@path`, then unique-resolve. Tool: Read/ImageGen.
+ * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`,
+ * `@path`, and `文件：<image path>`, then unique-resolve. Tool: Read/ImageGen.
  * No output surface (CLI assistant text does not embed images). Fail-open.
  */
 export async function enrichCliMultimodal(
@@ -224,6 +228,7 @@ export function extractInputImagePaths(
     ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
+    ...matchAll(FILE_CITATION_IMAGE_RE, text),
   ], raw => resolveImagePath(raw, cwd));
 }
 
