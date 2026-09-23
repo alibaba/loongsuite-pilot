@@ -1,0 +1,11 @@
+{
+  "id": "loongsuite-pilot",
+  "name": "LoongSuite Pilot",
+  "version": "0.1.0",
+  "type": "general",
+  "description": "QwenPaw runtime and AgentScope telemetry for LoongSuite Pilot.",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": []
+}

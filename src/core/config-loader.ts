@@ -815,6 +815,7 @@ function buildListenersConfig(
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwenpaw-log': { enabled: true, pollInterval: 1_000 },
   };
 
   const result = { ...defaults };

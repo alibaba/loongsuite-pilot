@@ -30,6 +30,7 @@ import { removeMessageContentFields, stripAgentMessageContent } from '../normali
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
+import { convertQwenPawEvents } from './qwenpaw-trace-converter.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -853,7 +854,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      if (agentType === 'codex' || agentType === 'doubao-work' || agentType === 'qwenpaw') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1192,7 +1193,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
     }
-
+    if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+      return entry['agent.qwenpaw.boundary'] === 'entry.end'
+        && entry['gen_ai.turn.end'] === true;
+    }
+    // A fused child shares the parent's turn buffer. Its stop closes only the
+    // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
       // A `stop` closes one Codex model wave, not necessarily the surrounding
       // transcript turn. The transcript input stamps this status only when it
@@ -1260,6 +1266,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
+      if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+        return { source: 'turn_id', value: turnId,
+          key: `qwenpaw:${JSON.stringify([entry['gen_ai.session.id'], turnId])}` };
       }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
@@ -1459,9 +1469,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(traceConversionRecords);
-        toolSpanIds.prepare(sanitized);
-        llmSpanIds.prepare(sanitized);
+        const sanitized = agentType === 'qwenpaw'
+          ? traceConversionRecords : dropOrphanPairs(traceConversionRecords);
+        if (agentType !== 'qwenpaw') {
+          toolSpanIds.prepare(sanitized);
+          llmSpanIds.prepare(sanitized);
+        }
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
@@ -1480,8 +1493,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
-          const stream = planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
-          if (stream) {
+          const stream = agentType === 'qwenpaw' ? undefined : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          if (agentType === 'qwenpaw') {
+            result = convertQwenPawEvents(conversionRecords, prepared.handler, passthroughKeys);
+          } else if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
             let pending: ReadableSpan[] = [];

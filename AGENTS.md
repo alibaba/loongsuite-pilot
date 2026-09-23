@@ -70,6 +70,7 @@
 | Pi Coding Agent | `pi-coding-agent` | Plugin-Inject（Extension） | `BaseHookInput` | `inputs/pi-coding-agent-log/` | `agents.d/pi-coding-agent.json` |
 | Qwen Code CLI | `qwen-code-cli` | Hook | `BaseHookInput` | `inputs/qwen-code-cli-log/` | `agents.d/qwen-code-cli.json` |
 | 千问办公 | `qwen-work-cn` | Hook + Interceptor | `BaseHookInput` / `BaseSqliteInput` / `BaseInput` | `inputs/qwen-work-cn/` | `agents.d/qwen-work-cn.json` |
+| QwenPaw | `qwenpaw` | Directory-Plugin | `BaseSessionInput` | `inputs/qwenpaw-log/` | `agents.d/qwenpaw.json` |
 | WorkBuddy | `workbuddy` | Hook | `BaseInput`（Hook/文件唤醒 + 本地 transcript 30 秒轮询兜底） | `inputs/workbuddy/` | `agents.d/workbuddy.json` |
 | Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
