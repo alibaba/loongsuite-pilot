@@ -4,7 +4,7 @@
 
 Interceptor 是 Pilot 的第三个同级服务，和 collector / updater 一样由 launchd、systemd 或 Windows Task Scheduler 在安装时启动并守护。它不依赖第一次 hook 触发，也不作为 collector 子进程。
 
-现有 Qoder transcript 采集 hook 保持独立，拦截判定走第二条 hook。
+现有 Qoder / 千问办公 transcript 采集 hook 保持独立，拦截判定走第二条 hook。
 
 ## 架构
 
@@ -24,19 +24,40 @@ dist/interceptor/cli.cjs  hook --agent qoder-auto
 顺序规则引擎（首个 block 短路）
 ```
 
+千问办公（QwenWorkCN，`qwen-work-cn`）本地走独立 command hook，**不能**用 `qoder-auto`（surface 解析会把 QwenWork 进程排除）。企业控制台只收 `type:http`，daemon 另开 `/v1/hooks/qwenwork`，不自动写进 `~/.qwenworkcn/settings.json`。
+
+```
+QwenWorkCN 桌面（本地 settings.json）
+        │ stdin hook JSON
+        ▼
+interceptor-qwenworkcn-hook.sh / .ps1
+        │
+        ▼
+dist/interceptor/cli.cjs  hook --agent qwen-work-cn
+        │ loopback HTTP（4s）
+        ▼
+共享 interceptor daemon（127.0.0.1）
+        │
+        │ 企业 HTTP：POST /v1/hooks/qwenwork
+        │ （始终 HTTP 200；fail-open 为 {}）
+        ▼
+顺序规则引擎（首个 block 短路）
+```
+
 OpenClaw 不走 stdin command hook：采集插件在进程内调用同一 daemon。
 
 ```
 OpenClaw Gateway（≥ 2026.5.12）
         │ api.on(before_agent_run / before_tool_call / tool_result_persist)
+        │ api.registerAgentToolResultMiddleware  （当轮 PostToolUse，宿主支持时）
         ▼
 assets/plugins/openclaw/plugin.mjs
-        │ 采集 JSONL 之后，进程内问 daemon（4s；runtime 缺失则静默 fail-open）
+        │ 采集 JSONL 之后问 daemon（4s；runtime 缺失则静默 fail-open）
         ▼
 共享 interceptor daemon（127.0.0.1）
         │
         ▼
-{ outcome:"block" } / { block:true, blockReason } / { message }
+{ outcome:"block" } / { block:true, blockReason } / { result } / { message }
 ```
 
 - 源码：`src/interceptor/`
@@ -74,6 +95,33 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 
 Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 请求 daemon 的超时是 4 秒。
 
+## 千问办公（QwenWork）协议
+
+[千问办公企业 Hooks](https://help.aliyun.com/zh/qwenwork/hooks)
+
+三个拦截点与 Qoder 相同：`UserPromptSubmit`、`PreToolUse`、`PostToolUse`。采集仍只装 `Stop`（`qwenworkcn-loongsuite-pilot-hook`）。拦截是 `agents.d/qwen-work-cn.json` 里独立的 `hook.interceptor`，写入 `~/.qwenworkcn/settings.json` 的 nested `type:command`（本机已验证可用）。
+
+官方企业控制台只接受 `type:http`。本机部署**不**把 HTTP hook 写进 settings；企业管理员若要把控制台 URL 指到本机 daemon，使用 `POST http://127.0.0.1:<port>/v1/hooks/qwenwork`（默认端口 18791，以 `runtime.json` 为准）。
+
+请求体与 Qoder 相同：snake_case 的 `hook_event_name` / `event`、`prompt`、`tool_name`、`tool_input`、`tool_response`。CLI `--agent qwen-work-cn`。
+
+拦截时的控制 JSON（command-hook stdout 与 HTTP 响应体同一套）：
+
+| 事件 | 控制 JSON |
+|------|-----------|
+| `UserPromptSubmit` | `{"decision":"block","reason":"..."}`（没有 CLI `deny`） |
+| `PreToolUse` | `hookSpecificOutput.permissionDecision="deny"` + `permissionDecisionReason` |
+| `PostToolUse` | `hookSpecificOutput.updatedToolOutput`。官方文档写明 `decision:"block"` **不保证**屏蔽原始工具结果，所以不用 `decision:block` |
+
+规则 reason 的中文包装与 Qoder 相同，在 QwenWork adapter 内完成（不要在 CLI 再包一层）。
+
+fail-open：
+
+- 本地 command hook：与 Qoder 相同，`exit 0` + 空 stdout
+- 企业 HTTP：官方约定 **HTTP 2xx + 非法 JSON 会 fail-close PreToolUse**。因此 `/v1/hooks/qwenwork` 在非法 JSON、不支持的事件、规则抛错、放行时一律返回 **HTTP 200 `{}`**，拦截时也是 200 + 控制 JSON。不要对该路径回 4xx/5xx。
+
+Hook timeout 与 Qoder 相同：`UserPromptSubmit` 15 秒，工具事件 10 秒。
+
 ## OpenClaw 协议
 
 OpenClaw 是 `plugin-inject`，不能安装第二条 `interceptor-hook.sh`。拦截判定复用采集插件，只覆盖现代 adapter（OpenClaw ≥ 2026.5.12）。3.8 legacy 路径保持 sync/void，不拦截。
@@ -82,11 +130,16 @@ OpenClaw 是 `plugin-inject`，不能安装第二条 `interceptor-hook.sh`。拦
 |---------------|----------------------|----------|
 | `before_agent_run` | `UserPromptSubmit` | `{ outcome: "block", reason, message }`。`reason` 是内部原因（如 `[APIKEY_MASKED]`），`message` 是包装后的用户可见文本 |
 | `before_tool_call` | `PreToolUse` | `{ block: true, blockReason }` |
-| `tool_result_persist` | `PostToolUse` | `{ message }`，替换回写给模型的工具结果。该 hook 必须同步，因此走 `interceptor-cli hook --agent openclaw` 的 spawnSync |
+| `registerAgentToolResultMiddleware` | `PostToolUse` | `{ result }`，替换**当前回合**回给模型的工具结果。可 await，走进程内 HTTP。宿主没有该 API 或拒绝 installed 插件注册时静默跳过 |
+| `tool_result_persist` | `PostToolUse` | `{ message }`，只改 session transcript 落盘。该 hook 必须同步，因此走 `interceptor-cli hook --agent openclaw` 的 spawnSync；与 middleware 按 `toolCallId` 短缓存共用判定 |
 
-daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 **fail-closed**，所以插件在 4 秒内 abort 并 fail-open，避免落到宿主 15 秒默认超时。interceptor runtime 缺失时静默放行，不写 access.log（采集插件始终在跑，不能把「未启用拦截」当成失败刷屏）。
+`tool_result_persist` **不能**当成 Qoder `updatedToolOutput`：它不改当前 ReAct 循环里模型正在看的那份结果。没有 middleware API 的 OpenClaw 上，PostToolUse 当轮拦截不可用，落盘仍可替换。Codex-native 工具记录 middleware 也改不到模型。
+
+daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 **fail-closed**，所以插件在 4 秒内 abort 并 fail-open，避免落到宿主 15 秒默认超时。interceptor runtime 缺失时静默放行，不写 access.log（采集插件始终在跑，不能把「未启用拦截」当成失败刷屏）。middleware 抛错或返回非法 shape 会被宿主 fail-closed 成 failure 结果，所以拦截失败必须 `return undefined`，不要 throw。
 
 规则 reason 的中文包装与 Qoder 相同。CLI `--agent openclaw` 用于同步 persist 路径和单测。
+
+商业版同步与是否加云端策略，见 [OpenClaw 拦截适配说明](interceptor-openclaw.md)。
 
 ## 规则开关
 

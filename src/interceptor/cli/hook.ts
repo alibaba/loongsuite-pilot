@@ -8,6 +8,7 @@ import {
 } from '../access-log.js';
 import { parseOpenClawHookRequest, renderOpenClawBlock } from '../adapters/openclaw.js';
 import { parseHookRequest, renderQoderBlock } from '../adapters/qoder.js';
+import { parseQwenWorkHookRequest, renderQwenWorkBlock } from '../adapters/qwenwork.js';
 import { wrapHostReason } from '../adapters/reason.js';
 import { interceptorRuntimePath } from '../paths.js';
 import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
@@ -75,7 +76,9 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
 
   const request = surface === 'openclaw'
     ? parseOpenClawHookRequest(payload, eventHint)
-    : parseHookRequest(payload, surface, eventHint);
+    : surface === 'qwen-work-cn'
+      ? parseQwenWorkHookRequest(payload, eventHint)
+      : parseHookRequest(payload, surface, eventHint);
   if (!request) {
     deps.log('skipping unsupported hook event');
     recordFailOpen(deps, eventName, input, 'unsupported hook event', surface);
@@ -161,7 +164,9 @@ export function emitVerdict(
   writeStdout(
     request.agent === 'openclaw'
       ? renderOpenClawBlock(request, reason)
-      : renderQoderBlock(request, wrapHostReason(request.event, reason)),
+      : request.agent === 'qwen-work-cn'
+        ? renderQwenWorkBlock(request, reason)
+        : renderQoderBlock(request, wrapHostReason(request.event, reason)),
   );
 }
 

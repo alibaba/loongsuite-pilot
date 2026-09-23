@@ -6,6 +6,7 @@ import {
   writeInterceptorAccessLog,
   type InterceptorAccessLogEntry,
 } from '../access-log.js';
+import { parseQwenWorkHookRequest, qwenWorkAllowBody, qwenWorkBlockBody } from '../adapters/qwenwork.js';
 import { RuleEngine } from '../rules/engine.js';
 import {
   INTERCEPTOR_SERVICE,
@@ -45,6 +46,10 @@ async function handle(
         daemon_port: opts.port,
       };
       writeJson(res, 200, body);
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/hooks/qwenwork') {
+      await handleQwenWorkHttp(req, res, opts);
       return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/hooks/evaluate') {
@@ -87,6 +92,78 @@ async function handle(
       },
     });
     writeJson(res, 500, { error: 'internal' });
+  }
+}
+
+async function handleQwenWorkHttp(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  opts: InterceptorServerOptions,
+): Promise<void> {
+  // QwenWork: HTTP 2xx + invalid JSON fail-closes PreToolUse. Fail-open must be 200 {}.
+  let body: unknown;
+  try {
+    body = await readJson<unknown>(req);
+  } catch (err) {
+    recordAccess(opts, {
+      event: 'unknown',
+      agent: 'qwen-work-cn',
+      input: {},
+      result: {
+        action: 'fail-open',
+        error: err instanceof Error ? err.message : 'invalid-json',
+      },
+    });
+    writeJson(res, 200, qwenWorkAllowBody());
+    return;
+  }
+
+  const payload = isRecord(body) ? body : null;
+  const request = payload ? parseQwenWorkHookRequest(payload) : null;
+  if (!request) {
+    recordAccess(opts, {
+      event: payload && typeof payload.hook_event_name === 'string'
+        ? payload.hook_event_name
+        : 'unknown',
+      agent: 'qwen-work-cn',
+      input: payload ? accessInputFromPayload(payload) : { raw: body },
+      result: { action: 'fail-open', error: 'unsupported hook event' },
+    });
+    writeJson(res, 200, qwenWorkAllowBody());
+    return;
+  }
+
+  try {
+    const verdict = await opts.engine.evaluate(request);
+    recordAccess(opts, {
+      event: request.event,
+      agent: request.agent,
+      sessionId: request.sessionId,
+      input: accessInputFromHookRequest(request),
+      result: {
+        action: verdict.action,
+        reason: verdict.reason,
+        ruleId: verdict.ruleId,
+        evaluatedRules: verdict.evaluatedRules,
+      },
+    });
+    if (verdict.action !== 'block') {
+      writeJson(res, 200, qwenWorkAllowBody());
+      return;
+    }
+    writeJson(res, 200, qwenWorkBlockBody(request, verdict.reason));
+  } catch (err) {
+    recordAccess(opts, {
+      event: request.event,
+      agent: request.agent,
+      sessionId: request.sessionId,
+      input: accessInputFromHookRequest(request),
+      result: {
+        action: 'fail-open',
+        error: err instanceof Error ? err.message : 'internal',
+      },
+    });
+    writeJson(res, 200, qwenWorkAllowBody());
   }
 }
 

@@ -28,6 +28,7 @@ export function classifyExecutable(raw: string): QoderSurface | null {
     return 'qodercli';
   }
   if (name.includes('qoderwork') || name.includes('qoder-work')) return null;
+  if (name.includes('qwenwork') || name.includes('qwen-work')) return null;
   if (name.includes('qoder')) return 'qoder';
   return null;
 }

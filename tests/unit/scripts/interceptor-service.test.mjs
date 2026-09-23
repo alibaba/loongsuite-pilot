@@ -58,6 +58,23 @@ describe('interceptor peer service registration', () => {
     expect(SERVICE_PS1).toContain('interceptor-daemon');
   });
 
+  it('pins QwenWork interceptor scripts to --agent qwen-work-cn, not qoder-auto', () => {
+    const sh = readFileSync('assets/hooks/interceptor-qwenworkcn-hook.sh', 'utf-8');
+    const ps1 = readFileSync('assets/hooks/interceptor-qwenworkcn-hook.ps1', 'utf-8');
+    expect(sh).toContain('hook --agent qwen-work-cn');
+    expect(ps1).toContain('hook --agent qwen-work-cn');
+    expect(sh).not.toMatch(/--agent qoder-auto/);
+    expect(ps1).not.toMatch(/--agent qoder-auto/);
+  });
+
+  it('declares QwenWork interceptor command hooks separately from collection Stop', () => {
+    const def = JSON.parse(readFileSync('agents.d/qwen-work-cn.json', 'utf-8'));
+    expect(def.hook.events).toEqual(['Stop']);
+    expect(def.hook.interceptor.events).toEqual(['UserPromptSubmit', 'PreToolUse', 'PostToolUse']);
+    expect(def.hook.interceptor.hookCommand).toContain('interceptor-qwenworkcn-hook.sh');
+    expect(def.hook.interceptor.insert).toBe('head');
+  });
+
   it('keeps the reference autostart library in sync', () => {
     expect(AUTOSTART).toContain('run-interceptor');
     expect(AUTOSTART).toContain('loongsuite-pilot-interceptor.service');

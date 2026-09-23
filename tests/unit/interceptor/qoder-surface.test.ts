@@ -15,6 +15,8 @@ describe('qoder surface detection', () => {
 
   it('ignores Qoder Work and interceptor hosts', () => {
     expect(classifyExecutable('qoderwork')).toBeNull();
+    expect(classifyExecutable('QwenWorkCN')).toBeNull();
+    expect(classifyExecutable('qwenworkcn.exe')).toBeNull();
     expect(classifyExecutable('node')).toBeNull();
     expect(classifyExecutable('interceptor-cli')).toBeNull();
   });

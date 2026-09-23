@@ -1166,6 +1166,43 @@ describe('HookStrategy', () => {
       });
     });
 
+    it('installs QwenWorkCN interceptor command hooks independently of collection Stop', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(makeDef({
+        id: 'qwen-work-cn',
+        hook: {
+          settingsPath: '/home/.qwenworkcn/settings.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/qwenworkcn-loongsuite-pilot-hook.sh',
+          format: 'nested',
+          matcher: '*',
+          interceptor: {
+            events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+            hookCommand: '/opt/pilot/hooks/interceptor-qwenworkcn-hook.sh',
+            matcher: '*',
+            timeout: { UserPromptSubmit: 15, PreToolUse: 10, PostToolUse: 10 },
+            insert: 'head',
+          },
+        },
+      }));
+
+      const commands = mockHookManager.installHook.mock.calls.map(([def]) => def.hookCommand);
+      expect(commands).toEqual([
+        '/opt/pilot/hooks/interceptor-qwenworkcn-hook.sh',
+        '/opt/pilot/hooks/interceptor-qwenworkcn-hook.sh',
+        '/opt/pilot/hooks/interceptor-qwenworkcn-hook.sh',
+        '/opt/pilot/hooks/qwenworkcn-loongsuite-pilot-hook.sh',
+      ]);
+      expect(mockHookManager.installHook.mock.calls[0][0]).toMatchObject({
+        agentId: 'qwen-work-cn',
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        insert: 'head',
+        useNestedFormat: true,
+      });
+    });
+
     it('needs deploy when the interceptor hook is missing or not at head', async () => {
       mockHookManager.isHookInstalled
         .mockResolvedValueOnce(false)

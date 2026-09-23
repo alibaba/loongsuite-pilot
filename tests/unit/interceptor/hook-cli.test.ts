@@ -224,6 +224,20 @@ describe('interceptor hook CLI', () => {
     expect(chunks).toEqual([]);
   });
 
+  it('writes QwenWork UserPromptSubmit as decision=block without wrapping twice', () => {
+    const chunks: string[] = [];
+    emitVerdict(
+      { agent: 'qwen-work-cn', event: 'UserPromptSubmit', raw: {} },
+      'block',
+      '[APIKEY_MASKED]',
+      (text) => chunks.push(text),
+    );
+    expect(chunks.join('')).toBe(`${JSON.stringify({
+      decision: 'block',
+      reason: wrapHostReason('UserPromptSubmit', '[APIKEY_MASKED]'),
+    })}\n`);
+  });
+
   it('writes OpenClaw before_tool_call block JSON on a blocking verdict', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
@@ -257,6 +271,41 @@ describe('interceptor hook CLI', () => {
     expect(stdout.join('')).toBe(`${JSON.stringify({
       block: true,
       blockReason: wrapHostReason('PreToolUse', '[APIKEY_MASKED]'),
+    })}\n`);
+  });
+
+  it('writes QwenWork UserPromptSubmit block JSON on a blocking verdict', async () => {
+    const runtimePath = await writeRuntime();
+    const stdout: string[] = [];
+    const code = await runHook(['--agent', 'qwen-work-cn'], {
+      readStdin: async () => JSON.stringify({
+        hook_event_name: 'UserPromptSubmit',
+        prompt: 'export KEY=sk-test',
+        session_id: 's1',
+      }),
+      writeStdout: (text) => stdout.push(text),
+      log: () => undefined,
+      runtimePath,
+      writeAccessLog: () => undefined,
+      createClient: () => ({
+        health: async (): Promise<InterceptorHealth> => ({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: 4242,
+          version: '1.0.2',
+          daemon_port: 18791,
+        }),
+        checkHook: async (): Promise<EvaluateHookResponse> => ({
+          action: 'block',
+          reason: '[APIKEY_MASKED]',
+          evaluatedRules: ['apiKey'],
+        }),
+      }),
+    });
+    expect(code).toBe(0);
+    expect(stdout.join('')).toBe(`${JSON.stringify({
+      decision: 'block',
+      reason: wrapHostReason('UserPromptSubmit', '[APIKEY_MASKED]'),
     })}\n`);
   });
 });
