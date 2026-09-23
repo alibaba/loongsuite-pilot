@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import sqlite3 from 'sqlite3';
+import { execSql as runSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
 
 let tmpHome: string = os.tmpdir();
 
@@ -60,7 +60,7 @@ afterEach(async () => {
   try { await fs.rm(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-describe('readSqliteTokensForSession (qoder-cn)', () => {
+describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession (qoder-cn)', () => {
   it('returns an empty result when no candidate DB is accessible', async () => {
     await fs.rm(dbPath, { force: true });
     const result = await readSqliteTokensForSession('sess-x');
@@ -144,7 +144,7 @@ describe('readSqliteTokensForSession (qoder-cn)', () => {
   });
 });
 
-describe('readSqliteTokensForSession candidate probing (qoder-cn)', () => {
+describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession candidate probing (qoder-cn)', () => {
   it('reads tokens from the IDE plugin layout when it is the only layout present', async () => {
     await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
     const pluginDb = await createDb(sharedClientDbPath());
@@ -307,16 +307,6 @@ async function insertRecord(p: string, row: {
 }
 
 function execSql(dbPath: string, sql: string, params: unknown[] = []): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.run(sql, params, (runErr: Error | null) => {
-        db.close((closeErr) => {
-          if (runErr) { reject(runErr); return; }
-          if (closeErr) { reject(closeErr); return; }
-          resolve();
-        });
-      });
-    });
-  });
+  runSql(dbPath, sql, params);
+  return Promise.resolve();
 }

@@ -1,8 +1,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { resolveHome } from '../../utils/fs-utils.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SqliteTokenReader');
@@ -289,17 +289,3 @@ function parseRecordModelKey(raw: string | null | undefined): string | undefined
   }
 }
 
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (closeErr) logger.debug('sqlite close warning', { error: String(closeErr) });
-          if (queryErr) { reject(queryErr); return; }
-          resolve(rows);
-        });
-      });
-    });
-  });
-}

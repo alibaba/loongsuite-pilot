@@ -24,6 +24,7 @@ import {
   writeRestartFailure,
   type RestartFailureBreadcrumb,
 } from '../utils/restart-breadcrumb.js';
+import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -621,8 +622,8 @@ export class Updater {
         });
       }
 
-      logger.info('checking sqlite3 runtime', { node: nodeBin });
-      await execFileAsync(nodeBin, ['-e', "require('sqlite3')"], {
+      logger.info('checking node:sqlite runtime', { node: nodeBin });
+      await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,
         env: childEnv,
         timeout: 30_000,
@@ -692,9 +693,8 @@ export class Updater {
         // the collector/updater restart (and any future launch) runs on it. Skipped
         // when we fell back to system node, preserving the existing pin. When the
         // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
-        // pointers back below: the activated version's node_modules are ABI-tied to the
-        // managed node, and leaving the pin on the old node would crash-loop the
-        // collector on mismatched native addons with no self-heal.
+        // pointers back below: leaving the pin on a different node would start the
+        // collector against the wrong runtime, with no self-heal.
         if (managedNodeBin) {
           await this.pinNodeRuntime(managedNodeBin);
         }

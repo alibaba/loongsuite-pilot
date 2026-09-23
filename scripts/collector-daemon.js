@@ -47,8 +47,8 @@ function resolveInstalledVersion() {
   }
 }
 
-// Fatal early-death happens during ESM module-graph resolution (e.g. a top-level
-// `import sqlite3` failing under npm12), before dist/index.js main() runs. This is
+// Fatal early-death happens during ESM module-graph resolution (e.g. the
+// native-deps-guard banner failing before dist/index.js main() runs). This is
 // the only place that can capture the real cause for the updater to report.
 function writeStartupCrash(err) {
   try {

@@ -1,8 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { ClientType } from '../../types/index.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome } from '../../utils/fs-utils.js';
@@ -162,36 +162,6 @@ function readMaxEligibleRowId(dbPath: string): Promise<number> {
   `;
   return queryReadonly<{ maxRowId: number }>(dbPath, sql, [])
     .then(rows => rows[0]?.maxRowId ?? 0);
-}
-
-function queryReadonly<T>(
-  dbPath: string,
-  sql: string,
-  params: unknown[],
-): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    let db: sqlite3.Database;
-    db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) {
-        reject(openErr);
-        return;
-      }
-
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) {
-            reject(queryErr);
-            return;
-          }
-          if (closeErr) {
-            reject(closeErr);
-            return;
-          }
-          resolve(rows);
-        });
-      });
-    });
-  });
 }
 
 function parseTokenInfo(raw: string): QoderCnTokenInfo | null {

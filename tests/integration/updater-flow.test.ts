@@ -159,7 +159,7 @@ describe('Updater integration (real filesystem)', () => {
       if (
         cmd === process.execPath
         && args[0] === '-e'
-        && args[1] === "require('sqlite3')"
+        && args[1]?.includes("require('node:sqlite')")
         && opts?.sqliteHealthCheckFails
       ) {
         return Promise.reject(new Error('Could not locate the bindings file'));
@@ -208,9 +208,9 @@ describe('Updater integration (real filesystem)', () => {
     expect(await readPointer('previous')).toBeNull();
   });
 
-  // ─── sqlite3 health check failure → no activation ─────
+  // ─── node:sqlite health check failure → no activation ─────
 
-  it('does NOT update pointers or restart collector when sqlite3 health check fails', async () => {
+  it('does NOT update pointers or restart collector when the node:sqlite probe fails', async () => {
     const v1Dir = await createFakeVersion('1.0.1', 'aaa');
     await setCurrentPointer(v1Dir);
     await fs.writeFile(path.join(testDir, 'previous'), '1.0.0_old\n');
@@ -227,7 +227,7 @@ describe('Updater integration (real filesystem)', () => {
 
     expect(mockExecFile).toHaveBeenCalledWith(
       process.execPath,
-      ['-e', "require('sqlite3')"],
+      ['-e', expect.stringContaining("require('node:sqlite')")],
       expect.objectContaining({
         cwd: path.join(testDir, 'versions', '1.0.2_bbb.candidate'),
         env: expect.any(Object),
