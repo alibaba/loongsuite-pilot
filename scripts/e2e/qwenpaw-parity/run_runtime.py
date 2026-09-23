@@ -35,7 +35,7 @@ async def main(args):
     metadata = {"mode": args.mode, "model": args.model, "source": "real QwenPaw Runtime / real DashScope",
                 "versions": {name: importlib.metadata.version(name) for name in ("qwenpaw", "agentscope", "reme-ai")},
                 "metrics_exporter": "none", "message_capture": args.capture_mode,
-                "session_prefix": args.session_prefix,
+                "session_prefix": args.session_prefix, "agent_name": args.agent_name,
                 "semconv_stability_opt_in": "gen_ai_latest_experimental"}
     if args.mode == "baseline":
         metadata["versions"].update({name: importlib.metadata.version(name) for name in ("loongsuite-instrumentation-qwenpaw", "loongsuite-instrumentation-agentscope", "loongsuite-otel-util-genai")})
@@ -82,7 +82,7 @@ async def main(args):
 
     ensure_default_agent_exists()
     config = load_agent_config("default")
-    config.name = "QwenPaw parity"
+    config.name = args.agent_name
     config.active_model = ModelSlotConfig(provider_id="dashscope", model=args.model)
     config.running.memory_manager_backend = "remelight"
     config.running.max_iters = 6
@@ -297,12 +297,21 @@ async def main(args):
             daily.mkdir(parents=True, exist_ok=True)
             (daily / "parity-observation.md").write_text("# Parity observation\nThe user prefers concise technical reports. The deployment uses QwenPaw 2.1.0 and AgentScope 2.0.4.post1. Their test marker is PARITY_WITNESS_20260920.\n")
             started = time.time()
+            manager = workspace.memory_manager
+            legacy_dream = getattr(manager, "dream", None)
+            dream_entry = "dream" if callable(legacy_dream) else "run_action:auto_dream"
             try:
-                await asyncio.wait_for(workspace.memory_manager.dream(date=day, hint="Extract only durable preferences; do not use web search."), 120)
+                params = {"date": day, "hint": "Extract only durable preferences; do not use web search."}
+                operation = legacy_dream(**params) if callable(legacy_dream) else manager.run_action("auto_dream", **params)
+                response = await asyncio.wait_for(operation, 120)
+                if dream_entry == "run_action:auto_dream" and response is None:
+                    raise RuntimeError("Dream action unavailable")
+                if getattr(response, "success", True) is False:
+                    raise RuntimeError("Dream action failed")
                 error = None
             except BaseException as exc:
                 error = type(exc).__name__
-            record = {"case": "dream", "error": error, "duration_s": time.time()-started}
+            record = {"case": "dream", "entry": dream_entry, "error": error, "duration_s": time.time()-started}
             results.append(record)
             print(json.dumps(record), flush=True)
     finally:
@@ -322,6 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--root", required=True)
     parser.add_argument("--mode", choices=("baseline", "pilot", "probe"), required=True)
     parser.add_argument("--model", default="qwen-plus")
+    parser.add_argument("--agent-name", default="QwenPaw parity")
     parser.add_argument("--otlp-endpoint")
     parser.add_argument("--plugin")
     parser.add_argument("--matrix", action="store_true")

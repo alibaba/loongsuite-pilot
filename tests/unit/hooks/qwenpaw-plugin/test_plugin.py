@@ -720,11 +720,124 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(plugin._scope.get())
             await self.owner.shutdown()
 
+    async def test_memory_action_only_wraps_dream_and_restores_original(self):
+        calls = []
+        result = NS(success=True)
+        class Manager:
+            agent_id = "owner"
+            async def run_action(instance, action, **kwargs):
+                calls.append((action, kwargs, plugin._scope.get()))
+                return result
+        original = Manager.run_action
+        capture = Capture()
+        with patch("qwenpaw.agents.memory.reme_light_memory_manager.ReMeLightMemoryManager", Manager), \
+             patch("qwenpaw.config.config.load_agent_config", return_value=NS(name="Owner")), \
+             patch.object(plugin, "_writer", capture):
+            self.owner._attach_dream()
+            wrapped = Manager.run_action
+            manager = Manager()
+            for action in ("auto_memory", "daily_paper", "reindex", "auto_fin"):
+                self.assertIs(await manager.run_action(action, hint="keep"), result)
+            self.assertEqual(capture.records, [])
+            self.assertTrue(all(scope is None for _, _, scope in calls))
+            self.assertIs(await manager.run_action("auto_dream", date="today"), result)
+            self.assertIs(await manager.run_action(action="auto_dream", hint="keep"), result)
+            self.assertEqual([row["agent.qwenpaw.boundary"] for row in capture.records],
+                             ["entry.start", "entry.end", "entry.start", "entry.end"])
+            self.assertEqual(calls[-2][1], {"date": "today"})
+            self.assertEqual(calls[-1][2].fields["agent.qwenpaw.dream.owner"], "Owner")
+            self.assertIsNone(plugin._scope.get())
+            await self.owner.shutdown()
+            self.assertIs(Manager.run_action, original)
+            count = len(capture.records)
+            self.assertIs(await wrapped(manager, "auto_dream"), result)
+            self.assertEqual(len(capture.records), count)
+
+    async def test_memory_action_error_cancel_and_false_result_preserve_business(self):
+        failure = ValueError("native action failure")
+        failed_result = NS(success=False, answer="private error detail")
+        calls = []
+        class Manager:
+            agent_id = "owner"
+            async def run_action(instance, action, mode=None):
+                calls.append(mode)
+                if mode == "error":
+                    raise failure
+                if mode == "cancel":
+                    raise asyncio.CancelledError()
+                if mode == "unavailable":
+                    return None
+                return failed_result
+        capture = Capture()
+        with patch("qwenpaw.agents.memory.reme_light_memory_manager.ReMeLightMemoryManager", Manager), \
+             patch.object(plugin, "_writer", capture):
+            self.owner._attach_dream()
+            with self.assertRaises(ValueError) as caught:
+                await Manager().run_action("auto_dream", mode="error")
+            self.assertIs(caught.exception, failure)
+            self.assertIsNone(plugin._scope.get())
+            with self.assertRaises(asyncio.CancelledError):
+                await Manager().run_action("auto_dream", mode="cancel")
+            self.assertIsNone(plugin._scope.get())
+            self.assertIs(await Manager().run_action("auto_dream"), failed_result)
+            self.assertIsNone(await Manager().run_action("auto_dream", mode="unavailable"))
+            self.assertEqual(calls, ["error", "cancel", None, "unavailable"])
+            ends = [r for r in capture.records if r.get("agent.qwenpaw.boundary") == "entry.end"]
+            self.assertEqual([r.get("error.type") for r in ends], ["ValueError", "CancelledError", "RuntimeError", "RuntimeError"])
+            self.assertNotIn("private error detail", str(capture.records))
+            self.assertIsNone(plugin._scope.get())
+
+    async def test_memory_action_concurrent_owners_do_not_inherit_foreground(self):
+        entered = []
+        gate = asyncio.Event()
+        class Manager:
+            def __init__(instance, name):
+                instance.agent_id = name
+            async def run_action(instance, action):
+                scope = plugin._scope.get()
+                entered.append(scope)
+                if len(entered) == 2:
+                    gate.set()
+                await gate.wait()
+                self.assertIs(plugin._scope.get(), scope)
+                self.assertEqual(scope.fields["agent.qwenpaw.dream.owner"], instance.agent_id)
+                return NS(success=True)
+        with patch("qwenpaw.agents.memory.reme_light_memory_manager.ReMeLightMemoryManager", Manager), \
+             patch("qwenpaw.config.config.load_agent_config", side_effect=lambda name: NS(name=name)):
+            self.owner._attach_dream()
+            foreground = plugin.Scope({"gen_ai.session.id": "foreground"})
+            token = plugin._scope.set(foreground)
+            try:
+                await asyncio.gather(Manager("first").run_action("auto_dream"), Manager("second").run_action("auto_dream"))
+                self.assertIs(plugin._scope.get(), foreground)
+                self.assertEqual({scope.fields["gen_ai.session.id"] for scope in entered}, {"dream:first", "dream:second"})
+                self.assertTrue(all(scope.parent is None and scope.ended for scope in entered))
+            finally:
+                plugin._scope.reset(token)
+
+    async def test_memory_action_observation_failure_does_not_change_result(self):
+        result = NS(success=True)
+        calls = []
+        class Manager:
+            agent_id = "owner"
+            async def run_action(instance, action):
+                calls.append(action)
+                return result
+        with patch("qwenpaw.agents.memory.reme_light_memory_manager.ReMeLightMemoryManager", Manager):
+            self.owner._attach_dream()
+            with patch.object(plugin, "_boundary", side_effect=RuntimeError("setup")):
+                self.assertIs(await Manager().run_action("auto_dream"), result)
+            with patch.object(plugin, "_finish_request", side_effect=RuntimeError("finish")):
+                self.assertIs(await Manager().run_action("auto_dream"), result)
+            self.assertEqual(calls, ["auto_dream", "auto_dream"])
+            self.assertIsNone(plugin._scope.get())
+
     async def test_sync_dream_is_not_patched(self):
         from qwenpaw.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
         def synchronous(self):
             return "business"
-        with patch.object(ReMeLightMemoryManager, "dream", synchronous, create=True):
+        with patch.object(ReMeLightMemoryManager, "dream", synchronous, create=True), \
+             patch.object(ReMeLightMemoryManager, "run_action", synchronous, create=True):
             self.assertFalse(self.owner._attach_dream())
             self.assertIs(ReMeLightMemoryManager.dream, synchronous)
 

@@ -72,3 +72,5 @@ Focused tests (with the pinned QwenPaw environment):
 ```sh
 python -m unittest discover -s tests/unit/hooks/qwenpaw-plugin -v
 ```
+
+Dream supports both the legacy async `dream(...)` method and QwenPaw 2.2's async `run_action("auto_dream", ...)` API. The plugin selects the legacy method when available, otherwise the action API, and patches only one boundary. Other memory actions are untouched. The owning Agent name propagates through a fresh background scope; errors, cancellation, returned failures and unavailable actions retain the original business result. Cleanup restores only the method wrapper owned by this plugin.

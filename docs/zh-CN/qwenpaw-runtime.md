@@ -47,9 +47,9 @@ node /absolute/path/to/pilot/dist/index.js
 
 原生 `Skill({"skill": name})` 调用作为 TOOL span 采集；`gen_ai.skill.id/name/description/version` 从 QwenPaw SkillRegistry、loader 缓存及声明元数据解析，与 LoongSuite Python 0.9.0 AgentScope v2 Middleware 一致。
 
-支持 `ReMeLightMemoryManager.dream` 的版本中，后台执行的 `gen_ai.agent.name` 使用所属 Agent 配置名，避免把多个业务 Agent 的用量聚合到内部 `DreamOptimizer` 名称。空配置名回退 `QwenPaw`；配置加载失败或名称非法时不覆盖原生 Agent 名称。后台请求使用独立 scope，不继承已完成前台请求。该命名行为已与 LoongSuite Python 0.9.0 的真实 Skill/Dream 运行对照。
+通过旧 `ReMeLightMemoryManager.dream(...)` 或新 `run_action("auto_dream", ...)` 入口，后台执行的 `gen_ai.agent.name` 使用所属 Agent 配置名，避免把多个业务 Agent 的用量聚合到内部 `DreamOptimizer` 名称。空配置名回退 `QwenPaw`；配置加载失败或名称非法时不覆盖原生 Agent 名称。后台请求使用独立 scope，不继承已完成前台请求。旧入口的命名行为已与 LoongSuite Python 0.9.0 的真实 Skill/Dream 运行对照；新入口沿用同一归属规则并单独验收，不表示 Python 0.9.0 已适配 `run_action`。
 
-QwenPaw 2.2.1b1 所用新版 ReMe 未提供旧 Dream 接口，本次 Dream 实测使用 QwenPaw 2.1.0 / AgentScope 2.0.4.post1 / ReMe 0.4.1.5；不能将可选功能的版本差异视为整个插件不兼容。
+QwenPaw 2.2.1b1 将 Dream 入口迁移到通用 `run_action("auto_dream", ...)`，能力没有取消。插件优先适配存在的旧异步 `dream`，不存在时适配异步 `run_action`，每个安装仅包装一个入口以避免重复根节点。新入口只处理 `auto_dream`，其他 action 原样执行；原始返回值和异常不变，返回失败或未启动时记录失败状态。
 
 ## 开关和隐私
 
@@ -63,7 +63,7 @@ QwenPaw 2.2.1b1 所用新版 ReMe 未提供旧 Dream 接口，本次 Dream 实�
 
 插件按需要的原生接口启用，不对 QwenPaw/AgentScope 作精确版本等值拒绝。核心注册失败会诊断并停用本次采集；可选 helper/Dream 接口不支持时仅跳过对应覆盖。已注册但无法通过原生 API 注销的回调变为 inactive。测试依赖版本固定用于复现，不等于运行时唯一允许版本。
 
-已测接口基线为 QwenPaw 2.1.0 / AgentScope 2.0.4.post1，以及 QwenPaw 2.2.1b1 / AgentScope 2.0.7.post1；后者已使用真实模型、安装产物与 CMS 读回验证。版本测试不保证所有可选功能均存在，例如新版 ReMe 无 Dream 接口时跳过该能力。其他版本仍以实际接口与运行验证为准，原生 PluginLoader 还应用自己的 manifest 兼容策略。
+已测接口基线为 QwenPaw 2.1.0 / AgentScope 2.0.4.post1，以及 QwenPaw 2.2.1b1 / AgentScope 2.0.7.post1；后者已使用真实模型、安装产物与 CMS 读回验证。版本测试不保证所有未来接口均兼容；两个异步 Dream 入口都缺失时才跳过对应能力并诊断。其他版本仍以实际接口与运行验证为准，原生 PluginLoader 还应用自己的 manifest 兼容策略。
 
 POST_RESPONSE 以响应生成完成为 ENTRY 结束边界；发生在该钩子之后的宿主 finalizer/envelope 错误只诊断，不改写已发送的 ENTRY。QwenPaw 2.2.1b1 在消费者停止于终态时仍可能输出 `async generator ignored GeneratorExit`，不加载 Pilot 的对照也能复现；插件完成钩子避免因此遗漏正常请求的结束事件，不会替宿主吞掉业务异常。
 
