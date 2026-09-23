@@ -84,6 +84,8 @@ home，会报告歧义而不会静默选择其中一个。
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
+`AGENTTEAMS_WORKER_NAME` 和 `AGENTTEAMS_INSTANCE_ID` 要设在这个 DSH 进程上；
+插件在落盘时写入 Worker 标识，collector 之后不再读取自己的环境变量。
 
 插件将 append-only 原生事件写入
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为

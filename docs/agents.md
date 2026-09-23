@@ -91,7 +91,9 @@ When `dsh` is enabled, Pilot appends one marked, Pilot-owned block to the
 resolved `<DSH_HOME>/cordis.patch.yml`. That block loads the packaged plugin
 from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
 preserved. Start a new DSH process after first enabling or reinstalling the
-integration so the host loads the current patch.
+integration so the host loads the current patch. Set `AGENTTEAMS_WORKER_NAME`
+and `AGENTTEAMS_INSTANCE_ID` on that DSH process. The plugin stamps the worker
+identity into the JSONL; the collector does not read its own environment later.
 
 The plugin writes append-only native events to
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory

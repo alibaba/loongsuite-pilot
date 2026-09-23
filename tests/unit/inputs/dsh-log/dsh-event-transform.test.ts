@@ -691,3 +691,52 @@ describe('dsh-event-transform (privacy)', () => {
     expect(json).not.toMatch(/API_KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i);
   });
 });
+
+describe('dsh-event-transform (agentteams worker identity)', () => {
+  const userMessage = {
+    type: 'user/message',
+    sid: 's',
+    time: 1,
+    data: { content: [{ type: 'text', text: 'hi' }], id: 'm1' },
+  };
+
+  it('copies the plugin-stamped worker name onto every emitted entry', () => {
+    const entry = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: {
+        'agentteams.worker.name': ' planner ',
+        'agentteams.instance.id': 'task-42-worker-1',
+        'agentteams.token': 'must-not-leak',
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(entry?.['gen_ai.agent.name']).toBe('planner');
+    expect(entry?.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'planner',
+      'agentteams.instance.id': 'task-42-worker-1',
+    });
+    expect(JSON.stringify(entry)).not.toContain('must-not-leak');
+  });
+
+  it('leaves agent identity unchanged when the source line has no worker context', () => {
+    const entry = transformDshRecord(userMessage, ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.agent.name']).toBeUndefined();
+    expect(entry?.resourceAttributes).toBeUndefined();
+  });
+
+  it('drops a blank or oversized worker name', () => {
+    const blank = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: { 'agentteams.worker.name': '   ' },
+    }, ClientType.Dsh, newState());
+    expect(blank?.['gen_ai.agent.name']).toBeUndefined();
+    expect(blank?.resourceAttributes).toBeUndefined();
+
+    const oversized = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: { 'agentteams.worker.name': 'x'.repeat(513) },
+    }, ClientType.Dsh, newState());
+    expect(oversized?.['gen_ai.agent.name']).toBeUndefined();
+    expect(oversized?.resourceAttributes).toBeUndefined();
+  });
+});
