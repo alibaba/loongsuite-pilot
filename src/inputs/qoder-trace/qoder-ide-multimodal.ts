@@ -167,21 +167,13 @@ async function enrichInputAttachedImages(
   if (byRequest.size === 0) return;
   stats.attachedRequests = byRequest.size;
 
-  // Group input carriers by request_id (prefer llm.request; other rarely has request_id).
   const carriersByRequest = new Map<string, AgentActivityEntry>();
   for (const entry of entries) {
     const requestId = requestIdOf(entry);
     if (!requestId || !byRequest.has(requestId)) continue;
-    const name = entry['event.name'];
-    const hasDelta = Array.isArray(entry['gen_ai.input.messages_delta']);
-    if (!hasDelta) continue;
-    if (name === 'llm.request') {
-      carriersByRequest.set(requestId, entry);
-      continue;
-    }
-    if (name === 'other' && !carriersByRequest.has(requestId)) {
-      carriersByRequest.set(requestId, entry);
-    }
+    if (entry['event.name'] !== 'llm.request') continue;
+    if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
+    carriersByRequest.set(requestId, entry);
   }
 
   // When request_id is only on llm.response, fall back to same-turn input carrier.
@@ -212,11 +204,28 @@ async function enrichInputAttachedImages(
       }
     }
     if (!carrier) continue;
-    const timeMs = entryTimeMs(carrier);
-    const n = await appendUriPartsToMessagesDelta(carrier, lookup.paths, pathToUri, timeMs, stats);
-    if (n > 0) {
-      stats.inputUri += n;
-      touched.add(carrier);
+    // Also attach the same-turn other, which has no request_id.
+    const siblingName = carrier['event.name'] === 'other' ? 'llm.request' : 'other';
+    const sibling = entries.find(e =>
+      e !== carrier
+      && e['gen_ai.turn.id'] === carrier['gen_ai.turn.id']
+      && e['event.name'] === siblingName
+      && Array.isArray(e['gen_ai.input.messages_delta'])
+      && (!requestIdOf(e) || requestIdOf(e) === requestId),
+    );
+    const targets = sibling ? [carrier, sibling] : [carrier];
+    let attached = 0;
+    for (const target of targets) {
+      const n = await appendUriPartsToMessagesDelta(
+        target, lookup.paths, pathToUri, entryTimeMs(target), stats,
+      );
+      if (n > 0) {
+        stats.inputUri += n;
+        touched.add(target);
+        attached += n;
+      }
+    }
+    if (attached > 0) {
       // Consume paths so this request_id is not attached again on later batches.
       attachedLookupByRequestId.set(requestId, { paths: [] });
     } else if (synthesized) {

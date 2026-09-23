@@ -1762,13 +1762,12 @@ describe('QoderTraceInput multimodal', () => {
           p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
       });
 
-      it('prefers llm.request over other when both carry the same request_id', async () => {
+      it('attaches paths to both llm.request and the same-turn other', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'prefer.png', 'prefer');
         const pathToUri = fakePathToUri;
         const user = mmEntry({
           'event.name': 'other',
-          'gen_ai.request.id': 'req-pref',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
           ],
@@ -1785,7 +1784,7 @@ describe('QoderTraceInput multimodal', () => {
         await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
 
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
-        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
       });
 
       it('batches multiple request_ids and only enriches matching rows', async () => {
@@ -1940,7 +1939,7 @@ describe('QoderTraceInput multimodal', () => {
         mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', attached([img])]]));
 
         const first = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-cache',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: '1' }] },
@@ -1951,7 +1950,7 @@ describe('QoderTraceInput multimodal', () => {
         expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
 
         const second = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-cache',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: '2' }] },
@@ -1971,7 +1970,7 @@ describe('QoderTraceInput multimodal', () => {
 
         mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', attached([imgA])]]));
         const first = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-a',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'a' }] },
@@ -1981,14 +1980,14 @@ describe('QoderTraceInput multimodal', () => {
 
         mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', attached([imgB])]]));
         const againA = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-a',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'a2' }] },
           ],
         });
         const freshB = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-b',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'b' }] },
@@ -2037,7 +2036,7 @@ describe('QoderTraceInput multimodal', () => {
         ]);
 
         const laterUser = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-solo',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
