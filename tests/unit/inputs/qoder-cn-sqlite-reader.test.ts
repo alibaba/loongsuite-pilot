@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSql as runSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
+import { SQLITE_SYNC_PAGE } from '../../../src/utils/node-sqlite.ts';
 
 let tmpHome: string = os.tmpdir();
 
@@ -237,6 +238,25 @@ describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession candidate probing 
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].inputTokens).toBe(55);
     expect(result.matchedDbPath).toBe(dbPath);
+  });
+
+  it('pages a session larger than one synchronous read', async () => {
+    const total = SQLITE_SYNC_PAGE + 1;
+    const values: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const id = `m-${String(i).padStart(4, '0')}`;
+      values.push(`('${id}','sess-page','req-${i}','assistant','{"prompt_tokens":1,"completion_tokens":1}',NULL,100)`);
+    }
+    await execSql(
+      dbPath,
+      `INSERT INTO chat_message (id, session_id, request_id, role, token_info, model_info, gmt_create) VALUES ${values.join(',')}`,
+    );
+
+    const { rows } = await readSqliteTokensForSession('sess-page');
+
+    expect(rows).toHaveLength(total);
+    expect(rows[0]?.messageId).toBe('m-0000');
+    expect(rows[total - 1]?.messageId).toBe(`m-${String(total - 1).padStart(4, '0')}`);
   });
 
   it('does not throw when every candidate is inaccessible', async () => {

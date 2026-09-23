@@ -39,8 +39,9 @@ await build({
   treeShaking: true,
   packages: 'external',
   // The guard must run BEFORE this bundle's module graph loads. SQLite reads
-  // use node:sqlite; if that builtin cannot load on Node >= 22.5 the process
-  // should exit with a readable FATAL before any logging exists. A static
+  // use node:sqlite; if that builtin cannot load on an unflagged Node
+  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
+  // exists. A static
   // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
   banner: { js: "import './native-deps-guard.cjs';" },
   define: commonDefine,

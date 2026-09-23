@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveHome } from '../../utils/fs-utils.js';
-import { queryReadonly } from '../../utils/node-sqlite.js';
+import { queryReadonly, queryReadonlyPaged } from '../../utils/node-sqlite.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SqliteTokenReader');
@@ -145,7 +145,8 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       AND cm.token_info IS NOT NULL
       AND cm.token_info != ''
       AND json_valid(cm.token_info)
-    ORDER BY cm.gmt_create ASC
+      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
+    ORDER BY cm.gmt_create ASC, cm.id ASC
   `;
 
   for (const dbPath of dbPaths) {
@@ -159,7 +160,9 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       record_extra?: string | null;
     }>;
     try {
-      rows = await queryReadonly(dbPath, sql, [sessionId]);
+      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
+        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
+      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
     } catch (err) {
       logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
       continue;
