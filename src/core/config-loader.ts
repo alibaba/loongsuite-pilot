@@ -44,6 +44,60 @@ import { anyAgentMultimodalEnabled } from '../multimodal/agent-gate.js';
 
 const logger = createLogger('ConfigLoader');
 
+/** Keys whose string values must not appear in logs (case-insensitive substring). */
+const SENSITIVE_CONFIG_KEY = /secret|token|password|accessKey|apiKey|ak|sk|license/i;
+
+/**
+ * Recursively clone `value` with sensitive string fields replaced by `'<redacted>'`.
+ * Matches e2e redact: only string leaves whose key matches SENSITIVE_CONFIG_KEY.
+ * All string values under a `headers` object are also redacted (OTLP/HTTP auth).
+ */
+export function redactConfigForLog(value: unknown, key = ''): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactConfigForLog(item, key));
+  }
+  if (value !== null && typeof value === 'object') {
+    const redactAllStrings = /^headers$/i.test(key);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = redactAllStrings && typeof v === 'string'
+        ? '<redacted>'
+        : redactConfigForLog(v, k);
+    }
+    return out;
+  }
+  if (typeof value === 'string' && SENSITIVE_CONFIG_KEY.test(key)) {
+    return '<redacted>';
+  }
+  return value;
+}
+
+type LoadedConfigFileLog =
+  | { found: true; path: string; config: unknown }
+  | { found: false; path: string };
+
+/** Last on-disk config.json snapshot from loadConfig(), already redacted. */
+let lastLoadedConfigFileLog: LoadedConfigFileLog | null = null;
+
+/**
+ * Re-emit the last loadConfig() on-disk dump. Collector main calls this again
+ * after initFileLogging() because that path truncates the launchd stdout file
+ * and replaces the root logger — the first dump would otherwise vanish from
+ * ~/.loongsuite-pilot/logs/. CLI/deploy skip file logging and keep the dump
+ * from loadConfig() itself. Never logs inner data_config.json.
+ */
+export function logLoadedConfigFile(): void {
+  if (!lastLoadedConfigFileLog) return;
+  if (lastLoadedConfigFileLog.found) {
+    logger.info('loaded config file', {
+      path: lastLoadedConfigFileLog.path,
+      config: lastLoadedConfigFileLog.config,
+    });
+    return;
+  }
+  logger.debug('no config file found, using env + defaults', { path: lastLoadedConfigFileLog.path });
+}
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -266,11 +320,10 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
-  if (file) {
-    logger.info('loaded config file', { path: configPath });
-  } else {
-    logger.debug('no config file found, using env + defaults', { path: configPath });
-  }
+  lastLoadedConfigFileLog = file
+    ? { found: true, path: configPath, config: redactConfigForLog(file) }
+    : { found: false, path: configPath };
+  logLoadedConfigFile();
 
   const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 
