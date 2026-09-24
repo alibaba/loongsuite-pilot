@@ -2,8 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
-
+import { execSql } from '../../../helpers/sqlite-fixture.mjs';
 import { hasNodeSqlite } from '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
 
 const PARSER = '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
@@ -22,35 +21,28 @@ let TMP;
 let DB_PATH;
 
 function buildFixtureDb(convRawJson, cwd) {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(DB_PATH, (err) => {
-      if (err) return reject(err);
-      db.serialize(() => {
-        db.run(`CREATE TABLE conversations_v2 (
-          key TEXT NOT NULL,
-          conversation_id TEXT NOT NULL,
-          value TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          PRIMARY KEY (key, conversation_id)
-        )`);
-        const now = Date.now();
-        const stmt = db.prepare(
-          `INSERT INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
-        );
-        stmt.run(cwd, CONV_ID, JSON.stringify(convRawJson), now - 10000, now);
-        stmt.finalize();
-        db.close((cerr) => (cerr ? reject(cerr) : resolve()));
-      });
-    });
-  });
+  const now = Date.now();
+  execSql(DB_PATH, `CREATE TABLE conversations_v2 (
+    key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (key, conversation_id)
+  )`);
+  execSql(
+    DB_PATH,
+    `INSERT INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
+    [cwd, CONV_ID, JSON.stringify(convRawJson), now - 10000, now],
+  );
 }
 
-beforeEach(async () => {
+beforeEach(() => {
   TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-transcript-test-'));
   DB_PATH = path.join(TMP, 'data.sqlite3');
+  if (!DB_AVAILABLE) return;
   const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
-  await buildFixtureDb(convRaw, CWD);
+  buildFixtureDb(convRaw, CWD);
 });
 
 afterEach(() => {

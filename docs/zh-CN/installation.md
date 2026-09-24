@@ -10,7 +10,7 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 
 - `curl` 或 `wget`
 - Windows 下需要 PowerShell 5.1 或更高版本
-- Node.js 18+ 与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 运行时**（见下文），无需预装；Linux musl（Alpine）与 Windows ARM64 等不受支持平台仍需自备 Node.js 18+ 与 `npm`
+- 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 22.22 运行时**（见下文），无需预装。系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受；Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。Linux musl（Alpine）与 Windows ARM64 等没有托管运行时的平台，仍需自备满足该要求的 Node.js 与 `npm`
 
 ## 在 Linux 或 macOS 从公开包安装
 
@@ -94,7 +94,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--cms-workspace <name>` | CMS workspace 值。 |
 | `--service-name-prefix <name>` | 上报后端使用的 service name 前缀。 |
 | `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
-| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统没有可用 node 时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
+| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统 Node.js 缺失或无法加载 `node:sqlite`（需要 22.13+ 或 23.4+）时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
 例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
@@ -104,8 +104,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 为避免「用户环境删除/切换 node 导致采集中断」，安装器默认从 OSS 下载并固定一份**托管 Node.js 运行时**与**预编译 node_modules**，采集运行时不再依赖系统 node：
 
 1. `ensure_managed_node`：按平台/架构下载 `node-v<版本>-<os>-<arch>` 包，校验 `SHASUMS256.txt` 后解压到 `<数据目录>/runtime/`，并把该 node 路径写入 `<数据目录>/node-bin`。macOS 会执行 `xattr -dr com.apple.quarantine` 去除隔离属性。
-2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（含原生模块 `sqlite3`、`zstd-napi`），校验后替换安装目录下的 `node_modules`。
-3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`），都不会硬失败；彻底无路可走才报错退出。
+2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（生产依赖是纯 JavaScript；SQLite 读取走 Node 内置 `node:sqlite`（22.13 / 23.4 起无需 `--experimental-sqlite`，托管运行时已满足）），校验后替换安装目录下的 `node_modules`。
+3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`）。系统 node 必须能加载 `node:sqlite`，否则安装直接失败并保留原版本可用的运行时，不会在 SQLite 不可用时装成成功。
 
 平台覆盖与回退：
 
@@ -114,8 +114,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
 | Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
 | Windows x64 | ✅ | ✅ | 托管下载 |
-| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
-| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
+| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
+| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
 
 本地布局：
 

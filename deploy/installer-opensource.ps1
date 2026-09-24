@@ -210,15 +210,31 @@ function Test-CanPrompt {
 # ============================================================
 # Node.js resolution
 # ============================================================
+# node:sqlite is unflagged from 22.13 and 23.4. A major check accepts Node 20
+# and 22.12, whose require('node:sqlite') throws, so install succeeds and
+# SQLite collection does not. The require is the check.
+# Native stderr under EAP=Stop becomes a terminating error and hides $LASTEXITCODE.
+function Test-NodeSupportsSqlite {
+    param([string]$bin)
+    if (-not $bin -or -not (Test-Path -LiteralPath $bin)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 1
+    try {
+        $sqliteProbe = & $bin -e "require('node:sqlite')" 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } catch {
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return ($code -eq 0)
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge 18
-    } catch { return $false }
+    return (Test-NodeSupportsSqlite $bin)
 }
 
 function Resolve-Node {
@@ -762,7 +778,11 @@ function Check-Deps {
     $script:NODE_BIN = ""
     if ($PreferSystemNode) {
         $script:NODE_BIN = Resolve-Node
-        if (-not $script:NODE_BIN) { $script:NODE_BIN = Ensure-ManagedNode }
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" `
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            $script:NODE_BIN = Ensure-ManagedNode
+        }
     } else {
         $script:NODE_BIN = Ensure-ManagedNode
         if (-not $script:NODE_BIN) {
@@ -772,16 +792,26 @@ function Check-Deps {
         }
     }
     if (-not $script:NODE_BIN) {
-        Msg "❌ 缺少依赖: node，请先安装后重试" "❌ Missing dependency: node — please install it first"
+        Msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" `
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     }
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $nodeMajor = & $script:NODE_BIN -e "process.stdout.write(String(process.versions.node.split('.')[0]))"
-    $ErrorActionPreference = $prevEAP
-    if ([int]$nodeMajor -lt 18) {
-        $nodeVer = & $script:NODE_BIN --version
-        Msg "❌ 需要 Node.js >= 18，当前版本: $nodeVer" "❌ Requires Node.js >= 18, current: $nodeVer"
+    if (-not (Test-NodeSupportsSqlite $script:NODE_BIN)) {
+        $nodeVer = "unknown"
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $verOut = & $script:NODE_BIN --version 2>&1
+            $code = $LASTEXITCODE
+            if ($code -eq 0 -and $verOut) { $nodeVer = "$verOut".Trim() }
+        } catch {
+            $nodeVer = "unknown"
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        Msg "❌ 当前 Node.js 无法加载 node:sqlite（$nodeVer）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" `
+            "❌ This Node.js cannot load node:sqlite ($nodeVer). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     }
 

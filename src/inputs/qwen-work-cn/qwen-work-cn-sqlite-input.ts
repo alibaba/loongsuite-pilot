@@ -2,8 +2,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
@@ -198,7 +198,7 @@ function mapRow(row: MessageRow, emittedIds: Set<string>): AgentActivityEntry[] 
 }
 
 function readRows(dbPath: string, cursorUpdatedAt: number, cursorRowId: number): Promise<MessageRow[]> {
-  return all<MessageRow>(dbPath, `
+  return queryReadonly<MessageRow>(dbPath, `
     SELECT m.rowid AS rowId, m.id AS id, sc.session_id AS sessionId, m.sub_chat_id AS subChatId,
       m.sequence AS sequence, m.role AS role, m.parts AS parts,
       m.updated_at AS updatedAt, sc.model_level AS modelLevel
@@ -212,25 +212,12 @@ function readRows(dbPath: string, cursorUpdatedAt: number, cursorRowId: number):
 }
 
 async function readLatestCursor(dbPath: string): Promise<{ updatedAt: number; rowId: number }> {
-  const rows = await all<{ updatedAt: number; rowId: number }>(
+  const rows = await queryReadonly<{ updatedAt: number; rowId: number }>(
     dbPath,
     'SELECT updated_at AS updatedAt, rowid AS rowId FROM messages ORDER BY updated_at DESC, rowid DESC LIMIT 1',
     [],
   );
   return rows[0] ?? { updatedAt: 0, rowId: 0 };
-}
-
-function all<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, error => {
-      if (error) reject(error);
-    });
-    db.all(sql, params, (error, rows) => {
-      db.close();
-      if (error) reject(error);
-      else resolve(rows as T[]);
-    });
-  });
 }
 
 function hash(parts: string[]): string {
