@@ -62,8 +62,8 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
-- 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）
-- 工具判定：`~/.loongsuite-pilot/interceptor/tool-verdicts/`（`PreToolUse` / `PostToolUse` 按 tool call id 关联，详见 [请求与响应协议](interceptor-protocol.md#tool-判定与-transcript-关联)）
+- 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）。单个文件超过 10MB 时切到 `access.log.1` … `access.log.5`，更旧的丢弃。
+- 工具判定：collector 进程内按 `session id + tool call id + phase` 保存最近 30 分钟，checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`（详见 [请求与响应协议](interceptor-protocol.md#tool-判定与-transcript-关联)）
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/daemon.cjs`
 - 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），collector **启动时读一次**，不热加载
 

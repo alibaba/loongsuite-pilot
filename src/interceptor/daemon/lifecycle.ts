@@ -4,15 +4,11 @@ import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../config
 import { writeInterceptorAccessLog } from '../access-log.js';
 import {
   interceptorAccessLogPath,
-  interceptorToolVerdictDir,
+  interceptorToolVerdictPath,
 } from '../paths.js';
 import { builtinRules } from '../rules/registry.js';
 import { RuleEngine } from '../rules/engine.js';
-import {
-  maybeCleanupToolVerdicts,
-  TOOL_VERDICT_CLEANUP_INTERVAL_MS,
-  writeToolVerdict,
-} from '../tool-verdict-store.js';
+import { ToolVerdictStore, type ToolVerdictAction, type ToolVerdictKey } from '../tool-verdict-store.js';
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
 import { createInterceptorServer } from './server.js';
 import { removeOwnPid, writeRuntime } from './runtime.js';
@@ -22,6 +18,7 @@ const RUNTIME_HEARTBEAT_MS = 30_000;
 
 export interface InterceptorService {
   readonly port: number;
+  readonly verdictStore: ToolVerdictStore;
   stop(): Promise<void>;
 }
 
@@ -29,6 +26,7 @@ export interface StartInterceptorServiceOptions {
   dataDir: string;
   version: string;
   gitCommit?: string;
+  verdictStore?: ToolVerdictStore;
 }
 
 /**
@@ -40,7 +38,8 @@ export async function startInterceptorService(
 ): Promise<InterceptorService> {
   const interceptorConfig = await loadInterceptorConfig();
   const engine = new RuleEngine(builtinRules(), resolveEnabledInterceptorTypes(interceptorConfig));
-  const verdictRoot = interceptorToolVerdictDir(opts.dataDir);
+  const verdictStore = opts.verdictStore ?? new ToolVerdictStore(interceptorToolVerdictPath(opts.dataDir));
+  if (!opts.verdictStore) verdictStore.restore();
   const accessLog = interceptorAccessLogPath(opts.dataDir);
   const serverOpts = {
     port: INTERCEPTOR_DEFAULT_PORT,
@@ -49,10 +48,9 @@ export async function startInterceptorService(
     writeAccessLog: (entry: Parameters<typeof writeInterceptorAccessLog>[0]) => {
       writeInterceptorAccessLog(entry, accessLog);
     },
-    writeToolVerdict: (
-      key: Parameters<typeof writeToolVerdict>[0],
-      result: Parameters<typeof writeToolVerdict>[1],
-    ) => writeToolVerdict(key, result, verdictRoot),
+    writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
+      verdictStore.put(key, result);
+    },
   };
   const server = createInterceptorServer(serverOpts);
   let port: number;
@@ -77,7 +75,7 @@ export async function startInterceptorService(
   }
 
   logger.info('interceptor HTTP server starting', { addr: `127.0.0.1:${port}` });
-  maybeCleanupToolVerdicts(verdictRoot, new Date());
+  verdictStore.startCheckpointLoop();
 
   const heartbeat = setInterval(() => {
     void writeRuntime({
@@ -88,19 +86,20 @@ export async function startInterceptorService(
     });
   }, RUNTIME_HEARTBEAT_MS);
   heartbeat.unref();
-  const verdictCleanup = setInterval(() => {
-    maybeCleanupToolVerdicts(verdictRoot, new Date());
-  }, TOOL_VERDICT_CLEANUP_INTERVAL_MS);
-  verdictCleanup.unref();
 
   let stopped = false;
   return {
     port,
+    verdictStore,
     async stop() {
       if (stopped) return;
       stopped = true;
       clearInterval(heartbeat);
-      clearInterval(verdictCleanup);
+      try {
+        verdictStore.stopCheckpointLoop();
+      } catch (err) {
+        logger.warn('interceptor verdict checkpoint failed', { error: String(err) });
+      }
       removeOwnPid(opts.dataDir);
       await closeServer(server);
     },

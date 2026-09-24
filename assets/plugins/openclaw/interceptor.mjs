@@ -13,7 +13,6 @@
  */
 
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,10 +22,8 @@ const INTERCEPTOR_SERVICE = "loongsuite-pilot-interceptor";
 const INTERCEPTOR_HOOK_TIMEOUT_MS = 4_000;
 const INTERCEPTOR_HEALTH_TIMEOUT_MS = 200;
 const ACCESS_LOG_MAX_CHARS = 256_000;
-const TOOL_VERDICT_RETENTION_DAYS = 7;
-const TOOL_VERDICT_MAX_RECORDS = 100_000;
-const TOOL_VERDICT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
+const ACCESS_LOG_MAX_BYTES = 10 * 1024 * 1024;
+const ACCESS_LOG_ROTATE_COUNT = 5;
 
 export const OPENCLAW_HOOK_TO_EVENT = {
   before_agent_run: "UserPromptSubmit",
@@ -156,98 +153,6 @@ function interceptorAccessLogPath(dataDir) {
   return path.join(dataDir, "interceptor", "logs", "access.log");
 }
 
-function toolVerdictDir(dataDir) {
-  return path.join(dataDir, "interceptor", "tool-verdicts");
-}
-
-function toolVerdictHash(request) {
-  return crypto
-    .createHash("sha256")
-    .update(JSON.stringify([
-      request.agent,
-      request.sessionId ?? "",
-      request.toolUseId,
-      request.event,
-    ]))
-    .digest("hex");
-}
-
-function recordToolVerdict(dataDir, request, result) {
-  if (
-    !request.toolUseId
-    || (request.event !== "PreToolUse" && request.event !== "PostToolUse")
-  ) return;
-  const root = toolVerdictDir(dataDir);
-  const now = new Date();
-  const bucket = path.join(root, now.toISOString().slice(0, 10));
-  const dest = path.join(bucket, `${toolVerdictHash(request)}.json`);
-  const tmp = `${dest}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  try {
-    fs.mkdirSync(bucket, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tmp, JSON.stringify({
-      schema: 1,
-      agent: request.agent,
-      sessionId: request.sessionId,
-      toolUseId: request.toolUseId,
-      phase: request.event,
-      result,
-      recordedAt: now.toISOString(),
-    }), { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tmp, dest);
-    maybeCleanupToolVerdicts(root, now);
-  } catch {
-    try { fs.unlinkSync(tmp); } catch {}
-  }
-}
-
-function maybeCleanupToolVerdicts(root, now) {
-  const marker = path.join(root, ".cleanup-marker");
-  const lock = path.join(root, ".cleanup-lock");
-  try {
-    if (now.getTime() - fs.statSync(marker).mtimeMs < TOOL_VERDICT_CLEANUP_INTERVAL_MS) return;
-  } catch {}
-  try {
-    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    fs.closeSync(fs.openSync(lock, "wx", 0o600));
-  } catch {
-    return;
-  }
-  try {
-    const retained = new Set();
-    for (let age = 0; age < TOOL_VERDICT_RETENTION_DAYS; age += 1) {
-      retained.add(new Date(now.getTime() - age * DAY_MS).toISOString().slice(0, 10));
-    }
-    const kept = [];
-    for (const name of fs.readdirSync(root)) {
-      const full = path.join(root, name);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(name) && !retained.has(name)) {
-        fs.rmSync(full, { recursive: true, force: true });
-        continue;
-      }
-      if (!retained.has(name)) continue;
-      for (const filename of fs.readdirSync(full)) {
-        const file = path.join(full, filename);
-        if (filename.endsWith(".tmp")) {
-          try { fs.unlinkSync(file); } catch {}
-        } else if (filename.endsWith(".json")) {
-          try { kept.push({ file, mtimeMs: fs.statSync(file).mtimeMs }); } catch {}
-        }
-      }
-    }
-    if (kept.length > TOOL_VERDICT_MAX_RECORDS) {
-      kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
-      for (let i = 0; i < kept.length - TOOL_VERDICT_MAX_RECORDS; i += 1) {
-        try { fs.unlinkSync(kept[i].file); } catch {}
-      }
-    }
-    fs.writeFileSync(marker, now.toISOString(), { encoding: "utf8", mode: 0o600 });
-  } catch {
-    // Best effort.
-  } finally {
-    try { fs.unlinkSync(lock); } catch {}
-  }
-}
-
 function resolveCli(dataDir) {
   const explicit = process.env.INTERCEPTOR_CLI;
   if (typeof explicit === "string" && explicit.length > 0 && fs.existsSync(explicit)) {
@@ -260,6 +165,26 @@ function resolveCli(dataDir) {
     return fs.existsSync(cli) ? cli : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function rotateAccessLog(filePath) {
+  let size = 0;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    return;
+  }
+  if (size < ACCESS_LOG_MAX_BYTES) return;
+  for (let generation = ACCESS_LOG_ROTATE_COUNT; generation >= 1; generation -= 1) {
+    const from = generation === 1 ? filePath : `${filePath}.${generation - 1}`;
+    const to = `${filePath}.${generation}`;
+    try {
+      fs.rmSync(to, { force: true });
+      fs.renameSync(from, to);
+    } catch {
+      // A missing generation is normal.
+    }
   }
 }
 
@@ -290,6 +215,7 @@ function writeFailOpen(dataDir, request, error) {
         input: { cwd: request.cwd, rawText: "<truncated>" },
       });
     }
+    rotateAccessLog(dest);
     fs.appendFileSync(dest, `${line}\n`, "utf8");
   } catch {
     // Access logs must never affect fail-open.
@@ -378,12 +304,10 @@ export function createOpenClawInterceptor(overrides = {}) {
         "GET",
       );
       if (health.service !== INTERCEPTOR_SERVICE || health.status !== "ok") {
-        recordToolVerdict(deps.resolveDataDir(), request, "unknown");
         writeFailOpen(deps.resolveDataDir(), request, "daemon identity mismatch");
         return undefined;
       }
       if (health.version !== runtime.version || health.pid !== runtime.pid) {
-        recordToolVerdict(deps.resolveDataDir(), request, "unknown");
         writeFailOpen(deps.resolveDataDir(), request, "daemon identity mismatch");
         return undefined;
       }
@@ -401,7 +325,6 @@ export function createOpenClawInterceptor(overrides = {}) {
       rememberPostToolVerdict(request, "block", verdict.reason);
       return openClawBlockResult(request, verdict.reason);
     } catch (err) {
-      recordToolVerdict(deps.resolveDataDir(), request, "unknown");
       writeFailOpen(deps.resolveDataDir(), request, err instanceof Error ? err.message : String(err));
       return undefined;
     }
@@ -426,7 +349,6 @@ export function createOpenClawInterceptor(overrides = {}) {
     if (!runtime) return undefined;
     const cli = resolveCli(dataDir);
     if (!cli) {
-      recordToolVerdict(dataDir, request, "unknown");
       writeFailOpen(dataDir, request, "interceptor cli missing");
       return undefined;
     }
@@ -439,7 +361,6 @@ export function createOpenClawInterceptor(overrides = {}) {
       env: deps.env,
     });
     if (result.error) {
-      recordToolVerdict(dataDir, request, "unknown");
       writeFailOpen(dataDir, request, result.error.message);
       return undefined;
     }
@@ -451,7 +372,6 @@ export function createOpenClawInterceptor(overrides = {}) {
     try {
       return JSON.parse(text);
     } catch {
-      recordToolVerdict(dataDir, request, "unknown");
       writeFailOpen(dataDir, request, "invalid interceptor cli stdout");
       return undefined;
     }
@@ -464,7 +384,6 @@ export function createOpenClawInterceptor(overrides = {}) {
     if (!cached.miss) return cached.result;
     const runtime = currentRuntime();
     if (!runtime) {
-      recordToolVerdict(deps.resolveDataDir(), request, "unknown");
       return undefined;
     }
     if (opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName)) {

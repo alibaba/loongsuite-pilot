@@ -1,132 +1,102 @@
-import * as fs from 'node:fs/promises';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
-  cleanupToolVerdicts,
-  maybeCleanupToolVerdicts,
-  readToolVerdict,
-  writeToolVerdict,
+  TOOL_VERDICT_TTL_MS,
+  ToolVerdictStore,
 } from '../../../src/interceptor/tool-verdict-store.js';
 
 describe('tool verdict store', () => {
-  it('isolates agent, session, and Pre/Post phases', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
+  it('keeps Pre and Post apart and overwrites the same key', () => {
+    const file = checkpointFile();
+    const store = new ToolVerdictStore(file);
     const now = new Date('2026-09-23T08:00:00.000Z');
-    expect(writeToolVerdict({
-      agent: 'qoder',
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse',
-    }, 'allow', root, now)).toBe(true);
-    expect(writeToolVerdict({
-      agent: 'qoder',
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PostToolUse',
-    }, 'deny', root, now)).toBe(true);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow', now);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny', now);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'deny', now);
 
-    expect(readToolVerdict({
-      agent: 'qoder',
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse',
-    }, root, now)?.result).toBe('allow');
-    expect(readToolVerdict({
-      agent: 'qoder',
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PostToolUse',
-    }, root, now)?.result).toBe('deny');
-    expect(readToolVerdict({
-      agent: 'qodercli',
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse',
-    }, root, now)).toBeNull();
-    expect(readToolVerdict({
-      agent: 'qoder',
-      sessionId: 's2',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse',
-    }, root, now)).toBeNull();
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBe('deny');
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, now)).toBe('deny');
+    expect(store.get({ sessionId: 's2', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBeNull();
   });
 
-  it('overwrites the same key atomically and preserves unknown', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
-    const now = new Date('2026-09-23T08:00:00.000Z');
-    const key = {
-      agent: 'openclaw' as const,
-      sessionId: 's1',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse' as const,
-    };
-    writeToolVerdict(key, 'allow', root, now);
-    writeToolVerdict(key, 'unknown', root, now);
-    expect(readToolVerdict(key, root, now)?.result).toBe('unknown');
+  it('drops records older than 30 minutes', () => {
+    const store = new ToolVerdictStore(checkpointFile());
+    const writtenAt = new Date('2026-09-23T08:00:00.000Z');
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow', writtenAt);
+    const stillFresh = new Date(writtenAt.getTime() + TOOL_VERDICT_TTL_MS);
+    const expired = new Date(writtenAt.getTime() + TOOL_VERDICT_TTL_MS + 1);
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, stillFresh)).toBe('allow');
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, expired)).toBeNull();
   });
 
-  it('removes expired buckets and enforces a hard record cap', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
+  it('dumps one checkpoint file and restores it', () => {
+    const file = checkpointFile();
     const now = new Date('2026-09-23T08:00:00.000Z');
-    const oldDir = path.join(root, '2026-09-01');
-    await fs.mkdir(oldDir, { recursive: true });
-    await fs.writeFile(path.join(oldDir, 'old.json'), '{}');
-    for (let i = 0; i < 4; i += 1) {
-      writeToolVerdict({
-        agent: 'qwen-work-cn',
+    const store = new ToolVerdictStore(file);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow', now);
+    store.put({ toolUseId: 'call-2', phase: 'PostToolUse' }, 'deny', now);
+    store.dump(now);
+
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { schema: number; records: unknown[] };
+    expect(raw.schema).toBe(1);
+    expect(raw.records).toEqual([
+      {
         sessionId: 's1',
-        toolUseId: `call-${i}`,
+        toolUseId: 'call-1',
+        phase: 'PreToolUse',
+        action: 'allow',
+        recordedAt: now.toISOString(),
+      },
+      {
+        toolUseId: 'call-2',
         phase: 'PostToolUse',
-      }, 'allow', root, now);
-    }
+        action: 'deny',
+        recordedAt: now.toISOString(),
+      },
+    ]);
 
-    const result = cleanupToolVerdicts(root, now, 2);
-    await expect(fs.stat(oldDir)).rejects.toThrow();
-    const current = (await fs.readdir(path.join(root, '2026-09-23')))
-      .filter(name => name.endsWith('.json'));
-    expect(current).toHaveLength(2);
-    expect(result.kept).toBe(2);
+    const restored = new ToolVerdictStore(file);
+    restored.restore(now);
+    expect(restored.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBe('allow');
+    expect(restored.get({ toolUseId: 'call-2', phase: 'PostToolUse' }, now)).toBe('deny');
   });
 
-  it('treats truncated or mismatched files as a miss', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
-    const now = new Date('2026-09-23T08:00:00.000Z');
-    const key = {
-      agent: 'qoder' as const,
-      sessionId: 's1',
-      toolUseId: 'broken',
-      phase: 'PreToolUse' as const,
-    };
-    writeToolVerdict(key, 'allow', root, now);
-    const files = await fs.readdir(path.join(root, '2026-09-23'));
-    await fs.writeFile(path.join(root, '2026-09-23', files[0]!), '{');
-    expect(readToolVerdict(key, root, now)).toBeNull();
+  it('ignores a corrupt or unknown checkpoint', () => {
+    const file = checkpointFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{');
+    const broken = new ToolVerdictStore(file);
+    broken.restore();
+    expect(broken.get({ toolUseId: 'call-1', phase: 'PreToolUse' })).toBeNull();
+
+    fs.writeFileSync(file, JSON.stringify({ schema: 2, records: [] }));
+    const unknown = new ToolVerdictStore(file);
+    unknown.restore();
+    expect(unknown.get({ toolUseId: 'call-1', phase: 'PreToolUse' })).toBeNull();
   });
 
-  it('looks back across retained UTC buckets', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
-    const writtenAt = new Date('2026-09-20T08:00:00.000Z');
-    const now = new Date('2026-09-23T08:00:00.000Z');
-    const key = {
-      agent: 'openclaw' as const,
-      sessionId: 's1',
-      toolUseId: 'old-call',
-      phase: 'PostToolUse' as const,
-    };
-    writeToolVerdict(key, 'deny', root, writtenAt);
-    expect(readToolVerdict(key, root, now)?.result).toBe('deny');
-    expect(readToolVerdict(key, root, new Date('2026-09-28T08:00:00.000Z'))).toBeNull();
-  });
-
-  it('skips cleanup when another process holds the lock', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-verdict-'));
-    const now = new Date('2026-09-23T08:00:00.000Z');
-    const oldDir = path.join(root, '2026-09-01');
-    await fs.mkdir(oldDir, { recursive: true });
-    await fs.writeFile(path.join(oldDir, 'old.json'), '{}');
-    await fs.writeFile(path.join(root, '.cleanup-lock'), '');
-    maybeCleanupToolVerdicts(root, now);
-    await expect(fs.stat(oldDir)).resolves.toBeDefined();
+  it('does not restore records older than 30 minutes', () => {
+    const file = checkpointFile();
+    const writtenAt = new Date('2026-09-23T08:00:00.000Z');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      schema: 1,
+      records: [{
+        sessionId: 's1',
+        toolUseId: 'call-1',
+        phase: 'PreToolUse',
+        action: 'deny',
+        recordedAt: writtenAt.toISOString(),
+      }],
+    }));
+    const store = new ToolVerdictStore(file);
+    store.restore(new Date(writtenAt.getTime() + TOOL_VERDICT_TTL_MS + 1));
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' })).toBeNull();
   });
 });
+
+function checkpointFile(): string {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tool-verdict-')), 'tool-verdicts.json');
+}

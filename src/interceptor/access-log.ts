@@ -1,9 +1,11 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { interceptorAccessLogPath } from './paths.js';
 import type { HookRequest } from './types.js';
 
 export const ACCESS_LOG_MAX_CHARS = 256_000;
+export const ACCESS_LOG_MAX_BYTES = 10 * 1024 * 1024;
+export const ACCESS_LOG_ROTATE_COUNT = 5;
 
 export type AccessLogAction = 'allow' | 'block' | 'fail-open';
 
@@ -76,13 +78,35 @@ export function buildAccessLogEntry(
 export function writeInterceptorAccessLog(
   entry: InterceptorAccessLogEntry,
   filePath?: string,
+  limits: { maxBytes?: number; rotateCount?: number } = {},
 ): void {
   try {
     const dest = filePath ?? interceptorAccessLogPath();
     mkdirSync(dirname(dest), { recursive: true });
+    rotateAccessLog(dest, limits.maxBytes ?? ACCESS_LOG_MAX_BYTES, limits.rotateCount ?? ACCESS_LOG_ROTATE_COUNT);
     appendFileSync(dest, `${serializeAccessLogEntry(entry)}\n`, 'utf8');
   } catch {
     // Access logs must never affect fail-open or the host verdict.
+  }
+}
+
+export function rotateAccessLog(filePath: string, maxBytes: number, rotateCount: number): void {
+  let size = 0;
+  try {
+    size = statSync(filePath).size;
+  } catch {
+    return;
+  }
+  if (size < maxBytes || rotateCount < 1) return;
+  for (let generation = rotateCount; generation >= 1; generation -= 1) {
+    const from = generation === 1 ? filePath : `${filePath}.${generation - 1}`;
+    const to = `${filePath}.${generation}`;
+    try {
+      rmSync(to, { force: true });
+      renameSync(from, to);
+    } catch {
+      // A missing generation is normal; the next write still appends.
+    }
   }
 }
 

@@ -78,6 +78,33 @@ describe('interceptor access log', () => {
     expect(JSON.parse(lines[1]!).result).toMatchObject({ action: 'block' });
   });
 
+  it('rotates the access log once it reaches the size limit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'interceptor-access-'));
+    const file = join(dir, 'access.log');
+    const limits = { maxBytes: 80, rotateCount: 2 };
+    writeInterceptorAccessLog(buildAccessLogEntry({
+      event: 'UserPromptSubmit',
+      input: { prompt: 'first-line-long-enough' },
+      result: { action: 'allow' },
+    }), file, limits);
+    writeInterceptorAccessLog(buildAccessLogEntry({
+      event: 'UserPromptSubmit',
+      input: { prompt: 'second-line-long-enough' },
+      result: { action: 'allow' },
+    }), file, limits);
+    writeInterceptorAccessLog(buildAccessLogEntry({
+      event: 'UserPromptSubmit',
+      input: { prompt: 'third-line-long-enough' },
+      result: { action: 'block' },
+    }), file, limits);
+
+    const current = (await readFile(file, 'utf8')).trim().split('\n');
+    const rotated = (await readFile(`${file}.1`, 'utf8')).trim().split('\n');
+    expect(JSON.parse(current[0]!).result.action).toBe('block');
+    expect(JSON.parse(rotated[0]!).input.prompt).toBe('second-line-long-enough');
+    await expect(readFile(`${file}.2`, 'utf8')).resolves.toContain('first-line-long-enough');
+  });
+
   it('truncates oversized input instead of dropping the line', () => {
     const huge = 'x'.repeat(ACCESS_LOG_MAX_CHARS);
     const line = serializeAccessLogEntry(buildAccessLogEntry({

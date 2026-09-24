@@ -6,7 +6,9 @@ import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
-import { interceptorToolVerdictDir } from '../interceptor/paths.js';
+import { interceptorToolVerdictPath } from '../interceptor/paths.js';
+import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../interceptor/config.js';
+import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
@@ -173,6 +175,7 @@ export class Orchestrator extends EventEmitter {
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
   private interceptorService: InterceptorService | null = null;
+  private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
@@ -225,8 +228,14 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
+    this.verdictStore.restore();
+    const interceptorConfig = await loadInterceptorConfig();
     this.inputManager.setInterceptResultLinker(
-      new InterceptResultLinker(interceptorToolVerdictDir(this.dataDir)),
+      new InterceptResultLinker(
+        this.verdictStore,
+        resolveEnabledInterceptorTypes(interceptorConfig).size > 0,
+      ),
     );
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
@@ -420,6 +429,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       version: packageVersion,
       gitCommit: packageGitCommit || undefined,
+      verdictStore: this.verdictStore ?? undefined,
     }).catch(err => {
       logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
       return null;
@@ -485,7 +495,15 @@ export class Orchestrator extends EventEmitter {
     await this.interceptorService?.stop().catch(err => {
       logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
     });
+    if (!this.interceptorService) {
+      try {
+        this.verdictStore?.dump();
+      } catch (err) {
+        logger.warn('interceptor verdict checkpoint failed', { error: String(err) });
+      }
+    }
     this.interceptorService = null;
+    this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();

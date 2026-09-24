@@ -4,7 +4,7 @@ import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import { wrapHostReason } from '../../../src/interceptor/adapters/reason.js';
 import { INTERCEPTOR_SERVICE, type LocalRule } from '../../../src/interceptor/types.js';
-import type { ToolInterceptResult, ToolVerdictKey } from '../../../src/interceptor/tool-verdict-store.js';
+import type { ToolVerdictAction, ToolVerdictKey } from '../../../src/interceptor/tool-verdict-store.js';
 
 function listen(server: import('node:http').Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -33,7 +33,7 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
@@ -41,9 +41,8 @@ describe('interceptor daemon HTTP API', () => {
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
         verdicts.push({ key, result });
-        return true;
       },
     };
     const server = createInterceptorServer(opts);
@@ -128,7 +127,6 @@ describe('interceptor daemon HTTP API', () => {
       expect(verdicts).toEqual([
         {
           key: {
-            agent: 'qoder',
             sessionId: 'qoder-session',
             toolUseId: 'qoder-post-1',
             phase: 'PostToolUse',
@@ -137,7 +135,6 @@ describe('interceptor daemon HTTP API', () => {
         },
         {
           key: {
-            agent: 'openclaw',
             sessionId: 'open-session',
             toolUseId: 'open-pre-1',
             phase: 'PreToolUse',
@@ -161,7 +158,7 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
@@ -169,9 +166,8 @@ describe('interceptor daemon HTTP API', () => {
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
         verdicts.push({ key, result });
-        return true;
       },
     };
     const server = createInterceptorServer(opts);
@@ -246,7 +242,6 @@ describe('interceptor daemon HTTP API', () => {
       });
       expect(verdicts).toContainEqual({
         key: {
-          agent: 'qwen-work-cn',
           sessionId: 'qwen-session',
           toolUseId: 'qwen-pre-1',
           phase: 'PreToolUse',
@@ -258,7 +253,7 @@ describe('interceptor daemon HTTP API', () => {
     }
   });
 
-  it('records unknown when a rule throws but still fail-opens the host', async () => {
+  it('does not store a verdict when a rule throws and still fail-opens the host', async () => {
     const rule: LocalRule = {
       id: 'boom',
       supports: () => true,
@@ -266,15 +261,14 @@ describe('interceptor daemon HTTP API', () => {
         throw new Error('rule failed');
       },
     };
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
       engine: new RuleEngine([rule], new Set(['boom'])),
       writeAccessLog: () => undefined,
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
         verdicts.push({ key, result });
-        return true;
       },
     };
     const server = createInterceptorServer(opts);
@@ -297,15 +291,7 @@ describe('interceptor daemon HTTP API', () => {
         action: 'allow',
         failOpen: true,
       });
-      expect(verdicts).toEqual([{
-        key: {
-          agent: 'qodercli',
-          sessionId: 'cli-session',
-          toolUseId: 'cli-pre-1',
-          phase: 'PreToolUse',
-        },
-        result: 'unknown',
-      }]);
+      expect(verdicts).toEqual([]);
     } finally {
       server.close();
     }

@@ -18,7 +18,7 @@ import {
 } from '../types.js';
 import {
   isToolInterceptPhase,
-  type ToolInterceptResult,
+  type ToolVerdictAction,
   type ToolVerdictKey,
 } from '../tool-verdict-store.js';
 
@@ -27,7 +27,7 @@ export interface InterceptorServerOptions {
   version: string;
   engine: RuleEngine;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
-  writeToolVerdict?: (key: ToolVerdictKey, result: ToolInterceptResult) => boolean;
+  writeToolVerdict?: (key: ToolVerdictKey, result: ToolVerdictAction) => void;
 }
 
 export function createInterceptorServer(opts: InterceptorServerOptions): http.Server {
@@ -182,12 +182,12 @@ async function handleQwenWorkHttp(
 function recordToolVerdict(
   opts: InterceptorServerOptions,
   request: HookRequest,
-  result: ToolInterceptResult,
+  result: ToolVerdictAction | 'unknown',
 ): void {
   if (!opts.writeToolVerdict || !request.toolUseId || !isToolInterceptPhase(request.event)) return;
+  if (result !== 'allow' && result !== 'deny') return;
   try {
     opts.writeToolVerdict({
-      agent: request.agent,
       sessionId: request.sessionId,
       toolUseId: request.toolUseId,
       phase: request.event,

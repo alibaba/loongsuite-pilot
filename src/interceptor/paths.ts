@@ -24,8 +24,8 @@ export function interceptorAccessLogPath(dataDir?: string): string {
   return path.join(interceptorDataDir(dataDir), 'logs', 'access.log');
 }
 
-export function interceptorToolVerdictDir(dataDir?: string): string {
-  return path.join(interceptorDataDir(dataDir), 'tool-verdicts');
+export function interceptorToolVerdictPath(dataDir?: string): string {
+  return path.join(interceptorDataDir(dataDir), 'tool-verdicts.json');
 }
 
 export function interceptorLockPath(dataDir?: string): string {

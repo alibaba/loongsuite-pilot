@@ -16,7 +16,7 @@ import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
 import { InterceptResultLinker } from '../../../src/core/intercept-result-linker.js';
-import { writeToolVerdict } from '../../../src/interceptor/tool-verdict-store.js';
+import { ToolVerdictStore } from '../../../src/interceptor/tool-verdict-store.js';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -875,20 +875,10 @@ describe('InputManager', () => {
 
   describe('interceptor result linking', () => {
     it('joins tool.call and tool.result before invocation identity rewrite', async () => {
-      const root = await createTempDir('intercept-link-');
-      writeToolVerdict({
-        agent: 'qoder',
-        sessionId: 'native-session',
-        toolUseId: 'call-1',
-        phase: 'PreToolUse',
-      }, 'allow', root);
-      writeToolVerdict({
-        agent: 'qoder',
-        sessionId: 'native-session',
-        toolUseId: 'call-1',
-        phase: 'PostToolUse',
-      }, 'deny', root);
-      manager.setInterceptResultLinker(new InterceptResultLinker(root));
+      const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny');
+      manager.setInterceptResultLinker(new InterceptResultLinker(store, true));
       manager.setConfiguredUserId('installer-user');
       const input = new StubInput('qoder-tools');
       manager.registerInput(input as any);
@@ -915,10 +905,11 @@ describe('InputManager', () => {
       await manager.stopAll();
 
       const dispatched = flusher.batchCalls[0];
-      expect(dispatched[0]['gen_ai.intercept.result']).toBe('allow');
-      expect(dispatched[1]['gen_ai.intercept.result']).toBe('deny');
-      expect(dispatched[2]['gen_ai.intercept.result']).toBeUndefined();
-      await cleanupTempDir(root);
+      expect(dispatched[0]['gen_ai.guardrail.action']).toBe('allow');
+      expect(dispatched[0]['gen_ai.guardrail.triggered']).toBe(true);
+      expect(dispatched[1]['gen_ai.guardrail.action']).toBe('deny');
+      expect(dispatched[2]['gen_ai.guardrail.action']).toBe('unknown');
+      expect(dispatched[2]['gen_ai.guardrail.triggered']).toBe(true);
     });
   });
 

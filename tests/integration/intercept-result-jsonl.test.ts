@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { InputManager } from '../../src/core/input-manager.js';
 import { InterceptResultLinker } from '../../src/core/intercept-result-linker.js';
-import { writeToolVerdict } from '../../src/interceptor/tool-verdict-store.js';
+import { ToolVerdictStore } from '../../src/interceptor/tool-verdict-store.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { ClientType, CollectionMethod } from '../../src/types/index.js';
 import { buildTestEntry, cleanupTempDir, createTempDir } from '../helpers/fixture-builder.js';
@@ -18,22 +18,12 @@ class StubInput extends EventEmitter {
 }
 
 describe('interceptor result JSONL output', () => {
-  it('writes gen_ai.intercept.result onto flushed tool events', async () => {
+  it('writes guardrail fields onto flushed tool events', async () => {
     const root = await createTempDir('intercept-jsonl-');
-    const verdictDir = path.join(root, 'verdicts');
     const outputDir = path.join(root, 'output');
-    writeToolVerdict({
-      agent: 'qoder',
-      sessionId: 'native-session',
-      toolUseId: 'call-1',
-      phase: 'PreToolUse',
-    }, 'allow', verdictDir);
-    writeToolVerdict({
-      agent: 'qoder',
-      sessionId: 'native-session',
-      toolUseId: 'call-1',
-      phase: 'PostToolUse',
-    }, 'deny', verdictDir);
+    const store = new ToolVerdictStore(path.join(root, 'tool-verdicts.json'));
+    store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
+    store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny');
 
     const manager = new InputManager();
     const flusher = new JsonlFlusher({
@@ -44,7 +34,7 @@ describe('interceptor result JSONL output', () => {
     });
     await flusher.start();
     manager.setFlusher(flusher);
-    manager.setInterceptResultLinker(new InterceptResultLinker(verdictDir));
+    manager.setInterceptResultLinker(new InterceptResultLinker(store, true));
     const input = new StubInput();
     manager.registerInput(input as any);
 
@@ -75,11 +65,13 @@ describe('interceptor result JSONL output', () => {
       .map(line => JSON.parse(line) as Record<string, unknown>);
     expect(lines[0]).toMatchObject({
       'event.name': 'tool.call',
-      'gen_ai.intercept.result': 'allow',
+      'gen_ai.guardrail.triggered': true,
+      'gen_ai.guardrail.action': 'allow',
     });
     expect(lines[1]).toMatchObject({
       'event.name': 'tool.result',
-      'gen_ai.intercept.result': 'deny',
+      'gen_ai.guardrail.triggered': true,
+      'gen_ai.guardrail.action': 'deny',
     });
     await cleanupTempDir(root);
   });
