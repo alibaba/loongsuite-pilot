@@ -4,6 +4,7 @@ import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import { wrapHostReason } from '../../../src/interceptor/adapters/reason.js';
 import { INTERCEPTOR_SERVICE, type LocalRule } from '../../../src/interceptor/types.js';
+import type { ToolInterceptResult, ToolVerdictKey } from '../../../src/interceptor/tool-verdict-store.js';
 
 function listen(server: import('node:http').Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -32,12 +33,17 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
       engine: new RuleEngine([rule], new Set(['demo'])),
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
+      },
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+        verdicts.push({ key, result });
+        return true;
       },
     };
     const server = createInterceptorServer(opts);
@@ -61,6 +67,8 @@ describe('interceptor daemon HTTP API', () => {
           prompt: 'hello',
           toolName: 'Bash',
           toolResponse: { stdout: 'ok' },
+          toolUseId: 'qoder-post-1',
+          sessionId: 'qoder-session',
           raw: { hook_event_name: 'PostToolUse' },
         }),
       });
@@ -90,6 +98,8 @@ describe('interceptor daemon HTTP API', () => {
           event: 'PreToolUse',
           toolName: 'exec',
           toolInput: { command: 'secret' },
+          toolUseId: 'open-pre-1',
+          sessionId: 'open-session',
           raw: { openclaw_hook: 'before_tool_call' },
         }),
       });
@@ -115,6 +125,26 @@ describe('interceptor daemon HTTP API', () => {
         agent: 'openclaw',
         result: { action: 'block', reason: 'blocked by demo', ruleId: 'demo' },
       });
+      expect(verdicts).toEqual([
+        {
+          key: {
+            agent: 'qoder',
+            sessionId: 'qoder-session',
+            toolUseId: 'qoder-post-1',
+            phase: 'PostToolUse',
+          },
+          result: 'allow',
+        },
+        {
+          key: {
+            agent: 'openclaw',
+            sessionId: 'open-session',
+            toolUseId: 'open-pre-1',
+            phase: 'PreToolUse',
+          },
+          result: 'deny',
+        },
+      ]);
     } finally {
       server.close();
     }
@@ -131,12 +161,17 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
       engine: new RuleEngine([rule], new Set(['demo'])),
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
+      },
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+        verdicts.push({ key, result });
+        return true;
       },
     };
     const server = createInterceptorServer(opts);
@@ -167,6 +202,8 @@ describe('interceptor daemon HTTP API', () => {
           hook_event_name: 'PreToolUse',
           tool_name: 'Bash',
           tool_input: { command: 'id' },
+          tool_use_id: 'qwen-pre-1',
+          session_id: 'qwen-session',
         }),
       });
       expect(preBlocked.status).toBe(200);
@@ -207,6 +244,68 @@ describe('interceptor daemon HTTP API', () => {
       expect(access.at(-1)).toMatchObject({
         result: { action: 'fail-open', error: 'unsupported hook event' },
       });
+      expect(verdicts).toContainEqual({
+        key: {
+          agent: 'qwen-work-cn',
+          sessionId: 'qwen-session',
+          toolUseId: 'qwen-pre-1',
+          phase: 'PreToolUse',
+        },
+        result: 'deny',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records unknown when a rule throws but still fail-opens the host', async () => {
+    const rule: LocalRule = {
+      id: 'boom',
+      supports: () => true,
+      evaluate: async () => {
+        throw new Error('rule failed');
+      },
+    };
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const opts = {
+      port: 0,
+      version: '1.2.3',
+      engine: new RuleEngine([rule], new Set(['boom'])),
+      writeAccessLog: () => undefined,
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolInterceptResult) => {
+        verdicts.push({ key, result });
+        return true;
+      },
+    };
+    const server = createInterceptorServer(opts);
+    const port = await listen(server);
+    opts.port = port;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent: 'qodercli',
+          event: 'PreToolUse',
+          toolName: 'Bash',
+          toolUseId: 'cli-pre-1',
+          sessionId: 'cli-session',
+          raw: {},
+        }),
+      });
+      await expect(response.json()).resolves.toMatchObject({
+        action: 'allow',
+        failOpen: true,
+      });
+      expect(verdicts).toEqual([{
+        key: {
+          agent: 'qodercli',
+          sessionId: 'cli-session',
+          toolUseId: 'cli-pre-1',
+          phase: 'PreToolUse',
+        },
+        result: 'unknown',
+      }]);
     } finally {
       server.close();
     }

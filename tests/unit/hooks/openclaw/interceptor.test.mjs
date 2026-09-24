@@ -82,8 +82,23 @@ describe('OpenClaw interceptor client', () => {
   it('fail-opens silently when interceptor runtime is missing', async () => {
     const { createOpenClawInterceptor } = await import(/* @vite-ignore */ `${INTERCEPTOR_PATH}?missing=${Date.now()}`);
     const interceptor = createOpenClawInterceptor({ resolveDataDir: () => tmpDir });
-    expect(interceptor.evaluate('before_tool_call', { toolName: 'exec', params: { command: 'id' } }, {})).toBeUndefined();
+    expect(interceptor.evaluate('before_tool_call', {
+      toolName: 'exec',
+      params: { command: 'id' },
+      toolCallId: 'call-missing',
+      sessionId: 's1',
+    }, {})).toBeUndefined();
     expect(fs.existsSync(path.join(tmpDir, 'interceptor', 'logs', 'access.log'))).toBe(false);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const files = fs.readdirSync(path.join(tmpDir, 'interceptor', 'tool-verdicts', stamp));
+    const record = JSON.parse(fs.readFileSync(path.join(tmpDir, 'interceptor', 'tool-verdicts', stamp, files[0]), 'utf8'));
+    expect(record).toMatchObject({
+      agent: 'openclaw',
+      sessionId: 's1',
+      toolUseId: 'call-missing',
+      phase: 'PreToolUse',
+      result: 'unknown',
+    });
   });
 
   it('blocks before_tool_call through the daemon and fail-opens on timeout', async () => {
@@ -251,6 +266,13 @@ describe('OpenClaw plugin interceptor wiring', () => {
     const logFile = path.join(tmpDir, 'logs', 'openclaw', `openclaw-${stamp}.jsonl`);
     const records = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(JSON.parse);
     expect(records.some(record => record['agent.openclaw.hook'] === 'before_tool_call')).toBe(true);
+    const stampUtc = new Date().toISOString().slice(0, 10);
+    const verdictDir = path.join(tmpDir, 'interceptor', 'tool-verdicts', stampUtc);
+    const verdictFiles = fs.readdirSync(verdictDir).filter(name => name.endsWith('.json'));
+    expect(verdictFiles.length).toBeGreaterThan(0);
+    const verdicts = verdictFiles.map(name => JSON.parse(fs.readFileSync(path.join(verdictDir, name), 'utf8')));
+    expect(verdicts.some(record => record.toolUseId === 't1' && record.phase === 'PreToolUse' && record.result === 'unknown')).toBe(true);
+    expect(verdicts.some(record => record.toolUseId === 't1' && record.phase === 'PostToolUse' && record.result === 'unknown')).toBe(true);
   });
 
   it('returns an OpenClaw block decision from before_agent_run when the daemon blocks', async () => {

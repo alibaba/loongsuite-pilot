@@ -16,12 +16,18 @@ import {
   type HookRequest,
   type InterceptorHealth,
 } from '../types.js';
+import {
+  isToolInterceptPhase,
+  type ToolInterceptResult,
+  type ToolVerdictKey,
+} from '../tool-verdict-store.js';
 
 export interface InterceptorServerOptions {
   port: number;
   version: string;
   engine: RuleEngine;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
+  writeToolVerdict?: (key: ToolVerdictKey, result: ToolInterceptResult) => boolean;
 }
 
 export function createInterceptorServer(opts: InterceptorServerOptions): http.Server {
@@ -66,10 +72,12 @@ async function handle(
       }
       const request = body;
       const verdict = await opts.engine.evaluate(request);
+      recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action === 'block' ? 'deny' : 'allow');
       recordAccess(opts, {
         event: request.event,
         agent: request.agent,
         sessionId: request.sessionId,
+        toolUseId: request.toolUseId,
         input: accessInputFromHookRequest(request),
         result: {
           action: verdict.action,
@@ -135,10 +143,12 @@ async function handleQwenWorkHttp(
 
   try {
     const verdict = await opts.engine.evaluate(request);
+    recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action === 'block' ? 'deny' : 'allow');
     recordAccess(opts, {
       event: request.event,
       agent: request.agent,
       sessionId: request.sessionId,
+      toolUseId: request.toolUseId,
       input: accessInputFromHookRequest(request),
       result: {
         action: verdict.action,
@@ -153,10 +163,12 @@ async function handleQwenWorkHttp(
     }
     writeJson(res, 200, qwenWorkBlockBody(request, verdict.reason));
   } catch (err) {
+    recordToolVerdict(opts, request, 'unknown');
     recordAccess(opts, {
       event: request.event,
       agent: request.agent,
       sessionId: request.sessionId,
+      toolUseId: request.toolUseId,
       input: accessInputFromHookRequest(request),
       result: {
         action: 'fail-open',
@@ -164,6 +176,24 @@ async function handleQwenWorkHttp(
       },
     });
     writeJson(res, 200, qwenWorkAllowBody());
+  }
+}
+
+function recordToolVerdict(
+  opts: InterceptorServerOptions,
+  request: HookRequest,
+  result: ToolInterceptResult,
+): void {
+  if (!opts.writeToolVerdict || !request.toolUseId || !isToolInterceptPhase(request.event)) return;
+  try {
+    opts.writeToolVerdict({
+      agent: request.agent,
+      sessionId: request.sessionId,
+      toolUseId: request.toolUseId,
+      phase: request.event,
+    }, result);
+  } catch {
+    // Verdict persistence must never affect the host response.
   }
 }
 

@@ -105,6 +105,7 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
+| `gen_ai.intercept.result` | string | 有匹配拦截判定时 Conditionally Required | 当前工具阶段的本地拦截结果：`tool.call` 关联 `PreToolUse`，`tool.result` 关联 `PostToolUse`。取值为 `allow`、`deny` 或基础设施 fail-open 时的 `unknown`。没有稳定 tool call ID 或找不到判定记录时省略。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |

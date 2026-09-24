@@ -11,6 +11,12 @@ import { parseHookRequest, renderQoderBlock } from '../adapters/qoder.js';
 import { parseQwenWorkHookRequest, renderQwenWorkBlock } from '../adapters/qwenwork.js';
 import { wrapHostReason } from '../adapters/reason.js';
 import { interceptorRuntimePath } from '../paths.js';
+import {
+  isToolInterceptPhase,
+  writeToolVerdict,
+  type ToolInterceptResult,
+  type ToolVerdictKey,
+} from '../tool-verdict-store.js';
 import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
 import { DaemonClient } from './daemon-client.js';
 import { resolveQoderSurface } from './qoder-surface.js';
@@ -23,6 +29,7 @@ export interface HookCliDeps {
   resolveSurface?: () => ReturnType<typeof resolveQoderSurface>;
   createClient?: (port: number) => Pick<DaemonClient, 'checkHook' | 'health'>;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
+  writeToolVerdict?: (key: ToolVerdictKey, result: ToolInterceptResult) => boolean;
 }
 
 export async function runHook(args: string[], deps: HookCliDeps): Promise<number> {
@@ -88,7 +95,8 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
   const runtime = readRuntime(deps.runtimePath ?? interceptorRuntimePath());
   if (!runtime) {
     deps.log('interceptor runtime missing, fail-open');
-    recordFailOpen(deps, request.event, accessInputFromHookRequest(request), 'interceptor runtime missing', request.agent, request.sessionId);
+    recordUnknownVerdict(deps, request);
+    recordFailOpen(deps, request.event, accessInputFromHookRequest(request), 'interceptor runtime missing', request.agent, request.sessionId, request.toolUseId);
     return 0;
   }
 
@@ -102,6 +110,7 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
         runtimePid: runtime.pid,
         healthPid: health.pid,
       });
+      recordUnknownVerdict(deps, request);
       recordFailOpen(
         deps,
         request.event,
@@ -109,15 +118,22 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
         'daemon identity mismatch',
         request.agent,
         request.sessionId,
+        request.toolUseId,
       );
       return 0;
     }
     const verdict = await client.checkHook(request);
+    recordHostVerdict(
+      deps,
+      request,
+      verdict.failOpen ? 'unknown' : verdict.action === 'block' ? 'deny' : 'allow',
+    );
     emitVerdict(request, verdict.action, verdict.reason, deps.writeStdout);
   } catch (err) {
     deps.log('daemon hook request failed, fail-open', {
       error: err instanceof Error ? err.message : String(err),
     });
+    recordUnknownVerdict(deps, request);
     recordFailOpen(
       deps,
       request.event,
@@ -125,9 +141,32 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
       err instanceof Error ? err.message : String(err),
       request.agent,
       request.sessionId,
+      request.toolUseId,
     );
   }
   return 0;
+}
+
+function recordUnknownVerdict(deps: HookCliDeps, request: HookRequest): void {
+  recordHostVerdict(deps, request, 'unknown');
+}
+
+function recordHostVerdict(
+  deps: HookCliDeps,
+  request: HookRequest,
+  result: ToolInterceptResult,
+): void {
+  if (!request.toolUseId || !isToolInterceptPhase(request.event)) return;
+  try {
+    (deps.writeToolVerdict ?? writeToolVerdict)({
+      agent: request.agent,
+      sessionId: request.sessionId,
+      toolUseId: request.toolUseId,
+      phase: request.event,
+    }, result);
+  } catch {
+    // Fail-open diagnostics must not affect the host.
+  }
 }
 
 function recordFailOpen(
@@ -137,6 +176,7 @@ function recordFailOpen(
   error: string,
   agent?: string,
   sessionId?: string,
+  toolUseId?: string,
 ): void {
   try {
     const write = deps.writeAccessLog ?? writeInterceptorAccessLog;
@@ -144,6 +184,7 @@ function recordFailOpen(
       event,
       agent,
       sessionId,
+      toolUseId,
       input,
       result: { action: 'fail-open', error },
     }));

@@ -1333,23 +1333,61 @@ function makeHandler(fn, interceptHook) {
   // Keep persistence hooks synchronous: OpenClaw's tool_result_persist and
   // before_message_write hooks reject Promise-returning handlers.
   return function safeHandler(event, ctx) {
-    try {
-      const cfg = loadPilotConfig();
-      const userId = resolveUserId(cfg);
-      const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
-      fn(event, ctx, userId, emit, cfg);
-    } catch (err) {
-      writeError(fn.name || "handler", err);
+    const collect = () => {
+      try {
+        const cfg = loadPilotConfig();
+        const userId = resolveUserId(cfg);
+        const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
+        fn(event, ctx, userId, emit, cfg);
+      } catch (err) {
+        writeError(fn.name || "handler", err);
+      }
+    };
+    if (!interceptHook) {
+      collect();
+      return;
     }
-    if (!interceptHook) return;
+
+    const options = {
+      cwd: agentCwd,
+      sync: SYNC_INTERCEPT_HOOKS.has(interceptHook),
+    };
+    if (options.sync) {
+      let decision;
+      try {
+        decision = evaluateInterceptor(interceptHook, event, ctx, options);
+      } catch (err) {
+        writeError("interceptor", err);
+      }
+      // Publish transcript/plugin JSONL only after the verdict record is durable.
+      collect();
+      return decision;
+    }
+
+    let pending;
     try {
-      return evaluateInterceptor(interceptHook, event, ctx, {
-        cwd: agentCwd,
-        sync: SYNC_INTERCEPT_HOOKS.has(interceptHook),
-      });
+      pending = evaluateInterceptor(interceptHook, event, ctx, options);
     } catch (err) {
       writeError("interceptor", err);
+      collect();
+      return undefined;
     }
+    // Missing runtime is a synchronous fail-open; preserve the host hook's
+    // synchronous return contract while still recording unknown first.
+    if (!pending || typeof pending.then !== "function") {
+      collect();
+      return pending;
+    }
+    return Promise.resolve(pending)
+      .catch((err) => {
+        writeError("interceptor", err);
+        return undefined;
+      })
+      .then((decision) => {
+        // Prevent the collector from consuming this event before verdict storage.
+        collect();
+        return decision;
+      });
   };
 }
 

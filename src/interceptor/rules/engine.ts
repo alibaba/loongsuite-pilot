@@ -20,7 +20,7 @@ export class RuleEngine {
       try {
         result = await rule.evaluate(request);
       } catch {
-        return { action: 'allow', evaluatedRules };
+        return { action: 'allow', evaluatedRules, failOpen: true };
       }
       if (result.matched) {
         return {

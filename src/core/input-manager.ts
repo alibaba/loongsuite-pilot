@@ -21,6 +21,7 @@ import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
+import type { InterceptResultLinker } from './intercept-result-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -86,6 +87,7 @@ export class InputManager extends EventEmitter {
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
   private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
+  private interceptResultLinker: InterceptResultLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
 
@@ -116,6 +118,10 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  setInterceptResultLinker(linker: InterceptResultLinker): void {
+    this.interceptResultLinker = linker;
   }
 
   /** Process-scoped; reject replacing a different live instance. */
@@ -328,6 +334,18 @@ export class InputManager extends EventEmitter {
     entries: AgentActivityEntry[],
   ): Promise<void> {
     if (entries.length === 0) return;
+
+    // Join while entries still carry the agent-native session id.
+    if (this.interceptResultLinker) {
+      try {
+        this.interceptResultLinker.enrich(entries);
+      } catch (err) {
+        logger.warn('interceptor result linking failed (skipped)', {
+          inputId,
+          error: String(err),
+        });
+      }
+    }
 
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);

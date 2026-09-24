@@ -16,6 +16,7 @@ describe('interceptor access log', () => {
     const line = serializeAccessLogEntry(buildAccessLogEntry({
       event: 'PostToolUse',
       agent: 'qoder',
+      toolUseId: 'call-1',
       input: {
         toolName: 'Bash',
         toolResponse: { stdout: 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },
@@ -24,6 +25,7 @@ describe('interceptor access log', () => {
     }));
     const parsed = JSON.parse(line) as Record<string, unknown>;
     expect(parsed.event).toBe('PostToolUse');
+    expect(parsed.toolUseId).toBe('call-1');
     expect(parsed.input).toMatchObject({
       toolName: 'Bash',
       toolResponse: { stdout: 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },

@@ -1,6 +1,6 @@
 # 本地拦截模块
 
-[Qoder CLI Hooks Reference](https://docs.qoder.com/cli/hooks-reference) · [Qoder Hooks](https://docs.qoder.com/extensions/hooks)
+[Qoder CLI Hooks Reference](https://docs.qoder.com/cli/hooks-reference) · [Qoder Hooks](https://docs.qoder.com/extensions/hooks) · [请求与响应协议](interceptor-protocol.md)
 
 Interceptor 是 Pilot 的第三个同级服务，和 collector / updater 一样由 launchd、systemd 或 Windows Task Scheduler 在安装时启动并守护。它不依赖第一次 hook 触发，也不作为 collector 子进程。
 
@@ -63,6 +63,7 @@ assets/plugins/openclaw/plugin.mjs
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）
+- 工具判定：`~/.loongsuite-pilot/interceptor/tool-verdicts/`（`PreToolUse` / `PostToolUse` 按 tool call id 关联，详见 [请求与响应协议](interceptor-protocol.md#tool-判定与-transcript-关联)）
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/daemon.cjs`
 - 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），daemon **启动时读一次**，不热加载
 

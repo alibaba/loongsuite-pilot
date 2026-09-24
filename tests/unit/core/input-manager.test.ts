@@ -15,6 +15,8 @@ import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
+import { InterceptResultLinker } from '../../../src/core/intercept-result-linker.js';
+import { writeToolVerdict } from '../../../src/interceptor/tool-verdict-store.js';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -870,6 +872,55 @@ describe('InputManager', () => {
     });
   });
 
+
+  describe('interceptor result linking', () => {
+    it('joins tool.call and tool.result before invocation identity rewrite', async () => {
+      const root = await createTempDir('intercept-link-');
+      writeToolVerdict({
+        agent: 'qoder',
+        sessionId: 'native-session',
+        toolUseId: 'call-1',
+        phase: 'PreToolUse',
+      }, 'allow', root);
+      writeToolVerdict({
+        agent: 'qoder',
+        sessionId: 'native-session',
+        toolUseId: 'call-1',
+        phase: 'PostToolUse',
+      }, 'deny', root);
+      manager.setInterceptResultLinker(new InterceptResultLinker(root));
+      manager.setConfiguredUserId('installer-user');
+      const input = new StubInput('qoder-tools');
+      manager.registerInput(input as any);
+
+      input.emit('entries', [
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'call',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.result',
+          'event.id': 'result',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'missing',
+          'gen_ai.session.id': 'native-session',
+        }),
+      ]);
+      await manager.stopAll();
+
+      const dispatched = flusher.batchCalls[0];
+      expect(dispatched[0]['gen_ai.intercept.result']).toBe('allow');
+      expect(dispatched[1]['gen_ai.intercept.result']).toBe('deny');
+      expect(dispatched[2]['gen_ai.intercept.result']).toBeUndefined();
+      await cleanupTempDir(root);
+    });
+  });
 
   describe('no flusher warning', () => {
     it('drops entries when no flusher is set', async () => {

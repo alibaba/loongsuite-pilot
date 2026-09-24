@@ -90,6 +90,8 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  /** Host-observed interceptor verdict for this tool phase. */
+  'gen_ai.intercept.result'?: 'allow' | 'deny' | 'unknown';
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

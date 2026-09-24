@@ -43,6 +43,8 @@ export interface EvaluateHookResponse {
   reason?: string;
   ruleId?: string;
   evaluatedRules: string[];
+  /** The host is allowed because evaluation failed, not because rules passed. */
+  failOpen?: true;
 }
 
 export interface InterceptorHealth {

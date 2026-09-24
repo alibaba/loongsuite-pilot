@@ -30,6 +30,7 @@ export interface InterceptorAccessLogEntry {
   event: string;
   agent?: string;
   sessionId?: string;
+  toolUseId?: string;
   input: InterceptorAccessInput;
   result: InterceptorAccessResult;
 }
@@ -66,6 +67,7 @@ export function buildAccessLogEntry(
     event: partial.event,
     agent: partial.agent,
     sessionId: partial.sessionId,
+    toolUseId: partial.toolUseId,
     input: partial.input,
     result: partial.result,
   };

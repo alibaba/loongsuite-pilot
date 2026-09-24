@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { emitVerdict, runHook, wrapHostReason } from '../../../src/interceptor/cli/hook.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import type { EvaluateHookResponse, InterceptorHealth } from '../../../src/interceptor/types.js';
+import type { ToolInterceptResult, ToolVerdictKey } from '../../../src/interceptor/tool-verdict-store.js';
 
 function collectAccess(): { entries: InterceptorAccessLogEntry[]; writeAccessLog: (entry: InterceptorAccessLogEntry) => void } {
   const entries: InterceptorAccessLogEntry[] = [];
@@ -72,6 +73,37 @@ describe('interceptor hook CLI', () => {
     });
   });
 
+  it('records unknown for a tool hook that fail-opens before daemon evaluation', async () => {
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const code = await runHook(['--agent', 'qodercli'], {
+      readStdin: async () => JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        session_id: 's1',
+        tool_use_id: 'call-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'id' },
+      }),
+      writeStdout: () => undefined,
+      log: () => undefined,
+      runtimePath: join(tmpdir(), 'missing-interceptor-runtime.json'),
+      writeAccessLog: () => undefined,
+      writeToolVerdict: (key, result) => {
+        verdicts.push({ key, result });
+        return true;
+      },
+    });
+    expect(code).toBe(0);
+    expect(verdicts).toEqual([{
+      key: {
+        agent: 'qodercli',
+        sessionId: 's1',
+        toolUseId: 'call-1',
+        phase: 'PreToolUse',
+      },
+      result: 'unknown',
+    }]);
+  });
+
   it('fail-opens when health identity does not match runtime', async () => {
     const runtimePath = await writeRuntime();
     const stdout: string[] = [];
@@ -124,6 +156,81 @@ describe('interceptor hook CLI', () => {
       event: 'UserPromptSubmit',
       result: { action: 'fail-open', error: 'timeout' },
     });
+  });
+
+  it('records allow and deny for successful tool hook evaluations', async () => {
+    const runtimePath = await writeRuntime();
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolInterceptResult }> = [];
+    const writeToolVerdict = (key: ToolVerdictKey, result: ToolInterceptResult) => {
+      verdicts.push({ key, result });
+      return true;
+    };
+    const client = (action: EvaluateHookResponse['action']) => ({
+      health: async (): Promise<InterceptorHealth> => ({
+        service: 'loongsuite-pilot-interceptor',
+        status: 'ok',
+        pid: 4242,
+        version: '1.0.2',
+        daemon_port: 18791,
+      }),
+      checkHook: async (): Promise<EvaluateHookResponse> => ({
+        action,
+        reason: action === 'block' ? '[APIKEY_MASKED]' : undefined,
+        evaluatedRules: ['apiKey'],
+      }),
+    });
+
+    await runHook(['--agent', 'qwen-work-cn'], {
+      readStdin: async () => JSON.stringify({
+        hook_event_name: 'PostToolUse',
+        session_id: 'qwen-s1',
+        tool_use_id: 'qwen-post-1',
+        tool_name: 'Bash',
+        tool_response: { stdout: 'ok' },
+      }),
+      writeStdout: () => undefined,
+      log: () => undefined,
+      runtimePath,
+      writeAccessLog: () => undefined,
+      writeToolVerdict,
+      createClient: () => client('allow'),
+    });
+    await runHook(['--agent', 'qoder'], {
+      readStdin: async () => JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        session_id: 'qoder-s1',
+        tool_use_id: 'qoder-pre-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'id' },
+      }),
+      writeStdout: () => undefined,
+      log: () => undefined,
+      runtimePath,
+      writeAccessLog: () => undefined,
+      writeToolVerdict,
+      createClient: () => client('block'),
+    });
+
+    expect(verdicts).toEqual([
+      {
+        key: {
+          agent: 'qwen-work-cn',
+          sessionId: 'qwen-s1',
+          toolUseId: 'qwen-post-1',
+          phase: 'PostToolUse',
+        },
+        result: 'allow',
+      },
+      {
+        key: {
+          agent: 'qoder',
+          sessionId: 'qoder-s1',
+          toolUseId: 'qoder-pre-1',
+          phase: 'PreToolUse',
+        },
+        result: 'deny',
+      },
+    ]);
   });
 
   it('keeps stdout empty on allow', async () => {

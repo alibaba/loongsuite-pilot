@@ -15,6 +15,11 @@ import {
 } from './paths.js';
 import { builtinRules } from './rules/registry.js';
 import { RuleEngine } from './rules/engine.js';
+import {
+  maybeCleanupToolVerdicts,
+  TOOL_VERDICT_CLEANUP_INTERVAL_MS,
+  writeToolVerdict,
+} from './tool-verdict-store.js';
 import { INTERCEPTOR_DEFAULT_PORT } from './types.js';
 
 const logger = createLogger('InterceptorDaemon');
@@ -48,20 +53,27 @@ async function main(): Promise<void> {
     port: INTERCEPTOR_DEFAULT_PORT,
     version,
     engine,
+    writeToolVerdict,
   };
   const server = createInterceptorServer(serverOpts);
   const port = await listenLoopback(server, INTERCEPTOR_DEFAULT_PORT);
   serverOpts.port = port;
   await writeRuntime({ dataDir, port, version, gitCommit });
   logger.info('interceptor HTTP server starting', { addr: `127.0.0.1:${port}` });
+  maybeCleanupToolVerdicts(undefined, new Date());
 
   const heartbeat = setInterval(() => {
     void writeRuntime({ dataDir, port, version, gitCommit });
   }, 30_000);
   heartbeat.unref();
+  const verdictCleanup = setInterval(() => {
+    maybeCleanupToolVerdicts(undefined, new Date());
+  }, TOOL_VERDICT_CLEANUP_INTERVAL_MS);
+  verdictCleanup.unref();
 
   const shutdown = () => {
     clearInterval(heartbeat);
+    clearInterval(verdictCleanup);
     server.close(() => process.exit(0));
   };
   process.on('SIGTERM', shutdown);

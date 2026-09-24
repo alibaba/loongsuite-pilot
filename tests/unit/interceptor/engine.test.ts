@@ -105,6 +105,7 @@ describe('RuleEngine', () => {
     await expect(engine.evaluate(request())).resolves.toEqual({
       action: 'allow',
       evaluatedRules: ['boom'],
+      failOpen: true,
     });
   });
 
