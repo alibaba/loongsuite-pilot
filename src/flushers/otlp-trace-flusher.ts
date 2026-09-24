@@ -20,6 +20,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
+import { convertQwenPawEvents } from './qwenpaw-trace-converter.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -709,6 +710,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
+      // QwenPaw emits explicit request boundaries; overlapping requests may
+      // share a conversation, including background/helper execution.
+      if (agentType === 'qwenpaw') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
@@ -846,6 +850,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
     }
+    if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+      return entry['agent.qwenpaw.boundary'] === 'entry.end'
+        && entry['gen_ai.turn.end'] === true;
+    }
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -901,6 +909,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   } {
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+        return { source: 'turn_id', value: turnId,
+          key: `qwenpaw:${JSON.stringify([entry['gen_ai.session.id'], turnId])}` };
+      }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
 
@@ -1078,19 +1090,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(traceConversionRecords);
-        toolSpanIds.prepare(sanitized);
-        llmSpanIds.prepare(sanitized);
+        const sanitized = agentType === 'qwenpaw'
+          ? traceConversionRecords : dropOrphanPairs(traceConversionRecords);
+        if (agentType !== 'qwenpaw') {
+          toolSpanIds.prepare(sanitized);
+          llmSpanIds.prepare(sanitized);
+        }
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
         let succeeded = false;
         try {
           const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents : convertEventLogToTrace;
-          result = convert(
-            sanitized as unknown as EventLogRecord[],
-            { handler, strict: false, passthroughKeys },
-          );
+          result = agentType === 'qwenpaw'
+            ? convertQwenPawEvents(sanitized, handler, passthroughKeys)
+            : convert(sanitized as unknown as EventLogRecord[], { handler, strict: false, passthroughKeys });
           succeeded = true;
         } finally {
           toolSpanIds.clear();

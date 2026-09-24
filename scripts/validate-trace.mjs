@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TAG = '[validate-trace]';
+// The bundled rules restore the exact docs/trace-validation-rules.json blob from
+// 73c13d44af385b711a56314f4ceaab35b56a3706 (cec13026^). The checks below
+// additionally support observed multi-agent lifecycles and explicit QwenPaw retries.
 const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
@@ -143,7 +146,7 @@ function loadRules(rulesPath) {
 
 // ─── Trace Tree Builder ─────────────────────────────────────────────────────
 
-function buildTraces(spans, traceIdFilter) {
+export function buildTraces(spans, traceIdFilter) {
   const grouped = new Map();
   for (const span of spans) {
     if (traceIdFilter && span.traceId !== traceIdFilter) continue;
@@ -185,9 +188,52 @@ function error(id, detail, spanId, spanName) { return { id, status: 'error', det
 function warn(id, detail, spanId, spanName) { return { id, status: 'warn', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
 function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'captureMessageContent not enabled' }; }
 
+function nearestAgent(span, trace) {
+  const seen = new Set([span.spanId]);
+  let parent = trace.spanMap.get(span.parentSpanId);
+  while (parent && !seen.has(parent.spanId)) {
+    if (parent._kind === 'AGENT') return parent;
+    seen.add(parent.spanId);
+    parent = trace.spanMap.get(parent.parentSpanId);
+  }
+  return undefined;
+}
+
+function groupStepsByAgent(trace) {
+  const groups = new Map();
+  for (const step of trace.spans.filter(span => span._kind === 'STEP')) {
+    const owner = nearestAgent(step, trace)?.spanId ?? step.parentSpanId;
+    if (!groups.has(owner)) groups.set(owner, []);
+    groups.get(owner).push(step);
+  }
+  return groups;
+}
+
+function byStartTime(left, right) {
+  const delta = BigInt(left.startTimeUnixNano) - BigInt(right.startTimeUnixNano);
+  return delta < 0n ? -1 : delta > 0n ? 1 : 0;
+}
+
+function isExplicitQwenPawSpan(span) {
+  return span.attributes?.['gen_ai.agent.type'] === 'qwenpaw' &&
+    /^[0-9a-f]{16}$/.test(span.spanId ?? '') &&
+    !/^0+$/.test(span.spanId);
+}
+
+function isErrorSpan(span) {
+  return span.status?.code === 2 || span.status?.code === 'ERROR';
+}
+
+function hasMessages(raw) {
+  try {
+    const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(value) && value.length > 0;
+  } catch { return false; }
+}
+
 // ─── 5a. Structure Validation ───────────────────────────────────────────────
 
-function validateStructure(trace) {
+export function validateStructure(trace) {
   const checks = [];
   const { spans, spanMap, childrenMap } = trace;
 
@@ -200,9 +246,9 @@ function validateStructure(trace) {
     : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1`));
 
   const agents = byKind('AGENT');
-  checks.push(agents.length === 1
-    ? pass('structure.single_agent')
-    : error('structure.single_agent', `found ${agents.length} AGENT spans, expected 1`));
+  checks.push(agents.length >= 1
+    ? pass('structure.agent_hierarchy', `${agents.length} AGENT span(s)`)
+    : error('structure.agent_hierarchy', 'expected at least one AGENT span'));
 
   if (entries.length === 1) {
     const e = entries[0];
@@ -213,9 +259,9 @@ function validateStructure(trace) {
   }
 
   for (const a of agents) {
-    checks.push(parentKind(a) === 'ENTRY'
+    checks.push(['ENTRY', 'AGENT', 'TOOL'].includes(parentKind(a))
       ? pass('structure.agent_under_entry')
-      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY`, a.spanId, a.name));
+      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, AGENT or TOOL`, a.spanId, a.name));
   }
 
   const steps = byKind('STEP');
@@ -255,19 +301,25 @@ function validateStructure(trace) {
   for (const s of steps) {
     const children = childrenMap.get(s.spanId) || [];
     const llmChildren = children.filter(c => c._kind === 'LLM');
-    if (llmChildren.length !== 1) {
+    const explicitAttempts = isExplicitQwenPawSpan(s) && llmChildren.length > 1 &&
+      llmChildren.every(child => isExplicitQwenPawSpan(child) &&
+        child.parentSpanId === s.spanId &&
+        typeof child.attributes?.['gen_ai.step.id'] === 'string' && child.attributes['gen_ai.step.id'].length > 0) &&
+      new Set(llmChildren.map(child => child.spanId)).size === llmChildren.length &&
+      new Set(llmChildren.map(child => child.attributes['gen_ai.step.id'])).size === llmChildren.length;
+    if (llmChildren.length !== 1 && !explicitAttempts) {
       checks.push(error('structure.step_has_one_llm', `STEP has ${llmChildren.length} LLM children, expected 1`, s.spanId, s.name));
       allStepsOk = false;
     }
   }
   if (allStepsOk && steps.length > 0) {
-    checks.push(pass('structure.step_has_one_llm', `${steps.length} STEPs, each with 1 LLM`));
+    checks.push(pass('structure.step_has_one_llm', `${steps.length} STEPs with one LLM or explicit QwenPaw model attempts`));
   }
 
   let llmOrderOk = true;
   for (const s of steps) {
     const children = childrenMap.get(s.spanId) || [];
-    const llm = children.find(c => c._kind === 'LLM');
+    const llm = children.filter(c => c._kind === 'LLM').sort(byStartTime)[0];
     const tools = children.filter(c => c._kind === 'TOOL');
     if (llm && tools.length > 0) {
       const llmStart = BigInt(llm.startTimeUnixNano);
@@ -281,6 +333,22 @@ function validateStructure(trace) {
   }
   if (llmOrderOk && steps.length > 0) {
     checks.push(pass('structure.llm_before_tools'));
+  }
+
+  if (spanMap.size !== spans.length) {
+    checks.push(error('structure.unique_span_ids', 'duplicate span IDs within one trace'));
+  }
+  for (const span of spans) {
+    const visited = new Set();
+    let current = span;
+    while (current) {
+      if (visited.has(current.spanId)) {
+        checks.push(error('structure.no_cycles', 'cycle in span parent hierarchy', span.spanId, span.name));
+        break;
+      }
+      visited.add(current.spanId);
+      current = spanMap.get(current.parentSpanId);
+    }
   }
 
   if (entries.length === 1) {
@@ -386,7 +454,7 @@ function shortKey(key) {
 
 // ─── 5c. Time Validation ────────────────────────────────────────────────────
 
-function validateTime(trace, rules) {
+export function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
 
@@ -401,28 +469,20 @@ function validateTime(trace, rules) {
   }
   if (allNonZero) checks.push(pass('time.non_zero_duration'));
 
-  const steps = spans.filter(s => s._kind === 'STEP');
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan && steps.length > 1) {
-    const sorted = [...steps].sort((a, b) => {
-      const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-      return d < 0n ? -1 : d > 0n ? 1 : 0;
-    });
-    let overlap = false;
+  const agentSteps = groupStepsByAgent(trace);
+  let overlap = false;
+  for (const group of agentSteps.values()) {
+    const sorted = [...group].sort(byStartTime);
     for (let i = 0; i < sorted.length - 1; i++) {
-      const curEnd = BigInt(sorted[i].endTimeUnixNano);
-      const nextStart = BigInt(sorted[i + 1].startTimeUnixNano);
-      if (curEnd > nextStart) {
+      if (BigInt(sorted[i].endTimeUnixNano) > BigInt(sorted[i + 1].startTimeUnixNano)) {
         checks.push(error('time.no_step_overlap',
-          `STEP ${sorted[i].spanId.slice(0, 8)} overlaps with ${sorted[i + 1].spanId.slice(0, 8)}`,
+          `STEP ${sorted[i].spanId.slice(0, 8)} overlaps with ${sorted[i + 1].spanId.slice(0, 8)} under the same AGENT`,
           sorted[i].spanId, sorted[i].name));
         overlap = true;
       }
     }
-    if (!overlap) checks.push(pass('time.no_step_overlap'));
-  } else if (steps.length <= 1) {
-    checks.push(pass('time.no_step_overlap'));
   }
+  if (!overlap) checks.push(pass('time.no_step_overlap'));
 
   let allContained = true;
   for (const s of spans) {
@@ -454,30 +514,19 @@ function validateTime(trace, rules) {
   }
   if (allReasonable) checks.push(pass('time.reasonable_duration'));
 
-  if (steps.length > 1) {
-    const withRound = steps.filter(s => s.attributes?.['gen_ai.react.round'] !== undefined);
-    if (withRound.length > 1) {
-      const byTime = [...withRound].sort((a, b) => {
-        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-        return d < 0n ? -1 : d > 0n ? 1 : 0;
-      });
-      let chrono = true;
-      for (let i = 0; i < byTime.length - 1; i++) {
-        const r1 = byTime[i].attributes['gen_ai.react.round'];
-        const r2 = byTime[i + 1].attributes['gen_ai.react.round'];
-        if (r1 >= r2) {
-          checks.push(warn('time.chronological_steps', `round ${r1} before round ${r2} but starts later`));
-          chrono = false;
-          break;
-        }
+  let chronological = true;
+  for (const group of agentSteps.values()) {
+    const sorted = group.filter(step => step.attributes?.['gen_ai.react.round'] !== undefined).sort(byStartTime);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const left = sorted[i].attributes['gen_ai.react.round'];
+      const right = sorted[i + 1].attributes['gen_ai.react.round'];
+      if (left >= right) {
+        checks.push(warn('time.chronological_steps', `round ${left} before round ${right} within the same AGENT`, sorted[i].spanId, sorted[i].name));
+        chronological = false;
       }
-      if (chrono) checks.push(pass('time.chronological_steps'));
-    } else {
-      checks.push(pass('time.chronological_steps'));
     }
-  } else {
-    checks.push(pass('time.chronological_steps'));
   }
+  if (chronological) checks.push(pass('time.chronological_steps'));
 
   return checks;
 }
@@ -738,7 +787,7 @@ function isObject(value) {
 
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────
 
-function validateSemantic(trace, rules) {
+export function validateSemantic(trace, rules) {
   const checks = [];
   const { spans, childrenMap, hasMessageContent } = trace;
 
@@ -754,11 +803,17 @@ function validateSemantic(trace, rules) {
     ? pass('semantic.consistent_user_id')
     : error('semantic.consistent_user_id', `found ${userIds.size} distinct user IDs`));
 
-  // consistent_agent_name
-  const agentNames = new Set(spans.map(s => s.attributes?.['gen_ai.agent.name']).filter(Boolean));
-  checks.push(agentNames.size <= 1
-    ? pass('semantic.consistent_agent_name')
-    : warn('semantic.consistent_agent_name', `found ${agentNames.size} distinct agent names: ${[...agentNames].join(', ')}`));
+  // Different helpers can legitimately have different names within one trace.
+  let namesConsistent = true;
+  for (const span of spans.filter(s => !['ENTRY', 'AGENT'].includes(s._kind))) {
+    const ownerName = nearestAgent(span, trace)?.attributes?.['gen_ai.agent.name'];
+    const name = span.attributes?.['gen_ai.agent.name'];
+    if (ownerName && name && ownerName !== name) {
+      namesConsistent = false;
+      checks.push(warn('semantic.consistent_agent_name', `agent name ${name} differs from owning AGENT ${ownerName}`, span.spanId, span.name));
+    }
+  }
+  if (namesConsistent) checks.push(pass('semantic.consistent_agent_name'));
 
   // operation_kind_mapping
   const mapping = rules.operationKindMapping || {};
@@ -789,30 +844,23 @@ function validateSemantic(trace, rules) {
   }
   if (allNamesOk) checks.push(pass('semantic.span_name_pattern'));
 
-  // agent_token_sum
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan) {
-    const llmSpans = spans.filter(s => s._kind === 'LLM');
-    for (const tokenKey of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
-      const agentVal = agentSpan.attributes?.[tokenKey];
-      if (agentVal === undefined || agentVal === null) continue;
-      const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[tokenKey] || 0), 0);
-      if (agentVal !== llmSum) {
+  // Each Agent owns only model calls whose nearest Agent ancestor is itself.
+  for (const agent of spans.filter(span => span._kind === 'AGENT')) {
+    const llms = spans.filter(span => span._kind === 'LLM' && nearestAgent(span, trace)?.spanId === agent.spanId);
+    let checked = false;
+    let matches = true;
+    for (const key of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
+      const actual = agent.attributes?.[key];
+      if (actual === undefined || actual === null) continue;
+      checked = true;
+      const expected = llms.reduce((sum, llm) => sum + (llm.attributes?.[key] || 0), 0);
+      if (actual !== expected) {
+        matches = false;
         checks.push(error('semantic.agent_token_sum',
-          `AGENT ${tokenKey}=${agentVal}, sum of LLM=${llmSum}`, agentSpan.spanId, agentSpan.name));
+          `AGENT ${key}=${actual}, sum of owned LLM=${expected}`, agent.spanId, agent.name));
       }
     }
-    const hasAnyToken = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']
-      .some(k => agentSpan.attributes?.[k] !== undefined);
-    if (hasAnyToken) {
-      const allMatch = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens'].every(k => {
-        const av = agentSpan.attributes?.[k];
-        if (av === undefined || av === null) return true;
-        const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[k] || 0), 0);
-        return av === llmSum;
-      });
-      if (allMatch) checks.push(pass('semantic.agent_token_sum'));
-    }
+    if (checked && matches) checks.push(pass('semantic.agent_token_sum'));
   }
 
   // tool_matches_llm_output
@@ -823,28 +871,25 @@ function validateSemantic(trace, rules) {
     const stepSpans = spans.filter(s => s._kind === 'STEP');
     for (const step of stepSpans) {
       const children = childrenMap.get(step.spanId) || [];
-      const llm = children.find(c => c._kind === 'LLM');
+      const llms = children.filter(c => c._kind === 'LLM').sort(byStartTime);
+      const llm = llms[llms.length - 1];
       const tools = children.filter(c => c._kind === 'TOOL');
       if (!llm || tools.length === 0) continue;
 
-      const outputRaw = llm.attributes?.['gen_ai.output.messages'];
-      if (!outputRaw) continue;
-
-      let expectedToolCalls = [];
-      try {
-        const output = typeof outputRaw === 'string' ? JSON.parse(outputRaw) : outputRaw;
-        if (Array.isArray(output)) {
+      const expectedToolCalls = [];
+      for (const attempt of llms) {
+        const outputRaw = attempt.attributes?.['gen_ai.output.messages'];
+        if (!outputRaw) continue;
+        try {
+          const output = typeof outputRaw === 'string' ? JSON.parse(outputRaw) : outputRaw;
+          if (!Array.isArray(output)) continue;
           for (const msg of output) {
-            if (msg.parts && Array.isArray(msg.parts)) {
-              for (const part of msg.parts) {
-                if (part.type === 'tool_call') {
-                  expectedToolCalls.push({ id: part.id, name: part.name });
-                }
-              }
+            for (const part of Array.isArray(msg.parts) ? msg.parts : []) {
+              if (part.type === 'tool_call') expectedToolCalls.push({ id: part.id, name: part.name });
             }
           }
-        }
-      } catch { continue; }
+        } catch { /* Schema validation reports malformed message content. */ }
+      }
 
       // Runtime/user-triggered Skill loads are truthful TOOL spans but are not
       // emitted by the model, so they intentionally have no output tool_call.
@@ -924,11 +969,12 @@ function validateSemantic(trace, rules) {
   } else {
     let allOk = true;
     for (const s of spans.filter(s => s._kind === 'LLM')) {
-      const hasInput = s.attributes?.['gen_ai.input.messages'] !== undefined;
-      const hasOutput = s.attributes?.['gen_ai.output.messages'] !== undefined;
-      if (!hasInput || !hasOutput) {
+      const hasInput = hasMessages(s.attributes?.['gen_ai.input.messages']);
+      const hasOutput = hasMessages(s.attributes?.['gen_ai.output.messages']);
+      const outputRequired = !isErrorSpan(s);
+      if (!hasInput || (outputRequired && !hasOutput)) {
         checks.push(error('semantic.llm_has_input_output',
-          `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && !hasOutput ? ' and ' : ''}${!hasOutput ? 'output' : ''}.messages`,
+          `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && outputRequired && !hasOutput ? ' and ' : ''}${outputRequired && !hasOutput ? 'output' : ''}.messages`,
           s.spanId, s.name));
         allOk = false;
       }
@@ -984,42 +1030,21 @@ function validateSemantic(trace, rules) {
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
-    const stepSpans = spans.filter(s => s._kind === 'STEP');
-    if (stepSpans.length > 0) {
-      const sorted = [...stepSpans].sort((a, b) => {
-        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-        return d < 0n ? -1 : d > 0n ? 1 : 0;
-      });
-      const lastStep = sorted[sorted.length - 1];
-      const children = childrenMap.get(lastStep.spanId) || [];
-      const llm = children.find(c => c._kind === 'LLM');
-      if (llm) {
-        const raw = llm.attributes?.['gen_ai.output.messages'];
-        if (raw) {
-          try {
-            const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            let hasToolCall = false;
-            if (Array.isArray(msgs)) {
-              for (const msg of msgs) {
-                if (Array.isArray(msg.parts)) {
-                  for (const part of msg.parts) {
-                    if (part.type === 'tool_call') hasToolCall = true;
-                  }
-                }
-              }
-            }
-            checks.push(hasToolCall
-              ? error('semantic.last_step_no_tool_call',
-                  'last STEP LLM output contains tool_call, expected final answer without tool calls',
-                  llm.spanId, llm.name)
-              : pass('semantic.last_step_no_tool_call'));
-          } catch {
-            checks.push(pass('semantic.last_step_no_tool_call'));
-          }
-        } else {
-          checks.push(pass('semantic.last_step_no_tool_call'));
-        }
-      }
+    for (const steps of groupStepsByAgent(trace).values()) {
+      const lastStep = [...steps].sort(byStartTime).at(-1);
+      const llm = (childrenMap.get(lastStep.spanId) || []).filter(child => child._kind === 'LLM').sort(byStartTime).at(-1);
+      if (!llm) continue;
+      const raw = llm.attributes?.['gen_ai.output.messages'];
+      if (!raw) continue;
+      try {
+        const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const hasToolCall = Array.isArray(msgs) && msgs.some(msg =>
+          Array.isArray(msg.parts) && msg.parts.some(part => part.type === 'tool_call'));
+        checks.push(hasToolCall
+          ? error('semantic.last_step_no_tool_call',
+            'last STEP LLM output contains tool_call, expected final answer without tool calls', llm.spanId, llm.name)
+          : pass('semantic.last_step_no_tool_call'));
+      } catch { /* Schema validation reports malformed output. */ }
     }
   }
 

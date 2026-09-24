@@ -2264,6 +2264,50 @@ function Remove-HermesPlugin {
     }
 }
 
+# Native QwenPaw discovers its plugin on startup; no CLI activation is needed.
+function Remove-QwenPawPlugin {
+    $qwenpawHome = if ($env:QWENPAW_WORKING_DIR) { $env:QWENPAW_WORKING_DIR } else { Join-Path $env:USERPROFILE ".qwenpaw" }
+    $fallback = Join-Path $qwenpawHome "plugins\loongsuite-pilot"
+    $nodeBin = $script:NODE_BIN
+    if (-not $nodeBin) { return }
+    $cleanupScript = @'
+const fs = require('fs');
+const path = require('path');
+const [dataDir, fallback] = process.argv.slice(-2);
+const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+const stateFile = path.join(dataDir, 'deployed-agents.json');
+let state = {};
+try { state = readJson(stateFile); } catch {}
+const recorded = state?.qwenpaw?.targetDir;
+const target = typeof recorded === 'string' && path.isAbsolute(recorded) ? recorded : fallback;
+try {
+  if (!path.isAbsolute(target)) process.exit(0);
+  const dirStat = fs.lstatSync(target);
+  const marker = path.join(target, '.loongsuite-pilot-managed.json');
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || fs.lstatSync(marker).isSymbolicLink()) process.exit(0);
+  const meta = readJson(marker);
+  // A matching plugin name alone does not establish this installation's ownership.
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'qwenpaw' ||
+      typeof meta.dataDir !== 'string' || !path.isAbsolute(meta.dataDir)) process.exit(0);
+  const ownedData = fs.realpathSync(dataDir);
+  if (fs.realpathSync(meta.dataDir) !== ownedData) process.exit(0);
+  const realTarget = fs.realpathSync(target);
+  if (realTarget === ownedData || realTarget === path.parse(realTarget).root) process.exit(0);
+  fs.rmSync(target, { recursive: true, force: true });
+  if (state && typeof state === 'object' && !Array.isArray(state) && state.qwenpaw) {
+    delete state.qwenpaw;
+    const tmp = stateFile + '.qwenpaw-' + process.pid + '.tmp';
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+      fs.renameSync(tmp, stateFile);
+    } finally { try { fs.unlinkSync(tmp); } catch {} }
+  }
+  process.stdout.write(target + '\n');
+} catch { /* Missing, unreadable or unowned paths are preserved. */ }
+'@
+    & $nodeBin -e $cleanupScript $DataDir $fallback
+}
+
 # ============================================================
 # Remove Pi Coding Agent extension injection
 # ============================================================
@@ -3420,6 +3464,8 @@ function Cmd-Uninstall {
     # Read the persisted target before the default data/install directory is removed.
     Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     Remove-HermesPlugin
+    Msg "==> 清理 QwenPaw 插件..." "==> Cleaning up QwenPaw plugin..."
+    Remove-QwenPawPlugin
     Write-Host ""
 
     Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."

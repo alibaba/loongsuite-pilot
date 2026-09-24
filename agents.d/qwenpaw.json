@@ -1,0 +1,18 @@
+{
+  "id": "qwenpaw",
+  "displayName": "QwenPaw",
+  "deployMode": "directory-plugin",
+  "detection": {
+    "paths": ["$QWENPAW_WORKING_DIR"],
+    "commands": ["qwenpaw"]
+  },
+  "directoryPlugin": {
+    "sourceDir": "$PILOT_DIR/assets/plugins/qwenpaw/loongsuite-pilot",
+    "targetDir": "$QWENPAW_WORKING_DIR/plugins/loongsuite-pilot"
+  },
+  "input": {
+    "type": "session-file-polling",
+    "logDir": "$PILOT_DATA/logs/qwenpaw",
+    "filePattern": "qwenpaw-*.jsonl"
+  }
+}

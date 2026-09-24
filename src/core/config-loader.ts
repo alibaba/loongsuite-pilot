@@ -813,6 +813,7 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
     workbuddy: { enabled: true, pollInterval: 30_000 },
     'hermes-agent-log': { enabled: true, pollInterval: 30_000 },
+    'qwenpaw-log': { enabled: true, pollInterval: 1_000 },
   };
 
   const result = { ...defaults };

@@ -31,6 +31,7 @@ type differences are called out in the notes.
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
+| QwenPaw | `qwenpaw` | Native directory plugin with Runtime hooks and AgentScope middleware. Targets QwenPaw 2.1.0 / AgentScope 2.0.4.post1. [Integration and parity (Chinese)](zh-CN/qwenpaw-runtime.md). |
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
