@@ -13,11 +13,11 @@ describe('tool verdict store', () => {
     const store = new ToolVerdictStore(file);
     const now = new Date('2026-09-23T08:00:00.000Z');
     store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow', now);
-    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny', now);
-    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'deny', now);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block', now);
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'block', now);
 
-    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBe('deny');
-    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, now)).toBe('deny');
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBe('block');
+    expect(store.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse' }, now)).toBe('block');
     expect(store.get({ sessionId: 's2', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBeNull();
   });
 
@@ -36,7 +36,7 @@ describe('tool verdict store', () => {
     const now = new Date('2026-09-23T08:00:00.000Z');
     const store = new ToolVerdictStore(file);
     store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow', now);
-    store.put({ toolUseId: 'call-2', phase: 'PostToolUse' }, 'deny', now);
+    store.put({ toolUseId: 'call-2', phase: 'PostToolUse' }, 'block', now);
     store.dump(now);
 
     const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { schema: number; records: unknown[] };
@@ -52,7 +52,7 @@ describe('tool verdict store', () => {
       {
         toolUseId: 'call-2',
         phase: 'PostToolUse',
-        action: 'deny',
+        action: 'block',
         recordedAt: now.toISOString(),
       },
     ]);
@@ -60,7 +60,7 @@ describe('tool verdict store', () => {
     const restored = new ToolVerdictStore(file);
     restored.restore(now);
     expect(restored.get({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, now)).toBe('allow');
-    expect(restored.get({ toolUseId: 'call-2', phase: 'PostToolUse' }, now)).toBe('deny');
+    expect(restored.get({ toolUseId: 'call-2', phase: 'PostToolUse' }, now)).toBe('block');
   });
 
   it('ignores a corrupt or unknown checkpoint', () => {
@@ -87,7 +87,7 @@ describe('tool verdict store', () => {
         sessionId: 's1',
         toolUseId: 'call-1',
         phase: 'PreToolUse',
-        action: 'deny',
+        action: 'block',
         recordedAt: writtenAt.toISOString(),
       }],
     }));

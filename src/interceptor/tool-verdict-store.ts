@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { HookEventName } from './types.js';
 
-export type ToolVerdictAction = 'allow' | 'deny';
+export type ToolVerdictAction = 'allow' | 'block';
 export type ToolInterceptPhase = Extract<HookEventName, 'PreToolUse' | 'PostToolUse'>;
 
 export interface ToolVerdictKey {
@@ -150,7 +150,7 @@ function parseRecord(value: unknown): ToolVerdictRecord | null {
   const record = value as Partial<ToolVerdictRecord>;
   if (typeof record.toolUseId !== 'string' || !record.toolUseId) return null;
   if (record.phase !== 'PreToolUse' && record.phase !== 'PostToolUse') return null;
-  if (record.action !== 'allow' && record.action !== 'deny') return null;
+  if (record.action !== 'allow' && record.action !== 'block') return null;
   if (typeof record.recordedAt !== 'string' || Number.isNaN(Date.parse(record.recordedAt))) return null;
   if (record.sessionId !== undefined && typeof record.sessionId !== 'string') return null;
   return {

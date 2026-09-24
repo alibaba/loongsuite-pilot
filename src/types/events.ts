@@ -92,7 +92,7 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.duration'?: number;
   /** Host-observed guardrail verdict for this tool phase. */
   'gen_ai.guardrail.triggered'?: boolean;
-  'gen_ai.guardrail.action'?: 'allow' | 'deny';
+  'gen_ai.guardrail.action'?: 'allow' | 'block';
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

@@ -79,7 +79,7 @@ async function handle(
       }
       const request = body;
       const verdict = await opts.engine.evaluate(request);
-      recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action === 'block' ? 'deny' : 'allow');
+      recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action);
       recordAccess(opts, {
         event: request.event,
         agent: request.agent,
@@ -151,7 +151,7 @@ async function handleQwenWorkHttp(
 
   try {
     const verdict = await opts.engine.evaluate(request);
-    recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action === 'block' ? 'deny' : 'allow');
+    recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action);
     recordAccess(opts, {
       event: request.event,
       agent: request.agent,
@@ -210,7 +210,7 @@ function recordToolVerdict(
   result: ToolVerdictAction | 'unknown',
 ): void {
   if (!opts.writeToolVerdict || !request.toolUseId || !isToolInterceptPhase(request.event)) return;
-  if (result !== 'allow' && result !== 'deny') return;
+  if (result !== 'allow' && result !== 'block') return;
   try {
     opts.writeToolVerdict({
       sessionId: request.sessionId,

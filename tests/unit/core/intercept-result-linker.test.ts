@@ -13,7 +13,7 @@ function toolEntry(event: 'tool.call' | 'tool.result', overrides: Partial<AgentA
   } as AgentActivityEntry;
 }
 
-function storeWith(records: Array<Parameters<ToolVerdictStore['put']>[0] & { action: 'allow' | 'deny' }>): ToolVerdictStore {
+function storeWith(records: Array<Parameters<ToolVerdictStore['put']>[0] & { action: 'allow' | 'block' }>): ToolVerdictStore {
   const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
   for (const record of records) store.put(record, record.action);
   return store;
@@ -23,7 +23,7 @@ describe('InterceptResultLinker', () => {
   it('maps tool.call to PreToolUse and tool.result to PostToolUse', () => {
     const store = storeWith([
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'allow' },
-      { sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse', action: 'deny' },
+      { sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse', action: 'block' },
     ]);
     const entries = [toolEntry('tool.call'), toolEntry('tool.result')];
 
@@ -32,12 +32,12 @@ describe('InterceptResultLinker', () => {
     expect(entries[0]['gen_ai.guardrail.triggered']).toBe(true);
     expect(entries[0]['gen_ai.guardrail.action']).toBe('allow');
     expect(entries[1]['gen_ai.guardrail.triggered']).toBe(true);
-    expect(entries[1]['gen_ai.guardrail.action']).toBe('deny');
+    expect(entries[1]['gen_ai.guardrail.action']).toBe('block');
   });
 
   it('omits guardrail fields when the record is missing and skips other agents', () => {
     const store = storeWith([
-      { sessionId: 'open-session', toolUseId: 'call-2', phase: 'PreToolUse', action: 'deny' },
+      { sessionId: 'open-session', toolUseId: 'call-2', phase: 'PreToolUse', action: 'block' },
     ]);
     const matching = toolEntry('tool.call', {
       'gen_ai.agent.type': 'openclaw',
@@ -56,7 +56,7 @@ describe('InterceptResultLinker', () => {
 
     new InterceptResultLinker(store, true).enrich([matching, wrongSession, unsupported]);
 
-    expect(matching['gen_ai.guardrail.action']).toBe('deny');
+    expect(matching['gen_ai.guardrail.action']).toBe('block');
     expect(wrongSession['gen_ai.guardrail.triggered']).toBeUndefined();
     expect(wrongSession['gen_ai.guardrail.action']).toBeUndefined();
     expect(unsupported['gen_ai.guardrail.triggered']).toBeUndefined();
@@ -65,7 +65,7 @@ describe('InterceptResultLinker', () => {
 
   it('omits guardrail fields when the tool call id or record is missing', () => {
     const store = storeWith([
-      { sessionId: 's1', toolUseId: 'present', phase: 'PreToolUse', action: 'deny' },
+      { sessionId: 's1', toolUseId: 'present', phase: 'PreToolUse', action: 'block' },
     ]);
     const missingId = toolEntry('tool.call', {
       'gen_ai.agent.type': 'qwen-work-cn',
@@ -86,12 +86,12 @@ describe('InterceptResultLinker', () => {
     expect(missingId['gen_ai.guardrail.action']).toBeUndefined();
     expect(missingRecord['gen_ai.guardrail.triggered']).toBeUndefined();
     expect(missingRecord['gen_ai.guardrail.action']).toBeUndefined();
-    expect(idea['gen_ai.guardrail.action']).toBe('deny');
+    expect(idea['gen_ai.guardrail.action']).toBe('block');
   });
 
   it('writes nothing when interceptor is disabled', () => {
     const store = storeWith([
-      { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'deny' },
+      { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'block' },
     ]);
     const entry = toolEntry('tool.call');
     new InterceptResultLinker(store, false).enrich([entry]);

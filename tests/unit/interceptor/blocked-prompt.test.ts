@@ -42,7 +42,7 @@ describe('buildBlockedQoderPromptEntry', () => {
     expect(entry['user.id']).toBe('');
     expect(entry['agent.source']).toBe('interceptor');
     expect(entry['gen_ai.guardrail.triggered']).toBe(true);
-    expect(entry['gen_ai.guardrail.action']).toBe('deny');
+    expect(entry['gen_ai.guardrail.action']).toBe('block');
     expect(entry['gen_ai.output.messages']).toBeUndefined();
     expect(entry['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(entry['gen_ai.usage.output_tokens']).toBeUndefined();
@@ -61,6 +61,6 @@ describe('buildBlockedQoderPromptEntry', () => {
     expect(entry).not.toHaveProperty('gen_ai.input.messages');
     expect(entry).not.toHaveProperty('gen_ai.input.messages_delta');
     expect(entry['workspace.path']).toBeUndefined();
-    expect(entry['gen_ai.guardrail.action']).toBe('deny');
+    expect(entry['gen_ai.guardrail.action']).toBe('block');
   });
 });

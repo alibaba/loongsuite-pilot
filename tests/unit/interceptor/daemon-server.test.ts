@@ -140,7 +140,7 @@ describe('interceptor daemon HTTP API', () => {
             toolUseId: 'open-pre-1',
             phase: 'PreToolUse',
           },
-          result: 'deny',
+          result: 'block',
         },
       ]);
     } finally {
@@ -247,7 +247,7 @@ describe('interceptor daemon HTTP API', () => {
           toolUseId: 'qwen-pre-1',
           phase: 'PreToolUse',
         },
-        result: 'deny',
+        result: 'block',
       });
     } finally {
       server.close();
@@ -375,7 +375,7 @@ describe('interceptor daemon HTTP API', () => {
         'gen_ai.session.id': 's-desktop',
         'workspace.path': '/tmp/desktop',
         'agent.source': 'interceptor',
-        'gen_ai.guardrail.action': 'deny',
+        'gen_ai.guardrail.action': 'block',
       });
       expect(emitted[1]).toMatchObject({
         'gen_ai.agent.type': 'qoder-cli',

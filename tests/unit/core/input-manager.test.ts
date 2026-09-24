@@ -536,7 +536,7 @@ describe('InputManager', () => {
       expect(dispatched['gen_ai.input.messages']).toEqual([
         { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
       ]);
-      expect(dispatched['gen_ai.guardrail.action']).toBe('deny');
+      expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });
@@ -925,7 +925,7 @@ describe('InputManager', () => {
     it('joins tool.call and tool.result before invocation identity rewrite', async () => {
       const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
       store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
-      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block');
       manager.setInterceptResultLinker(new InterceptResultLinker(store, true));
       manager.setConfiguredUserId('installer-user');
       const input = new StubInput('qoder-tools');
@@ -955,7 +955,7 @@ describe('InputManager', () => {
       const dispatched = flusher.batchCalls[0];
       expect(dispatched[0]['gen_ai.guardrail.action']).toBe('allow');
       expect(dispatched[0]['gen_ai.guardrail.triggered']).toBe(true);
-      expect(dispatched[1]['gen_ai.guardrail.action']).toBe('deny');
+      expect(dispatched[1]['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched[2]['gen_ai.guardrail.action']).toBeUndefined();
       expect(dispatched[2]['gen_ai.guardrail.triggered']).toBeUndefined();
     });

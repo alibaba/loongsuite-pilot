@@ -23,7 +23,7 @@ describe('interceptor result JSONL output', () => {
     const outputDir = path.join(root, 'output');
     const store = new ToolVerdictStore(path.join(root, 'tool-verdicts.json'));
     store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
-    store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'deny');
+    store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block');
 
     const manager = new InputManager();
     const flusher = new JsonlFlusher({
@@ -71,7 +71,7 @@ describe('interceptor result JSONL output', () => {
     expect(lines[1]).toMatchObject({
       'event.name': 'tool.result',
       'gen_ai.guardrail.triggered': true,
-      'gen_ai.guardrail.action': 'deny',
+      'gen_ai.guardrail.action': 'block',
     });
     await cleanupTempDir(root);
   });

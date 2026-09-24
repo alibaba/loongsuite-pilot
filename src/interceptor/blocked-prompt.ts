@@ -45,7 +45,7 @@ export function buildBlockedQoderPromptEntry(
     ...(cwd ? { 'workspace.path': cwd } : {}),
     'agent.source': 'interceptor',
     'gen_ai.guardrail.triggered': true,
-    'gen_ai.guardrail.action': 'deny',
+    'gen_ai.guardrail.action': 'block',
   });
 
   if (!prompt) {
