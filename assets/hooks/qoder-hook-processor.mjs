@@ -629,6 +629,26 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
   }
 
+  // --- Phase 4.5: Collect subagent records ---
+  // After building parent turn records, scan for Agent/task tool calls and
+  // merge the corresponding subagent transcript records into the batch. The
+  // converter groups subagent records by gen_ai.turn.id alongside the parent
+  // turn and nests them under the parent tool.call span.
+  let subagentRecords = [];
+  if (sessionId) {
+    subagentRecords = collectSubagentRecordsForTurn(records, transcriptPath, sessionId, cwd);
+    if (subagentRecords.length > 0) {
+      records.push(...subagentRecords);
+      // Maintain time order so the converter processes events deterministically.
+      records.sort((a, b) => {
+        try {
+          return Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano));
+        } catch { return 0; }
+      });
+      logDebug(agentId, `Merged ${subagentRecords.length} subagent records`);
+    }
+  }
+
   const cursorMode = rangeReason === 'incremental' ? 'incremental' : 'bootstrap';
   const cursorBatchId = crypto.randomUUID();
   for (const record of records) {
@@ -641,7 +661,7 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
   const rowsToAppend = records.map(r => JSON.stringify(r));
   const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
   if (success) {
-    logDebug(agentId, `Appended ${rowsToAppend.length} rows`);
+    logDebug(agentId, `Appended ${rowsToAppend.length} rows (${subagentRecords.length} subagent)`);
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
   }
   return success;
@@ -1650,6 +1670,378 @@ function buildUserMessageParts(userText, contentEvents, agentType) {
     seen.add(text);
   }
   return parts;
+}
+
+// --- Subagent transcript processing -------------------------------------------
+
+// QoderCLI subagent invocation tool names (both Anthropic and Qoder-native spellings).
+const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'agent', 'Task', 'task']);
+
+/**
+ * Resolve a subagent's transcript file from its task descriptor.
+ *
+ * qodercli writes the absolute path into `transcriptPath`, so that is preferred:
+ * re-deriving `agent-<agentId>.jsonl` from the file-name convention is only a
+ * fallback, and silently yields no records once the convention drifts. Both
+ * candidates must stay inside <sessionDir>/subagents/.
+ */
+function resolveSubagentTranscriptPath(transcriptPath, task) {
+  const sessionDir = transcriptPath.replace(/\.jsonl$/, '');
+  const subagentDir = path.join(sessionDir, 'subagents');
+  const withinSubagentDir = (file) => {
+    if (!file || file.includes('\0')) return null;
+    const resolved = path.resolve(file);
+    const relative = path.relative(subagentDir, resolved);
+    if (
+      !relative
+      || relative === '..'
+      || relative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relative)
+    ) return null;
+    return resolved;
+  };
+
+  const declared = withinSubagentDir(String(task.transcriptPath || '').trim());
+  if (declared) return declared;
+
+  const rawAgentId = String(task.agentId || '').trim();
+  if (
+    !rawAgentId
+    || rawAgentId.includes('/')
+    || rawAgentId.includes('\\')
+    || rawAgentId.includes('\0')
+  ) return null;
+
+  const safeAgentId = path.basename(rawAgentId).replace(/\.jsonl$/, '');
+  if (!safeAgentId || safeAgentId === '.' || safeAgentId === '..') return null;
+
+  const filename = safeAgentId.startsWith('agent-')
+    ? `${safeAgentId}.jsonl`
+    : `agent-${safeAgentId}.jsonl`;
+  return withinSubagentDir(path.join(subagentDir, filename));
+}
+
+/**
+ * Scan <sessionDir>/subagents/task-*.json for subagent task descriptors.
+ * Each descriptor carries parentToolUseId → agentId mapping so the parent
+ * tool.call can be linked to the subagent transcript.
+ *
+ * Returns an array of { parentToolUseId, agentId, agentType, description }.
+ */
+function loadSubagentTasks(sessionDir) {
+  const dir = path.join(sessionDir, 'subagents');
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return []; }
+  const tasks = [];
+  for (const name of entries) {
+    if (!/^task-.+\.json$/.test(name)) continue;
+    try {
+      const t = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8'));
+      if (t && t.parentToolUseId && t.agentId) tasks.push(t);
+    } catch { /* skip corrupt files */ }
+  }
+  return tasks;
+}
+
+/**
+ * Parse a qodercli subagent transcript JSONL into structured LLM calls.
+ *
+ * QoderCLI subagent transcripts use the same line types as the main transcript
+ * (type=user / type=assistant) but are stored in a separate per-agent file.
+ *
+ * Returns { calls, toolResults, firstUserPrompt } where:
+ *   calls: [{ id, model, ts, endTs, stopReason, parts, toolUses }]
+ *   toolResults: Map<tool_use_id, { ts, content }>
+ *   firstUserPrompt: string | null
+ */
+function parseSubagentTranscript(file) {
+  const content = fs.readFileSync(file, 'utf-8');
+  const lines = content.split('\n').filter(Boolean);
+  const calls = [];
+  const callById = new Map();
+  const toolResults = new Map();
+  let firstUserPrompt = null;
+
+  for (const line of lines) {
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    const msg = d.message || {};
+    const ts = d.timestamp || new Date().toISOString();
+
+    if (d.type === 'user') {
+      const c = msg.content;
+      if (typeof c === 'string' && firstUserPrompt === null) {
+        firstUserPrompt = c;
+      } else if (Array.isArray(c)) {
+        for (const b of c) {
+          if (b && b.type === 'text' && firstUserPrompt === null) firstUserPrompt = b.text;
+          if (b && b.type === 'tool_result') {
+            let text = '';
+            if (typeof b.content === 'string') text = b.content;
+            else if (Array.isArray(b.content)) {
+              text = b.content.filter(x => x && x.type === 'text').map(x => x.text).join('\n');
+            }
+            toolResults.set(b.tool_use_id, { ts, content: text });
+          }
+        }
+      }
+    } else if (d.type === 'assistant') {
+      const id = msg.id || d.uuid;
+      let call = callById.get(id);
+      if (!call) {
+        call = {
+          id, model: msg.model || 'auto', ts, endTs: ts,
+          stopReason: msg.stop_reason, parts: [], toolUses: [],
+        };
+        callById.set(id, call);
+        calls.push(call);
+      }
+      call.endTs = ts;
+      if (msg.stop_reason) call.stopReason = msg.stop_reason;
+      for (const b of msg.content || []) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'thinking' && b.thinking) {
+          call.parts.push({ type: 'reasoning', content: b.thinking });
+        } else if (b.type === 'text' && b.text) {
+          call.parts.push({ type: 'text', content: b.text });
+        } else if (b.type === 'tool_use') {
+          call.parts.push({ type: 'tool_call', id: b.id, name: b.name, arguments: b.input });
+          call.toolUses.push({ id: b.id, name: b.name, input: b.input });
+        }
+      }
+    }
+  }
+  return { calls, toolResults, firstUserPrompt };
+}
+
+/**
+ * Build subagent event records that conform to the pilot subagent event
+ * contract (gen_ai.agent.scope=subagent + gen_ai.subagent.parent_tool_call.id).
+ * The converter nests these under the parent Agent tool.call span.
+ *
+ * Uses the same field shapes (raw objects/arrays, not pre-stringified) as
+ * buildEventsFromBoundaries so the JSONL serialisation path is identical.
+ */
+function buildSubagentRecords(task, turnContext, parsed) {
+  const records = [];
+  const base = {
+    'gen_ai.turn.id': turnContext.turnId,
+    'gen_ai.session.id': turnContext.sessionId,
+    'gen_ai.agent.type': turnContext.agentType,
+    'gen_ai.provider.name': turnContext.provider,
+    'gen_ai.agent.scope': 'subagent',
+    'gen_ai.agent.depth': 1,
+    'gen_ai.agent.id': task.agentId,
+    'gen_ai.agent.name': task.agentType || 'Subagent',
+    'gen_ai.agent.parent.id': turnContext.sessionId,
+    'gen_ai.subagent.parent_tool_call.id': task.parentToolUseId,
+    'agent.source': 'qoder-transcript-hook',
+  };
+  if (turnContext.userId) base['user.id'] = turnContext.userId;
+  if (turnContext.cwd) base['agent.qoder.cwd'] = turnContext.cwd;
+
+  const { calls, toolResults, firstUserPrompt } = parsed;
+  if (calls.length === 0) return records;
+
+  const observedTs = timestampToUnixNanos(Date.now());
+  let prevBoundaryMs = Date.parse(calls[0]?.ts || new Date().toISOString());
+  if (!Number.isFinite(prevBoundaryMs)) prevBoundaryMs = Date.now();
+
+  calls.forEach((call, idx) => {
+    const stepId = `${turnContext.turnId}:sa-${task.agentId.slice(-8)}:s${idx + 1}`;
+    const callStartMs = prevBoundaryMs;
+    const callEndMs = Date.parse(call.endTs) || callStartMs + 1;
+
+    // Input delta: first call uses the subagent prompt; subsequent calls use
+    // the previous call's tool_call + tool_result pairs (standard ReAct cycle).
+    let requestDelta;
+    if (idx === 0) {
+      requestDelta = [{
+        role: 'user',
+        parts: [{ type: 'text', content: firstUserPrompt || task.description || '' }],
+      }];
+    } else {
+      const prev = calls[idx - 1];
+      requestDelta = [
+        {
+          role: 'assistant',
+          parts: prev.toolUses.map(t => ({
+            type: 'tool_call', id: t.id, name: t.name, arguments: t.input,
+          })),
+        },
+        {
+          role: 'tool',
+          parts: prev.toolUses.map(t => ({
+            type: 'tool_call_response',
+            id: t.id,
+            response: toolResults.get(t.id)?.content ?? '',
+          })),
+        },
+      ];
+    }
+
+    // llm.request
+    records.push({
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.request',
+      'gen_ai.step.id': stepId,
+      'gen_ai.request.model': call.model,
+      'gen_ai.input.messages_delta': requestDelta,
+      time_unix_nano: `${callStartMs}000001`,
+      observed_time_unix_nano: observedTs,
+      ...base,
+    });
+
+    // llm.response
+    const finishReasons = [call.stopReason === 'tool_use' ? 'tool_call'
+      : (call.stopReason || 'end_turn')];
+    records.push({
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.response',
+      'gen_ai.step.id': stepId,
+      'gen_ai.request.model': call.model,
+      'gen_ai.response.model': call.model,
+      'gen_ai.response.id': call.id,
+      'gen_ai.response.finish_reasons': finishReasons,
+      'gen_ai.output.messages': [{
+        role: 'assistant',
+        parts: call.parts,
+        finish_reason: finishReasons[0],
+      }],
+      'agent.stop_reason': call.stopReason || 'end_turn',
+      time_unix_nano: `${callEndMs}000000`,
+      observed_time_unix_nano: observedTs,
+      ...base,
+    });
+
+    // tool.call + tool.result for each tool use in this LLM call
+    for (const t of call.toolUses) {
+      const res = toolResults.get(t.id);
+      records.push({
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.call',
+        'gen_ai.step.id': stepId,
+        'gen_ai.tool.name': t.name,
+        'gen_ai.tool.call.id': t.id,
+        'gen_ai.tool.call.exec.id': t.id,
+        'gen_ai.tool.call.arguments': typeof t.input === 'string' ? t.input : JSON.stringify(t.input),
+        time_unix_nano: `${callEndMs}000000`,
+        observed_time_unix_nano: observedTs,
+        ...base,
+      });
+
+      if (res) {
+        const resMs = Date.parse(res.ts) || callEndMs;
+        records.push({
+          'event.id': crypto.randomUUID(),
+          'event.name': 'tool.result',
+          'gen_ai.step.id': stepId,
+          'gen_ai.tool.name': t.name,
+          'gen_ai.tool.call.id': t.id,
+          'gen_ai.tool.call.exec.id': t.id,
+          'gen_ai.tool.call.result': res.content ?? '',
+          'tool.result.status': 'success',
+          'gen_ai.tool.call.duration': Math.max(0, resMs - callEndMs),
+          time_unix_nano: `${resMs}000000`,
+          observed_time_unix_nano: observedTs,
+          ...base,
+        });
+        prevBoundaryMs = resMs;
+      } else {
+        prevBoundaryMs = callEndMs;
+      }
+    }
+    if (call.toolUses.length === 0) prevBoundaryMs = callEndMs;
+  });
+
+  return records;
+}
+
+/**
+ * Scan the already-built parent turn records for Agent/task tool calls,
+ * match them against subagent task descriptors, parse each subagent
+ * transcript, and return the set of child records to be merged into the
+ * parent turn batch.
+ *
+ * Fail-open: any individual subagent error is logged and skipped.
+ */
+export function collectSubagentRecordsForTurn(turnRecords, transcriptPath, sessionId, cwd) {
+  const sessionDir = transcriptPath.replace(/\.jsonl$/, '');
+  const tasks = loadSubagentTasks(sessionDir);
+  if (tasks.length === 0) return [];
+
+  // Find tool.call records whose tool name is a recognised agent-invocation tool.
+  const agentToolCalls = turnRecords.filter(r =>
+    r['event.name'] === 'tool.call' && SUBAGENT_TOOL_NAMES.has(r['gen_ai.tool.name']),
+  );
+  if (agentToolCalls.length === 0) return [];
+
+  const toolCallIds = new Set(agentToolCalls.map(r => r['gen_ai.tool.call.id']));
+
+  // Match tasks to parent tool calls.
+  const taskByCallId = new Map();
+  for (const task of tasks) {
+    if (toolCallIds.has(task.parentToolUseId)) {
+      taskByCallId.set(task.parentToolUseId, task);
+    }
+  }
+  if (taskByCallId.size === 0) return [];
+
+  const callById = new Map(agentToolCalls.map(r => [r['gen_ai.tool.call.id'], r]));
+
+  const allSubagentRecords = [];
+  for (const [callId, task] of taskByCallId) {
+    // One context per parent call: the shared converter buckets records by
+    // gen_ai.turn.id before it looks up subagent.parent_tool_call.id, so child
+    // records carrying another turn's id are nested under a TOOL span that does
+    // not exist in their bucket and get dropped without a warning.
+    const parentCall = callById.get(callId);
+    const turnContext = {
+      turnId: parentCall['gen_ai.turn.id'],
+      sessionId: parentCall['gen_ai.session.id'] || sessionId,
+      agentType: parentCall['gen_ai.agent.type'],
+      provider: parentCall['gen_ai.provider.name'] || 'qwen',
+      userId: parentCall['user.id'] || '',
+      cwd: parentCall['agent.qoder.cwd'] || cwd || '',
+    };
+
+    const childFile = resolveSubagentTranscriptPath(transcriptPath, task);
+    if (!childFile || !fs.existsSync(childFile)) {
+      logDebug('qoder', `Subagent transcript not found for agentId=${task.agentId}`);
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = parseSubagentTranscript(childFile);
+    } catch (e) {
+      logDebug('qoder', `Subagent transcript parse failed: ${e.message}`);
+      continue;
+    }
+    if (parsed.calls.length === 0) continue;
+
+    const childRecords = buildSubagentRecords(task, turnContext, parsed);
+    // Apply resource / span attribute patches so subagent records carry the
+    // same invocation identity as parent records.
+    for (const record of childRecords) {
+      Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+    }
+    allSubagentRecords.push(...childRecords);
+    logDebug('qoder',
+      `Subagent agentId=${task.agentId.slice(-8)} callId=${callId.slice(-8)} ` +
+      `records=${childRecords.length}`,
+    );
+  }
+
+  if (allSubagentRecords.length > 0) {
+    // Sort by timestamp so the merge with parent records is deterministic.
+    allSubagentRecords.sort((a, b) => {
+      try {
+        return Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano));
+      } catch { return 0; }
+    });
+  }
+  return allSubagentRecords;
 }
 
 function inferVariant(row, sourceAgentId) {
