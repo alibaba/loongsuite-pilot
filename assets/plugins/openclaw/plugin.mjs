@@ -147,11 +147,16 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
-// Allocate once per invocation, so both event boundaries carry the same ID.
-function invocationSpanId(ids, key) {
-  if (key && ids.has(key)) return ids.get(key);
+function generateSpanId() {
   let id;
   do { id = crypto.randomBytes(8).toString("hex"); } while (id === "0000000000000000");
+  return id;
+}
+
+// Allocate once per model invocation, so both event boundaries carry the same ID.
+function invocationSpanId(ids, key) {
+  if (key && ids.has(key)) return ids.get(key);
+  const id = generateSpanId();
   if (key) setBounded(ids, key, id);
   return id;
 }
@@ -455,7 +460,7 @@ function getRun(runId, event, ctx) {
       lastCallId: null,
       nativeCallIds: new Map(),
       modelSpanIds: new Map(),
-      toolSpanIds: new Map(),
+      pendingToolInvocations: [],
       llmInputStash: null,
       llmInputPending: false,
       completed: false,
@@ -539,7 +544,7 @@ function resetCompletedRunState(run) {
   run.lastCallId = null;
   run.nativeCallIds.clear();
   run.modelSpanIds.clear();
-  run.toolSpanIds.clear();
+  run.pendingToolInvocations.length = 0;
   run.llmInputStash = null;
   run.llmInputPending = false;
   run.userPromptText = null;
@@ -1077,15 +1082,22 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   // Tool belongs to the current ReAct step (= most recent LLM call's callId).
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
+  const spanId = generateSpanId();
   if (event?.toolCallId) {
+    // Keep invocation state together. Reusing a native ID in a later step must
+    // not overwrite a pending result's span, step or start time. Repeated IDs
+    // are consumed in invocation order; different IDs can complete in any order.
+    pushBounded(run.pendingToolInvocations, {
+      toolCallId: event.toolCallId, spanId, stepId,
+      startedAtNanos: common.time_unix_nano,
+    });
     if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
     setBounded(run.toolStartedAtNanos, event.toolCallId, common.time_unix_nano);
   }
   const record = {
     ...common,
     "event.name": "tool.call",
-    span_id: invocationSpanId(run.toolSpanIds, event?.toolCallId
-      ? JSON.stringify([stepId, event.toolCallId]) : undefined),
+    span_id: spanId,
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,
@@ -1105,13 +1117,24 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   // Tool execution may finish after OpenClaw has already started the next
   // model call. Keep the result on the step where before_tool_call began so
   // the converter merges arguments, result and duration into one TOOL span.
-  const stepId = (event?.toolCallId && run.toolStepCallIds.get(event.toolCallId))
+  const pendingIndex = event?.toolCallId
+    ? run.pendingToolInvocations.findIndex(item => item.toolCallId === event.toolCallId)
+    : -1;
+  const invocation = pendingIndex >= 0
+    ? run.pendingToolInvocations.splice(pendingIndex, 1)[0]
+    : undefined;
+  const stepId = invocation?.stepId
+    || (event?.toolCallId && run.toolStepCallIds.get(event.toolCallId))
     || run.currentStepCallId
     || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
-  const startedAtNanos = event?.toolCallId
-    ? run.toolStartedAtNanos.get(event.toolCallId)
-    : undefined;
+  const startedAtNanos = invocation?.startedAtNanos;
+  if (invocation) {
+    // Persistence hooks and the legacy timing adapter must see the invocation
+    // that just completed, not a later before_tool_call with the same native ID.
+    if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
+    setBounded(run.toolStartedAtNanos, event.toolCallId, startedAtNanos);
+  }
   const nativeCompletedAtNanos = completionNanos(startedAtNanos, event?.durationMs);
   const observedAtNanos = common.observed_time_unix_nano;
   const completionExceedsObservation = nativeCompletedAtNanos && observedAtNanos && startedAtNanos
@@ -1145,8 +1168,7 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     ...common,
     ...(completedAtNanos ? { time_unix_nano: completedAtNanos } : {}),
     "event.name": "tool.result",
-    span_id: invocationSpanId(run.toolSpanIds, event?.toolCallId
-      ? JSON.stringify([stepId, event.toolCallId]) : undefined),
+    span_id: invocation?.spanId || generateSpanId(),
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,

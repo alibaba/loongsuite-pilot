@@ -181,6 +181,16 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
           records.filter(r => r['event.name'] === 'tool.call').map(r => r.span_id),
         ));
         expect(exported).toHaveLength(8);
+        const byId = new Map(exported.map(span => [span.spanContext().spanId, span]));
+        const expectedParent: Record<string, string | undefined> = {
+          ENTRY: undefined, AGENT: 'ENTRY', STEP: 'AGENT', LLM: 'STEP', TOOL: 'STEP',
+        };
+        for (const span of exported) {
+          const parent = span.parentSpanId ? byId.get(span.parentSpanId) : undefined;
+          expect(parent?.attributes['gen_ai.span.kind']).toBe(
+            expectedParent[String(span.attributes['gen_ai.span.kind'])],
+          );
+        }
         expect(new Set(exported.map(span => span.spanContext().spanId)).size).toBe(8);
       } finally {
         await otlp.shutdown();
@@ -188,6 +198,25 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       const traceRecords = records.filter(record => record['event.name'] !== 'agent.input');
       const converted = await convertEventLogToReadableSpans(traceRecords as EventLogRecord[], { strict: false });
       expect(converted.warnings).toEqual([]);
+      // Adding event span IDs must preserve every edge and span's semantic data.
+      const withoutIds = traceRecords.map(record => {
+        const copy = { ...record };
+        delete copy.span_id;
+        return copy;
+      });
+      const baseline = await convertEventLogToReadableSpans(withoutIds as EventLogRecord[], { strict: false });
+      const topology = (spans: ReadableSpan[]) => {
+        const byId = new Map(spans.map(span => [span.spanContext().spanId, span]));
+        return spans.map(span => {
+          const parent = span.parentSpanId ? byId.get(span.parentSpanId) : undefined;
+          return {
+            name: span.name, attributes: span.attributes,
+            parent: parent ? { name: parent.name, attributes: parent.attributes } : undefined,
+            startTime: span.startTime, endTime: span.endTime,
+          };
+        });
+      };
+      expect(topology(converted.spans)).toEqual(topology(baseline.spans));
       const kindCounts = converted.spans.reduce<Record<string, number>>((counts, span) => {
         const kind = String(span.attributes['gen_ai.span.kind']);
         counts[kind] = (counts[kind] ?? 0) + 1;
