@@ -101,8 +101,8 @@ describe('masked preview replacement mode', () => {
     expect(maskString(input, previewPlan)).toBe(
       '[IDCARD_MASKED]{1101**********002X}|' +
       '[EMAIL_MASKED]{zh****an@example.com}|' +
-      '[IPADDRESS_MASKED]{192.*.*.10}|' +
-      '[BANKCARD_MASKED]{622126******0000}',
+      '[IP_ADDRESS_MASKED]{192.*.*.10}|' +
+      '[CREDIT_CARD_MASKED]{622126******0000}',
     );
   });
 
