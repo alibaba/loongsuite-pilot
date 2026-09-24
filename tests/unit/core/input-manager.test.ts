@@ -908,8 +908,8 @@ describe('InputManager', () => {
       expect(dispatched[0]['gen_ai.guardrail.action']).toBe('allow');
       expect(dispatched[0]['gen_ai.guardrail.triggered']).toBe(true);
       expect(dispatched[1]['gen_ai.guardrail.action']).toBe('deny');
-      expect(dispatched[2]['gen_ai.guardrail.action']).toBe('unknown');
-      expect(dispatched[2]['gen_ai.guardrail.triggered']).toBe(true);
+      expect(dispatched[2]['gen_ai.guardrail.action']).toBeUndefined();
+      expect(dispatched[2]['gen_ai.guardrail.triggered']).toBeUndefined();
     });
   });
 

@@ -18,17 +18,17 @@ export class InterceptResultLinker {
           : null;
       if (!phase || !isInterceptorAgent(entry['gen_ai.agent.type'])) continue;
 
-      entry['gen_ai.guardrail.triggered'] = true;
       const toolUseId = entry['gen_ai.tool.call.id'];
       const sessionId = entry['gen_ai.session.id'];
-      const action = typeof toolUseId === 'string' && toolUseId.length > 0
-        ? this.verdictStore.get({
-          sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
-          toolUseId,
-          phase,
-        })
-        : null;
-      entry['gen_ai.guardrail.action'] = action ?? 'unknown';
+      if (typeof toolUseId !== 'string' || toolUseId.length === 0) continue;
+      const action = this.verdictStore.get({
+        sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
+        toolUseId,
+        phase,
+      });
+      if (!action) continue;
+      entry['gen_ai.guardrail.triggered'] = true;
+      entry['gen_ai.guardrail.action'] = action;
     }
   }
 }

@@ -35,7 +35,7 @@ describe('InterceptResultLinker', () => {
     expect(entries[1]['gen_ai.guardrail.action']).toBe('deny');
   });
 
-  it('fills unknown when the record is missing and skips other agents', () => {
+  it('omits guardrail fields when the record is missing and skips other agents', () => {
     const store = storeWith([
       { sessionId: 'open-session', toolUseId: 'call-2', phase: 'PreToolUse', action: 'deny' },
     ]);
@@ -57,13 +57,13 @@ describe('InterceptResultLinker', () => {
     new InterceptResultLinker(store, true).enrich([matching, wrongSession, unsupported]);
 
     expect(matching['gen_ai.guardrail.action']).toBe('deny');
-    expect(wrongSession['gen_ai.guardrail.triggered']).toBe(true);
-    expect(wrongSession['gen_ai.guardrail.action']).toBe('unknown');
+    expect(wrongSession['gen_ai.guardrail.triggered']).toBeUndefined();
+    expect(wrongSession['gen_ai.guardrail.action']).toBeUndefined();
     expect(unsupported['gen_ai.guardrail.triggered']).toBeUndefined();
     expect(unsupported['gen_ai.guardrail.action']).toBeUndefined();
   });
 
-  it('fills unknown when the tool call id is missing', () => {
+  it('omits guardrail fields when the tool call id or record is missing', () => {
     const store = storeWith([
       { sessionId: 's1', toolUseId: 'present', phase: 'PreToolUse', action: 'deny' },
     ]);
@@ -82,9 +82,10 @@ describe('InterceptResultLinker', () => {
 
     new InterceptResultLinker(store, true).enrich([missingId, missingRecord, idea]);
 
-    expect(missingId['gen_ai.guardrail.triggered']).toBe(true);
-    expect(missingId['gen_ai.guardrail.action']).toBe('unknown');
-    expect(missingRecord['gen_ai.guardrail.action']).toBe('unknown');
+    expect(missingId['gen_ai.guardrail.triggered']).toBeUndefined();
+    expect(missingId['gen_ai.guardrail.action']).toBeUndefined();
+    expect(missingRecord['gen_ai.guardrail.triggered']).toBeUndefined();
+    expect(missingRecord['gen_ai.guardrail.action']).toBeUndefined();
     expect(idea['gen_ai.guardrail.action']).toBe('deny');
   });
 
