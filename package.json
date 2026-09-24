@@ -66,7 +66,8 @@
     "smol-toml": "^1.8.0",
     "undici": "^6.28.0",
     "uuid": "^9.0.0",
-    "zod": "^3.22.0"
+    "zod": "^3.22.0",
+    "sqlite3": "file:compat/sqlite3"
   },
   "devDependencies": {
     "@types/express": "^4.17.0",
@@ -83,6 +84,7 @@
   "files": [
     "dist/",
     "assets/",
+    "compat/",
     "scripts/",
     "agents.d/"
   ],

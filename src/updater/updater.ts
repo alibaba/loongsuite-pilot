@@ -626,6 +626,11 @@ export class Updater {
       // provisioning succeeded, otherwise this process). The probe require()s
       // node:sqlite with no version bypass. Failure throws before current is
       // written, so the previous version stays.
+      //
+      // Cross-version upgrade: a deployed updater from before this migration
+      // runs `require('sqlite3')` instead. The compat shim at compat/sqlite3/
+      // makes that probe succeed (exit 0) so old updaters can activate new
+      // versions. The shim is just `module.exports = {}`.
       logger.info('checking node:sqlite runtime', { node: nodeBin });
       await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,
