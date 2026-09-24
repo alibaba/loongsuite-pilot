@@ -4,23 +4,14 @@ import { createLogger, initFileLogging, flushLogsSync } from '../utils/logger.js
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
 import { INTERCEPTOR_PROCESS_PATTERNS } from '../utils/pid-utils.js';
-import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from './config.js';
-import { createInterceptorServer } from './daemon/server.js';
-import { removeOwnPid, writeRuntime } from './daemon/runtime.js';
+import { removeOwnPid } from './daemon/runtime.js';
+import { startInterceptorService } from './daemon/lifecycle.js';
 import {
   defaultPilotDataDir,
   interceptorDataDir,
   interceptorLockPath,
   interceptorLogPath,
 } from './paths.js';
-import { builtinRules } from './rules/registry.js';
-import { RuleEngine } from './rules/engine.js';
-import {
-  maybeCleanupToolVerdicts,
-  TOOL_VERDICT_CLEANUP_INTERVAL_MS,
-  writeToolVerdict,
-} from './tool-verdict-store.js';
-import { INTERCEPTOR_DEFAULT_PORT } from './types.js';
 
 const logger = createLogger('InterceptorDaemon');
 
@@ -45,65 +36,15 @@ async function main(): Promise<void> {
     removeOwnPid(dataDir);
   });
 
-  const interceptorConfig = await loadInterceptorConfig();
-  const engine = new RuleEngine(builtinRules(), resolveEnabledInterceptorTypes(interceptorConfig));
   const version = readInstalledVersion(dataDir);
   const gitCommit = readInstalledGitCommit(dataDir);
-  const serverOpts = {
-    port: INTERCEPTOR_DEFAULT_PORT,
-    version,
-    engine,
-    writeToolVerdict,
-  };
-  const server = createInterceptorServer(serverOpts);
-  const port = await listenLoopback(server, INTERCEPTOR_DEFAULT_PORT);
-  serverOpts.port = port;
-  await writeRuntime({ dataDir, port, version, gitCommit });
-  logger.info('interceptor HTTP server starting', { addr: `127.0.0.1:${port}` });
-  maybeCleanupToolVerdicts(undefined, new Date());
-
-  const heartbeat = setInterval(() => {
-    void writeRuntime({ dataDir, port, version, gitCommit });
-  }, 30_000);
-  heartbeat.unref();
-  const verdictCleanup = setInterval(() => {
-    maybeCleanupToolVerdicts(undefined, new Date());
-  }, TOOL_VERDICT_CLEANUP_INTERVAL_MS);
-  verdictCleanup.unref();
+  const service = await startInterceptorService({ dataDir, version, gitCommit });
 
   const shutdown = () => {
-    clearInterval(heartbeat);
-    clearInterval(verdictCleanup);
-    server.close(() => process.exit(0));
+    void service.stop().finally(() => process.exit(0));
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
-}
-
-function listenLoopback(server: import('node:http').Server, preferredPort: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const tryListen = (port: number) => {
-      const onError = (err: NodeJS.ErrnoException) => {
-        server.off('error', onError);
-        if (err.code === 'EADDRINUSE' && port !== 0) {
-          tryListen(0);
-          return;
-        }
-        reject(err);
-      };
-      server.once('error', onError);
-      server.listen(port, '127.0.0.1', () => {
-        server.off('error', onError);
-        const addr = server.address();
-        if (!addr || typeof addr === 'string') {
-          reject(new Error('failed to bind interceptor port'));
-          return;
-        }
-        resolve(addr.port);
-      });
-    };
-    tryListen(preferredPort);
-  });
 }
 
 function readInstalledGitCommit(dataDir: string): string | undefined {

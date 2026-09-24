@@ -232,34 +232,6 @@ describe('Updater', () => {
     vi.unstubAllGlobals();
   });
 
-  describe('interceptor health', () => {
-    it('rejects a stale heartbeat even when its PID is still alive', () => {
-      const updater = new Updater(makeConfig(), tmpDir);
-      const failure = (updater as any).interceptorHealthFailure(
-        healthyInterceptorRuntime({
-          updatedAt: new Date(Date.now() - 3 * 60_000).toISOString(),
-        }),
-        '1.0.2',
-        Date.now() - 2 * 60_000,
-        null,
-      );
-
-      expect(failure).toBe('runtime record predates restart');
-    });
-
-    it('rejects a runtime whose PID start token no longer matches', () => {
-      const updater = new Updater(makeConfig(), tmpDir);
-      const failure = (updater as any).interceptorHealthFailure(
-        healthyInterceptorRuntime({ processStartToken: 'stale-process-lifetime' }),
-        '1.0.2',
-        0,
-        null,
-      );
-
-      expect(failure).toMatch(/identity is unreadable|was reused/);
-    });
-  });
-
   // ─── LIFECYCLE ─────────────────────────────────────────
 
   describe('lifecycle', () => {
@@ -476,7 +448,9 @@ describe('Updater', () => {
       mockFsAccess.mockResolvedValue(undefined);
       let runtimeReads = 0;
       mockReadJsonFile.mockImplementation((filePath: string) => {
-        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
+        if (isInterceptorRuntimePath(filePath)) {
+          return Promise.resolve(healthyInterceptorRuntime({ pid: process.ppid }));
+        }
         if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
         runtimeReads++;
         return Promise.resolve(runtimeReads <= 2 ? {
@@ -1049,9 +1023,8 @@ describe('Updater', () => {
       expect(commandArgs).toContainEqual([
         'restart-collector', '--defer-updater-restart',
       ]);
-      expect(commandArgs).toContainEqual([
-        'restart-interceptor',
-      ]);
+      expect(commandArgs.flat()).not.toContain('restart-interceptor');
+      expect(commandArgs.flat()).not.toContain('start-interceptor');
       expect(commandArgs).toContainEqual([
         'schedule-updater-restart',
       ]);

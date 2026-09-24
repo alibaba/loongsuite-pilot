@@ -5,42 +5,35 @@ const SERVICE_SH = readFileSync('scripts/loongsuite-pilot.sh', 'utf-8');
 const SERVICE_PS1 = readFileSync('scripts/loongsuite-pilot.ps1', 'utf-8');
 const AUTOSTART = readFileSync('deploy/autostart.sh', 'utf-8');
 
-describe('interceptor peer service registration', () => {
-  it('registers interceptor as a third Unix service', () => {
-    expect(SERVICE_SH).toContain('cmd_run_interceptor()');
-    expect(SERVICE_SH).toContain('cmd_restart_interceptor()');
-    expect(SERVICE_SH).toContain('cmd_start_interceptor()');
-    expect(SERVICE_SH).toContain('_write_launchd_interceptor_plist');
-    expect(SERVICE_SH).toContain('_write_systemd_user_interceptor_unit');
-    expect(SERVICE_SH).toContain('_write_systemd_system_interceptor_unit');
-    expect(SERVICE_SH).toContain('_write_initd_interceptor_script');
-    expect(SERVICE_SH).toContain('autostart_install_interceptor_only');
-    expect(SERVICE_SH).toMatch(/run-interceptor\)\s+cmd_run_interceptor/);
-    expect(SERVICE_SH).toContain('loongsuite-pilot-interceptor.service');
-    expect(SERVICE_SH).toContain('com.loongsuite-pilot.interceptor');
+describe('interceptor inside the collector process', () => {
+  it('does not register or command a separate Unix interceptor service', () => {
+    const install = SERVICE_SH.slice(
+      SERVICE_SH.indexOf('autostart_install() {'),
+      SERVICE_SH.indexOf('autostart_remove() {'),
+    );
+    expect(install).not.toContain('_write_launchd_interceptor_plist');
+    expect(install).not.toContain('loongsuite-pilot-interceptor');
+    expect(SERVICE_SH).not.toContain('retire_standalone_interceptor');
+    expect(SERVICE_SH).not.toContain('start-interceptor');
+    expect(SERVICE_SH).not.toContain('restart-interceptor');
+    expect(SERVICE_SH).not.toContain('run-interceptor');
+    expect(SERVICE_SH).not.toContain('interceptor-daemon.js');
+    expect(SERVICE_SH).toContain('interceptor_embedded_status()');
+    expect(SERVICE_SH).toMatch(/cmd_run\(\) \{\n    ensure_dirs/);
   });
 
-  it('propagates custom data and cache directories to every Unix service manager', () => {
-    const interceptorSection = SERVICE_SH.slice(
-      SERVICE_SH.indexOf('_write_systemd_user_interceptor_unit()'),
-      SERVICE_SH.indexOf('_register_initd_boot()'),
-    );
-    expect(interceptorSection).toContain('Environment=LOONGSUITE_PILOT_DATA_DIR=${DATA_DIR}');
-    expect(interceptorSection).toContain('Environment=LOONGSUITE_PILOT_CACHE_DIR=${CACHE_DIR}');
-    expect(interceptorSection).toContain('<key>LOONGSUITE_PILOT_DATA_DIR</key>');
-    expect(interceptorSection).toContain('<key>LOONGSUITE_PILOT_CACHE_DIR</key>');
-    expect(interceptorSection).toContain('export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"');
-    expect(interceptorSection).toContain('export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"');
-
-    const referenceSection = AUTOSTART.slice(AUTOSTART.indexOf('_write_launchd_interceptor_plist()'));
-    expect(referenceSection).toContain('<key>LOONGSUITE_PILOT_DATA_DIR</key>');
-    expect(referenceSection).toContain('<key>LOONGSUITE_PILOT_CACHE_DIR</key>');
-    expect(referenceSection).toContain(
-      'Environment=LOONGSUITE_PILOT_DATA_DIR=${LOONGSUITE_PILOT_DATA_DIR}',
-    );
-    expect(referenceSection).toContain(
-      'Environment=LOONGSUITE_PILOT_CACHE_DIR=${LOONGSUITE_PILOT_CACHE_DIR}',
-    );
+  it('does not deploy a separate interceptor daemon', () => {
+    expect(SERVICE_SH).not.toContain('cmd_run_interceptor');
+    expect(SERVICE_PS1).not.toContain('function Cmd-RunInterceptor');
+    expect(SERVICE_PS1).not.toContain('interceptor-daemon');
+    expect(AUTOSTART).not.toContain('interceptor');
+    const installerSh = readFileSync('deploy/installer-opensource.sh', 'utf-8');
+    const installerPs1 = readFileSync('deploy/installer-opensource.ps1', 'utf-8');
+    expect(installerSh).not.toContain('interceptor-daemon.js');
+    expect(installerSh).not.toContain('loongsuite-pilot-interceptor');
+    expect(installerSh).not.toContain('interceptor/interceptor.pid');
+    expect(installerPs1).not.toContain('interceptor-daemon.js');
+    expect(installerPs1).not.toContain('LoongsuitePilotInterceptor');
   });
 
   it('does not let the hook CLI start the daemon', () => {
@@ -50,12 +43,16 @@ describe('interceptor peer service registration', () => {
     expect(cli).toContain("command === 'hook'");
   });
 
-  it('registers interceptor as a Windows scheduled task', () => {
-    expect(SERVICE_PS1).toContain('function Install-InterceptorTask');
-    expect(SERVICE_PS1).toContain('function Cmd-RunInterceptor');
-    expect(SERVICE_PS1).toContain('function Cmd-RestartInterceptor');
-    expect(SERVICE_PS1).toContain('LoongsuitePilotInterceptor-');
-    expect(SERVICE_PS1).toContain('interceptor-daemon');
+  it('does not register interceptor as a Windows scheduled task', () => {
+    expect(SERVICE_PS1).not.toContain('function Remove-StandaloneInterceptor');
+    expect(SERVICE_PS1).not.toContain('function Install-InterceptorTask');
+    expect(SERVICE_PS1).not.toContain('function Cmd-RestartInterceptor');
+    expect(SERVICE_PS1).not.toContain('start-interceptor');
+    expect(SERVICE_PS1).not.toContain('restart-interceptor');
+    expect(SERVICE_PS1).not.toContain('run-interceptor');
+    expect(SERVICE_PS1).not.toContain('LoongsuitePilotInterceptor');
+    expect(SERVICE_PS1).toContain('function Test-InterceptorEmbedded');
+    expect(SERVICE_PS1).toMatch(/function Cmd-Run \{\r?\n    Ensure-Dirs/);
   });
 
   it('pins QwenWork interceptor scripts to --agent qwen-work-cn, not qoder-auto', () => {
@@ -75,9 +72,9 @@ describe('interceptor peer service registration', () => {
     expect(def.hook.interceptor.insert).toBe('head');
   });
 
-  it('keeps the reference autostart library in sync', () => {
-    expect(AUTOSTART).toContain('run-interceptor');
-    expect(AUTOSTART).toContain('loongsuite-pilot-interceptor.service');
-    expect(AUTOSTART).toContain('com.loongsuite-pilot.interceptor');
+  it('keeps the reference autostart library on collector and updater only', () => {
+    expect(AUTOSTART).toContain('autostart_install()');
+    expect(AUTOSTART).toContain('_LOONGSUITE_PILOT_UPDATER_UNIT');
+    expect(AUTOSTART).not.toContain('interceptor');
   });
 });

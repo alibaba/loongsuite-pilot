@@ -7,6 +7,7 @@ import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { interceptorToolVerdictDir } from '../interceptor/paths.js';
+import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import {
@@ -171,6 +172,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
+  private interceptorService: InterceptorService | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
@@ -412,6 +414,17 @@ export class Orchestrator extends EventEmitter {
       logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
     });
 
+    // Interceptor HTTP shares this process. A bind failure leaves hooks fail-open
+    // and must not keep the collector from collecting.
+    this.interceptorService = await startInterceptorService({
+      dataDir: this.dataDir,
+      version: packageVersion,
+      gitCommit: packageGitCommit || undefined,
+    }).catch(err => {
+      logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
+      return null;
+    });
+
     // Only the native macOS menu bar app remains optional.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
@@ -469,6 +482,10 @@ export class Orchestrator extends EventEmitter {
     });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
+    await this.interceptorService?.stop().catch(err => {
+      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    this.interceptorService = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();

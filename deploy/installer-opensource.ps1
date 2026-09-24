@@ -1133,8 +1133,6 @@ function Deploy-BootstrapScripts {
     $bootDir = Join-Path $CACHE_DIR "bin"
     if (-not (Test-Path $bootDir)) { New-Item -ItemType Directory -Path $bootDir -Force | Out-Null }
     Copy-Item (Join-Path $srcDir "collector-daemon.js") $bootDir -Force
-    $interceptorSrc = Join-Path $srcDir "interceptor-daemon.js"
-    if (Test-Path $interceptorSrc) { Copy-Item $interceptorSrc $bootDir -Force }
 }
 
 # ============================================================
@@ -1893,7 +1891,7 @@ $script:PILOT_HELD_TASK_NAMES = @()
 
 function Get-PilotDeployTaskNames {
     $tag = Get-PilotUserTag
-    @("LoongsuitePilot-$tag", "LoongsuitePilotUpdater-$tag", "LoongsuitePilotInterceptor-$tag")
+    @("LoongsuitePilot-$tag", "LoongsuitePilotUpdater-$tag")
 }
 
 function Disable-PilotScheduledTasksDuringDeploy {

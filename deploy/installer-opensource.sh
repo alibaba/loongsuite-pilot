@@ -881,7 +881,6 @@ deploy_bootstrap_scripts() {
     mkdir -p "$boot_dir"
     cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
     [ -f "$src_dir/updater-daemon.js" ] && cp -f "$src_dir/updater-daemon.js" "$boot_dir/" || true
-    [ -f "$src_dir/interceptor-daemon.js" ] && cp -f "$src_dir/interceptor-daemon.js" "$boot_dir/" || true
 }
 
 # ============================================================
@@ -1966,7 +1965,7 @@ stop_pilot_for_deploy() {
     local cli
     cli="$(resolve_pilot_cli)"
 
-    if [ -z "$cli" ] && [ ! -f "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -f "$DATA_DIR/loongsuite-pilot-updater.pid" ] && [ ! -f "$DATA_DIR/interceptor/interceptor.pid" ]; then
+    if [ -z "$cli" ] && [ ! -f "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -f "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
         return 0
     fi
 
@@ -1981,7 +1980,6 @@ stop_pilot_for_deploy() {
     # Leftovers: no CLI on PATH, or an updater the CLI did not track.
     stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid"
     stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid"
-    stop_one_pilot_pid_file "$DATA_DIR/interceptor/interceptor.pid"
     echo ""
 }
 
@@ -2873,8 +2871,7 @@ cmd_uninstall() {
             Darwin)
                 local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
                 local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
-                local _ilist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.interceptor.plist"
-                for f in "$_ilist" "$_uplist" "$_plist"; do
+                for f in "$_uplist" "$_plist"; do
                     if [ -f "$f" ]; then
                         launchctl unload -w "$f" 2>/dev/null || true
                         rm -f "$f"
@@ -2890,18 +2887,15 @@ cmd_uninstall() {
                 if [ -f "$_user_unit_dir/loongsuite-pilot.service" ]; then
                     systemctl --user disable --now loongsuite-pilot.service &>/dev/null || true
                     systemctl --user disable --now loongsuite-pilot-updater.service &>/dev/null || true
-                    systemctl --user disable --now loongsuite-pilot-interceptor.service &>/dev/null || true
                     rm -f "$_user_unit_dir/loongsuite-pilot.service"
                     rm -f "$_user_unit_dir/loongsuite-pilot-updater.service"
-                    rm -f "$_user_unit_dir/loongsuite-pilot-interceptor.service"
                     systemctl --user daemon-reload &>/dev/null || true
                 fi
 
                 # Clean up system-level systemd units
                 local _sys_unit="/etc/systemd/system/loongsuite-pilot-${_run_user}.service"
                 local _sys_uunit="/etc/systemd/system/loongsuite-pilot-updater-${_run_user}.service"
-                local _sys_iunit="/etc/systemd/system/loongsuite-pilot-interceptor-${_run_user}.service"
-                for f in "$_sys_iunit" "$_sys_uunit" "$_sys_unit"; do
+                for f in "$_sys_uunit" "$_sys_unit"; do
                     if [ -f "$f" ]; then
                         sudo systemctl disable --now "$(basename "$f")" &>/dev/null || true
                         sudo rm -f "$f"
@@ -2912,8 +2906,7 @@ cmd_uninstall() {
                 # Clean up init.d scripts
                 local _initd="/etc/init.d/loongsuite-pilot-${_run_user}"
                 local _initd_u="/etc/init.d/loongsuite-pilot-updater-${_run_user}"
-                local _initd_i="/etc/init.d/loongsuite-pilot-interceptor-${_run_user}"
-                for f in "$_initd_i" "$_initd_u" "$_initd"; do
+                for f in "$_initd_u" "$_initd"; do
                     if [ -f "$f" ]; then
                         sudo "$f" stop &>/dev/null || true
                         local _name; _name=$(basename "$f")

@@ -24,7 +24,6 @@ import {
   writeRestartFailure,
   type RestartFailureBreadcrumb,
 } from '../utils/restart-breadcrumb.js';
-import { readProcessStartToken } from '../utils/pid-utils.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -44,7 +43,6 @@ const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
 const COLLECTOR_COMMAND_TIMEOUT_MS = 90_000;
 const COLLECTOR_HEALTH_TIMEOUT_MS = 30_000;
 const COLLECTOR_HEALTH_POLL_MS = 500;
-const INTERCEPTOR_HEARTBEAT_MAX_AGE_MS = 2 * 60_000;
 
 // ── Managed Node.js runtime (mirrors deploy/installer-opensource.sh) ──
 // Existing installs that predate the managed runtime run the updater (and hence
@@ -116,7 +114,6 @@ export interface UpdaterPaths {
   loongsuitePilotBin: string;
   runtimeFile: string;
   collectorRuntimeFile: string;
-  interceptorRuntimeFile: string;
   // Where the CLI wrapper reads the pinned node runtime (its NODE_PIN_FILE).
   nodePinFile: string;
 }
@@ -156,7 +153,6 @@ function defaultPaths(): UpdaterPaths {
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
     collectorRuntimeFile: path.join(dataDir, 'logs', 'runtime.json'),
-    interceptorRuntimeFile: path.join(dataDir, 'interceptor', 'runtime.json'),
     nodePinFile: path.join(pinDir, 'node-bin'),
   };
 }
@@ -172,7 +168,6 @@ export function buildPaths(baseDir: string): UpdaterPaths {
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(baseDir),
     collectorRuntimeFile: path.join(baseDir, 'logs', 'runtime.json'),
-    interceptorRuntimeFile: path.join(baseDir, 'interceptor', 'runtime.json'),
     nodePinFile: path.join(baseDir, 'node-bin'),
   };
 }
@@ -188,17 +183,6 @@ interface CollectorRuntimeRecord {
   packageVersion?: unknown;
   gitCommit?: unknown;
   pid?: unknown;
-  updatedAt?: unknown;
-}
-
-interface InterceptorRuntimeRecord {
-  service?: unknown;
-  status?: unknown;
-  packageVersion?: unknown;
-  version?: unknown;
-  gitCommit?: unknown;
-  pid?: unknown;
-  processStartToken?: unknown;
   updatedAt?: unknown;
 }
 
@@ -295,7 +279,6 @@ export class Updater {
           gitCommit: target.git_commit,
         };
         const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
-        await this.recoverCurrentInterceptorIfNeeded(activeVersion);
         if (collectorRecovered) {
           void this.metrics?.writeEvent('collector_restarted', {
             latest_version: activeVersion.version,
@@ -342,11 +325,6 @@ export class Updater {
       void this.metrics?.writeEvent('collector_restarted', {
         latest_version: target.version,
       });
-      await this.restartInterceptor(
-        target.version,
-        local?.version === target.version,
-        target.git_commit,
-      );
 
       if (channel === 'canary') {
         await this.persistCanaryState(hotfixVersion ?? 0);
@@ -1206,48 +1184,8 @@ export class Updater {
     logger.info('collector restarted and healthy', { targetVersion });
   }
 
-  private async restartInterceptor(
-    targetVersion: string,
-    requireNewPid: boolean,
-    targetGitCommit = '',
-  ): Promise<void> {
-    logger.info('restarting interceptor service');
-    const previousRuntime = requireNewPid ? await this.readInterceptorRuntime() : null;
-    const previousPid = typeof previousRuntime?.pid === 'number' ? previousRuntime.pid : null;
-    const restartStartedAt = Date.now();
-
-    try {
-      await this.runCollectorCommand('restart-interceptor');
-    } catch (err) {
-      logger.warn('interceptor restart failed; attempting start-only recovery', {
-        error: this.formatCommandFailure(err),
-      });
-      await this.startInterceptorForRecovery(err);
-    }
-
-    await this.waitForInterceptorHealth(
-      targetVersion,
-      restartStartedAt,
-      previousPid,
-      targetGitCommit,
-    );
-    logger.info('interceptor restarted and healthy', { targetVersion });
-  }
-
-  private async startInterceptorForRecovery(cause: unknown): Promise<void> {
-    try {
-      await this.runCollectorCommand('start-interceptor');
-    } catch (recoveryErr) {
-      throw new Error(
-        `interceptor restart failed (${this.formatCommandFailure(cause)}); `
-          + `start-only recovery also failed (${this.formatCommandFailure(recoveryErr)})`,
-      );
-    }
-  }
-
   private async runCollectorCommand(
-    command: 'restart-collector' | 'start-collector' | 'schedule-updater-restart'
-      | 'restart-interceptor' | 'start-interceptor',
+    command: 'restart-collector' | 'start-collector' | 'schedule-updater-restart',
   ): Promise<void> {
     const bin = this.paths.loongsuitePilotBin;
     const commandArgs = command === 'restart-collector'
@@ -1388,48 +1326,6 @@ export class Updater {
     return true;
   }
 
-  private async readInterceptorRuntime(): Promise<InterceptorRuntimeRecord | null> {
-    return readJsonFile<InterceptorRuntimeRecord>(this.paths.interceptorRuntimeFile);
-  }
-
-  private async recoverCurrentInterceptorIfNeeded(target: LocalVersion): Promise<boolean> {
-    const runtime = await this.readInterceptorRuntime();
-    const healthFailure = this.interceptorHealthFailure(
-      runtime,
-      target.version,
-      Date.now() - INTERCEPTOR_HEARTBEAT_MAX_AGE_MS,
-      null,
-      target.gitCommit,
-    );
-    if (!healthFailure) return false;
-
-    const livePid = this.liveCollectorPid(runtime);
-    if (livePid !== null) {
-      logger.warn('current version is installed but a stale interceptor is still alive; restarting it', {
-        targetVersion: target.version,
-        interceptorPid: livePid,
-        error: healthFailure,
-      });
-      await this.restartInterceptor(target.version, true, target.gitCommit);
-      return true;
-    }
-
-    logger.warn('current version is installed but interceptor is not running; attempting start-only recovery', {
-      targetVersion: target.version,
-      error: healthFailure,
-    });
-    const recoveryStartedAt = Date.now();
-    await this.startInterceptorForRecovery(new Error(healthFailure));
-    await this.waitForInterceptorHealth(
-      target.version,
-      recoveryStartedAt,
-      null,
-      target.gitCommit,
-    );
-    logger.info('interceptor recovered and healthy', { targetVersion: target.version });
-    return true;
-  }
-
   private liveCollectorPid(runtime: CollectorRuntimeRecord | null): number | null {
     const pid = runtime?.pid;
     if (!Number.isInteger(pid) || (pid as number) <= 0) return null;
@@ -1494,78 +1390,6 @@ export class Updater {
     if (!Number.isInteger(pid) || (pid as number) <= 0) return 'runtime PID is invalid';
     if (previousPid !== null && pid === previousPid) return 'collector PID did not change';
     if (this.liveCollectorPid(runtime) === null) return `collector PID ${String(pid)} is not alive`;
-    return '';
-  }
-
-  private async waitForInterceptorHealth(
-    targetVersion: string,
-    notBeforeMs: number,
-    previousPid: number | null,
-    targetGitCommit = '',
-  ): Promise<void> {
-    const deadline = Date.now() + COLLECTOR_HEALTH_TIMEOUT_MS;
-    let lastFailure = 'runtime record not found';
-
-    while (true) {
-      const runtime = await this.readInterceptorRuntime();
-      lastFailure = this.interceptorHealthFailure(
-        runtime,
-        targetVersion,
-        notBeforeMs,
-        previousPid,
-        targetGitCommit,
-      );
-      if (!lastFailure) return;
-      if (Date.now() >= deadline) break;
-      await new Promise<void>((resolve) => setTimeout(resolve, COLLECTOR_HEALTH_POLL_MS));
-    }
-
-    throw new Error(
-      `interceptor did not become healthy within ${COLLECTOR_HEALTH_TIMEOUT_MS}ms: ${lastFailure}`,
-    );
-  }
-
-  private interceptorHealthFailure(
-    runtime: InterceptorRuntimeRecord | null,
-    targetVersion: string,
-    notBeforeMs: number,
-    previousPid: number | null,
-    targetGitCommit = '',
-  ): string {
-    if (!runtime) return 'runtime record not found';
-    if (runtime.service !== 'loongsuite-pilot-interceptor') {
-      return `runtime service is ${String(runtime.service)}`;
-    }
-    if (runtime.status !== 'ok') return `runtime status is ${String(runtime.status)}`;
-    const packageVersion = runtime.packageVersion ?? runtime.version;
-    if (packageVersion !== targetVersion) {
-      return `runtime version is ${String(packageVersion)}, expected ${targetVersion}`;
-    }
-    if (
-      targetGitCommit
-      && typeof runtime.gitCommit === 'string'
-      && runtime.gitCommit.length > 0
-      && runtime.gitCommit !== targetGitCommit
-    ) {
-      return `runtime git commit is ${String(runtime.gitCommit)}, expected ${targetGitCommit}`;
-    }
-
-    const updatedAtMs = typeof runtime.updatedAt === 'string' ? Date.parse(runtime.updatedAt) : NaN;
-    if (!Number.isFinite(updatedAtMs) || updatedAtMs < notBeforeMs) {
-      return 'runtime record predates restart';
-    }
-
-    const pid = runtime.pid;
-    if (!Number.isInteger(pid) || (pid as number) <= 0) return 'runtime PID is invalid';
-    if (previousPid !== null && pid === previousPid) return 'interceptor PID did not change';
-    if (this.liveCollectorPid(runtime) === null) return `interceptor PID ${String(pid)} is not alive`;
-    if (typeof runtime.processStartToken === 'string' && runtime.processStartToken.length > 0) {
-      const currentStartToken = readProcessStartToken(pid as number);
-      if (!currentStartToken) return `interceptor PID ${String(pid)} identity is unreadable`;
-      if (currentStartToken !== runtime.processStartToken) {
-        return `interceptor PID ${String(pid)} was reused`;
-      }
-    }
     return '';
   }
 

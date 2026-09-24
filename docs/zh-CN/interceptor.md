@@ -2,7 +2,7 @@
 
 [Qoder CLI Hooks Reference](https://docs.qoder.com/cli/hooks-reference) · [Qoder Hooks](https://docs.qoder.com/extensions/hooks) · [请求与响应协议](interceptor-protocol.md)
 
-Interceptor 是 Pilot 的第三个同级服务，和 collector / updater 一样由 launchd、systemd 或 Windows Task Scheduler 在安装时启动并守护。它不依赖第一次 hook 触发，也不作为 collector 子进程。
+Interceptor 的 HTTP 服务跑在 collector 进程里，随 collector 启动和退出。Hook CLI 仍是 IDE 拉起的短进程，通过 loopback HTTP 访问 collector。它不依赖第一次 hook 触发。
 
 现有 Qoder / 千问办公 transcript 采集 hook 保持独立，拦截判定走第二条 hook。
 
@@ -18,7 +18,7 @@ interceptor-hook.sh / .ps1
 dist/interceptor/cli.cjs  hook --agent qoder-auto
         │ loopback HTTP（4s）
         ▼
-共享 interceptor daemon（127.0.0.1）
+collector 进程内 interceptor HTTP（127.0.0.1）
         │
         ▼
 顺序规则引擎（首个 block 短路）
@@ -36,7 +36,7 @@ interceptor-qwenworkcn-hook.sh / .ps1
 dist/interceptor/cli.cjs  hook --agent qwen-work-cn
         │ loopback HTTP（4s）
         ▼
-共享 interceptor daemon（127.0.0.1）
+collector 进程内 interceptor HTTP（127.0.0.1）
         │
         │ 企业 HTTP：POST /v1/hooks/qwenwork
         │ （始终 HTTP 200；fail-open 为 {}）
@@ -54,7 +54,7 @@ OpenClaw Gateway（≥ 2026.5.12）
 assets/plugins/openclaw/plugin.mjs
         │ 采集 JSONL 之后问 daemon（4s；runtime 缺失则静默 fail-open）
         ▼
-共享 interceptor daemon（127.0.0.1）
+collector 进程内 interceptor HTTP（127.0.0.1）
         │
         ▼
 { outcome:"block" } / { block:true, blockReason } / { result } / { message }
@@ -65,7 +65,7 @@ assets/plugins/openclaw/plugin.mjs
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）
 - 工具判定：`~/.loongsuite-pilot/interceptor/tool-verdicts/`（`PreToolUse` / `PostToolUse` 按 tool call id 关联，详见 [请求与响应协议](interceptor-protocol.md#tool-判定与-transcript-关联)）
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/daemon.cjs`
-- 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），daemon **启动时读一次**，不热加载
+- 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），collector **启动时读一次**，不热加载
 
 ## Qoder 协议
 
@@ -203,7 +203,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,datab
 | `privateKey` | PEM 或 OpenSSH 私钥块。 |
 | `databaseUrl` | 包含密码的数据库 URL。 |
 
-敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask` 独立，默认关闭，修改后需重启 interceptor。
+敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask` 独立，默认关闭，修改后需重启 collector。
 
 按注册顺序执行，首个拦截立即短路。规则抛错视为该次判定 fail-open。
 
@@ -213,27 +213,19 @@ export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,datab
 
 ## 服务生命周期
 
-Interceptor 与 collector 使用同一系统服务管理层级：
+Interceptor HTTP 属于 collector 生命周期，不注册独立的 launchd / systemd / init.d / 计划任务。
 
-| 平台 | 单元 / 任务 | 重启策略 |
-|------|-------------|----------|
-| macOS | `com.loongsuite-pilot.interceptor` | launchd `KeepAlive` |
-| Linux systemd | `loongsuite-pilot-interceptor.service` | `Restart=on-failure` |
-| Linux init.d | `/etc/init.d/loongsuite-pilot-interceptor-<user>` | init.d |
-| Windows | `LoongsuitePilotInterceptor-<tag>` | Task Scheduler 重复触发 + `RestartCount` |
+`interceptor/runtime.json` 里的 pid 是 collector 的 pid。`status` 在 collector 正在运行，且这份 runtime 的 pid、`status=ok` 与 collector 一致时，显示 interceptor running。
 
 运维命令：
 
 ```bash
-loongsuite-pilot start              # 安装/启动三个同级服务
+loongsuite-pilot start     # 启动 collector（拦截 HTTP 在同一进程内）
 loongsuite-pilot status
-loongsuite-pilot restart-interceptor
-loongsuite-pilot start-interceptor
+loongsuite-pilot restart   # 重新加载拦截配置
 ```
 
-升级时 updater 在 `current` 指针切换后重启 collector 与 interceptor，并等待两者 heartbeat / 版本一致。CLI **不会**自行拉起 daemon；runtime 缺失或连不上立即 fail-open。
-
-整体 `stop` / 卸载会同时停止并清理 interceptor。
+CLI 不会自行拉起 HTTP 服务。runtime 缺失或连不上时立即 fail-open。`stop` / 卸载停掉 collector，拦截 HTTP 一起退出。
 
 ## 新增 AgentAdapter / LocalRule
 
@@ -249,6 +241,6 @@ loongsuite-pilot start-interceptor
 |------|------|
 | hook 总是放行 | `loongsuite-pilot status` 是否显示 interceptor running；`~/.loongsuite-pilot/interceptor/runtime.json` 是否新鲜；`interceptor/logs/access.log` 是否有对应 `event`/`result` |
 | 看每次判定 | `~/.loongsuite-pilot/interceptor/logs/access.log`：`event`、`input`、`result.action`（`block` / `allow` / `fail-open`） |
-| 想打开拦截 | 确认 `config.json` 里 `"interceptor": { "mode": "all" }`（或 `custom` + `types`）后**重启 interceptor** |
+| 想打开拦截 | 确认 `config.json` 里 `"interceptor": { "mode": "all" }`（或 `custom` + `types`）后**重启 collector** |
 | stdout 被吃掉 | Windows 拦截 hook 禁止 `Out-Null`；不要复用采集 processor |
 | 端口冲突 | daemon 优先绑定 `127.0.0.1:18791`，占用则改绑 `0` 并把实际端口写入 runtime |

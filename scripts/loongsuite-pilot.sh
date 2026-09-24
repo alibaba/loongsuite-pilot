@@ -11,23 +11,19 @@ BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
 PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
 UPDATER_PID_FILE="$DATA_DIR/loongsuite-pilot-updater.pid"
-INTERCEPTOR_PID_FILE="$DATA_DIR/interceptor/interceptor.pid"
 LEGACY_MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
 LEGACY_DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
-INTERCEPTOR_LOG_FILE="$DATA_DIR/interceptor/logs/interceptor-service.log"
 CONFIG_FILE="$DATA_DIR/config.json"
 SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
 OPEN_SOURCE_INSTALLER_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
-INTERCEPTOR_LABEL="com.loongsuite-pilot.interceptor"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 UPDATER_PLIST="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
-INTERCEPTOR_PLIST="$HOME/Library/LaunchAgents/${INTERCEPTOR_LABEL}.plist"
 SYSTEMD_SYSTEM_UNIT_DIR="/etc/systemd/system"
 LOONGSUITE_PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 INIT_TYPE_FILE="$DATA_DIR/init-type"
@@ -311,23 +307,6 @@ wait_for_updater_process() {
     return 1
 }
 
-wait_for_interceptor_process() {
-    local timeout="${1:-15}"
-    local exclude_pid="${2:-}"
-    local i=0
-    local pid=""
-    while [ "$i" -lt "$timeout" ]; do
-        pid=$(find_current_user_processes interceptor | head -n 1 || true)
-        if [ -z "$pid" ]; then
-            pid=$(find_current_user_processes interceptor-wrapper | head -n 1 || true)
-        fi
-        if [ -n "$pid" ] && [ "$pid" != "$exclude_pid" ]; then return 0; fi
-        sleep 1
-        i=$((i + 1))
-    done
-    return 1
-}
-
 sync_bootstrap_scripts() {
     local version_dir
     version_dir=$(resolve_current_version 2>/dev/null) || true
@@ -337,7 +316,6 @@ sync_bootstrap_scripts() {
     mkdir -p "$BOOTSTRAP_DIR"
     cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/"
     cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
-    cp -f "$src_dir/interceptor-daemon.js" "$BOOTSTRAP_DIR/" 2>/dev/null || true
 }
 
 sync_installed_scripts_from_version() {
@@ -352,10 +330,6 @@ sync_installed_scripts_from_version() {
     mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
     cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
     mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
-    if [ -f "$src_dir/interceptor-daemon.js" ]; then
-        cp -f "$src_dir/interceptor-daemon.js" "$BOOTSTRAP_DIR/interceptor-daemon.js.tmp"
-        mv -f "$BOOTSTRAP_DIR/interceptor-daemon.js.tmp" "$BOOTSTRAP_DIR/interceptor-daemon.js"
-    fi
 
     mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
     cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
@@ -379,10 +353,6 @@ process_matches_installed_entry() {
             expected_entry="$BOOTSTRAP_DIR/updater-daemon.js"
             expected_process=node
             ;;
-        interceptor)
-            expected_entry="$BOOTSTRAP_DIR/interceptor-daemon.js"
-            expected_process=node
-            ;;
         collector-wrapper)
             expected_entry="$LOONGSUITE_PILOT_BIN"
             expected_arg=run
@@ -391,11 +361,6 @@ process_matches_installed_entry() {
         updater-wrapper)
             expected_entry="$LOONGSUITE_PILOT_BIN"
             expected_arg=run-updater
-            expected_process=shell
-            ;;
-        interceptor-wrapper)
-            expected_entry="$LOONGSUITE_PILOT_BIN"
-            expected_arg=run-interceptor
             expected_process=shell
             ;;
         *) return 1 ;;
@@ -482,7 +447,7 @@ find_current_user_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$kind:$process_name" in
-            collector:node|collector:nodejs|updater:node|updater:nodejs|interceptor:node|interceptor:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot|interceptor-wrapper:bash|interceptor-wrapper:sh|interceptor-wrapper:zsh|interceptor-wrapper:loongsuite-pilot) ;;
+            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
@@ -569,42 +534,6 @@ stop_installed_updater_processes() {
     done < <({
         find_current_user_processes updater-wrapper | while read -r pid; do echo "$pid updater-wrapper"; done
         find_current_user_processes updater | while read -r pid; do echo "$pid updater"; done
-    } | sort -u)
-
-    [ -n "$pids" ] || return 0
-
-    local count=0
-    local still
-    local p
-    while [ "$count" -lt 10 ]; do
-        still=false
-        for p in $pids; do
-            if kill -0 "$p" 2>/dev/null; then
-                still=true
-            fi
-        done
-        [ "$still" = true ] || return 0
-        sleep 1
-        count=$((count + 1))
-    done
-    for p in $pids; do
-        kill -9 "$p" 2>/dev/null || true
-    done
-}
-
-stop_installed_interceptor_processes() {
-    local pid
-    local kind
-    local pids=""
-    while read -r pid kind; do
-        [ -n "$pid" ] || continue
-        if process_matches_installed_entry "$pid" "$kind"; then
-            kill "$pid" 2>/dev/null || true
-            pids="$pids $pid"
-        fi
-    done < <({
-        find_current_user_processes interceptor-wrapper | while read -r pid; do echo "$pid interceptor-wrapper"; done
-        find_current_user_processes interceptor | while read -r pid; do echo "$pid interceptor"; done
     } | sort -u)
 
     [ -n "$pids" ] || return 0
@@ -1009,31 +938,6 @@ cmd_run_updater() {
     exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
 }
 
-cmd_run_interceptor() {
-    ensure_dirs
-    mkdir -p "$(dirname "$INTERCEPTOR_LOG_FILE")" "$(dirname "$INTERCEPTOR_PID_FILE")"
-    sync_bootstrap_scripts
-
-    if [ ! -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-        echo "❌ Bootstrap script missing" >&2
-        exit 1
-    fi
-
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    echo "$$" > "$INTERCEPTOR_PID_FILE"
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
-    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-    exec "$node_bin" "$BOOTSTRAP_DIR/interceptor-daemon.js"
-}
-
-# ---- User-facing commands ----
-
 cmd_start() {
     cleanup_legacy_monitor_processes
     for arg in "$@"; do
@@ -1096,24 +1000,20 @@ cmd_stop() {
         Darwin)
             launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
             launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
-            launchctl stop "$INTERCEPTOR_LABEL" 2>/dev/null || true
             ;;
         Linux)
             case "$init_type" in
                 systemd-user)
                     systemctl --user stop loongsuite-pilot.service &>/dev/null || true
                     systemctl --user stop loongsuite-pilot-updater.service &>/dev/null || true
-                    systemctl --user stop loongsuite-pilot-interceptor.service &>/dev/null || true
                     ;;
                 systemd-system|systemd)
                     maybe_sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
                     maybe_sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
-                    maybe_sudo systemctl stop "loongsuite-pilot-interceptor-${target_user}.service" &>/dev/null || true
                     ;;
                 initd)
                     [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
                     [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
-                    [ -f "/etc/init.d/loongsuite-pilot-interceptor-${target_user}" ] && maybe_sudo "/etc/init.d/loongsuite-pilot-interceptor-${target_user}" stop &>/dev/null || true
                     ;;
             esac
             ;;
@@ -1125,13 +1025,11 @@ cmd_stop() {
 
     # Stop updater PID-file tracked process
     stop_pid_file "$UPDATER_PID_FILE" updater
-    stop_pid_file "$INTERCEPTOR_PID_FILE" interceptor
 
     # A launchd wrapper may still be between startup and exec after unload.
     # Retry exact installed paths so it cannot later become an orphan collector.
     stop_installed_collector_processes
     stop_installed_updater_processes
-    stop_installed_interceptor_processes
 
     rm -f "$PID_FILE"
     echo "✅ loongsuite-pilot stopped"
@@ -1562,176 +1460,25 @@ cmd_restart() {
     cmd_start
 }
 
-cmd_start_interceptor() {
-    if wait_for_interceptor_process 1 ""; then
-        echo "✅ interceptor is already running"
-        return 0
+interceptor_embedded_status() {
+    if ! is_running; then
+        echo "stopped"
+        return
     fi
-
-    ensure_dirs
-    mkdir -p "$(dirname "$INTERCEPTOR_LOG_FILE")" "$(dirname "$INTERCEPTOR_PID_FILE")"
-    sync_bootstrap_scripts
-    if autostart_install_interceptor_only "false"; then
-        if wait_for_interceptor_process 15 ""; then
-            echo "✅ interceptor started"
-            return 0
-        fi
-        echo "⚠️  interceptor registered but process not found" >&2
-        return 1
+    local collector_pid runtime runtime_pid runtime_status
+    collector_pid=$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    runtime="$DATA_DIR/interceptor/runtime.json"
+    if [ -z "$collector_pid" ] || [ ! -f "$runtime" ]; then
+        echo "stopped"
+        return
     fi
-
-    local init_type=""
-    if [ -f "$INIT_TYPE_FILE" ]; then
-        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    runtime_pid=$(sed -n 's/^[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$runtime" | head -n 1)
+    runtime_status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$runtime" | head -n 1)
+    if [ "$runtime_status" = "ok" ] && [ "$runtime_pid" = "$collector_pid" ]; then
+        echo "running $collector_pid"
+        return
     fi
-    case "$init_type" in
-        nohup|unknown|"")
-            local entry="$BOOTSTRAP_DIR/interceptor-daemon.js"
-            if [ ! -f "$entry" ]; then
-                echo "❌ Interceptor bootstrap script missing" >&2
-                return 1
-            fi
-            local node_bin
-            node_bin=$(resolve_node) || {
-                echo "❌ node runtime not found" >&2
-                return 1
-            }
-            export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-            nohup "$node_bin" "$entry" >> "$INTERCEPTOR_LOG_FILE" 2>&1 &
-            echo "$!" > "$INTERCEPTOR_PID_FILE"
-            echo "⚠️  interceptor started (nohup fallback)" >&2
-            ;;
-        *)
-            echo "❌ Failed to start interceptor (init_type=$init_type)" >&2
-            return 1
-            ;;
-    esac
-}
-
-cmd_restart_interceptor() {
-    local target_user
-    target_user=$(whoami)
-    local sys_unit="loongsuite-pilot-interceptor-${target_user}.service"
-    local initd_script="/etc/init.d/loongsuite-pilot-interceptor-${target_user}"
-    local init_type=""
-    if [ -f "$INIT_TYPE_FILE" ]; then
-        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
-    fi
-
-    local _old_pid=""
-    _old_pid=$(find_current_user_processes interceptor | head -n 1 || true)
-    if [ -z "$_old_pid" ]; then
-        _old_pid=$(find_current_user_processes interceptor-wrapper | head -n 1 || true)
-    fi
-
-    case "$(uname -s)" in
-        Darwin)
-            launchctl stop "$INTERCEPTOR_LABEL" 2>/dev/null || true
-            ;;
-        Linux)
-            case "$init_type" in
-                systemd-user)
-                    systemctl --user stop loongsuite-pilot-interceptor.service &>/dev/null || true
-                    ;;
-                systemd-system|systemd)
-                    maybe_sudo systemctl stop "$sys_unit" &>/dev/null || true
-                    ;;
-                initd)
-                    [ -f "$initd_script" ] && maybe_sudo "$initd_script" stop &>/dev/null || true
-                    ;;
-            esac
-            ;;
-    esac
-    stop_pid_file "$INTERCEPTOR_PID_FILE" interceptor
-    stop_installed_interceptor_processes
-    sleep 1
-
-    ensure_dirs
-    mkdir -p "$(dirname "$INTERCEPTOR_LOG_FILE")" "$(dirname "$INTERCEPTOR_PID_FILE")"
-    sync_bootstrap_scripts
-
-    local _restarted=false
-    case "$(uname -s)" in
-        Darwin)
-            if launchctl list "$INTERCEPTOR_LABEL" &>/dev/null; then
-                launchctl start "$INTERCEPTOR_LABEL" 2>/dev/null || true
-                _restarted=true
-            fi
-            ;;
-        Linux)
-            case "$init_type" in
-                systemd-user)
-                    if systemctl --user is-enabled loongsuite-pilot-interceptor.service &>/dev/null; then
-                        if systemctl --user start loongsuite-pilot-interceptor.service &>/dev/null; then
-                            echo "✅ interceptor restarted (systemd user-level)"
-                            _restarted=true
-                        fi
-                    fi
-                    ;;
-                systemd-system|systemd)
-                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        if maybe_sudo systemctl start "$sys_unit" &>/dev/null; then
-                            echo "✅ interceptor restarted (systemd system-level)"
-                            _restarted=true
-                        fi
-                    fi
-                    ;;
-                initd)
-                    if [ -f "$initd_script" ]; then
-                        maybe_sudo "$initd_script" start &>/dev/null
-                        echo "✅ interceptor restarted (init.d)"
-                        _restarted=true
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
-
-    if [ "$_restarted" = true ]; then
-        if ! wait_for_interceptor_process 15 "$_old_pid"; then
-            _restarted=false
-        fi
-    fi
-    if [ "$_restarted" = false ]; then
-        local _new_init
-        _new_init=$(detect_init_system "false")
-        if [ "$_new_init" != "none" ] && autostart_install_interceptor_only "false" 2>>"$INTERCEPTOR_LOG_FILE"; then
-            init_type="$_new_init"
-            if wait_for_interceptor_process 15 "$_old_pid"; then
-                echo "✅ interceptor self-healed: registered as $_new_init"
-                _restarted=true
-            fi
-        fi
-    fi
-    if [ "$_restarted" = false ]; then
-        case "$init_type" in
-            nohup|unknown|"")
-                local entry="$BOOTSTRAP_DIR/interceptor-daemon.js"
-                if [ ! -f "$entry" ]; then
-                    echo "❌ Interceptor bootstrap script missing" >&2
-                    return 1
-                fi
-                local node_bin
-                node_bin=$(resolve_node) || {
-                    echo "❌ node runtime not found" >&2
-                    return 1
-                }
-                export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-                nohup "$node_bin" "$entry" >> "$INTERCEPTOR_LOG_FILE" 2>&1 &
-                echo "$!" > "$INTERCEPTOR_PID_FILE"
-                echo "⚠️  interceptor restarted (nohup fallback)" >&2
-                ;;
-            *)
-                echo "❌ Service manager failed to restart interceptor (init_type=$init_type)" >&2
-                return 1
-                ;;
-        esac
-    fi
-
-    if ! wait_for_interceptor_process 10 "$_old_pid"; then
-        echo "❌ interceptor process not found after restart" >&2
-        return 1
-    fi
+    echo "stopped"
 }
 
 dashboard_port() {
@@ -1839,10 +1586,12 @@ cmd_status() {
     else
         echo "   updater: stopped"
     fi
-    if is_pid_file_running "$INTERCEPTOR_PID_FILE" interceptor; then
-        echo "   interceptor: running (PID $(cat "$INTERCEPTOR_PID_FILE"))"
-    else
+    local interceptor_state
+    interceptor_state=$(interceptor_embedded_status)
+    if [ "$interceptor_state" = "stopped" ]; then
         echo "   interceptor: stopped"
+    else
+        echo "   interceptor: running (PID ${interceptor_state#running })"
     fi
     autostart_status
 }
@@ -2455,111 +2204,6 @@ WantedBy=multi-user.target
 UNITEOF
 }
 
-_write_systemd_user_interceptor_unit() {
-    mkdir -p "$SYSTEMD_USER_UNIT_DIR"
-    mkdir -p "$(dirname "$INTERCEPTOR_LOG_FILE")"
-    cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-interceptor.service" << UNITEOF
-[Unit]
-Description=LoongSuite Pilot Interceptor
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=%h/.local/bin/loongsuite-pilot run-interceptor
-WorkingDirectory=${CACHE_DIR}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
-Environment=LOONGSUITE_PILOT_DATA_DIR=${DATA_DIR}
-Environment=LOONGSUITE_PILOT_CACHE_DIR=${CACHE_DIR}
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=65536
-
-[Install]
-WantedBy=default.target
-UNITEOF
-}
-
-_write_launchd_interceptor_plist() {
-    mkdir -p "$(dirname "$INTERCEPTOR_PLIST")"
-    mkdir -p "$(dirname "$INTERCEPTOR_LOG_FILE")"
-    ensure_dirs
-    cat > "$INTERCEPTOR_PLIST" << PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${INTERCEPTOR_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${LOONGSUITE_PILOT_BIN}</string>
-        <string>run-interceptor</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>${INTERCEPTOR_LOG_FILE}</string>
-    <key>StandardErrorPath</key>
-    <string>${INTERCEPTOR_LOG_FILE}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>AGENT_DATA_COLLECTION_CONFIG</key>
-        <string>${CONFIG_FILE}</string>
-        <key>LOONGSUITE_PILOT_DATA_DIR</key>
-        <string>${DATA_DIR}</string>
-        <key>LOONGSUITE_PILOT_CACHE_DIR</key>
-        <string>${CACHE_DIR}</string>
-    </dict>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-</dict>
-</plist>
-PLISTEOF
-}
-
-_write_systemd_system_interceptor_unit() {
-    local target_user="$1"
-    local target_home
-    target_home=$(resolve_user_home "$target_user")
-    local target_bin="$target_home/.local/bin/loongsuite-pilot"
-    local target_config="$CONFIG_FILE"
-    local target_workdir="$CACHE_DIR"
-    local unit_name="loongsuite-pilot-interceptor-${target_user}.service"
-    local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
-
-    maybe_sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
-    ensure_dirs
-    maybe_sudo tee "$unit_path" > /dev/null << UNITEOF
-[Unit]
-Description=LoongSuite Pilot Interceptor (${target_user})
-After=network.target
-
-[Service]
-Type=simple
-User=${target_user}
-Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
-ExecStart=${target_bin} run-interceptor
-WorkingDirectory=${target_workdir}
-Environment=HOME=${target_home}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
-Environment=LOONGSUITE_PILOT_DATA_DIR=${DATA_DIR}
-Environment=LOONGSUITE_PILOT_CACHE_DIR=${CACHE_DIR}
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-UNITEOF
-}
-
 _write_initd_script() {
     local target_user="$1"
     local target_home
@@ -2904,188 +2548,6 @@ INITEOF
     rm -f "$tmp_script"
 }
 
-_write_initd_interceptor_script() {
-    local target_user="$1"
-    local target_home
-    target_home=$(resolve_user_home "$target_user")
-    local daemon_bin="$target_home/.local/bin/loongsuite-pilot"
-    local daemon_name="loongsuite-pilot-interceptor-${target_user}"
-    local pid_file="$INTERCEPTOR_PID_FILE"
-    local log_file="$INTERCEPTOR_LOG_FILE"
-    local config_file="$CONFIG_FILE"
-    local script_path="/etc/init.d/$daemon_name"
-    local daemon_group
-    daemon_group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
-
-    local tmp_script
-    tmp_script=$(mktemp)
-
-    cat > "$tmp_script" << 'INITEOF'
-#!/bin/bash
-### BEGIN INIT INFO
-# Provides:          DAEMON_NAME_PLACEHOLDER
-# Required-Start:    $local_fs $network
-# Required-Stop:     $local_fs $network
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Description:       LoongSuite Pilot interceptor (USER_PLACEHOLDER)
-### END INIT INFO
-# chkconfig: 2345 92 8
-
-DAEMON_USER="USER_PLACEHOLDER"
-DAEMON_GROUP="GROUP_PLACEHOLDER"
-DAEMON_HOME="HOME_PLACEHOLDER"
-DAEMON_BIN="BIN_PLACEHOLDER"
-DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
-PID_FILE="PID_PLACEHOLDER"
-LOG_FILE="LOG_PLACEHOLDER"
-CONFIG_FILE="CONFIG_PLACEHOLDER"
-DATA_DIR="DATA_PLACEHOLDER"
-CACHE_DIR="CACHE_PLACEHOLDER"
-DAEMON_COMMAND="run-interceptor"
-DAEMON_ENTRY="$CACHE_DIR/bin/interceptor-daemon.js"
-
-pid_matches_daemon() {
-    local pid="$1"
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
-    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
-
-    local env_value=""
-    local identity_bin=false
-    local identity_command=false
-    while IFS= read -r -d '' env_value; do
-        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
-        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
-    done < "/proc/$pid/environ"
-    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
-
-    local arg=""
-    local arg_index=0
-    local argv_entry=""
-    local argv_command=""
-    local argv_count=0
-    while IFS= read -r -d '' arg; do
-        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
-        [ "$arg_index" -eq 2 ] && argv_command="$arg"
-        arg_index=$((arg_index + 1))
-        argv_count=$arg_index
-    done < "/proc/$pid/cmdline"
-    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
-        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
-    else
-        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
-    fi
-}
-
-do_start() {
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        if pid_matches_daemon "$pid"; then
-            echo "$DAEMON_NAME is already running (PID $pid)"
-            return 0
-        fi
-        rm -f "$PID_FILE"
-    fi
-
-    echo -n "Starting $DAEMON_NAME... "
-    mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
-    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
-    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
-    export HOME="$DAEMON_HOME"
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
-    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-
-    if command -v start-stop-daemon &>/dev/null; then
-        start-stop-daemon --start --chuid "$DAEMON_USER" \
-            --background --make-pidfile --pidfile "$PID_FILE" \
-            --exec "$DAEMON_BIN" -- run-interceptor \
-            >>"$LOG_FILE" 2>&1
-        chown "$DAEMON_USER:$DAEMON_GROUP" "$LOG_FILE" "$PID_FILE"
-    else
-        su - "$DAEMON_USER" -c "
-            export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
-            export LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'
-            export LOONGSUITE_PILOT_CACHE_DIR='$CACHE_DIR'
-            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
-            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
-            nohup '$DAEMON_BIN' run-interceptor >> '$LOG_FILE' 2>&1 &
-            echo \$! > '$PID_FILE'
-        "
-    fi
-    echo "done"
-}
-
-do_stop() {
-    if [ ! -f "$PID_FILE" ]; then
-        echo "$DAEMON_NAME is not running"
-        return 0
-    fi
-    local pid
-    pid=$(cat "$PID_FILE" 2>/dev/null)
-    if ! pid_matches_daemon "$pid"; then
-        rm -f "$PID_FILE"
-        echo "$DAEMON_NAME is not running"
-        return 0
-    fi
-
-    echo -n "Stopping $DAEMON_NAME... "
-    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
-    local count=0
-    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
-        sleep 1
-        count=$((count + 1))
-    done
-    if pid_matches_daemon "$pid"; then
-        kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$PID_FILE"
-    echo "done"
-}
-
-do_status() {
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        if pid_matches_daemon "$pid"; then
-            echo "$DAEMON_NAME is running (PID $pid)"
-            return 0
-        fi
-    fi
-    echo "$DAEMON_NAME is not running"
-    return 1
-}
-
-case "$1" in
-    start)   do_start ;;
-    stop)    do_stop ;;
-    restart) do_stop; sleep 1; do_start ;;
-    status)  do_status ;;
-    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
-esac
-INITEOF
-
-    sed -i.bak \
-        -e "s|USER_PLACEHOLDER|${target_user}|g" \
-        -e "s|GROUP_PLACEHOLDER|${daemon_group}|g" \
-        -e "s|HOME_PLACEHOLDER|${target_home}|g" \
-        -e "s|BIN_PLACEHOLDER|${daemon_bin}|g" \
-        -e "s|DAEMON_NAME_PLACEHOLDER|${daemon_name}|g" \
-        -e "s|PID_PLACEHOLDER|${pid_file}|g" \
-        -e "s|LOG_PLACEHOLDER|${log_file}|g" \
-        -e "s|CONFIG_PLACEHOLDER|${config_file}|g" \
-        -e "s|DATA_PLACEHOLDER|${DATA_DIR}|g" \
-        -e "s|CACHE_PLACEHOLDER|${CACHE_DIR}|g" \
-        "$tmp_script"
-    rm -f "${tmp_script}.bak"
-
-    maybe_sudo install -m 755 "$tmp_script" "$script_path"
-    rm -f "$tmp_script"
-}
-
 _register_initd_boot() {
     local name="$1"
     if command -v chkconfig &>/dev/null; then
@@ -3186,45 +2648,6 @@ autostart_install_updater_only() {
     esac
 }
 
-autostart_install_interceptor_only() {
-    local interactive="${1:-true}"
-
-    local init_system
-    init_system=$(detect_init_system "$interactive")
-    local target_user
-    target_user=$(whoami)
-
-    case "$init_system" in
-        launchd)
-            launchctl unload -w "$INTERCEPTOR_PLIST" 2>/dev/null || true
-            _write_launchd_interceptor_plist
-            launchctl load -w "$INTERCEPTOR_PLIST"
-            echo "launchd" > "$INIT_TYPE_FILE"
-            ;;
-        systemd-user)
-            _write_systemd_user_interceptor_unit
-            systemctl --user daemon-reload &>/dev/null
-            systemctl --user enable --now loongsuite-pilot-interceptor.service &>/dev/null
-            enable_linger || true
-            echo "systemd-user" > "$INIT_TYPE_FILE"
-            ;;
-        systemd-system)
-            _write_systemd_system_interceptor_unit "$target_user"
-            maybe_sudo systemctl daemon-reload &>/dev/null
-            maybe_sudo systemctl enable --now "loongsuite-pilot-interceptor-${target_user}.service" &>/dev/null
-            echo "systemd-system" > "$INIT_TYPE_FILE"
-            ;;
-        initd)
-            _write_initd_interceptor_script "$target_user"
-            _register_initd_boot "loongsuite-pilot-interceptor-${target_user}"
-            maybe_sudo "/etc/init.d/loongsuite-pilot-interceptor-${target_user}" start &>/dev/null || true
-            echo "initd" > "$INIT_TYPE_FILE"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
 
 autostart_install() {
     local interactive="${1:-true}"
@@ -3244,11 +2667,6 @@ autostart_install() {
                 _write_launchd_updater_plist
                 launchctl load -w "$UPDATER_PLIST"
             fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                launchctl unload -w "$INTERCEPTOR_PLIST" 2>/dev/null || true
-                _write_launchd_interceptor_plist
-                launchctl load -w "$INTERCEPTOR_PLIST"
-            fi
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
@@ -3256,16 +2674,10 @@ autostart_install() {
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 _write_systemd_user_updater_unit
             fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                _write_systemd_user_interceptor_unit
-            fi
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
-            fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                systemctl --user enable --now loongsuite-pilot-interceptor.service &>/dev/null
             fi
             enable_linger || true
             echo "systemd-user" > "$INIT_TYPE_FILE"
@@ -3275,16 +2687,10 @@ autostart_install() {
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 _write_systemd_system_updater_unit "$target_user"
             fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                _write_systemd_system_interceptor_unit "$target_user"
-            fi
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
-            fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                maybe_sudo systemctl enable --now "loongsuite-pilot-interceptor-${target_user}.service" &>/dev/null
             fi
             echo "systemd-system" > "$INIT_TYPE_FILE"
             ;;
@@ -3296,11 +2702,6 @@ autostart_install() {
                 _write_initd_updater_script "$target_user"
                 _register_initd_boot "loongsuite-pilot-updater-${target_user}"
                 maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
-            fi
-            if [ -f "$BOOTSTRAP_DIR/interceptor-daemon.js" ]; then
-                _write_initd_interceptor_script "$target_user"
-                _register_initd_boot "loongsuite-pilot-interceptor-${target_user}"
-                maybe_sudo "/etc/init.d/loongsuite-pilot-interceptor-${target_user}" start &>/dev/null || true
             fi
             echo "initd" > "$INIT_TYPE_FILE"
             ;;
@@ -3318,41 +2719,32 @@ autostart_remove() {
 
     case "$init_system" in
         launchd)
-            launchctl unload -w "$INTERCEPTOR_PLIST" 2>/dev/null || true
-            rm -f "$INTERCEPTOR_PLIST"
             launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
             rm -f "$UPDATER_PLIST"
             launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
             rm -f "$LAUNCHD_PLIST"
             ;;
         systemd-user)
-            systemctl --user disable --now loongsuite-pilot-interceptor.service &>/dev/null || true
             systemctl --user disable --now loongsuite-pilot-updater.service &>/dev/null || true
             systemctl --user disable --now loongsuite-pilot.service &>/dev/null || true
             rm -f "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service"
             rm -f "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-updater.service"
-            rm -f "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-interceptor.service"
             systemctl --user daemon-reload &>/dev/null || true
             ;;
         systemd-system|systemd)
-            maybe_sudo systemctl disable --now "loongsuite-pilot-interceptor-${target_user}.service" &>/dev/null || true
             maybe_sudo systemctl disable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
             maybe_sudo systemctl disable --now "loongsuite-pilot-${target_user}.service" &>/dev/null || true
             maybe_sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-${target_user}.service"
             maybe_sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-updater-${target_user}.service"
-            maybe_sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-interceptor-${target_user}.service"
             maybe_sudo systemctl daemon-reload &>/dev/null || true
             ;;
         initd)
             maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
             maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
-            maybe_sudo "/etc/init.d/loongsuite-pilot-interceptor-${target_user}" stop &>/dev/null || true
             _unregister_initd_boot "loongsuite-pilot-${target_user}"
             _unregister_initd_boot "loongsuite-pilot-updater-${target_user}"
-            _unregister_initd_boot "loongsuite-pilot-interceptor-${target_user}"
             maybe_sudo rm -f "/etc/init.d/loongsuite-pilot-${target_user}"
             maybe_sudo rm -f "/etc/init.d/loongsuite-pilot-updater-${target_user}"
-            maybe_sudo rm -f "/etc/init.d/loongsuite-pilot-interceptor-${target_user}"
             ;;
         *)
             ;;
@@ -3521,11 +2913,8 @@ case "${1:-status}" in
     restart-collector)   shift; cmd_restart_collector "$@" ;;
     schedule-updater-restart) schedule_updater_restart ;;
     restart-updater)     cmd_restart_updater ;;
-    start-interceptor)   cmd_start_interceptor ;;
-    restart-interceptor) cmd_restart_interceptor ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;
-    run-interceptor)     cmd_run_interceptor ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"
