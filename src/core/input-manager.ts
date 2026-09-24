@@ -380,9 +380,7 @@ export class InputManager extends EventEmitter {
       }
     }
 
-    for (const entry of entries) {
-      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
-    }
+    this.applyIdentity(entries);
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
     // existing boundary markers, and must not block the normal output path.
@@ -395,18 +393,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const policyAppliedEntries = entries.map(entry =>
-      applyAgentContentPolicy(entry, this.agentsConfig),
-    );
-
-    const maskedEntries =
-      this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
-        ? policyAppliedEntries
-        : policyAppliedEntries.map(entry =>
-            maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
-          );
-
-    const expandedEntries = expandAgentInputEvents(maskedEntries);
+    const expandedEntries = expandAgentInputEvents(this.applyPolicyAndMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -417,6 +404,52 @@ export class InputManager extends EventEmitter {
 
     logger.info('dispatching entries', { inputId, count: expandedEntries.length });
     await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes, logicalBytes);
+  }
+
+  /**
+   * Flush entries that did not come from an Input. Reuses git enrichment,
+   * invocation identity, content policy, and mask, then the same flusher.
+   */
+  async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const inputId = 'interceptor';
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
+
+    this.applyIdentity(entries);
+    const prepared = this.applyPolicyAndMask(entries);
+    let outputBatchBytes = 0;
+    const logicalBytes = prepared.map(entry => {
+      const bytes = Buffer.byteLength(JSON.stringify(entry));
+      outputBatchBytes += bytes;
+      return bytes;
+    });
+    logger.info('dispatching entries', { inputId, count: prepared.length });
+    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes);
+  }
+
+  private applyIdentity(entries: AgentActivityEntry[]): void {
+    for (const entry of entries) {
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
+    }
+  }
+
+  private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    const policyAppliedEntries = entries.map(entry =>
+      applyAgentContentPolicy(entry, this.agentsConfig),
+    );
+    if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
+      return policyAppliedEntries;
+    }
+    return policyAppliedEntries.map(entry =>
+      maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
+    );
   }
 
   markInputStarted(id: string): void {

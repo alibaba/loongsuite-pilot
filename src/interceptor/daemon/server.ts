@@ -1,4 +1,6 @@
 import * as http from 'node:http';
+import type { AgentActivityEntry } from '../../types/index.js';
+import { createLogger } from '../../utils/logger.js';
 import {
   accessInputFromHookRequest,
   accessInputFromPayload,
@@ -7,6 +9,7 @@ import {
   type InterceptorAccessLogEntry,
 } from '../access-log.js';
 import { parseQwenWorkHookRequest, qwenWorkAllowBody, qwenWorkBlockBody } from '../adapters/qwenwork.js';
+import { buildBlockedQoderPromptEntry } from '../blocked-prompt.js';
 import { RuleEngine } from '../rules/engine.js';
 import {
   INTERCEPTOR_SERVICE,
@@ -22,12 +25,16 @@ import {
   type ToolVerdictKey,
 } from '../tool-verdict-store.js';
 
+const logger = createLogger('InterceptorServer');
+
 export interface InterceptorServerOptions {
   port: number;
   version: string;
   engine: RuleEngine;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
   writeToolVerdict?: (key: ToolVerdictKey, result: ToolVerdictAction) => void;
+  /** Async sink for a denied Qoder UserPromptSubmit. Must not affect the host response. */
+  emitBlockedPrompt?: (entry: AgentActivityEntry) => void;
 }
 
 export function createInterceptorServer(opts: InterceptorServerOptions): http.Server {
@@ -87,6 +94,7 @@ async function handle(
         },
       });
       writeJson(res, 200, verdict satisfies EvaluateHookResponse);
+      emitBlockedPrompt(opts, request, verdict);
       return;
     }
     writeJson(res, 404, { error: 'not-found' });
@@ -162,6 +170,7 @@ async function handleQwenWorkHttp(
       return;
     }
     writeJson(res, 200, qwenWorkBlockBody(request, verdict.reason));
+    emitBlockedPrompt(opts, request, verdict);
   } catch (err) {
     recordToolVerdict(opts, request, 'unknown');
     recordAccess(opts, {
@@ -176,6 +185,22 @@ async function handleQwenWorkHttp(
       },
     });
     writeJson(res, 200, qwenWorkAllowBody());
+  }
+}
+
+function emitBlockedPrompt(
+  opts: InterceptorServerOptions,
+  request: HookRequest,
+  verdict: EvaluateHookResponse,
+): void {
+  if (!opts.emitBlockedPrompt) return;
+  if (verdict.failOpen || verdict.action !== 'block') return;
+  if (request.event !== 'UserPromptSubmit') return;
+  if (request.agent !== 'qoder' && request.agent !== 'qodercli') return;
+  try {
+    opts.emitBlockedPrompt(buildBlockedQoderPromptEntry(request));
+  } catch (err) {
+    logger.warn('blocked prompt emit failed', { error: String(err) });
   }
 }
 

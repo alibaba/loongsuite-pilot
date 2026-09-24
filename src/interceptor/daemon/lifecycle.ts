@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import type { AgentActivityEntry } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
 import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../config.js';
 import { writeInterceptorAccessLog } from '../access-log.js';
@@ -27,6 +28,7 @@ export interface StartInterceptorServiceOptions {
   version: string;
   gitCommit?: string;
   verdictStore?: ToolVerdictStore;
+  emitBlockedPrompt?: (entry: AgentActivityEntry) => void;
 }
 
 /**
@@ -51,6 +53,7 @@ export async function startInterceptorService(
     writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
       verdictStore.put(key, result);
     },
+    emitBlockedPrompt: opts.emitBlockedPrompt,
   };
   const server = createInterceptorServer(serverOpts);
   let port: number;

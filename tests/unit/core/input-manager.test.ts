@@ -22,6 +22,7 @@ import {
   INVOCATION_USER_ID_FIELD,
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
+import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -510,6 +511,53 @@ describe('InputManager', () => {
       });
       expect(flusher.batchCalls[0][0]['gen_ai.turn.start']).toBeUndefined();
       enrich.mockRestore();
+    });
+  });
+
+  describe('blocked prompt flush', () => {
+    it('applies user id, content policy, and mask before the shared flusher', async () => {
+      manager.setConfiguredUserId('configured-user');
+      manager.setMaskConfig({ mode: 'all', types: [] });
+      const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qoder',
+        event: 'UserPromptSubmit',
+        prompt: `token ${apiKey}`,
+        sessionId: 's1',
+        cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
+        raw: {},
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['user.id']).toBe('configured-user');
+      expect(dispatched['gen_ai.input.messages']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+      ]);
+      expect(dispatched['gen_ai.guardrail.action']).toBe('deny');
+      expect(dispatched.trace_id).toBeUndefined();
+      expect(dispatched['gen_ai.turn.start']).toBeUndefined();
+    });
+
+    it('drops message content when the qoder capture policy is off', async () => {
+      manager.setAgentsConfig({
+        [ClientType.Qoder]: { captureMessageContent: false },
+      });
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qodercli',
+        event: 'UserPromptSubmit',
+        prompt: 'sk-1234567890abcdefghijklmnop',
+        raw: {},
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages');
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages_delta');
+      expect(JSON.stringify(dispatched)).not.toContain('sk-1234567890abcdefghijklmnop');
     });
   });
 

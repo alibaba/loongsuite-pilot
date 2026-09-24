@@ -430,6 +430,11 @@ export class Orchestrator extends EventEmitter {
       version: packageVersion,
       gitCommit: packageGitCommit || undefined,
       verdictStore: this.verdictStore ?? undefined,
+      emitBlockedPrompt: (entry) => {
+        void this.inputManager.flushPreparedEntries([entry]).catch(err => {
+          logger.warn('blocked prompt flush failed', { error: String(err) });
+        });
+      },
     }).catch(err => {
       logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
       return null;
