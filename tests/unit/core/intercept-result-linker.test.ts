@@ -102,4 +102,23 @@ describe('InterceptResultLinker', () => {
     expect(missingRecord['gen_ai.intercept.result']).toBeUndefined();
     expect(idea['gen_ai.intercept.result']).toBe('deny');
   });
+
+  it('treats qoder and qodercli as the same product', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'intercept-linker-'));
+    writeToolVerdict({
+      agent: 'qodercli',
+      sessionId: 's1',
+      toolUseId: 'call-1',
+      phase: 'PreToolUse',
+    }, 'deny', root);
+    const desktop = toolEntry('tool.call');
+    const cli = toolEntry('tool.call', { 'gen_ai.agent.type': 'qoder-cli' });
+    const other = toolEntry('tool.call', { 'gen_ai.agent.type': 'openclaw' });
+
+    new InterceptResultLinker(root).enrich([desktop, cli, other]);
+
+    expect(desktop['gen_ai.intercept.result']).toBe('deny');
+    expect(cli['gen_ai.intercept.result']).toBe('deny');
+    expect(other['gen_ai.intercept.result']).toBeUndefined();
+  });
 });

@@ -16,34 +16,36 @@ export class InterceptResultLinker {
           : null;
       if (!phase) continue;
 
-      const agent = interceptorAgent(entry['gen_ai.agent.type']);
+      const agents = interceptorAgents(entry['gen_ai.agent.type']);
       const toolUseId = entry['gen_ai.tool.call.id'];
       const sessionId = entry['gen_ai.session.id'];
-      if (!agent || typeof toolUseId !== 'string' || toolUseId.length === 0) continue;
+      if (agents.length === 0 || typeof toolUseId !== 'string' || toolUseId.length === 0) continue;
 
-      const verdict = readToolVerdict({
-        agent,
-        sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
-        toolUseId,
-        phase,
-      }, this.verdictDir);
+      const verdict = agents
+        .map(agent => readToolVerdict({
+          agent,
+          sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
+          toolUseId,
+          phase,
+        }, this.verdictDir))
+        .filter((item): item is NonNullable<typeof item> => item !== null)
+        .sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))[0];
       if (verdict) entry['gen_ai.intercept.result'] = verdict.result;
     }
   }
 }
 
-function interceptorAgent(agentType: unknown): InterceptorAgent | null {
+function interceptorAgents(agentType: unknown): InterceptorAgent[] {
+  if (typeof agentType === 'string' && agentType.toLowerCase().includes('qoder')) {
+    // Qoder Desktop and Qoder CLI share one product identity at join time.
+    return ['qoder', 'qodercli'];
+  }
   switch (agentType) {
-    case ClientType.Qoder:
-    case ClientType.QoderIdea:
-      return 'qoder';
-    case ClientType.QoderCli:
-      return 'qodercli';
     case ClientType.OpenClaw:
-      return 'openclaw';
+      return ['openclaw'];
     case ClientType.QwenWorkCN:
-      return 'qwen-work-cn';
+      return ['qwen-work-cn'];
     default:
-      return null;
+      return [];
   }
 }
