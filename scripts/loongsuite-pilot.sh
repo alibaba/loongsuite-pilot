@@ -390,8 +390,9 @@ process_matches_installed_entry() {
         process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     fi
     process_name="${process_name##*/}"
+    # Node 23+ sets /proc/pid/comm to MainThread, so ucomm is no longer "node".
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
         *) return 1 ;;
     esac
 
@@ -434,7 +435,7 @@ process_matches_installed_entry() {
     local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
     local command_executable="${command_prefix##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -447,7 +448,7 @@ find_current_user_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$kind:$process_name" in
-            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            collector:node|collector:nodejs|collector:MainThread|updater:node|updater:nodejs|updater:MainThread|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
@@ -465,7 +466,7 @@ find_current_user_collector_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$process_name" in
-            node|nodejs) kind=collector ;;
+            node|nodejs|MainThread) kind=collector ;;
             bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
             *) continue ;;
         esac
@@ -625,7 +626,7 @@ legacy_monitor_process_matches() {
     process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     process_name="${process_name##*/}"
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) ;;
         *) return 1 ;;
     esac
 
@@ -650,7 +651,7 @@ legacy_monitor_process_matches() {
     local command_executable="${command_prefix%% *}"
     command_executable="${command_executable##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
