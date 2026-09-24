@@ -1,4 +1,5 @@
 import * as os from 'node:os';
+import { validateExcludedWorkspaces } from './workspace-policy.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
@@ -131,6 +132,7 @@ export interface ConfigFile {
     repairCooldownMs?: number;
   };
 
+  privacy?: { excludeWorkspaces?: string[] };
   collectLog?: boolean;
   collectTrace?: boolean;
   serviceName?: string;
@@ -307,6 +309,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     flushers,
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
+    privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
     mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),

@@ -225,6 +225,7 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    this.workspacePolicy.filter(rawEntries, this.agentType);
     if (this.multimodalEnabled && this.multimodalProcessor) {
       const pathToUri = async (filePath: string, timeUnixMs?: number) => {
         if (this.multimodalStopped) return null;
@@ -233,6 +234,7 @@ export class QoderTraceInput extends BaseInput {
         });
       };
       for (const sessionEntries of ideSessionGroups.values()) {
+        if (sessionEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;
         if (this.multimodalStopped) break;
@@ -250,6 +252,7 @@ export class QoderTraceInput extends BaseInput {
         }
       }
       for (const turnEntries of cliTurns) {
+        if (turnEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
         if (this.multimodalStopped) break;
         await enrichCliMultimodal(turnEntries, {
           uploadMode: this.multimodalUploadMode,

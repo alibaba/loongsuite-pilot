@@ -17,6 +17,7 @@ vi.mock('../../../src/flushers/sls-transport.js', () => ({
   persistFailedLogs: (...args: unknown[]) => mockPersistFailedLogs(...args),
 }));
 
+import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { FilePipeline, parseCheckpointKey } from '../../../src/pipeline/input/file/file-pipeline.js';
 import type { PipelineConfig } from '../../../src/pipeline/types.js';
 
@@ -80,6 +81,28 @@ describe('parseCheckpointKey', () => {
 });
 
 describe('FilePipeline', () => {
+  it('filters workspace JSON records before independent SLS delivery and advances their offsets', async () => {
+    const logFile = path.join(logDir, 'privacy.log');
+    fs.writeFileSync(logFile, [
+      JSON.stringify({ session_id: 'blocked', content: 'early secret' }),
+      JSON.stringify({ session_id: 'blocked', cwd: '/private-project', content: 'secret' }),
+      JSON.stringify({ session_id: 'unknown', content: 'allowed' }),
+      'plain unknown workspace',
+    ].join('\n') + '\n');
+    const pipeline = new FilePipeline({
+      config: makeConfig(), stateDir, failedLogDir: failedDir, dataDir,
+      workspacePolicy: new WorkspacePolicy(['/private-project']),
+    });
+    await pipeline.start();
+    await pipeline.stop();
+    const sent = JSON.stringify(mockPostWebtracking.mock.calls);
+    expect(sent).toContain('allowed');
+    expect(sent).toContain('plain unknown workspace');
+    expect(sent).not.toContain('secret');
+    const saved = JSON.parse(fs.readFileSync(path.join(stateDir, 'test-pipeline.json'), 'utf8'));
+    expect(Object.values(saved).some((value: any) => value.lastOffset === fs.statSync(logFile).size)).toBe(true);
+  });
+
   it('starts and stops without error', async () => {
     const pipeline = new FilePipeline({
       config: makeConfig(),

@@ -550,6 +550,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
     'tool.result.status': 'success',
     'host.name': os.hostname(),
     'workspace.current_root': getStringValue(data, 'cwd') || getStringValue(row, 'cwd') || undefined,
+    [`agent.${sourceNamespace}.cwd`]: getStringValue(data, 'cwd') || getStringValue(row, 'cwd') || undefined,
     'agent.source': 'qoder-transcript-hook',
     [`agent.${sourceNamespace}.variant`]: variant,
     [`agent.${sourceNamespace}.raw_type`]: eventType,

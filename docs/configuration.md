@@ -284,3 +284,15 @@ loongsuite-pilot info
 ```
 
 Use [Local JSONL Output](local-jsonl-output.md) as the quickest way to confirm that events are being collected.
+
+## Workspace exclusions
+
+Use repeatable `--exclude-workspace "/absolute/project"` arguments with the shell installer, or `-ExcludeWorkspace "C:\private", "D:\secret"` with the Windows installer. Explicit installation arguments replace the list; omitted arguments and upgrades preserve it. Alternatively edit `config.json` and restart Pilot:
+
+```json
+{ "privacy": { "excludeWorkspaces": ["/absolute/private-project"] } }
+```
+
+An empty array disables filtering. Rules match the directory and descendants, including symlink aliases, without matching sibling prefixes. Only explicit Agent working-directory/workspace metadata is used; no Git repository is required. Any excluded root in a multi-root workspace blocks the session. Unknown workspaces are allowed. Once identified as excluded, subsequent session events are dropped even after switching directories or restarting Pilot. Each rule list has separate persisted decisions; restoring an earlier list reuses its decisions. Records without a session ID are evaluated individually.
+
+Filtering applies before JSONL/SLS/HTTP/OTLP output, Codex/Qoder attachment uploads, and shared Hook history writers. Independent file/API pipelines inspect explicit workspace metadata; plain text and records without such metadata remain allowed. This is session output control, not a filesystem access restriction: adapters may read native transcripts or Hook files to identify a workspace, and specialized inputs may create intermediate local files before filtering. Existing local/remote data is not removed; accessing excluded files from another workspace is outside this feature's scope.

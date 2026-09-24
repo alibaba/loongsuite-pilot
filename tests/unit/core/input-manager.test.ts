@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
 import {
@@ -28,6 +29,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 class StubInput extends EventEmitter {
+  setWorkspacePolicy() {}
   readonly id: string;
   readonly agentType = ClientType.Qoder;
   readonly collectionMethod = CollectionMethod.IdeSnapshotPolling;
@@ -62,6 +64,18 @@ describe('InputManager', () => {
     manager = new InputManager();
     flusher = new MockFlusher();
     manager.setFlusher(flusher);
+  });
+
+  it('filters excluded sessions before identity rewriting and every output destination', async () => {
+    manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+    const input = new StubInput('privacy');
+    manager.registerInput(input as any);
+    const denied = buildTestEntry({ 'gen_ai.session.id': 'denied', 'workspace.path': '/private-project/app' });
+    const allowed = buildTestEntry({ 'gen_ai.session.id': 'allowed' });
+    input.emit('entries', [denied, allowed]);
+    await manager.stopAll();
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'denied')).toBe(false);
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'allowed')).toBe(true);
   });
 
   describe('registerInput and event dispatch (T030)', () => {

@@ -282,3 +282,39 @@ loongsuite-pilot info
 ```
 
 最快的验证方式是启用 [本地 JSONL 输出](local-jsonl-output.md)，检查是否有新事件写入。
+
+## Workspace 采集黑名单
+
+安装时可排除 Agent 会话的本地工作目录。macOS/Linux 支持重复参数：
+
+```bash
+bash installer.sh install \
+  --exclude-workspace "/Users/alice/private" \
+  --exclude-workspace "/Users/alice/company-secret"
+```
+
+Windows 使用目录数组：
+
+```powershell
+.\installer-opensource.ps1 install -ExcludeWorkspace "C:\private", "D:\company-secret"
+```
+
+参数必须是绝对目录；再次安装并指定参数会替换整个列表，不指定则保留已有配置。升级保留配置。也可以编辑 `config.json` 后重启 Pilot：
+
+```json
+{
+  "privacy": {
+    "excludeWorkspaces": ["/Users/alice/private", "/Users/alice/company-secret"]
+  }
+}
+```
+
+将列表改为 `[]` 并重启可关闭过滤。此设置不使用环境变量覆盖。
+
+- workspace 指 Agent 明确提供的会话 `cwd`、`workspace.path` 或 IDE `workspace_roots`，不要求 Git 仓库。不会通过仓库远端地址、工具访问路径、日志存放位置或对话内容猜测目录。
+- 匹配目录本身及所有子目录，规范化 `..`、分隔符并解析符号链接；`/code/private-copy` 不会命中 `/code/private`。Windows 按不区分大小写的本地路径匹配。
+- 多根 workspace 任一命中就屏蔽整个会话的后续事件，包括对话、工具调用和 token 事件。未知目录正常采集；稍后识别命中时停止后续采集，已输出的数据不撤回。
+- 命中状态按 Agent 和原生会话 ID 保存。即使切回其他目录或 Pilot 重启，也不会恢复该会话。不同黑名单列表使用独立状态，恢复原列表会复用其屏蔽记录；没有会话 ID 时只能按当前事件判断。
+- 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
+
+这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，部分专用采集入口的本地中间文件也可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。

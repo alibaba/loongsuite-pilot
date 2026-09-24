@@ -35,7 +35,7 @@ export class FilePipeline implements Pipeline {
   private lastRescanTime = 0;
   private readonly patternMatchers: { dir: string; regex: RegExp }[];
 
-  constructor(opts: FilePipelineOptions) {
+  constructor(private readonly opts: FilePipelineOptions) {
     this.config = opts.config;
     this.logger = createLogger(`FilePipeline:${opts.config.configName}`);
 
@@ -203,6 +203,19 @@ export class FilePipeline implements Pipeline {
 
             hasMore = result.hasMore;
 
+            if (this.opts.workspacePolicy?.enabled) {
+              const records = result.lines.map(line => {
+                try {
+                  const record: unknown = JSON.parse(line);
+                  return record && typeof record === 'object' && !Array.isArray(record)
+                    ? record as Record<string, unknown> : undefined;
+                } catch { return undefined; }
+              });
+              const policy = this.opts.workspacePolicy;
+              const agent = `file:${this.config.configName}`;
+              policy.filter(records.filter((record): record is Record<string, unknown> => !!record), agent);
+              result.lines = result.lines.filter((_, index) => !records[index] || policy.allows(records[index]!, agent));
+            }
             if (result.lines.length > 0) {
               const accepted = this.sender.enqueue(result.lines, filePath);
               if (!accepted) {

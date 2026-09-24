@@ -224,6 +224,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
@@ -350,6 +353,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
@@ -698,6 +704,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),

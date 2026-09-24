@@ -76,6 +76,7 @@ MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
@@ -130,6 +131,19 @@ while [[ $# -gt 0 ]]; do
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
+        --exclude-workspace)
+            if [ "$#" -lt 2 ] || [[ "$2" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$2"); shift 2 ;;
+        --exclude-workspace=*)
+            excluded_workspace="${1#*=}"
+            if [[ "$excluded_workspace" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$excluded_workspace"); shift ;;
         --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
         --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
         --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
@@ -1057,7 +1071,12 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
+    local excluded_workspaces_json=""
+    if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
+        excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
+    fi
     printf '%s' "$PROBE_RESULT" | \
+        LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
@@ -1078,6 +1097,9 @@ const config = {
 };
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
+}
+if (process.env.LP_EXCLUDE_WORKSPACES) {
+  config.privacy = { ...config.privacy, excludeWorkspaces: JSON.parse(process.env.LP_EXCLUDE_WORKSPACES) };
 }
 const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
 if (dashboardPort) config.dashboard.port = Number(dashboardPort);

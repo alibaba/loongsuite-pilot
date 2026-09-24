@@ -1,3 +1,4 @@
+import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
 import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
@@ -218,6 +219,11 @@ export class Orchestrator extends EventEmitter {
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
+    const workspacePolicy = new WorkspacePolicy(
+      this.config.privacy?.excludeWorkspaces,
+      path.join(this.dataDir, 'state', 'workspace-exclusions'),
+    );
+    this.inputManager.setWorkspacePolicy(workspacePolicy);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(
@@ -350,6 +356,7 @@ export class Orchestrator extends EventEmitter {
         failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
+        workspacePolicy,
       });
       await this.pipelineManager.start();
     } else {

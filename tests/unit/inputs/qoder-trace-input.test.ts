@@ -1,3 +1,4 @@
+import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -2428,6 +2429,33 @@ describe('QoderTraceInput multimodal', () => {
   });
 
   describe('IDE gate via collect', () => {
+    it('never uploads attachments for an excluded IDE workspace', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-private-'));
+      const pathToUri = vi.fn();
+      clearAttachedImagePathsCache();
+      mockReadAttachedImagePaths.mockResolvedValue(new Map([['private-req', attached([path.join(tmpDir, 'secret.png')], 1_779_999_995_000)]]));
+      try {
+        const file = `qoder-${getTodayDateString()}.jsonl`;
+        await fs.writeFile(path.join(tmpDir, file), JSON.stringify({
+          'event.id': 'private-response', 'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder', 'gen_ai.session.id': 'private-session',
+          'gen_ai.turn.id': 'private-turn', 'gen_ai.request.id': 'private-req',
+          'agent.qoder.cwd': tmpDir, 'gen_ai.output.messages': [],
+          time_unix_nano: '1780000000000000000',
+        }) + '\n');
+        const stateStore = new MockStateStore();
+        stateStore.set('qoder-trace', { lastFile: file, lastOffset: 0, extra: { hookHistoryInitialized: true } });
+        const input = new QoderTraceInput({ stateStore: stateStore as any, logDir: tmpDir,
+          multimodal: { enabled: true, uploadMode: 'input', processor: { pathToUri } as any } });
+        input.setWorkspacePolicy(new WorkspacePolicy([tmpDir]));
+        const emitted = vi.fn(); input.on('entries', emitted);
+        await input.start();
+        await input.stop();
+        expect(pathToUri).not.toHaveBeenCalled();
+        expect(emitted).not.toHaveBeenCalled();
+      } finally { await fs.rm(tmpDir, { recursive: true, force: true }); }
+    });
+
     it('converts IDE and CLI tool Image file paths and preserves invocation attributes', async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-mm-'));
       const imgPath = path.join(tmpDir, 'shot.png');
