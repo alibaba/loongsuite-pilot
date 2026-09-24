@@ -19,6 +19,11 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
 const NS_PER_MS = 1_000_000n;
 const MAX_TURN_CORRELATIONS = 1_024;
 const MAX_INPUT_MESSAGES = 2_048;
+const MAX_RESOURCE_FIELD_VALUE_LENGTH = 512;
+const AGENTTEAMS_RESOURCE_KEYS = [
+  'agentteams.worker.name',
+  'agentteams.instance.id',
+] as const;
 
 export interface DshRequestHeader {
   model?: string;
@@ -156,6 +161,24 @@ function asArray(v: unknown): unknown[] | undefined {
   return Array.isArray(v) ? v : undefined;
 }
 
+/** Plugin-stamped allowlist only. The collector never reads its own environment. */
+function agentTeamsFields(record: Record<string, unknown>): Record<string, unknown> {
+  const raw = asObject(record.resourceAttributes);
+  if (!raw) return {};
+  const resourceAttributes: Record<string, string> = {};
+  for (const key of AGENTTEAMS_RESOURCE_KEYS) {
+    const value = asString(raw[key])?.trim();
+    if (!value || value.length > MAX_RESOURCE_FIELD_VALUE_LENGTH) continue;
+    resourceAttributes[key] = value;
+  }
+  if (Object.keys(resourceAttributes).length === 0) return {};
+  const workerName = resourceAttributes['agentteams.worker.name'];
+  return {
+    ...(workerName ? { 'gen_ai.agent.name': workerName } : {}),
+    resourceAttributes,
+  };
+}
+
 export function parseDshRequestHeader(
   record: Record<string, unknown>,
 ): DshRequestHeader | undefined {
@@ -274,6 +297,7 @@ export function transformDshRecord(
     'trace_id': traceId,
     'user.id': '',
     'gen_ai.agent.type': agentType,
+    ...agentTeamsFields(record),
   };
 
   switch (type) {

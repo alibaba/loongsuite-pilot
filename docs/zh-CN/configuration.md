@@ -105,7 +105,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
     "codex": {
       "enabled": true,
       "captureMessageContent": true,
-      "multimodal": { "uploadMode": "both" }
+      "multimodal": { "uploadMode": "all" }
     }
   }
 }

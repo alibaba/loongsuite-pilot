@@ -132,7 +132,7 @@ describe('PII mask detectors', () => {
     const input = '8.8.8.8|192.168.1.10|127.0.0.1|169.254.10.20.';
 
     expect(mask(input, ['ipAddress'])).toBe(
-      '[IPADDRESS_MASKED]|[IPADDRESS_MASKED]|[IPADDRESS_MASKED]|[IPADDRESS_MASKED].',
+      '[IP_ADDRESS_MASKED]|[IP_ADDRESS_MASKED]|[IP_ADDRESS_MASKED]|[IP_ADDRESS_MASKED].',
     );
   });
 
@@ -140,7 +140,7 @@ describe('PII mask detectors', () => {
     const invalid = '256.1.1.1|192.168.01.1|1.2.3|1.2.3.4.5';
     expect(mask(invalid, ['ipAddress'])).toBe(invalid);
     expect(mask('version=1.2.3.4', ['ipAddress'])).toBe(
-      'version=[IPADDRESS_MASKED]',
+      'version=[IP_ADDRESS_MASKED]',
     );
   });
 
@@ -154,7 +154,7 @@ describe('PII mask detectors', () => {
     ];
     const masked = mask(cards.join('|'), ['bankCard']);
 
-    expect(masked.match(/\[BANKCARD_MASKED\]/g)).toHaveLength(cards.length);
+    expect(masked.match(/\[CREDIT_CARD_MASKED\]/g)).toHaveLength(cards.length);
     for (const card of cards) {
       expect(masked).not.toContain(card);
     }
@@ -193,7 +193,7 @@ describe('PII mask detectors', () => {
       {
         start: 0,
         end: value.length,
-        replacement: '[BANKCARD_MASKED]',
+        replacement: '[CREDIT_CARD_MASKED]',
         ruleId: 'pii.bankCard',
         type: 'bankCard',
       },

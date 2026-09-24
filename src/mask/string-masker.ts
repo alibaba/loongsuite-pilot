@@ -9,7 +9,10 @@ import type {
   MaskRange,
   StringMaskOptions,
 } from './types.js';
-import { MASKED_TOKEN_PATTERN } from './types.js';
+import {
+  MASKED_PREVIEW_TOKEN_PATTERN,
+  MASKED_TOKEN_PATTERN,
+} from './types.js';
 
 const EMPTY_PII_TYPES: MaskPlan['piiTypes'] = new Set();
 
@@ -31,15 +34,59 @@ export function maskString(
 
   const resolvedOptions = resolveStringMaskOptions(options);
   const ranges: MaskRange[] = [];
+  const protectedPreviewRanges = collectMaskedPreviewRanges(value);
+  const scanValue = blankProtectedPreviewRanges(value, protectedPreviewRanges);
 
   if (plan.rules.length > 0) {
-    ranges.push(...collectSensitiveRanges(value, plan.rules, resolvedOptions));
+    ranges.push(...collectSensitiveRanges(
+      scanValue,
+      plan.rules,
+      resolvedOptions,
+      plan.replacementMode,
+    ));
   }
   if (plan.piiTypes.size > 0) {
-    ranges.push(...collectPiiRanges(value, plan.piiTypes));
+    ranges.push(
+      ...collectPiiRanges(scanValue, plan.piiTypes, plan.replacementMode),
+    );
   }
 
   return applyMaskRanges(value, ranges);
+}
+
+interface ProtectedPreviewRange {
+  start: number;
+  end: number;
+}
+
+function collectMaskedPreviewRanges(value: string): ProtectedPreviewRange[] {
+  if (!value.includes('_MASKED]{')) return [];
+
+  const ranges: ProtectedPreviewRange[] = [];
+  const pattern = new RegExp(MASKED_PREVIEW_TOKEN_PATTERN.source, 'g');
+  for (const match of value.matchAll(pattern)) {
+    ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return ranges;
+}
+
+function blankProtectedPreviewRanges(
+  value: string,
+  protectedRanges: readonly ProtectedPreviewRange[],
+): string {
+  if (protectedRanges.length === 0) return value;
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const range of protectedRanges) {
+    chunks.push(
+      value.slice(cursor, range.start),
+      ' '.repeat(range.end - range.start),
+    );
+    cursor = range.end;
+  }
+  chunks.push(value.slice(cursor));
+  return chunks.join('');
 }
 
 function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): MaskPlan {
@@ -47,6 +94,7 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
     return {
       rules: planOrRules,
       piiTypes: EMPTY_PII_TYPES,
+      replacementMode: 'placeholder',
     };
   }
   return planOrRules as MaskPlan;

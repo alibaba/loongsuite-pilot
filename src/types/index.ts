@@ -32,6 +32,7 @@ export interface CmsConfig {
 }
 
 export type MaskMode = 'none' | 'all' | 'custom';
+export type MaskReplacementMode = 'placeholder' | 'preview';
 
 export const PII_MASK_TYPES = [
   'idCard',
@@ -56,6 +57,7 @@ export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 export interface MaskConfig {
   mode: MaskMode;
   types: MaskType[];
+  replacementMode?: MaskReplacementMode;
 }
 
 /** Interceptor types are the credential subset of mask types; PII is not interceptable. */
@@ -74,6 +76,8 @@ export interface InterceptorConfig {
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -157,6 +161,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Propagate the linked context to the LLM gateway as a `traceparent` header. */
+  propagateToLlm: boolean;
   /** Generate a per-turn trace context for tools when no upstream context is available. */
   generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
@@ -167,24 +173,23 @@ export const MULTIMODAL_UPLOAD_MODES = [
   'none',
   'input',
   'output',
-  'tool',
-  'both',
+  'all',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
 /** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'both';
+  return mode === 'input' || mode === 'all';
 }
 
 /** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
-  return mode === 'output' || mode === 'both';
+  return mode === 'output' || mode === 'all';
 }
 
-/** uploadMode covers tool results. */
+/** uploadMode covers tool results (included by every non-none mode). */
 export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'tool' || mode === 'both';
+  return mode === 'input' || mode === 'output' || mode === 'all';
 }
 
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
@@ -268,6 +273,8 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];

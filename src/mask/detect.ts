@@ -1,5 +1,7 @@
+import { buildMaskReplacement } from './masked-preview.js';
 import type {
   CompiledMaskRule,
+  MaskPlan,
   MaskRange,
   ResolvedStringMaskOptions,
   StringMaskOptions,
@@ -30,6 +32,7 @@ export function collectSensitiveRanges(
   value: string,
   rules: readonly CompiledMaskRule[],
   options: StringMaskOptions = {},
+  replacementMode: MaskPlan['replacementMode'] = 'placeholder',
 ): MaskRange[] {
   if (value.length === 0 || rules.length === 0 || MASKED_TOKEN_PATTERN.test(value)) {
     return [];
@@ -40,8 +43,8 @@ export function collectSensitiveRanges(
   if (!hasAnyPrefilter(normalizedValue, rules)) return [];
 
   return isLargeString(value, resolvedOptions.largeStringThresholdBytes)
-    ? collectLargeStringRanges(value, normalizedValue, rules, resolvedOptions)
-    : collectRangesForSegment(value, normalizedValue, 0, rules, resolvedOptions);
+    ? collectLargeStringRanges(value, normalizedValue, rules, replacementMode, resolvedOptions)
+    : collectRangesForSegment(value, normalizedValue, 0, rules, replacementMode, resolvedOptions);
 }
 
 export function findFirstSensitiveMatch(
@@ -79,6 +82,7 @@ function collectLargeStringRanges(
   value: string,
   normalizedValue: string,
   rules: readonly CompiledMaskRule[],
+  replacementMode: MaskPlan['replacementMode'],
   options: ResolvedStringMaskOptions,
 ): MaskRange[] {
   const windows = buildKeywordWindows(normalizedValue, rules, options.keywordContextWindow);
@@ -89,7 +93,7 @@ function collectLargeStringRanges(
     const segment = value.slice(window.start, window.end);
     const normalizedSegment = normalizedValue.slice(window.start, window.end);
     ranges.push(
-      ...collectRangesForSegment(segment, normalizedSegment, window.start, rules, options),
+      ...collectRangesForSegment(segment, normalizedSegment, window.start, rules, replacementMode, options),
     );
   }
   return ranges;
@@ -141,6 +145,7 @@ function collectRangesForSegment(
   normalizedSegment: string,
   offset: number,
   rules: readonly CompiledMaskRule[],
+  replacementMode: MaskPlan['replacementMode'],
   options: ResolvedStringMaskOptions,
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
@@ -148,11 +153,11 @@ function collectRangesForSegment(
     if (!ruleHasPrefilter(normalizedSegment, rule)) continue;
 
     if (rule.kind === 'regex' && rule.regex) {
-      ranges.push(...collectRegexRanges(segment, offset, rule));
+      ranges.push(...collectRegexRanges(segment, offset, rule, replacementMode));
     } else if (rule.kind === 'block' && rule.blockRegex) {
-      ranges.push(...collectBlockRanges(segment, offset, rule, options.privateKeyBlockLimit));
+      ranges.push(...collectBlockRanges(segment, offset, rule, replacementMode, options.privateKeyBlockLimit));
     } else if (rule.kind === 'urlWithPassword' && rule.schemeSet) {
-      ranges.push(...collectUrlWithPasswordRanges(segment, offset, rule));
+      ranges.push(...collectUrlWithPasswordRanges(segment, offset, rule, replacementMode));
     }
   }
   return ranges;
@@ -162,6 +167,7 @@ function collectRegexRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
   const regex = rule.regex!;
@@ -172,7 +178,7 @@ function collectRegexRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + match[0].length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(rule.replacement, rule.type, match[0], replacementMode),
       ruleId: rule.id,
       type: rule.type,
     });
@@ -185,6 +191,7 @@ function collectBlockRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
   blockLimit: number,
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
@@ -197,7 +204,7 @@ function collectBlockRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + match[0].length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(rule.replacement, rule.type, match[0], replacementMode),
       ruleId: rule.id,
       type: rule.type,
     });
@@ -210,6 +217,7 @@ function collectUrlWithPasswordRanges(
   segment: string,
   offset: number,
   rule: CompiledMaskRule,
+  replacementMode: MaskPlan['replacementMode'],
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
   URL_CANDIDATE_PATTERN.lastIndex = 0;
@@ -221,7 +229,7 @@ function collectUrlWithPasswordRanges(
     ranges.push({
       start: offset + match.index,
       end: offset + match.index + candidate.length,
-      replacement: rule.replacement,
+      replacement: buildMaskReplacement(rule.replacement, rule.type, candidate, replacementMode),
       ruleId: rule.id,
       type: rule.type,
     });

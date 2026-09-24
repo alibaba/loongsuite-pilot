@@ -26,6 +26,37 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
+    mockReadJsonFile.mockResolvedValueOnce({
+      dataDir: '/data/pilot', collectTrace: true,
+      otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: [
+        './skill.mjs', '/custom/skill.mjs', '~/home.mjs', '$PILOT_DATA/plugins/skill.mjs', 42, 'bad.ts',
+      ] },
+    });
+    const config = await loadConfig();
+    expect(buildOtlpTraceConfig(config)?.spanEnricherPaths).toEqual([
+      '/custom/skill.mjs', '/home/test/home.mjs', '/data/pilot/plugins/skill.mjs',
+    ]);
+  });
+
+  it('ignores malformed span enricher config without disabling trace export', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true, otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: 'bad.mjs' },
+    });
+    expect(buildOtlpTraceConfig(await loadConfig())?.spanEnricherPaths).toEqual([]);
+  });
+
+  it('limits plugin count and supports CMS-only trace destinations', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true,
+      cms: { licenseKey: 'test', endpoint: 'http://localhost:4318' },
+      otlpTrace: { spanEnrichers: Array.from({ length: 20 }, (_, i) => `/plugins/${i}.mjs`) },
+    });
+    const config = buildOtlpTraceConfig(await loadConfig());
+    expect(config?.spanEnricherPaths).toHaveLength(16);
+    expect(config?.endpoints).toHaveLength(1);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
@@ -545,7 +576,7 @@ describe('ConfigLoader', () => {
         agents: {
           codex: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
           cursor: { captureMessageContent: true },
         },
@@ -554,7 +585,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.codex).toEqual({
         captureMessageContent: true,
-        multimodal: { uploadMode: 'both' },
+        multimodal: { uploadMode: 'all' },
       });
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
@@ -565,7 +596,7 @@ describe('ConfigLoader', () => {
           qoder: {
             captureMessageContent: true,
             multimodal: {
-              uploadMode: 'both',
+              uploadMode: 'all',
               allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
             },
           },
@@ -573,7 +604,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.qoder.multimodal?.uploadMode).toBe('both');
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('all');
       expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
         '/home/test/workspace/loongsuite-pilot',
         '/tmp/extra',
@@ -601,21 +632,21 @@ describe('ConfigLoader', () => {
         agents: {
           cursor: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
           codex: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'both' },
+            multimodal: { uploadMode: 'all' },
           },
         },
       });
 
       const config = await loadConfig();
       expect(config.agents.cursor.multimodal).toEqual({
-        uploadMode: 'both',
+        uploadMode: 'all',
       });
       expect(config.agents.codex.multimodal).toEqual({
-        uploadMode: 'both',
+        uploadMode: 'all',
       });
     });
   });
@@ -1002,7 +1033,7 @@ describe('ConfigLoader', () => {
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
     });
 
-    it('accepts input, output, and tool uploadMode values', async () => {
+    it('accepts input, output, and all uploadMode values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           codex: {
@@ -1011,7 +1042,7 @@ describe('ConfigLoader', () => {
           },
           cursor: {
             captureMessageContent: true,
-            multimodal: { uploadMode: 'tool' },
+            multimodal: { uploadMode: 'all' },
           },
           'claude-code': {
             captureMessageContent: true,
@@ -1021,7 +1052,7 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
-      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'tool' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'all' });
       expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
     });
   });
@@ -1507,7 +1538,11 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('defaults to none when mask.mode is missing', async () => {
@@ -1516,7 +1551,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('loads all mode and ignores types', async () => {
@@ -1528,7 +1567,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('loads custom mode with supported types only', async () => {
@@ -1552,6 +1595,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
+        replacementMode: 'placeholder',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1574,7 +1618,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('custom mode with empty or omitted types enables no mask types', async () => {
@@ -1583,7 +1631,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'custom', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('uses mask mode env over config file', async () => {
@@ -1596,7 +1648,11 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_MASK_MODE', 'all');
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'placeholder',
+      });
     });
 
     it('uses mask types env for custom mode and filters unsupported values', async () => {
@@ -1614,6 +1670,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
+        replacementMode: 'placeholder',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1624,6 +1681,60 @@ describe('ConfigLoader', () => {
           'bankCard',
         ],
       });
+    });
+
+    it('loads preview replacement mode from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('uses replacement mode env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'placeholder',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'preview');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('treats an empty replacement mode env as unset', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', '');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('falls back to placeholder for an invalid replacement mode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'fingerprint',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('placeholder');
     });
   });
 
@@ -2160,10 +2271,12 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '');
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
       expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.propagateToLlm).toBe(false);
       expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
@@ -2187,6 +2300,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
       config = await loadConfig();
       expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables LLM gateway propagation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, propagateToLlm: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
     });
 
     it('enables local trace generation from config or env', async () => {

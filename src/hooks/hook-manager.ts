@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { withClaudeSettingsLock } from './claude-settings.js';
 import {
   writeJsonFile,
   writeTextFileAtomic,
@@ -83,6 +84,17 @@ export class HookManager {
    */
   async installHook(def: HookDefinition): Promise<boolean> {
     try {
+      return def.agentId === 'claude-code'
+        ? await withClaudeSettingsLock(def.settingsPath, () => this.installHookUnlocked(def))
+        : await this.installHookUnlocked(def);
+    } catch (err) {
+      logger.error('hook configuration lock failed', { agentId: def.agentId, error: String(err) });
+      return false;
+    }
+  }
+
+  private async installHookUnlocked(def: HookDefinition): Promise<boolean> {
+    try {
       await ensureDir(path.dirname(def.settingsPath));
       if (def.settingsSyntax === 'jsonc') {
         return await this.installJsoncHook(def);
@@ -158,6 +170,17 @@ export class HookManager {
    * Remove a previously installed hook.
    */
   async uninstallHook(def: HookDefinition): Promise<boolean> {
+    try {
+      return def.agentId === 'claude-code'
+        ? await withClaudeSettingsLock(def.settingsPath, () => this.uninstallHookUnlocked(def))
+        : await this.uninstallHookUnlocked(def);
+    } catch (err) {
+      logger.error('hook configuration lock failed', { agentId: def.agentId, error: String(err) });
+      return false;
+    }
+  }
+
+  private async uninstallHookUnlocked(def: HookDefinition): Promise<boolean> {
     try {
       if (def.settingsSyntax === 'jsonc') {
         return await this.uninstallJsoncHook(def);

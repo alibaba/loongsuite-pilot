@@ -1736,7 +1736,7 @@ describe('QoderTraceInput multimodal', () => {
         ]);
       });
 
-      it('uploadMode gates input attach: tool/output skip; both enriches', async () => {
+      it('uploadMode gates input attach: output skips; all enriches', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'in-gate.png', 'in-gate');
         const makeRequest = () => mmEntry({
@@ -1748,18 +1748,16 @@ describe('QoderTraceInput multimodal', () => {
         });
         mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-in-gate', attached([img])]]));
 
-        for (const mode of ['tool', 'output'] as const) {
-          clearAttachedImagePathsCache();
-          const request = makeRequest();
-          await enrichIdeMultimodal([request], { uploadMode: mode, pathToUri: fakePathToUri });
-          const parts = (request['gen_ai.input.messages_delta'] as any[])[0].parts;
-          expect(parts, mode).toHaveLength(1);
-          expect(parts[0].type, mode).toBe('text');
-        }
+        clearAttachedImagePathsCache();
+        const outputOnly = makeRequest();
+        await enrichIdeMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+        const outputParts = (outputOnly['gen_ai.input.messages_delta'] as any[])[0].parts;
+        expect(outputParts).toHaveLength(1);
+        expect(outputParts[0].type).toBe('text');
 
         clearAttachedImagePathsCache();
         const both = makeRequest();
-        await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+        await enrichIdeMultimodal([both], { uploadMode: 'all', pathToUri: fakePathToUri });
         expect((both['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
           p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
       });
@@ -1869,7 +1867,7 @@ describe('QoderTraceInput multimodal', () => {
         mockReadAttachedImagePaths.mockRejectedValue(new Error('sqlite down'));
 
         await enrichIdeMultimodal([request, tool], {
-          uploadMode: 'both',
+          uploadMode: 'all',
           pathToUri,
         });
 
@@ -2203,7 +2201,7 @@ describe('QoderTraceInput multimodal', () => {
       });
     });
 
-    it('tool mode rewrites Image file tool.result to text+uri parts', async () => {
+    it('rewrites Image file tool.result to text+uri parts', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'read.png', 'read-img');
       const pathToUri = fakePathToUri;
@@ -2213,7 +2211,7 @@ describe('QoderTraceInput multimodal', () => {
         'gen_ai.tool.call.result': `Image file: ${img}`,
       });
 
-      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      await enrichIdeMultimodal([tool], { uploadMode: 'input', pathToUri });
 
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result[0]).toEqual({ type: 'text', content: `Image file: ${img}` });
@@ -2227,12 +2225,12 @@ describe('QoderTraceInput multimodal', () => {
         'event.name': 'tool.result',
         'gen_ai.tool.call.result': listed.map(p => `Image file: ${p}`).join('\n'),
       });
-      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      await enrichIdeMultimodal([tool], { uploadMode: 'input', pathToUri });
       expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
       expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Image file: ${p}`).join('\n'));
     });
 
-    it('tool mode parses ImageGen success path', async () => {
+    it('parses ImageGen success path', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'gen.png', 'gen-img');
       const pathToUri = fakePathToUri;
@@ -2243,32 +2241,9 @@ describe('QoderTraceInput multimodal', () => {
           `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
       });
 
-      await enrichIdeMultimodal([tool], { uploadMode: 'tool', pathToUri });
+      await enrichIdeMultimodal([tool], { uploadMode: 'input', pathToUri });
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img')).toBe(true);
-    });
-
-    it('uploadMode gates ImageGen tool: input/output skip; both enriches', async () => {
-      const dir = makeMmTempDir();
-      const img = writePng(dir, 'gen-gate.png', 'gen-gate');
-      const makeTool = () => mmEntry({
-        'event.name': 'tool.result',
-        'gen_ai.tool.name': 'ImageGen',
-        'gen_ai.tool.call.result':
-          `Image generated successfully! The absolute path of the image is: ${img}\nRequest ID: abc`,
-      });
-
-      for (const mode of ['input', 'output'] as const) {
-        const tool = makeTool();
-        const before = tool['gen_ai.tool.call.result'];
-        await enrichIdeMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri });
-        expect(tool['gen_ai.tool.call.result'], mode).toBe(before);
-      }
-
-      const both = makeTool();
-      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
-      const result = both['gen_ai.tool.call.result'] as any[];
-      expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-gate')).toBe(true);
     });
 
     it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
@@ -2312,7 +2287,7 @@ describe('QoderTraceInput multimodal', () => {
       expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
     });
 
-    it('uploadMode gates output markdown: input/tool skip; both enriches', async () => {
+    it('uploadMode gates output markdown: input skips; all enriches', async () => {
       const dir = makeMmTempDir();
       const img = writePng(dir, 'out-gate.png', 'out-gate');
       const makeResponse = () => mmEntry({
@@ -2322,16 +2297,14 @@ describe('QoderTraceInput multimodal', () => {
         ],
       });
 
-      for (const mode of ['input', 'tool'] as const) {
-        const response = makeResponse();
-        await enrichIdeMultimodal([response], { uploadMode: mode, pathToUri: fakePathToUri });
-        const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
-        expect(parts, mode).toHaveLength(1);
-        expect(parts[0].type, mode).toBe('text');
-      }
+      const inputOnly = makeResponse();
+      await enrichIdeMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+      const inputParts = (inputOnly['gen_ai.output.messages'] as any[])[0].parts;
+      expect(inputParts).toHaveLength(1);
+      expect(inputParts[0].type).toBe('text');
 
       const both = makeResponse();
-      await enrichIdeMultimodal([both], { uploadMode: 'both', pathToUri: fakePathToUri });
+      await enrichIdeMultimodal([both], { uploadMode: 'all', pathToUri: fakePathToUri });
       expect((both['gen_ai.output.messages'] as any[])[0].parts.some((p: any) =>
         p.type === 'uri' && p.uri === 'oss://test/out-gate')).toBe(true);
     });
@@ -2351,7 +2324,7 @@ describe('QoderTraceInput multimodal', () => {
         ],
       });
 
-      await enrichIdeMultimodal([tool, response], { uploadMode: 'both', pathToUri });
+      await enrichIdeMultimodal([tool, response], { uploadMode: 'all', pathToUri });
       expect(Array.isArray(tool['gen_ai.tool.call.result'])).toBe(true);
       const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
       expect(parts.some((p: any) => p.type === 'uri')).toBe(true);
@@ -2373,14 +2346,14 @@ describe('QoderTraceInput multimodal', () => {
         'event.name': 'tool.result',
         'gen_ai.tool.call.result': 'Image file: /no/such/file.png',
       });
-      await enrichIdeMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri });
+      await enrichIdeMultimodal([missing], { uploadMode: 'input', pathToUri: fakePathToUri });
       expect(missing['gen_ai.tool.call.result']).toBe('Image file: /no/such/file.png');
 
       const nullUri = mmEntry({
         'event.name': 'tool.result',
         'gen_ai.tool.call.result': `Image file: ${img}`,
       });
-      await enrichIdeMultimodal([nullUri], { uploadMode: 'tool', pathToUri: async () => null });
+      await enrichIdeMultimodal([nullUri], { uploadMode: 'input', pathToUri: async () => null });
       expect(nullUri['gen_ai.tool.call.result']).toBe(`Image file: ${img}`);
     });
 
@@ -2416,7 +2389,7 @@ describe('QoderTraceInput multimodal', () => {
         'gen_ai.tool.call.result': `Image file: ${img}`,
       });
       await expect(enrichIdeMultimodal([tool], {
-        uploadMode: 'tool',
+        uploadMode: 'input',
         pathToUri: async () => {
           throw new Error('processor boom');
         },
@@ -2434,7 +2407,7 @@ describe('QoderTraceInput multimodal', () => {
         'gen_ai.tool.call.result': `Image file: ${boom}\nImage file: ${ok}`,
       });
       await enrichIdeMultimodal([tool], {
-        uploadMode: 'tool',
+        uploadMode: 'input',
         pathToUri: async (filePath: string) => {
           if (filePath === boom) throw new Error('processor boom');
           return {
@@ -2501,7 +2474,7 @@ describe('QoderTraceInput multimodal', () => {
           pollIntervalMs: 60_000,
           multimodal: {
             enabled: true,
-            uploadMode: 'tool',
+            uploadMode: 'input',
             processor: {
               pathToUri: fakePathToUri,
             } as any,
@@ -2641,7 +2614,7 @@ describe('QoderTraceInput multimodal', () => {
           pollIntervalMs: 60_000,
           multimodal: {
             enabled: true,
-            uploadMode: 'tool',
+            uploadMode: 'input',
             processor: {
               pathToUri: fakePathToUri,
             } as any,
@@ -2688,7 +2661,7 @@ describe('QoderTraceInput multimodal', () => {
           pollIntervalMs: 60_000,
           multimodal: {
             enabled: true,
-            uploadMode: 'tool',
+            uploadMode: 'input',
             processor: {
               pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) =>
                 withDeadline(new Promise(() => {}), opts?.deadlineMs ?? 40, () => null),
@@ -2737,7 +2710,7 @@ describe('QoderTraceInput multimodal', () => {
           pollIntervalMs: 60_000,
           multimodal: {
             enabled: true,
-            uploadMode: 'tool',
+            uploadMode: 'input',
             processor: {
               pathToUri: fakePathToUri,
             } as any,
@@ -2791,7 +2764,7 @@ describe('QoderTraceInput multimodal', () => {
           pollIntervalMs: 60_000,
           multimodal: {
             enabled: true,
-            uploadMode: 'tool',
+            uploadMode: 'input',
             processor: {
               pathToUri: (_file: string, _time?: number, opts?: { deadlineMs?: number }) => {
                 pathToUriCalls += 1;

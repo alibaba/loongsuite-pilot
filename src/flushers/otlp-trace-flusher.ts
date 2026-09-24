@@ -14,10 +14,12 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
+import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
+import { SpanEnricherRunner } from './span-enricher.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -33,10 +35,11 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  attachReservedLlmSpanIds,
   attachReservedToolSpanIds,
-  ReservedToolSpanIdGenerator,
-  type ToolSpanIdReservations,
-} from './tool-span-id-reservation.js';
+  ReservedSpanIdGenerator,
+  type SpanIdReservations,
+} from './span-id-reservation.js';
 
 import {
   OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
@@ -118,7 +121,8 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
-  toolSpanIds: ToolSpanIdReservations;
+  toolSpanIds: SpanIdReservations;
+  llmSpanIds: SpanIdReservations;
   active: number;
 }
 
@@ -416,6 +420,9 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
   'gen_ai.subagent.parent_tool_call.id',
+  'agent.qwen-code-cli.subagent.collection',
+  'agent.qwen-code-cli.subagent.status',
+  'agent.qwen-code-cli.timing.source',
 ];
 
 function estimateSpanSize(span: ReadableSpan): number {
@@ -514,6 +521,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   readonly name = 'otlp-trace';
 
   private readonly cfg: OtlpTraceFlusherConfig;
+  private readonly spanEnrichers: SpanEnricherRunner;
   private readonly turnBuffers = new Map<string, TurnBuffer>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
@@ -552,6 +560,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    this.spanEnrichers = new SpanEnricherRunner(cfg.spanEnricherPaths ?? []);
     this.globalAttributesProvider = globalAttributesProvider;
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
     this.endpoints = cfg.endpoints.map((ep, i) => ({
@@ -833,6 +842,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwen-code-cli'
+      && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
+      return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
+    }
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -992,7 +1005,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resourceIdentity,
       convertKey,
     );
-    const { handler, provider, inMem, toolSpanIds } = convertState;
+    const { handler, provider, inMem, toolSpanIds, llmSpanIds } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
@@ -1067,18 +1080,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
+        llmSpanIds.prepare(sanitized);
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
         let succeeded = false;
         try {
-          result = convertEventLogToTrace(
+          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents : convertEventLogToTrace;
+          result = convert(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },
           );
           succeeded = true;
         } finally {
           toolSpanIds.clear();
+          llmSpanIds.clear();
           if (counters) {
             counters.converter_calls_total++;
             counters.converter_duration_ms_total += performance.now() - convertStarted;
@@ -1102,7 +1118,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
 
       await provider.forceFlush();
-      const spans = inMem.getFinishedSpans();
+      let spans = inMem.getFinishedSpans();
       inMem.reset();
 
       if (spans.length === 0) return;
@@ -1121,6 +1137,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
 
+      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
@@ -1245,7 +1262,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
     const inMem = new InMemorySpanExporter();
-    const idGenerator = new ReservedToolSpanIdGenerator();
+    const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
       idGenerator,
@@ -1253,8 +1270,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
+    const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;

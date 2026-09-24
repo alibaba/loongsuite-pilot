@@ -4,6 +4,8 @@
 
 本文说明如何安装、验证、卸载 LoongSuite Pilot，或从源码运行。
 
+Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前执行 [`loongsuite-pilot inject`](claude-session-injection.md) 合并采集 Hook。
+
 ## 前置要求
 
 - `curl` 或 `wget`
@@ -70,6 +72,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
+| `--all-agents` | 采集全部 Agent。不写 `enabled` 门禁，缺省即开。与 `--agents` 同时出现时忽略 `--agents`。Windows：`-AllAgents`。 |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`。与 `--all-agents` 同用且非 `none` 时，`codex`、`qoder` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
 | `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
@@ -82,6 +86,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--sls-api-key <key>` | API Key 模式的 SLS API Key，不能和 AK/SK 参数同时使用。 |
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
+| `--mask-replacement-mode <mode>` | 脱敏替换格式：`placeholder`（默认固定占位符）或 `preview`（星号预览）。Windows 对应 `-MaskReplacementMode`。 |
 | `--interceptor-mode <mode>` | 本地拦截模式：`all`、`none` 或 `custom`。启用的拦截类型会自动补进 `mask`。 |
 | `--interceptor-types <list>` | 逗号分隔的拦截类型（mask 密钥子集），`--interceptor-mode custom` 时必填。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |

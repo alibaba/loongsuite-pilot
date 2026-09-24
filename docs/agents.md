@@ -16,14 +16,14 @@ type differences are called out in the notes.
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
 | Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
-| DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. |
-| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. |
+| DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). |
+| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. Detection and hook config follow Grok's `GROK_HOME` (default `~/.grok`). |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
 | OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.3.8 or later. Automatic legacy/modern adaptation; model-call timing is inferred before 2026.5.12. |
 | OpenCode | `opencode` | Plugin injection. |
-| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
+| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. Detection and `settings.json` follow Pi's `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
@@ -47,10 +47,11 @@ best-effort wakeup and is not required for directory discovery.
 
 ## Grok Build Collection And Lifecycle
 
-Pilot detects Grok Build from `~/.grok` and installs four fail-open hooks in
-`~/.grok/hooks/loongsuite-pilot.json`: `stop`, `stop_failure`,
-`user_prompt_submit`, and `session_end`. Subagent hooks are intentionally not
-installed or collected.
+Pilot detects Grok Build from Grok's `GROK_HOME` (default `~/.grok`) and
+installs four fail-open hooks in `$GROK_HOME/hooks/loongsuite-pilot.json`:
+`stop`, `stop_failure`, `user_prompt_submit`, and `session_end`. Subagent
+hooks are intentionally not installed or collected. `GROK_WORKSPACE_DIR` is
+the workspace, not the Agent home.
 
 Each completed turn is reconstructed from three Grok-owned JSONL sources:
 
@@ -58,7 +59,7 @@ Each completed turn is reconstructed from three Grok-owned JSONL sources:
   arguments, tool results, and the system instruction.
 - Session `updates.jsonl` provides the real prompt ID, turn terminal state,
   cancellation or failure, and tool status.
-- `~/.grok/logs/unified.jsonl` provides model timing and token usage plus tool
+- `$GROK_HOME/logs/unified.jsonl` provides model timing and token usage plus tool
   execution timing and success.
 
 Collection starts with the turn observed after installation and does not replay
@@ -75,20 +76,24 @@ party hooks.
 
 ## DeepSeek Harness Collection And Lifecycle
 
-Pilot resolves one exact Harness home for both detection and deployment. It
-keeps a previously deployed patch path for repair and cleanup, then checks an
-explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and — on
-Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
-`~/.dsh` and `dsh` command detection remain the fallback. Pilot does not scan
-temporary directories or assume a fixed non-default home; multiple distinct
-running homes found during initial discovery are reported as ambiguous instead
-of selecting one silently.
+Pilot resolves one exact Harness home for both detection and deployment.
+Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). It keeps a
+previously deployed patch path for repair and cleanup, then checks an
+explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and —
+on Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
+`~/.dsh` and `dsh` command detection remain the fallback. `DSH_WORKSPACE_DIR`
+is the workspace, not the Harness home. Pilot does not scan temporary
+directories or assume a fixed non-default home; multiple distinct running
+homes found during initial discovery are reported as ambiguous instead of
+selecting one silently.
 
 When `dsh` is enabled, Pilot appends one marked, Pilot-owned block to the
 resolved `<DSH_HOME>/cordis.patch.yml`. That block loads the packaged plugin
 from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
 preserved. Start a new DSH process after first enabling or reinstalling the
-integration so the host loads the current patch.
+integration so the host loads the current patch. Set `AGENTTEAMS_WORKER_NAME`
+and `AGENTTEAMS_INSTANCE_ID` on that DSH process. The plugin stamps the worker
+identity into the JSONL; the collector does not read its own environment later.
 
 The plugin writes append-only native events to
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory
@@ -315,7 +320,7 @@ Use `config.json` when you need to control message content capture:
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
 | `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
-| `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `tool` / `output` / `both` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
+| `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
 For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).

@@ -227,7 +227,13 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
     const interceptorConfig = await loadInterceptorConfig();
@@ -1418,8 +1424,13 @@ export class Orchestrator extends EventEmitter {
     const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
+    const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
+    const codexSpanContextDir = path.join(this.dataDir, 'state', 'codex', 'transcript-span-contexts');
+    await ensureDir(codexWakeupDir);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      wakeupDir: codexWakeupDir,
+      spanContextDir: codexSpanContextDir,
       multimodal: {
         enabled: codexMultimodalEnabled,
         uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
@@ -1429,8 +1440,8 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
       this.inputManager.buildDetectionEntry(codexTranscriptInput, {
-        watchPaths: CodexTranscriptInput.getWatchPaths(),
-        isAvailable: CodexTranscriptInput.checkAvailability,
+        watchPaths: CodexTranscriptInput.getWatchPaths(codexWakeupDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(codexWakeupDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
             'codex-transcript',

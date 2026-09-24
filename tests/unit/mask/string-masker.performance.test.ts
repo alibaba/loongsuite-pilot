@@ -49,8 +49,8 @@ describe('mask string masker performance smoke', () => {
       expect(masked).toContain('[IDCARD_MASKED]');
       expect(masked).toContain('[PHONE_MASKED]');
       expect(masked).toContain('[EMAIL_MASKED]');
-      expect(masked).toContain('[IPADDRESS_MASKED]');
-      expect(masked).toContain('[BANKCARD_MASKED]');
+      expect(masked).toContain('[IP_ADDRESS_MASKED]');
+      expect(masked).toContain('[CREDIT_CARD_MASKED]');
     }
     const elapsedMs = performance.now() - startedAt;
 

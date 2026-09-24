@@ -1,3 +1,5 @@
+import type { MaskReplacementMode } from '../types/index.js';
+import { buildMaskReplacement } from './masked-preview.js';
 import type { MaskRange, PiiMaskType } from './types.js';
 
 const MAX_PHONE_CANDIDATE_LENGTH = 18;
@@ -22,13 +24,14 @@ const REPLACEMENTS: Record<PiiMaskType, string> = {
   idCard: '[IDCARD_MASKED]',
   phone: '[PHONE_MASKED]',
   email: '[EMAIL_MASKED]',
-  ipAddress: '[IPADDRESS_MASKED]',
-  bankCard: '[BANKCARD_MASKED]',
+  ipAddress: '[IP_ADDRESS_MASKED]',
+  bankCard: '[CREDIT_CARD_MASKED]',
 };
 
 export function collectPiiRanges(
   value: string,
   enabledTypes: ReadonlySet<PiiMaskType>,
+  replacementMode: MaskReplacementMode = 'placeholder',
 ): MaskRange[] {
   if (value.length === 0 || enabledTypes.size === 0) return [];
 
@@ -46,13 +49,14 @@ export function collectPiiRanges(
       idCard: detectIdCard,
       phone: detectPhone,
       bankCard: detectBankCard,
+      replacementMode,
     });
   }
   if (enabledTypes.has('email') && value.includes('@')) {
-    collectEmailRanges(value, ranges);
+    collectEmailRanges(value, ranges, replacementMode);
   }
   if (detectIpAddress && hasAsciiDigit && value.includes('.')) {
-    collectIpAddressRanges(value, ranges);
+    collectIpAddressRanges(value, ranges, replacementMode);
   }
 
   return ranges;
@@ -61,7 +65,12 @@ export function collectPiiRanges(
 function collectNumericRanges(
   value: string,
   ranges: MaskRange[],
-  enabled: { idCard: boolean; phone: boolean; bankCard: boolean },
+  enabled: {
+    idCard: boolean;
+    phone: boolean;
+    bankCard: boolean;
+    replacementMode: MaskReplacementMode;
+  },
 ): void {
   let candidateStart = -1;
   const currentDateNumber = enabled.idCard ? getCurrentDateNumber() : 0;
@@ -75,7 +84,13 @@ function collectNumericRanges(
       isAsciiDigit(code) &&
       (index === 0 || !isAsciiAlphaNumeric(value.charCodeAt(index - 1)))
     ) {
-      collectIdCardAt(value, index, ranges, currentDateNumber);
+      collectIdCardAt(
+        value,
+        index,
+        ranges,
+        currentDateNumber,
+        enabled.replacementMode,
+      );
     }
 
     if (index < value.length && isNumericCandidateChar(code)) {
@@ -93,6 +108,7 @@ function collectNumericRanges(
         ranges,
         enabled.phone,
         enabled.bankCard,
+        enabled.replacementMode,
       );
     }
     candidateStart = -1;
@@ -104,6 +120,7 @@ function collectIdCardAt(
   start: number,
   ranges: MaskRange[],
   currentDateNumber: number,
+  replacementMode: MaskReplacementMode,
 ): void {
   const end = start + 18;
   if (end > value.length) return;
@@ -117,7 +134,7 @@ function collectIdCardAt(
 
   const candidate = value.slice(start, end);
   if (!isValidIdCard(candidate, currentDateNumber)) return;
-  ranges.push(createRange(start, end, 'idCard'));
+  ranges.push(createRange(value, start, end, 'idCard', replacementMode));
 }
 
 function getCurrentDateNumber(): number {
@@ -169,6 +186,7 @@ function collectFormattedNumericCandidate(
   ranges: MaskRange[],
   detectPhone: boolean,
   detectBankCard: boolean,
+  replacementMode: MaskReplacementMode,
 ): void {
   const end = trimNumericCandidateEnd(value, rawStart, rawEnd);
   const firstCode = value.charCodeAt(rawStart);
@@ -189,6 +207,7 @@ function collectFormattedNumericCandidate(
       ranges,
       initialPhoneCandidate,
       initialBankCardCandidate,
+      replacementMode,
     )
   ) {
     return;
@@ -238,6 +257,7 @@ function collectFormattedNumericCandidate(
         ranges,
         validatePhone,
         validateBankCard,
+        replacementMode,
       );
     }
 
@@ -278,6 +298,7 @@ function collectValidatedNumericRange(
   ranges: MaskRange[],
   detectPhone: boolean,
   detectBankCard: boolean,
+  replacementMode: MaskReplacementMode,
 ): boolean {
   if (end <= start) return false;
   if (
@@ -290,11 +311,11 @@ function collectValidatedNumericRange(
   const candidate = value.slice(start, end);
   let matched = false;
   if (detectPhone && isValidPhone(candidate)) {
-    ranges.push(createRange(start, end, 'phone'));
+    ranges.push(createRange(value, start, end, 'phone', replacementMode));
     matched = true;
   }
   if (detectBankCard && isValidBankCard(candidate)) {
-    ranges.push(createRange(start, end, 'bankCard'));
+    ranges.push(createRange(value, start, end, 'bankCard', replacementMode));
     matched = true;
   }
   return matched;
@@ -386,7 +407,11 @@ function passesLuhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-function collectEmailRanges(value: string, ranges: MaskRange[]): void {
+function collectEmailRanges(
+  value: string,
+  ranges: MaskRange[],
+  replacementMode: MaskReplacementMode,
+): void {
   let atIndex = value.indexOf('@');
   while (atIndex !== -1) {
     let start = atIndex;
@@ -437,7 +462,7 @@ function collectEmailRanges(value: string, ranges: MaskRange[]): void {
       !touchesEmailChar &&
       isValidEmail(value, start, atIndex, end)
     ) {
-      ranges.push(createRange(start, end, 'email'));
+      ranges.push(createRange(value, start, end, 'email', replacementMode));
     }
 
     atIndex = value.indexOf('@', atIndex + 1);
@@ -483,7 +508,11 @@ function isValidEmail(value: string, start: number, atIndex: number, end: number
   return true;
 }
 
-function collectIpAddressRanges(value: string, ranges: MaskRange[]): void {
+function collectIpAddressRanges(
+  value: string,
+  ranges: MaskRange[],
+  replacementMode: MaskReplacementMode,
+): void {
   let index = 0;
   while (index < value.length) {
     const code = value.charCodeAt(index);
@@ -509,7 +538,9 @@ function collectIpAddressRanges(value: string, ranges: MaskRange[]): void {
       candidateEnd - index <= 15 &&
       isValidIpAddress(value, index, candidateEnd)
     ) {
-      ranges.push(createRange(index, candidateEnd, 'ipAddress'));
+      ranges.push(
+        createRange(value, index, candidateEnd, 'ipAddress', replacementMode),
+      );
     }
     index = end;
   }
@@ -542,11 +573,22 @@ function isValidIpAddress(value: string, start: number, end: number): boolean {
   return partCount === 4;
 }
 
-function createRange(start: number, end: number, type: PiiMaskType): MaskRange {
+function createRange(
+  value: string,
+  start: number,
+  end: number,
+  type: PiiMaskType,
+  replacementMode: MaskReplacementMode,
+): MaskRange {
   return {
     start,
     end,
-    replacement: REPLACEMENTS[type],
+    replacement: buildMaskReplacement(
+      REPLACEMENTS[type],
+      type,
+      value.slice(start, end),
+      replacementMode,
+    ),
     ruleId: `pii.${type}`,
     type,
   };

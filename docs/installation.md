@@ -71,6 +71,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
+| `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
@@ -83,6 +85,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
+| `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
 | `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
 | `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |

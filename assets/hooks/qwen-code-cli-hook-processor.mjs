@@ -8,10 +8,10 @@
  * Invoked by qwen-code-cli-loongsuite-pilot-hook.sh per registered hook event:
  *   $ node qwen-code-cli-hook-processor.mjs <subcommand>
  *
- * v1 subcommands handled:
+ * Subcommands handled:
  *   stop              → main export (parse transcript → write event_t records)
- *   subagent-start    → v1: accumulate into state.events (deferred to v2)
- *   subagent-stop     → v1: accumulate into state.events (deferred to v2)
+ *   subagent-start    → acknowledge; parent Stop reads child transcript/meta
+ *   subagent-stop     → acknowledge; parent Stop reads child transcript/meta
  *
  * Architecture mirrors assets/hooks/claude-code-hook-processor.mjs v2:
  *   pure transcript-driven (timestamps from record.timestamp, not hook fire time).
@@ -52,7 +52,6 @@ import {
 import {
   loadState,
   saveState,
-  readAndDeleteChildState,
 } from './qwen-code-cli/state.mjs';
 import { parseQwenTranscript } from './qwen-code-cli/transcript-parser.mjs';
 import {
@@ -60,6 +59,7 @@ import {
   buildInputMessagesDelta,
   inferAssistantFinishReason,
 } from './qwen-code-cli/message-converter.mjs';
+import { loadSubagentIndex, collectSubagents } from './qwen-code-cli/subagents.mjs';
 import { inferProvider } from './qwen-code-cli/provider-inferrer.mjs';
 
 const AGENT_ID = 'qwen-code-cli';
@@ -139,58 +139,12 @@ function isoToUnixNanos(isoStr) {
 
 // ─── cmd handlers ───
 
-// v1: subagent_start / subagent_stop are INTENTIONALLY INERT.
-//
-// We register these hooks so the wiring is in place for v2, but in v1 we
-// only persist the events into state.events for later consumption — we do
-// NOT emit any event_t records here. The transcript parser explicitly
-// filters out subagent (sidechain) records (`r.isSidechain === true || r.agentId`),
-// so subagent activity is dropped end-to-end in v1.
-//
-// v2 will: read state.events at Stop time, fetch the child session's chats
-// JSONL (via subagent_session_id), build a nested AGENT→STEP→LLM/TOOL
-// subtree, and attach it under the parent TOOL span via
-// `gen_ai.subagent.parent_tool_call.id`. See EVENT_LOG_TO_TRACE_SPEC §4.4.
-//
-// Until then, do not add record-emission logic here — leave the handlers
-// minimal and side-effect-free (state accumulation only).
-function cmdSubagentStart() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'subagent_start');
-  if (!sessionId) return;
-  const state = loadState(sessionId);
-  state.events = state.events || [];
-  state.events.push({
-    type: 'subagent_start',
-    timestamp: nowSec(),
-    subagent_session_id: event.subagent_session_id || '',
-    agent_id: event.agent_id || '',
-    agent_type: event.agent_type || '',
-  });
-  saveState(sessionId, state);
-}
-
-function cmdSubagentStop() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'subagent_stop');
-  if (!sessionId) return;
-  const state = loadState(sessionId);
-  const childSid = event.subagent_session_id || 'unknown';
-  let childStateSnapshot = null;
-  if (childSid && childSid !== 'unknown' && childSid !== sessionId) {
-    childStateSnapshot = readAndDeleteChildState(childSid);
-  }
-  state.events = state.events || [];
-  const ev = {
-    type: 'subagent_stop',
-    timestamp: nowSec(),
-    subagent_session_id: childSid,
-    stop_reason: event.stop_reason || 'end_turn',
-  };
-  if (childStateSnapshot) ev._child_state = childStateSnapshot;
-  state.events.push(ev);
-  saveState(sessionId, state);
-}
+// Foreground data is read from transcript/meta at the parent Stop boundary.
+// Child Hooks are acknowledged without racing the parent's offset/state writer.
+// In particular SubagentStop may point to the parent transcript or request more
+// execution; it is not a reliable terminal boundary for child collection.
+function cmdSubagentStart() { tryReadStdin(); }
+function cmdSubagentStop() { tryReadStdin(); }
 
 async function cmdStop() {
   const event = tryReadStdin();
@@ -280,6 +234,18 @@ async function exportSession(state, stopReason) {
 
   await waitForTranscriptStable(transcriptPath, baseOffset);
 
+  // Do not seal/export a truncated final record and then checkpoint past it.
+  // The writer always appends newline-terminated JSONL. A subsequent Stop can
+  // retry the entire uncommitted interval after a partial write completes.
+  const fd = fs.openSync(transcriptPath, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const lastByte = Buffer.alloc(1);
+    if (size && (fs.readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] !== 10)) {
+      throw new Error('incomplete main transcript tail; retaining checkpoint');
+    }
+  } finally { fs.closeSync(fd); }
+
   let parseResult;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -325,6 +291,7 @@ async function exportSession(state, stopReason) {
   }
 
   const cwd = state.cwd || undefined;
+  const subagents = loadSubagentIndex(transcriptPath, sessionId);
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
@@ -335,7 +302,20 @@ async function exportSession(state, stopReason) {
       state.resource_attributes,
       state.span_attributes,
     );
-    allRecords.push(...records);
+    const children = collectSubagents(turn, records, subagents, (childTurn, options) =>
+      buildTurnRecords(childTurn, baseTurnCount + i, sessionId, INITIAL_HASH, userId,
+        'end_turn', cwd, state.resource_attributes, state.span_attributes, options).records);
+    // Explicit seal is last on disk even when child/parent source times overlap.
+    // It prevents intermediate model stop reasons from flushing a partial tree.
+    for (const r of [...records, ...children]) r['agent.qwen-code-cli.collection'] = 'foreground-v1';
+    allRecords.push(...records, ...children);
+    if (records.length) allRecords.push({
+      ...records[0],
+      'event.id': crypto.randomUUID(), 'event.name': 'other',
+      'gen_ai.input.messages_delta': undefined,
+      time_unix_nano: records.at(-1).time_unix_nano,
+      'gen_ai.turn.end': true,
+    });
     logHash = hash;
 
     // Surface positional-fallback usage so it is visible in operator
@@ -391,6 +371,7 @@ export function buildTurnRecords(
   cwd,
   resourceAttributes = {},
   spanAttributes = {},
+  options = {},
 ) {
   const records = [];
   const safeResourceAttributes = resourceAttributes &&
@@ -404,10 +385,10 @@ export function buildTurnRecords(
     ? spanAttributes
     : {};
   // [C2] turn.id = <sessionId>:t<N>
-  const turnId = `${sessionId}:t${turnIndex + 1}`;
+  const turnId = options.turnId || `${sessionId}:t${turnIndex + 1}`;
   let runningHash = prevHash;
   // [C1] trace_id: generate once per turn, reuse for every event in this turn
-  const traceId = generateTraceId();
+  const traceId = options.traceId || generateTraceId();
 
   const baseFields = {
     // Caller-supplied attributes are spread first so structural fields always
@@ -422,6 +403,7 @@ export function buildTurnRecords(
     ...(cwd ? { 'agent.qwen-code-cli.cwd': cwd } : {}),
     ...(turn.gitBranch ? { 'git.branch': turn.gitBranch } : {}),
     ...agentBaseFieldPatch(safeResourceAttributes),
+    ...(options.fields || {}),
     ...(Object.keys(safeResourceAttributes).length > 0
       ? { resourceAttributes: safeResourceAttributes }
       : {}),
@@ -453,7 +435,7 @@ export function buildTurnRecords(
   for (const llm of llmCalls) {
     stepRound++;
     // [C2] step.id = <turnId>:s<M>
-    const stepId = `${turnId}:s${stepRound}`;
+    const stepId = `${options.stepPrefix || turnId}:s${stepRound}`;
     const stepSpanId = generateSpanId();
     const llmSpanId = generateSpanId();
     // [C4] LLM pairing key: request + response share gen_ai.response.id
@@ -535,6 +517,27 @@ export function buildTurnRecords(
       }
       respRecord['gen_ai.response.finish_reasons'] = ['error'];
     }
+    if (options.subagent) {
+      // Unknown usage is absent, not a measured zero. Metadata is configured
+      // model identity, not an API response model.
+      const usageFields = {
+        'gen_ai.usage.input_tokens': usage.promptTokenCount,
+        'gen_ai.usage.output_tokens': usage.candidatesTokenCount,
+        'gen_ai.usage.cache_read.input_tokens': usage.cachedContentTokenCount,
+        'gen_ai.usage.total_tokens': usage.totalTokenCount ??
+          (Number.isFinite(usage.promptTokenCount) && Number.isFinite(usage.candidatesTokenCount)
+            ? usage.promptTokenCount + usage.candidatesTokenCount : undefined),
+      };
+      for (const [key, value] of Object.entries(usageFields)) {
+        if (Number.isFinite(value) && value >= 0) respRecord[key] = value;
+        else delete respRecord[key];
+      }
+      delete respRecord['gen_ai.response.model'];
+      if (!llm.model || llm.model === 'unknown') {
+        delete respRecord['gen_ai.request.model'];
+        delete records.at(-1)['gen_ai.request.model'];
+      }
+    }
     records.push(respRecord);
 
     // ─── tool.call + tool.result for each declared tool ───
@@ -548,7 +551,7 @@ export function buildTurnRecords(
       // they all share that timestamp — acceptable since the actual execution
       // start isn't separately observable from the transcript.
       records.push({
-        time_unix_nano: isoToUnixNanos(llm.timestamp),
+        time_unix_nano: isoToUnixNanos(tool.timestamp || llm.timestamp),
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
         ...baseFields,
@@ -573,6 +576,8 @@ export function buildTurnRecords(
           'gen_ai.tool.call.id': callIdForEvent,
           ...(tool.result.response != null ? { 'gen_ai.tool.call.result': tool.result.response } : {}),
           'tool.result.status': tool.result.status,
+          ...(options.subagent && Number.isFinite(tool.result.durationMs) && tool.result.durationMs >= 0
+            ? { 'gen_ai.tool.call.duration': tool.result.durationMs } : {}),
         };
         if (tool.result.status === 'error') {
           resultRec['error.type'] = 'ToolError';

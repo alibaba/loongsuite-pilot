@@ -1,4 +1,5 @@
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   AgentsConfig,
   AnalyticsConfig,
@@ -11,6 +12,7 @@ import type {
   HookWatchdogConfig,
   LogRetentionConfig,
   MaskConfig,
+  MaskReplacementMode,
   MaskType,
   AgentMultimodalConfig,
   MultimodalRuntimeConfig,
@@ -142,6 +144,7 @@ export interface ConfigFile {
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
+    propagateToLlm?: boolean;
     generateTraceWhenMissing?: boolean;
     ttlMs?: number;
   };
@@ -168,6 +171,7 @@ export interface ConfigFile {
   mask?: {
     mode?: string;
     types?: string[];
+    replacementMode?: string;
   };
 
   cms?: {
@@ -178,6 +182,7 @@ export interface ConfigFile {
   };
 
   otlpTrace?: {
+    spanEnrichers?: string[];
     endpoint?: string;
     headers?: Record<string, string>;
     resourceAttributes?: Record<string, string>;
@@ -327,6 +332,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
     propagateToTools: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,
+    ),
+    propagateToLlm: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM',
+      file?.upstreamLink?.propagateToLlm ?? false,
     ),
     generateTraceWhenMissing: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
@@ -741,6 +750,10 @@ function buildAgentMultimodalConfig(
 }
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
+const SUPPORTED_MASK_REPLACEMENT_MODES = new Set<MaskReplacementMode>([
+  'placeholder',
+  'preview',
+]);
 
 function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
   const rawTypes = Array.isArray(value)
@@ -754,18 +767,32 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const rawReplacementMode =
+    nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
+    file?.mask?.replacementMode;
+  const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
+    rawReplacementMode as MaskReplacementMode,
+  )
+    ? (rawReplacementMode as MaskReplacementMode)
+    : 'placeholder';
+  if (rawReplacementMode && rawReplacementMode !== replacementMode) {
+    logger.warn('invalid mask replacement mode, using placeholder', {
+      replacementMode: rawReplacementMode,
+    });
+  }
+
   const mode = env('LOONGSUITE_PILOT_MASK_MODE') ?? file?.mask?.mode;
   if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
-    return { mode: 'none', types: [] };
+    return { mode: 'none', types: [], replacementMode };
   }
 
   if (mode === 'all' || mode === 'none') {
-    return { mode, types: [] };
+    return { mode, types: [], replacementMode };
   }
 
   const types = parseMaskTypes(env('LOONGSUITE_PILOT_MASK_TYPES') ?? file?.mask?.types);
 
-  return { mode: 'custom', types };
+  return { mode: 'custom', types, replacementMode };
 }
 
 function buildListenersConfig(
@@ -1026,8 +1053,33 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
+    spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
   };
+}
+
+/** Resolve explicitly configured modules relative to the configuration file. */
+function resolveSpanEnricherPaths(value: unknown, dataDir: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    logger.warn('otlpTrace.spanEnrichers must be an array; ignoring');
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry.trim() || !entry.trim().endsWith('.mjs')) {
+      logger.warn('Ignoring invalid span enricher path; expected a local .mjs file');
+      continue;
+    }
+    const expanded = entry.trim().replace(/^\$PILOT_DATA(?=[/\\]|$)/, () => path.resolve(resolveHome(dataDir)));
+    const resolved = path.resolve(path.dirname(configJsonPath()), resolveHome(expanded));
+    if (!paths.includes(resolved)) paths.push(resolved);
+    if (paths.length === 16) {
+      logger.warn('At most 16 span enrichers are loaded');
+      break;
+    }
+  }
+  return paths;
 }
 
 /** Expand an ARMS/CMS shorthand entry into an OTLP endpoint with x-arms-* headers. */

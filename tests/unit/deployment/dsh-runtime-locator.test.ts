@@ -80,6 +80,21 @@ describe('DshRuntimeLocator', () => {
     if (options.cwd) await fs.symlink(options.cwd, path.join(processDir, 'cwd'));
   }
 
+  it('does not treat a blank DSH_HOME as the default home before process discovery', async () => {
+    const home = path.join(tmpDir, 'runtime-home');
+    await writeProcess(324, { home });
+
+    const target = await locator({ DSH_HOME: '   ' }).locate(makeDef());
+
+    expect(target).toEqual({
+      home,
+      patchPath: path.join(home, 'cordis.patch.yml'),
+      source: 'running-process',
+      pid: 324,
+    });
+    expect(detectAgent).not.toHaveBeenCalled();
+  });
+
   it('uses the Pilot service DSH_HOME without requiring a PATH command or default home', async () => {
     const home = path.join(tmpDir, 'custom-home');
     const target = await locator({ DSH_HOME: home }).locate(makeDef());

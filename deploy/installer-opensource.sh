@@ -13,7 +13,8 @@
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
-#     --sls-api-key "your-api-key"
+#     --sls-api-key "your-api-key" \
+#     --multimodal-mode all
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -70,8 +71,14 @@ CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
+ALL_AGENTS=0
+MULTIMODAL_MODE=""
+MULTIMODAL_MODE_SET=0
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
 MASK_MODE=""
 MASK_TYPES=""
+MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
 INTERCEPTOR_TYPES=""
 HAS_SUDO=0
@@ -139,10 +146,15 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --all-agents)         ALL_AGENTS=1; shift ;;
+        --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
+        --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
+        --mask-replacement-mode) MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
+        --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
         --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
@@ -182,6 +194,10 @@ if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
     exit 1
 fi
+if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder" ] && [ "$MASK_REPLACEMENT_MODE" != "preview" ]; then
+    echo "❌ Unknown mask replacement mode: $MASK_REPLACEMENT_MODE (use 'placeholder' or 'preview')" >&2
+    exit 1
+fi
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
         all|none|custom) ;;
@@ -201,6 +217,29 @@ fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
+fi
+if [ "$MULTIMODAL_MODE_SET" -eq 1 ]; then
+    if [ -z "$MULTIMODAL_MODE" ]; then
+        echo "❌ --multimodal-mode requires 'none', 'input', 'output', or 'all'" >&2
+        exit 1
+    fi
+    case "$MULTIMODAL_MODE" in
+        none|input|output|all) ;;
+            *)
+            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'all')" >&2
+            exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
+        exit 1
+    fi
+    if [ "$MULTIMODAL_MODE" != "none" ]; then
+        if [[ "$SLS_ENDPOINT" != *[![:space:]]* ]] || [[ "$SLS_PROJECT" != *[![:space:]]* ]] \
+            || [[ "$SLS_LOGSTORE" != *[![:space:]]* ]] || [[ "$SLS_API_KEY" != *[![:space:]]* ]]; then
+            echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # Validate current user and sudo access on Linux
@@ -659,6 +698,21 @@ probe_agents() {
 # Agent selection: interactive menu or --agents flag
 # ============================================================
 select_agents() {
+    # --all-agents: collect every agent. Skip selection entirely and leave no
+    # enabled gate in config (other agent settings survive), so pilot auto-detects
+    # all agents at runtime — including ones installed after this run.
+    if [ "$ALL_AGENTS" = "1" ]; then
+        if [ -n "$SELECTED_AGENTS" ]; then
+            msg "    ⚠️  --all-agents 已启用，忽略 --agents 指定的列表" \
+                "    ⚠️  --all-agents is set; ignoring the --agents list"
+            SELECTED_AGENTS=""
+        fi
+        msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" \
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        echo ""
+        return 0
+    fi
+
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
         echo ""
@@ -832,8 +886,10 @@ const checks = [
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
   { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: coveredMaskMode },
   { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
+  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
   { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
+  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -842,8 +898,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","interceptorMode":"%s","interceptorTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1044,6 +1100,8 @@ write_config() {
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
+        LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" \
+        LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         "$NODE_BIN" -e "
 const fs = require('fs');
@@ -1123,8 +1181,11 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
+const allAgentsMode = '${ALL_AGENTS}';
+const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
+const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
 const interceptorMode = '${INTERCEPTOR_MODE}';
 const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
@@ -1151,6 +1212,10 @@ if (maskMode) {
   } else {
     delete config.mask.types;
   }
+}
+if (maskReplacementMode) {
+  config.mask = config.mask || {};
+  config.mask.replacementMode = maskReplacementMode;
 }
 
 if (interceptorMode) {
@@ -1186,11 +1251,14 @@ const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databas
   config.mask.types = [...new Set(current.concat(extra))];
 })(config);
 
-if (selectedAgents) {
+const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
+if (allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1200,14 +1268,41 @@ if (selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
+}
+
+if (multimodalMode) {
+  config.agents = config.agents || {};
+  const supported = (process.env.LP_MULTIMODAL_SUPPORTED_AGENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(selectedAgents.split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = allAgentsMode === '1' && multimodalMode !== 'none';
+  for (const id of supported) {
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
+    if (multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? multimodalMode : 'none' };
+  }
+}
+
+if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
+  config.multimodal = { storage: { type: 'sls' } };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
@@ -1306,7 +1401,7 @@ _rc_block_contains() {
 
 inject_qodercli_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1391,7 +1486,7 @@ remove_qodercli_token_intercept() {
 # variable differ here — the wrapper and preload script are the same assets.
 inject_qoderclicn_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
     if ! command -v qoderclicn >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1519,7 +1614,7 @@ _rc_user_override_present() {
 
 inject_claude_code_fetch_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
     if ! command -v claude >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"
@@ -2300,7 +2395,22 @@ try {
 # script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
 # installations uninstall correctly, while unrelated hooks in the file remain.
 remove_grok_build_hook_config() {
-    local cfg="$HOME/.grok/hooks/loongsuite-pilot.json"
+    local grok_home="${GROK_HOME:-$HOME/.grok}"
+    local cfg="$grok_home/hooks/loongsuite-pilot.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["grok-build"]?.hookSettingsPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     [ -f "$cfg" ] || return 0
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
@@ -2575,7 +2685,21 @@ try {
 # Remove Pi Coding Agent extension injection
 # ============================================================
 remove_pi_coding_agent_extension() {
-    local cfg="$HOME/.pi/agent/settings.json"
+    local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"

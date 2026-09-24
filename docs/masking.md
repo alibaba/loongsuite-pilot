@@ -29,6 +29,23 @@ Or, Environment variable:
 export LOONGSUITE_PILOT_MASK_MODE=all
 ```
 
+To emit recognizable star-masked previews, set:
+
+```json
+{
+  "mask": {
+    "mode": "all",
+    "replacementMode": "preview"
+  }
+}
+```
+
+or:
+
+```bash
+export LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview
+```
+
 Restart Pilot after changing config:
 
 ```bash
@@ -79,9 +96,16 @@ export LOONGSUITE_PILOT_MASK_MODE=custom
 export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
-## Replacement Values
+## Replacement Formats
 
-When a rule matches, Pilot replaces the secret with a fixed marker:
+`mask.replacementMode` supports:
+
+| Mode | Behavior |
+| ---- | -------- |
+| `placeholder` | Default. Emit the existing fixed markers unchanged. |
+| `preview` | Keep the marker and append a star-masked preview inside `{}`. Previews are approximate and not unique. |
+
+An empty or invalid value falls back to `placeholder`. In `placeholder` mode, Pilot uses these fixed markers:
 
 
 | Mask Type        | Replacement Marker     |
@@ -93,11 +117,21 @@ When a rule matches, Pilot replaces the secret with a fixed marker:
 | `idCard`         | `[IDCARD_MASKED]`      |
 | `phone`          | `[PHONE_MASKED]`       |
 | `email`          | `[EMAIL_MASKED]`       |
-| `ipAddress`      | `[IPADDRESS_MASKED]`   |
-| `bankCard`       | `[BANKCARD_MASKED]`    |
+| `ipAddress`      | `[IP_ADDRESS_MASKED]`  |
+| `bankCard`       | `[CREDIT_CARD_MASKED]` |
 
 
-The original value is not preserved in the emitted event.
+Preview examples:
+
+```text
+[PHONE_MASKED]{138****1234}
+[IP_ADDRESS_MASKED]{192.*.*.10}
+[DATABASEURL_MASKED]{mysql://user:****@db.example.com/orders}
+```
+
+Phone and bank-card values are normalized before fixed-position masking so common formatting variants produce the same preview. Database URL query strings and fragments are removed, passwords always become `****`, and IPv4 hosts use the IP preview rule.
+
+The complete original value is not preserved in the emitted event.
 
 ## What Gets Masked
 
