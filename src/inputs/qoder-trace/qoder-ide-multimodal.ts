@@ -173,7 +173,9 @@ async function enrichInputAttachedImages(
     if (!requestId || !byRequest.has(requestId)) continue;
     if (entry['event.name'] !== 'llm.request') continue;
     if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
-    carriersByRequest.set(requestId, entry);
+    if (!carriersByRequest.has(requestId)) {
+      carriersByRequest.set(requestId, entry);
+    }
   }
 
   // When request_id is only on llm.response, fall back to same-turn input carrier.

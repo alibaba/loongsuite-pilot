@@ -1736,6 +1736,39 @@ describe('QoderTraceInput multimodal', () => {
         ]);
       });
 
+      it('attaches shared request_id images only onto the first llm.request', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'first.png', 'first');
+        const first = mmEntry({
+          'event.id': 'req-first',
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-shared',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'first' }] },
+          ],
+        });
+        const later = mmEntry({
+          'event.id': 'req-later',
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-shared',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'later' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-shared', attached([img])]]));
+
+        await enrichIdeMultimodal([first, later], {
+          uploadMode: 'input',
+          pathToUri: fakePathToUri,
+        });
+
+        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/first')).toBe(true);
+        expect((later['gen_ai.input.messages_delta'] as any[])[0].parts).toEqual([
+          { type: 'text', content: 'later' },
+        ]);
+      });
+
       it('uploadMode gates input attach: output skips; all enriches', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'in-gate.png', 'in-gate');
