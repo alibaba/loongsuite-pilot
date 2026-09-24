@@ -90,14 +90,16 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on this entry; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the message contains media; stripped when `captureMessageContent` is false. |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input messages; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the input contains media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.output.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on output messages. Same item shape as the input summary; omitted when the output has no media. |
 | `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
 | `gen_ai.tool.call.arguments` | json | Opt-In | Tool call arguments. May contain sensitive content. |
 | `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
+| `gen_ai.tool.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on the tool result. Same item shape as the input summary; omitted when the result has no media. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |

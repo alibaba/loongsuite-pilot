@@ -96,6 +96,30 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     )).toEqual(['/tmp/chart,final.png']);
   });
 
+  it('parses Qoder CLI 1.1.61 文件： citations and ignores size-only Image blocks', () => {
+    const text = [
+      '附件引用：',
+      '- 文件：/tmp/a949604a.png',
+      '- 文件：/tmp/55cc677b.jpg',
+      '- 文件：/tmp/notes.txt',
+      '[Image: original 2516x1418, displayed at 2000x1127. Multiply coordinates by 1.26 to map to original image.]',
+    ].join('\n');
+    if (process.platform === 'win32') {
+      expect(extractInputImagePaths(
+        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\notes.txt',
+      )).toEqual([
+        path.win32.normalize('C:\\tmp\\a949604a.png'),
+        path.win32.normalize('C:\\tmp\\55cc677b.jpg'),
+      ]);
+      return;
+    }
+    expect(extractInputImagePaths(text)).toEqual([
+      '/tmp/a949604a.png',
+      '/tmp/55cc677b.jpg',
+    ]);
+    expect(extractInputImagePaths('文件: /tmp/clip.png')).toEqual(['/tmp/clip.png']);
+  });
+
   it('unions attachment filename with @ / Image:source and unique-resolves', () => {
     const filename = process.platform === 'win32'
       ? 'C:\\Users\\me\\workspace\\picture\\pipeline.jpg'

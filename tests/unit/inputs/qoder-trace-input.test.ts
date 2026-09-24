@@ -1736,6 +1736,39 @@ describe('QoderTraceInput multimodal', () => {
         ]);
       });
 
+      it('attaches shared request_id images only onto the first llm.request', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'first.png', 'first');
+        const first = mmEntry({
+          'event.id': 'req-first',
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-shared',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'first' }] },
+          ],
+        });
+        const later = mmEntry({
+          'event.id': 'req-later',
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-shared',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'later' }] },
+          ],
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-shared', attached([img])]]));
+
+        await enrichIdeMultimodal([first, later], {
+          uploadMode: 'input',
+          pathToUri: fakePathToUri,
+        });
+
+        expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) =>
+          p.type === 'uri' && p.uri === 'oss://test/first')).toBe(true);
+        expect((later['gen_ai.input.messages_delta'] as any[])[0].parts).toEqual([
+          { type: 'text', content: 'later' },
+        ]);
+      });
+
       it('uploadMode gates input attach: output skips; all enriches', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'in-gate.png', 'in-gate');
@@ -1762,13 +1795,12 @@ describe('QoderTraceInput multimodal', () => {
           p.type === 'uri' && p.uri === 'oss://test/in-gate')).toBe(true);
       });
 
-      it('prefers llm.request over other when both carry the same request_id', async () => {
+      it('attaches paths to both llm.request and the same-turn other', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'prefer.png', 'prefer');
         const pathToUri = fakePathToUri;
         const user = mmEntry({
           'event.name': 'other',
-          'gen_ai.request.id': 'req-pref',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
           ],
@@ -1785,7 +1817,7 @@ describe('QoderTraceInput multimodal', () => {
         await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
 
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
-        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(false);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
       });
 
       it('batches multiple request_ids and only enriches matching rows', async () => {
@@ -1940,7 +1972,7 @@ describe('QoderTraceInput multimodal', () => {
         mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-cache', attached([img])]]));
 
         const first = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-cache',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: '1' }] },
@@ -1951,7 +1983,7 @@ describe('QoderTraceInput multimodal', () => {
         expect((first['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
 
         const second = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-cache',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: '2' }] },
@@ -1971,7 +2003,7 @@ describe('QoderTraceInput multimodal', () => {
 
         mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-a', attached([imgA])]]));
         const first = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-a',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'a' }] },
@@ -1981,14 +2013,14 @@ describe('QoderTraceInput multimodal', () => {
 
         mockReadAttachedImagePaths.mockResolvedValueOnce(new Map([['req-b', attached([imgB])]]));
         const againA = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-a',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'a2' }] },
           ],
         });
         const freshB = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-b',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'b' }] },
@@ -2037,7 +2069,7 @@ describe('QoderTraceInput multimodal', () => {
         ]);
 
         const laterUser = mmEntry({
-          'event.name': 'other',
+          'event.name': 'llm.request',
           'gen_ai.request.id': 'req-solo',
           'gen_ai.input.messages_delta': [
             { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
@@ -2285,6 +2317,10 @@ describe('QoderTraceInput multimodal', () => {
       const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
       expect(parts[0].type).toBe('text');
       expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
+      expect(response['gen_ai.output.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/out-img', mime_type: 'image/png', modality: 'image' },
+      ]);
+      expect(response['gen_ai.input.multimodal_metadata']).toBeUndefined();
     });
 
     it('uploadMode gates output markdown: input skips; all enriches', async () => {
@@ -2421,9 +2457,10 @@ describe('QoderTraceInput multimodal', () => {
       });
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
-      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
+      expect(tool['gen_ai.tool.multimodal_metadata']).toEqual([
         { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
       ]);
+      expect(tool['gen_ai.input.multimodal_metadata']).toBeUndefined();
     });
   });
 

@@ -117,6 +117,36 @@ describe('qoder slash-command control rows', () => {
     expect(turns[0]).toContain(imageMeta);
   });
 
+  it('keeps every clipboard text block from one pasted-image meta row', () => {
+    const prompt = promptRow('[Image #0][Image #1][Image #2]');
+    const imageMeta = userRow([
+      { type: 'text', text: '[Image: source: /tmp/0-clipboard.png.png]' },
+      { type: 'text', text: '[Image: source: /tmp/1-clipboard.png.png]' },
+      { type: 'text', text: '[Image: source: /tmp/2-clipboard.png.png]' },
+    ], { isMeta: true });
+    const assistant = assistantRow('看到三张图。');
+    const turns = splitContentEventsIntoTurns([prompt, imageMeta, assistant]);
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, turns[0]),
+      turns[0],
+      turns[0],
+      'turn-paste',
+      'session-paste',
+      'qoder',
+      {},
+      '/tmp/cwd',
+    );
+    const expected = [
+      '[Image #0][Image #1][Image #2]',
+      '[Image: source: /tmp/0-clipboard.png.png]',
+      '[Image: source: /tmp/1-clipboard.png.png]',
+      '[Image: source: /tmp/2-clipboard.png.png]',
+    ];
+
+    expect(partsOf(records.find(r => r['event.name'] === 'other'))).toEqual(expected);
+    expect(partsOf(records.find(r => r['event.name'] === 'llm.request'))).toEqual(expected);
+  });
+
   it('still yields one turn for a real prompt that got no model activity', () => {
     // Interrupted turns carry no assistant row and must survive the filter.
     const prompt = promptRow('帮我改一下');

@@ -45,7 +45,7 @@ export interface UriPart {
   modality?: string;
 }
 
-/** Item in gen_ai.input.multimodal_metadata. */
+/** Item in gen_ai.{input,output,tool}.multimodal_metadata. */
 export interface MultimodalMetadataItem {
   uri: string;
   mime_type: string;
@@ -101,4 +101,6 @@ export const MAX_MULTIMODAL_BASE64_CHARS = Math.ceil(MAX_MULTIMODAL_DATA_SIZE * 
 export const MULTIMODAL_SHUTDOWN_TIMEOUT_MS = 1_500;
 /** Per-image stat/read deadline so a hung mount cannot block collect/stop. */
 export const PATH_TO_URI_DEADLINE_MS = 3_000;
-export const MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';
+export const INPUT_MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';
+export const OUTPUT_MULTIMODAL_METADATA_FIELD = 'gen_ai.output.multimodal_metadata';
+export const TOOL_MULTIMODAL_METADATA_FIELD = 'gen_ai.tool.multimodal_metadata';
