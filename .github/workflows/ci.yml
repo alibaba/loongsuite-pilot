@@ -11,7 +11,7 @@ jobs:
     runs-on: loongsuite-pilot
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
