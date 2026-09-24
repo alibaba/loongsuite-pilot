@@ -218,11 +218,11 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     });
   }
 
-  it('matches our entries by pluginId or plugin file path', () => {
+  it('matches our entries by pluginId or plugin dir path', () => {
     expect(sh).toContain('loongsuite-pilot-opencode');
-    expect(sh).toContain('plugins/opencode/plugin.mjs');
+    expect(sh).toContain(`plugins/opencode'`);
     expect(ps1).toContain('loongsuite-pilot-opencode');
-    expect(ps1).toContain('plugins/opencode/plugin.mjs');
+    expect(ps1).toContain(`plugins/opencode'`);
   });
 
   // Regression for the 2026-07-29 bug where a rebase resolution dropped the

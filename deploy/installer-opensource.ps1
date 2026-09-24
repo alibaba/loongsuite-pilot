@@ -2188,7 +2188,7 @@ function Remove-OpenCodePlugin {
         $result = & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
-const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode'));
 const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
 const stripJsonc = src => src
   .replace(/\/\*[\s\S]*?\*\//g, '')
