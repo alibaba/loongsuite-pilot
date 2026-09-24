@@ -453,13 +453,15 @@ describe('dashboard static page', () => {
     expect(dashboardHtml).toContain('No Agent token data detected yet');
   });
 
-  it('keeps complete matching Chinese and English message dictionaries', () => {
+  it('keeps complete matching Chinese, English and Japanese message dictionaries', () => {
     const match = dashboardScript.match(/const messages = (\{[\s\S]*?\n    \});/);
     expect(match).not.toBeNull();
     const dictionary = Function(`return (${match[1]});`)();
     const chineseKeys = Object.keys(dictionary['zh-CN']).sort();
     const englishKeys = Object.keys(dictionary.en).sort();
+    const japaneseKeys = Object.keys(dictionary.ja).sort();
     expect(englishKeys).toEqual(chineseKeys);
+    expect(japaneseKeys).toEqual(chineseKeys);
 
     const staticKeys = [...dashboardHtml.matchAll(/data-i18n(?:-aria-label)?="([^"]+)"/g)]
       .map(([, key]) => key);
@@ -468,6 +470,7 @@ describe('dashboard static page', () => {
     for (const key of new Set([...staticKeys, ...dynamicKeys])) {
       expect(dictionary['zh-CN'][key], `missing zh-CN translation for ${key}`).toBeTruthy();
       expect(dictionary.en[key], `missing English translation for ${key}`).toBeTruthy();
+      expect(dictionary.ja[key], `missing Japanese translation for ${key}`).toBeTruthy();
     }
   });
 
@@ -494,7 +497,7 @@ describe('dashboard static page', () => {
     );
   });
 
-  it('detects zh browser preferences and otherwise defaults to English', () => {
+  it('detects zh/ja browser preferences and otherwise defaults to English', () => {
     const normalizeLanguage = Function(`return (${dashboardFunctionSource('normalizeLanguage')});`)();
     const detectBrowserLanguage = Function(
       'normalizeLanguage',
@@ -505,10 +508,15 @@ describe('dashboard static page', () => {
     expect(normalizeLanguage('zh-Hant-TW')).toBe('zh-CN');
     expect(normalizeLanguage(' zh-TW ')).toBe('zh-CN');
     expect(normalizeLanguage('en-US')).toBe('en');
+    expect(normalizeLanguage('ja')).toBe('ja');
+    expect(normalizeLanguage('ja-JP')).toBe('ja');
+    expect(normalizeLanguage(' ja-TW ')).toBe('ja');
     expect(detectBrowserLanguage(['en-US', 'zh-CN'], 'zh-CN')).toBe('en');
     expect(detectBrowserLanguage(['zh-TW', 'en-US'], 'en-US')).toBe('zh-CN');
     expect(detectBrowserLanguage(['', '  ', 'fr-FR'], 'zh-CN')).toBe('en');
     expect(detectBrowserLanguage(['fr-FR'], 'fr-FR')).toBe('en');
+    expect(detectBrowserLanguage(['ja-JP', 'en-US'], 'en-US')).toBe('ja');
+    expect(detectBrowserLanguage(['zh-CN', 'ja-JP'], 'en')).toBe('zh-CN');
     expect(detectBrowserLanguage([], 'zh-SG')).toBe('zh-CN');
     expect(detectBrowserLanguage(undefined, 'en-US')).toBe('en');
   });
@@ -532,6 +540,7 @@ describe('dashboard static page', () => {
 
     expect(getLocalStorage()).toBeNull();
     expect(readStoredLanguage({ getItem: () => 'zh-CN' })).toBe('zh-CN');
+    expect(readStoredLanguage({ getItem: () => 'ja' })).toBe('ja');
     expect(readStoredLanguage({ getItem: () => 'de-DE' })).toBeNull();
     expect(readStoredLanguage({ getItem: () => { throw new Error('blocked'); } })).toBeNull();
     expect(() => writeStoredLanguage({ setItem: () => { throw new Error('blocked'); } }, 'en')).not.toThrow();

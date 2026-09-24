@@ -113,6 +113,7 @@
           <select id="language-select" data-i18n-aria-label="languageAriaLabel" aria-label="界面语言">
             <option value="zh-CN" data-i18n="languageChinese">中文</option>
             <option value="en" data-i18n="languageEnglish">English</option>
+            <option value="ja" data-i18n="languageJapanese">日本語</option>
           </select>
         </label>
       </div>
@@ -161,6 +162,7 @@
         languageAriaLabel: '界面语言',
         languageChinese: '中文',
         languageEnglish: 'English',
+        languageJapanese: '日本語',
         todayTokens: '今日 Token',
         todaySessions: '今日 Session',
         todayRequests: '今日 Request',
@@ -208,6 +210,7 @@
         languageAriaLabel: 'Interface language',
         languageChinese: '中文',
         languageEnglish: 'English',
+        languageJapanese: '日本語',
         todayTokens: "Today's Tokens",
         todaySessions: "Today's Sessions",
         todayRequests: "Today's Requests",
@@ -243,10 +246,61 @@
         summaryHttpError: 'Failed to read metrics-summary.json: HTTP {status}',
         summaryReadError: 'Failed to read metrics-summary.json: {message}',
       },
+      ja: {
+        pageTitle: 'LoongSuite Pilot ダッシュボード',
+        pageHeading: 'LoongSuite Pilot ダッシュボード',
+        refreshLabel: '更新',
+        refreshAriaLabel: '更新間隔',
+        refresh5Seconds: '5秒',
+        refresh10Seconds: '10秒',
+        refresh30Seconds: '30秒',
+        languageLabel: '言語',
+        languageAriaLabel: '表示言語',
+        languageChinese: '中文',
+        languageEnglish: 'English',
+        languageJapanese: '日本語',
+        todayTokens: '本日のトークン',
+        todaySessions: '本日のセッション',
+        todayRequests: '本日のリクエスト',
+        todayToolCalls: '本日のツール呼び出し',
+        uniqueSessions: 'ユニークセッション数',
+        llmRequests: 'LLMリクエスト数',
+        toolCalls: 'ツール呼び出し数',
+        agentDistribution: 'エージェント別',
+        tokenTrendHeading: 'トークン推移 · 直近30日',
+        sessionTrendHeading: 'セッション推移 · 直近30日',
+        modelDistribution: 'モデル別',
+        providerDistribution: 'プロバイダ別',
+        repositoryActivity: 'リポジトリ活動',
+        tokenLabel: 'トークン',
+        sessionLabel: 'セッション',
+        eventLabel: 'イベント',
+        inputLabel: '入力',
+        outputLabel: '出力',
+        cacheReadLabel: 'キャッシュ読込',
+        agentEventShare: '本日の全エージェントイベントの {percentage}%',
+        noAgentData: 'エージェントのトークンデータはまだ検出されていません',
+        noData: 'データなし',
+        noRepositoryData: 'リポジトリ活動はまだありません',
+        trendDescription: '直近30日の{label}推移',
+        trendPointDescription: '{day}、{label} {value}',
+        repositorySessions: '{value} セッション',
+        repositoryEvents: '{value} イベント',
+        statusConnecting: '接続中...',
+        statusReady: '{time} 時点 · {seconds}秒ごとに読込',
+        statusWaiting: '集計結果を待機中',
+        summaryNotReady: 'metrics-summary.json がまだ生成されていません。Pilot 起動後、通常は数秒で書き出されます。',
+        statusReadFailed: '読込失敗',
+        summaryHttpError: 'metrics-summary.json の読込に失敗: HTTP {status}',
+        summaryReadError: 'metrics-summary.json の読込に失敗: {message}',
+      },
     };
 
     function normalizeLanguage(language) {
-      return typeof language === 'string' && language.trim().toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+      const value = typeof language === 'string' ? language.trim().toLowerCase() : '';
+      if (value.startsWith('zh')) return 'zh-CN';
+      if (value.startsWith('ja')) return 'ja';
+      return 'en';
     }
 
     function detectBrowserLanguage(languages, language) {
@@ -257,7 +311,7 @@
     }
 
     function isSupportedLanguage(language) {
-      return language === 'zh-CN' || language === 'en';
+      return language === 'zh-CN' || language === 'en' || language === 'ja';
     }
 
     function getLocalStorage() {
