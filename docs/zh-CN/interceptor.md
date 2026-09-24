@@ -215,7 +215,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,datab
 
 Interceptor HTTP 属于 collector 生命周期，不注册独立的 launchd / systemd / init.d / 计划任务。
 
-`interceptor/runtime.json` 里的 pid 是 collector 的 pid。`status` 在 collector 正在运行，且这份 runtime 的 pid、`status=ok` 与 collector 一致时，显示 interceptor running。
+`status` 在 collector 正在运行，且 `interceptor/runtime.json` 的 `status=ok` 时，显示 `interceptor: running`。监听失败或 collector 未运行时显示 `interceptor: stopped`。
 
 运维命令：
 

@@ -1465,17 +1465,15 @@ interceptor_embedded_status() {
         echo "stopped"
         return
     fi
-    local collector_pid runtime runtime_pid runtime_status
-    collector_pid=$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    local runtime runtime_status
     runtime="$DATA_DIR/interceptor/runtime.json"
-    if [ -z "$collector_pid" ] || [ ! -f "$runtime" ]; then
+    if [ ! -f "$runtime" ]; then
         echo "stopped"
         return
     fi
-    runtime_pid=$(sed -n 's/^[[:space:]]*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$runtime" | head -n 1)
     runtime_status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$runtime" | head -n 1)
-    if [ "$runtime_status" = "ok" ] && [ "$runtime_pid" = "$collector_pid" ]; then
-        echo "running $collector_pid"
+    if [ "$runtime_status" = "ok" ]; then
+        echo "running"
         return
     fi
     echo "stopped"
@@ -1591,7 +1589,7 @@ cmd_status() {
     if [ "$interceptor_state" = "stopped" ]; then
         echo "   interceptor: stopped"
     else
-        echo "   interceptor: running (PID ${interceptor_state#running })"
+        echo "   interceptor: running"
     fi
     autostart_status
 }

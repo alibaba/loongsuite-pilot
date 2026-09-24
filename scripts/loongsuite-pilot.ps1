@@ -1946,13 +1946,12 @@ timer = setTimeout(() => {
 }
 
 function Test-InterceptorEmbedded {
-    param($CollectorPid)
-    if ($null -eq $CollectorPid) { return $false }
+    if (-not (Get-CollectorRuntime) -and -not (Test-PidRunning $PID_FILE)) { return $false }
     $runtimePath = Join-Path $DATA_DIR "interceptor\runtime.json"
     if (-not (Test-Path -LiteralPath $runtimePath)) { return $false }
     try {
         $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        return ($runtime.status -eq "ok" -and [int]$runtime.pid -eq [int]$CollectorPid)
+        return ($runtime.status -eq "ok")
     } catch {
         return $false
     }
@@ -2006,8 +2005,8 @@ function Cmd-Status {
         Write-Host "   updater: stopped"
     }
 
-    if (Test-InterceptorEmbedded $collectorPid) {
-        Write-Host "   interceptor: running (PID $collectorPid)"
+    if (Test-InterceptorEmbedded) {
+        Write-Host "   interceptor: running"
     } else {
         Write-Host "   interceptor: stopped"
     }
