@@ -7,6 +7,29 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('DiskUsageSampler');
 export const DISK_USAGE_STALE_MS = 20 * 60_000;
 
+// Only mutable Pilot data belongs in the usage signal. Managed installations,
+// downloaded payloads and other implementation assets can contain dependency
+// trees with thousands of files while saying nothing about user-data growth.
+const SCANNED_DATA_DIRECTORIES = new Set([
+  'logs',
+  'state',
+  'cache',
+  'configs',
+  'agents.d.local',
+  'acp-correlate',
+  'sls-failed-logs',
+  'sls-failed-logs.delete-pending',
+  'local-workers',
+]);
+
+function isLocalWorkerPayload(directory: string, name: string, root: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return path.dirname(directory).toLowerCase() === path.join(root, 'local-workers').toLowerCase()
+    && (normalizedName === 'bundle'
+      || normalizedName.startsWith('.bundle.staging-')
+      || normalizedName.startsWith('.bundle.backup-'));
+}
+
 export type DiskUsageStatus = 'pending' | 'ok' | 'partial' | 'timeout' | 'error' | 'stale';
 
 export interface DiskUsageSnapshot {
@@ -262,14 +285,16 @@ export class DiskUsageSampler {
           const child = await io(() => fs.lstat(childPath));
           if (child.isSymbolicLink()) continue;
           if (child.isDirectory()) {
-            // Installed versions and bundled runtimes are immutable payloads,
-            // not user data growth. Prune only these root-level directories;
-            // nested directories with the same basenames remain observable.
-            if (frame.path === root
-              && (entry.name === 'versions' || entry.name === 'runtime')) continue;
+            const normalizedName = entry.name.toLowerCase();
+            // Root files are counted, but recurse only into known mutable data.
+            // This keeps future managed payload directories out by default.
+            if (frame.path === root && !SCANNED_DATA_DIRECTORIES.has(normalizedName)) continue;
+            // A local worker's runtime bundle is a managed dependency tree. Its
+            // configuration, credentials, state and logs remain observable.
+            if (isLocalWorkerPayload(frame.path, entry.name, root)) continue;
             if (frames.length >= this.options.maxDepth) throw new ScanInterrupted('partial');
             await openDirectory(childPath, child, frame.inLogs
-              || path.relative(path.join(root, 'logs'), childPath) === '');
+              || (frame.path === root && normalizedName === 'logs'));
           } else if (child.isFile()) {
             // Recheck after the path-based lookup so an observed replacement
             // cannot turn an external file's metadata into a valid sample.
