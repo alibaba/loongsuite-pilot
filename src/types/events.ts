@@ -84,11 +84,13 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages'?: JsonValue;
   'gen_ai.input.multimodal_metadata'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
+  'gen_ai.tool.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;

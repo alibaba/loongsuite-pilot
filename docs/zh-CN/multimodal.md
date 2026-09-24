@@ -8,7 +8,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 多模态与消息内容采集是两层不同控制：
 
-- `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`）。
+- `captureMessageContent: false` 会剥离完整消息与工具内容（含 `gen_ai.input.multimodal_metadata`、`gen_ai.output.multimodal_metadata`、`gen_ai.tool.multimodal_metadata`）。
 - `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
 
 开启多模态还需要对象存储（唯一的 SLS `apiKey` flusher，或显式的 `config.multimodal.storage`），见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
@@ -158,7 +158,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 ## 输出形态（简述）
 
 - 消息 / 工具结果的 `parts` 中出现 `type: "uri"`（含 `mime_type` 等），而不是内联 base64。
-- 可选字段 `gen_ai.input.multimodal_metadata`：本条事件中 `uri` 媒体的摘要列表。
+- 可选摘要按 `uri` 已经落在的位置分开：`gen_ai.input.multimodal_metadata`（输入消息）、`gen_ai.output.multimodal_metadata`（输出消息）、`gen_ai.tool.multimodal_metadata`（工具结果）。
 
 完整字段说明见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 

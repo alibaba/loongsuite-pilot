@@ -2284,6 +2284,10 @@ describe('QoderTraceInput multimodal', () => {
       const parts = (response['gen_ai.output.messages'] as any[])[0].parts;
       expect(parts[0].type).toBe('text');
       expect(parts[1]).toMatchObject({ type: 'uri', uri: 'oss://test/out-img' });
+      expect(response['gen_ai.output.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/out-img', mime_type: 'image/png', modality: 'image' },
+      ]);
+      expect(response['gen_ai.input.multimodal_metadata']).toBeUndefined();
     });
 
     it('uploadMode gates output markdown: input skips; all enriches', async () => {
@@ -2420,9 +2424,10 @@ describe('QoderTraceInput multimodal', () => {
       });
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
-      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
+      expect(tool['gen_ai.tool.multimodal_metadata']).toEqual([
         { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
       ]);
+      expect(tool['gen_ai.input.multimodal_metadata']).toBeUndefined();
     });
   });
 

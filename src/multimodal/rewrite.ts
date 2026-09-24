@@ -1,13 +1,17 @@
 import type { AgentActivityEntry, JsonValue } from '../types/index.js';
 import type { MultimodalMetadataItem, UriPart } from './types.js';
-import { MULTIMODAL_METADATA_FIELD } from './types.js';
+import {
+  INPUT_MULTIMODAL_METADATA_FIELD,
+  OUTPUT_MULTIMODAL_METADATA_FIELD,
+  TOOL_MULTIMODAL_METADATA_FIELD,
+} from './types.js';
 
-const MESSAGE_FIELDS = [
+const INPUT_MESSAGE_FIELDS = [
   'gen_ai.input.messages',
   'gen_ai.input.messages_delta',
-  'gen_ai.output.messages',
 ] as const;
 
+const OUTPUT_MESSAGE_FIELD = 'gen_ai.output.messages';
 const TOOL_RESULT_FIELD = 'gen_ai.tool.call.result';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -28,17 +32,43 @@ export function attachMultimodalMetadata(
   items: MultimodalMetadataItem[],
 ): void {
   if (items.length === 0) {
-    delete entry[MULTIMODAL_METADATA_FIELD];
+    delete entry[INPUT_MULTIMODAL_METADATA_FIELD];
     return;
   }
-  entry[MULTIMODAL_METADATA_FIELD] = items as unknown as JsonValue;
+  entry[INPUT_MULTIMODAL_METADATA_FIELD] = items as unknown as JsonValue;
 }
 
-/** Collect uri parts on entry into multimodal_metadata (dedupe by uri). */
+/** Summarize uri parts already on the entry into input, output, and tool metadata. */
 export function attachMultimodalMetadataForEntry(entry: AgentActivityEntry): void {
+  const inputParts: UriPart[] = [];
+  for (const field of INPUT_MESSAGE_FIELDS) {
+    const value = entry[field];
+    if (Array.isArray(value)) inputParts.push(...collectUriPartsFromMessages(value));
+  }
+  writeMetadata(entry, INPUT_MULTIMODAL_METADATA_FIELD, metadataItems(inputParts));
+
+  const output = entry[OUTPUT_MESSAGE_FIELD];
+  writeMetadata(
+    entry,
+    OUTPUT_MULTIMODAL_METADATA_FIELD,
+    metadataItems(Array.isArray(output) ? collectUriPartsFromMessages(output) : []),
+  );
+
+  writeMetadata(
+    entry,
+    TOOL_MULTIMODAL_METADATA_FIELD,
+    metadataItems(
+      entry[TOOL_RESULT_FIELD] !== undefined
+        ? collectUriPartsFromValue(entry[TOOL_RESULT_FIELD])
+        : [],
+    ),
+  );
+}
+
+function metadataItems(parts: UriPart[]): MultimodalMetadataItem[] {
   const items: MultimodalMetadataItem[] = [];
   const seen = new Set<string>();
-  for (const part of collectUriPartsFromEntry(entry)) {
+  for (const part of parts) {
     if (seen.has(part.uri)) continue;
     seen.add(part.uri);
     items.push({
@@ -47,19 +77,21 @@ export function attachMultimodalMetadataForEntry(entry: AgentActivityEntry): voi
       ...(part.modality ? { modality: part.modality } : {}),
     });
   }
-  attachMultimodalMetadata(entry, items);
+  return items;
 }
 
-function collectUriPartsFromEntry(entry: AgentActivityEntry): UriPart[] {
-  const parts: UriPart[] = [];
-  for (const field of MESSAGE_FIELDS) {
-    const value = entry[field];
-    if (Array.isArray(value)) parts.push(...collectUriPartsFromMessages(value));
+function writeMetadata(
+  entry: AgentActivityEntry,
+  field: typeof INPUT_MULTIMODAL_METADATA_FIELD
+    | typeof OUTPUT_MULTIMODAL_METADATA_FIELD
+    | typeof TOOL_MULTIMODAL_METADATA_FIELD,
+  items: MultimodalMetadataItem[],
+): void {
+  if (items.length === 0) {
+    delete entry[field];
+    return;
   }
-  if (entry[TOOL_RESULT_FIELD] !== undefined) {
-    parts.push(...collectUriPartsFromValue(entry[TOOL_RESULT_FIELD]));
-  }
-  return parts;
+  entry[field] = items as unknown as JsonValue;
 }
 
 function collectUriPartsFromMessages(messages: unknown[]): UriPart[] {

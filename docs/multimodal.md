@@ -8,7 +8,7 @@ LoongSuite Pilot can convert media in agent messages or tool results (images tod
 
 Multimodal conversion is separate from message content capture:
 
-- `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata`).
+- `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata`, `gen_ai.output.multimodal_metadata`, and `gen_ai.tool.multimodal_metadata`).
 - `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media becomes `uri` parts.
 
 Multimodal also needs object storage (a unique SLS `apiKey` flusher, or an explicit `config.multimodal.storage` block); see [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
@@ -158,7 +158,7 @@ Notes:
 ## Output Shape (Short)
 
 - Message / tool-result `parts` use `type: "uri"` (with `mime_type`, etc.) instead of inline base64.
-- Optional `gen_ai.input.multimodal_metadata`: a summary list of `uri` media on that event.
+- Optional summaries of `uri` media, split by where the parts already sit: `gen_ai.input.multimodal_metadata` (input messages), `gen_ai.output.multimodal_metadata` (output messages), and `gen_ai.tool.multimodal_metadata` (tool results).
 
 Full field docs: [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 
