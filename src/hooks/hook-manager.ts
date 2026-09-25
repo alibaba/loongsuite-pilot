@@ -691,6 +691,9 @@ export class HookManager {
     const index = hooks.findIndex((entry) => this.entryMatchesCommand(entry, def.hookCommand));
     if (index < 0) return raw;
     let next = this.applyTimeoutToJsonc(raw, def, hooks, index);
+    // The move below reinserts the in-memory entry. applyTimeoutToJsonc only
+    // edits the serialized text, so the object must carry the timeout too.
+    this.applyTimeoutToEntries(hooks, def.hookCommand, def.timeout);
     if (def.insert === 'head' && index > 0) {
       const entry = hooks[index];
       next = editJsonc(next, [...def.hookJsonPath, index], undefined);

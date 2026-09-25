@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -28,7 +28,7 @@ describe('interceptor access log', () => {
     expect(parsed.toolUseId).toBe('call-1');
     expect(parsed.input).toMatchObject({
       toolName: 'Bash',
-      toolResponse: { stdout: 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },
+      toolResponse: { stdout: '[DATABASEURL_MASKED]' },
     });
     expect(parsed.result).toMatchObject({
       action: 'block',
@@ -76,6 +76,10 @@ describe('interceptor access log', () => {
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0]!).result).toMatchObject({ action: 'allow' });
     expect(JSON.parse(lines[1]!).result).toMatchObject({ action: 'block' });
+    if (process.platform !== 'win32') {
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    }
   });
 
   it('rotates the access log once it reaches the size limit', async () => {

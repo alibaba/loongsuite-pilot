@@ -53,14 +53,21 @@ describe('InterceptResultLinker', () => {
       'gen_ai.agent.type': 'codex',
       'gen_ai.tool.call.id': 'call-2',
     });
+    const qoderWork = toolEntry('tool.call', {
+      'gen_ai.agent.type': 'qoder-work',
+      'gen_ai.session.id': 'open-session',
+      'gen_ai.tool.call.id': 'call-2',
+    });
 
-    new InterceptResultLinker(store, true).enrich([matching, wrongSession, unsupported]);
+    new InterceptResultLinker(store, true).enrich([matching, wrongSession, unsupported, qoderWork]);
 
     expect(matching['gen_ai.guardrail.action']).toBe('block');
     expect(wrongSession['gen_ai.guardrail.triggered']).toBeUndefined();
     expect(wrongSession['gen_ai.guardrail.action']).toBeUndefined();
     expect(unsupported['gen_ai.guardrail.triggered']).toBeUndefined();
     expect(unsupported['gen_ai.guardrail.action']).toBeUndefined();
+    expect(qoderWork['gen_ai.guardrail.triggered']).toBeUndefined();
+    expect(qoderWork['gen_ai.guardrail.action']).toBeUndefined();
   });
 
   it('omits guardrail fields when the tool call id or record is missing', () => {

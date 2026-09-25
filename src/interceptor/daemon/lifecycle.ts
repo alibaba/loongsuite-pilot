@@ -86,6 +86,8 @@ export async function startInterceptorService(
       port,
       version: opts.version,
       gitCommit: opts.gitCommit,
+    }).catch((err) => {
+      logger.warn('interceptor runtime heartbeat failed', { error: String(err) });
     });
   }, RUNTIME_HEARTBEAT_MS);
   heartbeat.unref();

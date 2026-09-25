@@ -34,7 +34,12 @@ import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
-import { evaluateInterceptor, SAME_TURN_POST_TOOL_HOOK, SYNC_INTERCEPT_HOOKS } from "./interceptor.mjs";
+import {
+  evaluateInterceptor,
+  resolveDataDir,
+  SAME_TURN_POST_TOOL_HOOK,
+  SYNC_INTERCEPT_HOOKS,
+} from "./interceptor.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -113,14 +118,6 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env);
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
-
-function resolveDataDir() {
-  return (
-    process.env.LOONGSUITE_PILOT_DATA_DIR ||
-    process.env.PILOT_DATA ||
-    path.join(os.homedir(), ".loongsuite-pilot")
-  );
-}
 
 function logDir() {
   return path.join(resolveDataDir(), "logs", "openclaw");

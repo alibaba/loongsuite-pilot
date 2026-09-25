@@ -108,8 +108,8 @@ export function readWindowsProcess(
     const script = [
       `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction Stop`,
       'if ($null -ne $p) {',
-      '  [Console]::Out.WriteLine([string]$p.Name)',
-      '  [Console]::Out.WriteLine([string]$p.ParentProcessId)',
+      '  Write-Output ([string]$p.Name)',
+      '  Write-Output ([string]$p.ParentProcessId)',
       '}',
     ].join('; ');
     const out = exec(

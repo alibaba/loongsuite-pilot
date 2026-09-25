@@ -5,7 +5,19 @@ $ErrorActionPreference = "Continue"
 
 if (-not [Console]::IsInputRedirected) { exit 0 }
 
-$CacheDir = if ($env:LOONGSUITE_PILOT_CACHE_DIR) { $env:LOONGSUITE_PILOT_CACHE_DIR } else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
+# Hooks are installed under <data-dir>/hooks. The CLI and current pointer live
+# in the cache dir, which stays ~/.loongsuite-pilot unless the cache env is set.
+$DataDir = Split-Path -Parent $PSScriptRoot
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
+}
+if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $CacheDir = $env:LOONGSUITE_PILOT_CACHE_DIR
+} elseif (Test-Path -LiteralPath (Join-Path $DataDir "current")) {
+    $CacheDir = $DataDir
+} else {
+    $CacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+}
 $MIN_NODE_MAJOR = 18
 
 function Test-NodeSuitable {

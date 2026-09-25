@@ -1,10 +1,9 @@
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { resolveHome } from '../utils/fs-utils.js';
-import { DEFAULT_DATA_DIR } from '../utils/data-dir.js';
+import { resolveDataDir } from '../utils/data-dir.js';
 
 export function interceptorDataDir(dataDir?: string): string {
-  const root = resolveHome(dataDir ?? process.env.LOONGSUITE_PILOT_DATA_DIR ?? DEFAULT_DATA_DIR);
+  const root = dataDir ? resolveHome(dataDir) : resolveDataDir();
   return path.join(root, 'interceptor');
 }
 
@@ -33,5 +32,5 @@ export function interceptorLockPath(dataDir?: string): string {
 }
 
 export function defaultPilotDataDir(): string {
-  return resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? path.join(os.homedir(), '.loongsuite-pilot'));
+  return resolveDataDir();
 }

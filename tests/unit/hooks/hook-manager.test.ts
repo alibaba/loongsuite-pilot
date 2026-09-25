@@ -571,6 +571,54 @@ describe('HookManager', () => {
       expect(settings.hooks.PreToolUse[1].hooks[0].command).toBe(COLLECT);
     });
 
+    it('repairs timeout while moving an existing JSONC interceptor hook to the head', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      const original = `{
+  // Keep this comment.
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "${COLLECT}", "type": "command" }]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "${INTERCEPT}", "type": "command", "timeout": 3 }]
+      }
+    ]
+  }
+}
+`;
+      await fs.writeFile(settingsPath, original, 'utf-8');
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      const ok = await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        settingsSyntax: 'jsonc',
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 10,
+        insert: 'head',
+      });
+
+      expect(ok).toBe(true);
+      const updated = await fs.readFile(settingsPath, 'utf-8');
+      expect(updated).toContain('// Keep this comment.');
+      const errors: ParseError[] = [];
+      const parsed = parseJsonc(updated, errors, { allowTrailingComma: true });
+      expect(errors).toEqual([]);
+      expect(parsed.hooks.PreToolUse[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 10,
+      });
+      expect(parsed.hooks.PreToolUse[1].hooks[0].command).toBe(COLLECT);
+    });
+
     it('uninstalls only the interceptor command', async () => {
       const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
       await fs.mkdir(path.dirname(settingsPath), { recursive: true });

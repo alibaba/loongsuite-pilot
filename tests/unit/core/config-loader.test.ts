@@ -2377,6 +2377,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
       const config = await loadConfig();
       expect(config.interceptor).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toMatchObject({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+      });
+    });
+
+    it('leaves mask mode all unchanged when interceptor is enabled', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all' },
+        interceptor: { mode: 'custom', types: ['apiKey'] },
+      });
+      const config = await loadConfig();
+      expect(config.mask.mode).toBe('all');
     });
   });
 });

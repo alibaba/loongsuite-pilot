@@ -1,7 +1,16 @@
-import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { loadMaskPlan } from '../mask/rule-loader.js';
+import { maskString } from '../mask/string-masker.js';
+import { SUPPORTED_INTERCEPTOR_TYPES } from '../types/index.js';
 import { interceptorAccessLogPath } from './paths.js';
 import type { HookRequest } from './types.js';
+
+const accessLogMaskPlan = loadMaskPlan({
+  mode: 'custom',
+  types: [...SUPPORTED_INTERCEPTOR_TYPES],
+  replacementMode: 'placeholder',
+});
 
 export const ACCESS_LOG_MAX_CHARS = 256_000;
 export const ACCESS_LOG_MAX_BYTES = 10 * 1024 * 1024;
@@ -82,9 +91,12 @@ export function writeInterceptorAccessLog(
 ): void {
   try {
     const dest = filePath ?? interceptorAccessLogPath();
-    mkdirSync(dirname(dest), { recursive: true });
+    const dir = dirname(dest);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    restrictAccessLogPermissions(dir);
     rotateAccessLog(dest, limits.maxBytes ?? ACCESS_LOG_MAX_BYTES, limits.rotateCount ?? ACCESS_LOG_ROTATE_COUNT);
     appendFileSync(dest, `${serializeAccessLogEntry(entry)}\n`, 'utf8');
+    restrictAccessLogPermissions(dir, dest);
   } catch {
     // Access logs must never affect fail-open or the host verdict.
   }
@@ -111,12 +123,58 @@ export function rotateAccessLog(filePath: string, maxBytes: number, rotateCount:
 }
 
 export function serializeAccessLogEntry(entry: InterceptorAccessLogEntry): string {
-  const line = safeJson(entry);
+  const redacted = redactAccessLogEntry(entry);
+  const line = safeJson(redacted);
   if (line.length <= ACCESS_LOG_MAX_CHARS) return line;
   return safeJson({
-    ...entry,
-    input: truncateInput(entry.input),
+    ...redacted,
+    input: truncateInput(redacted.input),
   });
+}
+
+function redactAccessLogEntry(entry: InterceptorAccessLogEntry): InterceptorAccessLogEntry {
+  return {
+    ...entry,
+    input: redactUnknown(entry.input) as InterceptorAccessInput,
+    result: {
+      ...entry.result,
+      reason: redactString(entry.result.reason),
+      error: redactString(entry.result.error),
+    },
+  };
+}
+
+function redactUnknown(value: unknown): unknown {
+  if (typeof value === 'string') return maskString(value, accessLogMaskPlan);
+  if (Array.isArray(value)) return value.map(redactUnknown);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactUnknown(child);
+    }
+    return out;
+  }
+  return value;
+}
+
+function redactString(value: string | undefined): string | undefined {
+  if (value == null) return value;
+  return maskString(value, accessLogMaskPlan);
+}
+
+function restrictAccessLogPermissions(dir: string, filePath?: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // A permission failure must not drop the verdict or the log line.
+  }
+  if (!filePath) return;
+  try {
+    chmodSync(filePath, 0o600);
+  } catch {
+    // The file may not exist yet; the post-append call covers the new line.
+  }
 }
 
 function truncateInput(input: InterceptorAccessInput): InterceptorAccessInput {

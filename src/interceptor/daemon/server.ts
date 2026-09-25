@@ -26,6 +26,14 @@ import {
 } from '../tool-verdict-store.js';
 
 const logger = createLogger('InterceptorServer');
+const MAX_HOOK_BODY_BYTES = 5 * 1024 * 1024;
+
+class HookBodyTooLargeError extends Error {
+  constructor() {
+    super('request body too large');
+    this.name = 'HookBodyTooLargeError';
+  }
+}
 
 export interface InterceptorServerOptions {
   port: number;
@@ -99,6 +107,20 @@ async function handle(
     }
     writeJson(res, 404, { error: 'not-found' });
   } catch (err) {
+    if (err instanceof HookBodyTooLargeError) {
+      recordAccess(opts, {
+        event: 'unknown',
+        input: {},
+        result: { action: 'fail-open', error: err.message },
+      });
+      writeJson(res, 200, {
+        action: 'allow',
+        evaluatedRules: [],
+        failOpen: true,
+      } satisfies EvaluateHookResponse);
+      req.destroy();
+      return;
+    }
     recordAccess(opts, {
       event: 'unknown',
       input: {},
@@ -131,6 +153,7 @@ async function handleQwenWorkHttp(
       },
     });
     writeJson(res, 200, qwenWorkAllowBody());
+    if (err instanceof HookBodyTooLargeError) req.destroy();
     return;
   }
 
@@ -231,8 +254,14 @@ function isHookRequest(value: unknown): value is HookRequest {
 
 async function readJson<T>(req: http.IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
+  let received = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    received += buf.length;
+    if (received > MAX_HOOK_BODY_BYTES) {
+      throw new HookBodyTooLargeError();
+    }
+    chunks.push(buf);
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
 }

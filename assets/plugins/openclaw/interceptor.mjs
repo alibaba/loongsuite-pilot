@@ -41,12 +41,34 @@ export const SAME_TURN_POST_TOOL_HOOK = "tool_result_middleware";
 const POST_TOOL_CACHE_TTL_MS = 30_000;
 const POST_TOOL_CACHE_MAX = 256;
 
-function resolveDataDir() {
-  return (
-    process.env.LOONGSUITE_PILOT_DATA_DIR ||
-    process.env.PILOT_DATA ||
-    path.join(os.homedir(), ".loongsuite-pilot")
-  );
+function expandHome(value) {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
+}
+
+function readConfigFileDataDir() {
+  const configured = (process.env.AGENT_DATA_COLLECTION_CONFIG || "").trim();
+  const configPath = configured || path.join(os.homedir(), ".loongsuite-pilot", "config.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
+    if (typeof parsed.dataDir === "string" && parsed.dataDir.trim()) return parsed.dataDir.trim();
+  } catch {
+    // A missing or unreadable config falls through to the default data dir.
+  }
+  return undefined;
+}
+
+export function resolveDataDir() {
+  const fromEnv = [process.env.LOONGSUITE_PILOT_DATA_DIR, process.env.PILOT_DATA]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .find((value) => value.length > 0);
+  if (fromEnv) return expandHome(fromEnv);
+  const fromFile = readConfigFileDataDir();
+  if (fromFile) return expandHome(fromFile);
+  return path.join(os.homedir(), ".loongsuite-pilot");
 }
 
 function pickString(...values) {
@@ -188,11 +210,48 @@ function rotateAccessLog(filePath) {
   }
 }
 
+const ACCESS_SECRET_PATTERNS = [
+  [/\bLTAI[A-Za-z0-9]{12,}\b/g, "[ACCESSKEY_MASKED]"],
+  [/\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b/g, "[ACCESSKEY_MASKED]"],
+  [/\bAKID[A-Za-z0-9]{13,}\b/g, "[ACCESSKEY_MASKED]"],
+  [/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[APIKEY_MASKED]"],
+  [/\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[APIKEY_MASKED]"],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[PRIVATEKEY_MASKED]"],
+  [/\b(?:mysql|postgres|postgresql|mongodb|redis):\/\/[^:\s'"]+:[^@\s'"]+@[^\s'"]+/gi, "[DATABASEURL_MASKED]"],
+  [/\bjdbc:(?:mysql|postgresql):\/\/[^\s'"]*(?:password|pwd)=[^\s'"]+/gi, "[DATABASEURL_MASKED]"],
+];
+
+export function redactAccessValue(value) {
+  if (typeof value === "string") {
+    let next = value;
+    for (const [pattern, replacement] of ACCESS_SECRET_PATTERNS) {
+      next = next.replace(pattern, replacement);
+    }
+    return next;
+  }
+  if (Array.isArray(value)) return value.map(redactAccessValue);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) out[key] = redactAccessValue(child);
+    return out;
+  }
+  return value;
+}
+
+function restrictAccessLogPermissions(dir, filePath) {
+  if (process.platform === "win32") return;
+  try { fs.chmodSync(dir, 0o700); } catch { /* logging must not change the verdict */ }
+  if (!filePath) return;
+  try { fs.chmodSync(filePath, 0o600); } catch { /* file may not exist until append */ }
+}
+
 function writeFailOpen(dataDir, request, error) {
   try {
     const dest = interceptorAccessLogPath(dataDir);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    const entry = {
+    const dir = path.dirname(dest);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    restrictAccessLogPermissions(dir);
+    const entry = redactAccessValue({
       ts: new Date().toISOString(),
       event: request.event,
       agent: request.agent,
@@ -207,7 +266,7 @@ function writeFailOpen(dataDir, request, error) {
         raw: request.raw,
       },
       result: { action: "fail-open", error },
-    };
+    });
     let line = JSON.stringify(entry);
     if (line.length > ACCESS_LOG_MAX_CHARS) {
       line = JSON.stringify({
@@ -217,6 +276,7 @@ function writeFailOpen(dataDir, request, error) {
     }
     rotateAccessLog(dest);
     fs.appendFileSync(dest, `${line}\n`, "utf8");
+    restrictAccessLogPermissions(dir, dest);
   } catch {
     // Access logs must never affect fail-open.
   }

@@ -40,7 +40,7 @@ import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
-import { buildInterceptorConfig } from '../interceptor/config.js';
+import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -287,6 +287,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
   const flushers = buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig);
+  const interceptor = buildInterceptorConfig(file?.interceptor);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -312,7 +313,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     flushers,
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
-    mask: buildMaskConfig(file),
+    mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
@@ -321,7 +322,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     upstreamLink: buildUpstreamLinkConfig(file),
     multimodal: buildMultimodalConfig(file, flushers.sls),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
-    interceptor: buildInterceptorConfig(file?.interceptor),
+    interceptor,
   };
 }
 

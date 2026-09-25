@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   buildInterceptorConfig,
+  ensureMaskCoversInterceptor,
   isRuleEnabled,
   resolveEnabledInterceptorTypes,
 } from '../../../src/interceptor/config.js';
@@ -92,6 +93,45 @@ describe('interceptor config', () => {
       mode: 'custom',
       types: ['apiKey'],
     })]).toEqual(['apiKey']);
+  });
+
+  it('treats empty interceptor env values as unset', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', '  ');
+    expect(buildInterceptorConfig({ mode: 'all', types: [] })).toEqual({ mode: 'all', types: [] });
+
+    vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'custom');
+    vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_TYPES', '');
+    expect(buildInterceptorConfig({ mode: 'custom', types: ['apiKey'] })).toEqual({
+      mode: 'custom',
+      types: ['apiKey'],
+    });
+  });
+
+  it('unions enabled interceptor types into a mask plan that is not already all', () => {
+    expect(ensureMaskCoversInterceptor(
+      { mode: 'none', types: [], replacementMode: 'placeholder' },
+      { mode: 'all', types: [] },
+    )).toEqual({
+      mode: 'custom',
+      types: [...SUPPORTED_INTERCEPTOR_TYPES],
+      replacementMode: 'placeholder',
+    });
+    expect(ensureMaskCoversInterceptor(
+      { mode: 'custom', types: ['email'], replacementMode: 'placeholder' },
+      { mode: 'custom', types: ['apiKey'] },
+    )).toEqual({
+      mode: 'custom',
+      types: ['email', 'apiKey'],
+      replacementMode: 'placeholder',
+    });
+    expect(ensureMaskCoversInterceptor(
+      { mode: 'all', types: [] },
+      { mode: 'all', types: [] },
+    )).toEqual({ mode: 'all', types: [] });
+    expect(ensureMaskCoversInterceptor(
+      { mode: 'none', types: [] },
+      { mode: 'none', types: [] },
+    )).toEqual({ mode: 'none', types: [] });
   });
 
   it('treats missing and disabled types as bypass', () => {

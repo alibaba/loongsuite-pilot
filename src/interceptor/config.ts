@@ -4,13 +4,17 @@ import {
   SUPPORTED_INTERCEPTOR_TYPES,
   type InterceptorConfig,
   type InterceptorType,
+  type MaskConfig,
+  type MaskType,
 } from '../types/index.js';
 
 const SUPPORTED_INTERCEPTOR_TYPE_SET = new Set<string>(SUPPORTED_INTERCEPTOR_TYPES);
 
 function env(key: string): string | undefined {
   const v = process.env[key];
-  return v !== undefined ? (process.platform === 'win32' ? v.trim() : v) : undefined;
+  if (v === undefined) return undefined;
+  const normalized = v.trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function parseInterceptorTypes(value: string | string[] | undefined): InterceptorType[] {
@@ -48,6 +52,30 @@ export function buildInterceptorConfig(value: unknown): InterceptorConfig {
   );
 
   return { mode: 'custom', types };
+}
+
+/**
+ * Credential types enabled for interception are also mask types. Installer
+ * writes this union into config.json; runtime config (env overrides and
+ * hand-edited files) has to apply the same rule or mask mode none would
+ * leave interceptor matches in the clear.
+ */
+export function ensureMaskCoversInterceptor(mask: MaskConfig, interceptor: InterceptorConfig): MaskConfig {
+  const extra: MaskType[] = interceptor.mode === 'all'
+    ? [...SUPPORTED_INTERCEPTOR_TYPES]
+    : interceptor.mode === 'custom'
+      ? interceptor.types.filter((type): type is InterceptorType => SUPPORTED_INTERCEPTOR_TYPE_SET.has(type))
+      : [];
+  if (extra.length === 0 || mask.mode === 'all') return mask;
+  const current = mask.mode === 'custom' ? mask.types : [];
+  const types: MaskType[] = [];
+  const seen = new Set<string>();
+  for (const type of [...current, ...extra]) {
+    if (seen.has(type)) continue;
+    seen.add(type);
+    types.push(type);
+  }
+  return { ...mask, mode: 'custom', types };
 }
 
 export function resolveEnabledInterceptorTypes(config: InterceptorConfig): Set<InterceptorType> {

@@ -5,7 +5,20 @@ set -euo pipefail
 # Must not use qoder-auto: that surface resolver excludes QwenWork / QoderWork.
 [[ -t 0 ]] && exit 0
 
-CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+# Hooks are installed under <data-dir>/hooks. The CLI and current pointer live
+# in the cache dir, which stays ~/.loongsuite-pilot unless the cache env is set.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="$(cd "$HOOK_DIR/.." && pwd)"
+if [[ -z "${LOONGSUITE_PILOT_DATA_DIR:-}" ]]; then
+  export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+fi
+if [[ -n "${LOONGSUITE_PILOT_CACHE_DIR:-}" ]]; then
+  CACHE_DIR="$LOONGSUITE_PILOT_CACHE_DIR"
+elif [[ -e "$DATA_DIR/current" ]]; then
+  CACHE_DIR="$DATA_DIR"
+else
+  CACHE_DIR="${HOME:-}/.loongsuite-pilot"
+fi
 CURRENT_FILE="$CACHE_DIR/current"
 
 MIN_NODE_MAJOR=18
@@ -46,4 +59,4 @@ if [[ -z "$CLI" && -f "$CURRENT_FILE" ]]; then
 fi
 [[ -n "$CLI" && -f "$CLI" ]] || exit 0
 
-exec "$NODE_BIN" "$CLI" hook --agent qwen-work-cn "$@"
+"$NODE_BIN" "$CLI" hook --agent qwen-work-cn "$@" || true

@@ -489,4 +489,37 @@ describe('interceptor daemon HTTP API', () => {
       server.close();
     }
   });
+
+  it('fail-opens an oversized evaluate body and keeps qwen on HTTP 200', async () => {
+    const server = createInterceptorServer({
+      port: 0,
+      version: '1.2.3',
+      engine: new RuleEngine([], new Set()),
+      writeAccessLog: () => undefined,
+    });
+    const port = await listen(server);
+    const body = `{"prompt":"${'x'.repeat(5 * 1024 * 1024)}"}`;
+    try {
+      const evaluated = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      expect(evaluated.status).toBe(200);
+      await expect(evaluated.json()).resolves.toMatchObject({
+        action: 'allow',
+        failOpen: true,
+      });
+
+      const qwen = await fetch(`http://127.0.0.1:${port}/v1/hooks/qwenwork`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      expect(qwen.status).toBe(200);
+      await expect(qwen.json()).resolves.toEqual({});
+    } finally {
+      server.close();
+    }
+  });
 });
