@@ -154,6 +154,23 @@ function pilotCommands(): string[] {
     .filter(Boolean);
 }
 
+function isInterceptorRuntimePath(filePath: string): boolean {
+  return String(filePath).replace(/\\/g, '/').endsWith('/interceptor/runtime.json');
+}
+
+function healthyInterceptorRuntime(overrides: Record<string, unknown> = {}) {
+  return {
+    service: 'loongsuite-pilot-interceptor',
+    status: 'ok',
+    pid: process.pid,
+    version: '1.0.2',
+    daemon_port: 18791,
+    packageVersion: '1.0.2',
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 describe('Updater', () => {
   let tmpDir: string;
 
@@ -184,12 +201,24 @@ describe('Updater', () => {
     // the freshly started target version so existing successful-upgrade tests
     // exercise the health gate without waiting for a timer.
     mockReadJsonFile.mockImplementation((filePath: string) => {
-      if (String(filePath).endsWith('/logs/runtime.json')) {
+      const normalized = String(filePath).replace(/\\/g, '/');
+      if (normalized.endsWith('/logs/runtime.json')) {
         return Promise.resolve({
           status: 'active',
           packageVersion: '1.0.2',
           gitCommit: 'bbb',
           pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      if (normalized.endsWith('/interceptor/runtime.json')) {
+        return Promise.resolve({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: process.pid,
+          version: '1.0.2',
+          daemon_port: 18791,
+          packageVersion: '1.0.2',
           updatedAt: new Date().toISOString(),
         });
       }
@@ -309,7 +338,9 @@ describe('Updater', () => {
       });
       mockFsAccess.mockResolvedValue(undefined); // versions dir exists
       mockReadJsonFile.mockImplementation((filePath: string) => (
-        String(filePath).endsWith('/logs/runtime.json')
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime({ packageVersion: '1.0.2', version: '1.0.2' }))
+          : String(filePath).endsWith('/logs/runtime.json')
           ? Promise.resolve({
             status: 'active',
             packageVersion: '1.0.2',
@@ -341,6 +372,7 @@ describe('Updater', () => {
       mockFsAccess.mockResolvedValue(undefined);
       let runtimeReads = 0;
       mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
         if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
         runtimeReads++;
         return Promise.resolve(runtimeReads === 1 ? null : {
@@ -380,7 +412,9 @@ describe('Updater', () => {
       });
       mockFsAccess.mockResolvedValue(undefined);
       mockReadJsonFile.mockImplementation((filePath: string) => (
-        String(filePath).endsWith('/logs/runtime.json')
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime())
+          : String(filePath).endsWith('/logs/runtime.json')
           ? Promise.resolve(null)
           : Promise.resolve({})
       ));
@@ -414,6 +448,9 @@ describe('Updater', () => {
       mockFsAccess.mockResolvedValue(undefined);
       let runtimeReads = 0;
       mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) {
+          return Promise.resolve(healthyInterceptorRuntime({ pid: process.ppid }));
+        }
         if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
         runtimeReads++;
         return Promise.resolve(runtimeReads <= 2 ? {
@@ -981,10 +1018,13 @@ describe('Updater', () => {
         .map((call: [string, string[]]) => pilotCommandArgs(call))
         .filter(([command]: string[]) => [
           'restart-collector', 'start-collector', 'schedule-updater-restart',
+          'restart-interceptor',
         ].includes(command));
       expect(commandArgs).toContainEqual([
         'restart-collector', '--defer-updater-restart',
       ]);
+      expect(commandArgs.flat()).not.toContain('restart-interceptor');
+      expect(commandArgs.flat()).not.toContain('start-interceptor');
       expect(commandArgs).toContainEqual([
         'schedule-updater-restart',
       ]);
@@ -1029,6 +1069,7 @@ describe('Updater', () => {
         return Promise.resolve({ stdout: '', stderr: '' });
       });
       mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
         if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
         if (Date.now() - recoveryStartedAt < 29_500) return Promise.resolve(null);
         return Promise.resolve({
@@ -1096,6 +1137,7 @@ describe('Updater', () => {
     it('does not report restart success or run GC when collector health never appears', async () => {
       setupForDownload();
       mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
         if (String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve(null);
         return Promise.resolve({});
       });
@@ -1408,7 +1450,9 @@ describe('Updater', () => {
       });
       mockFsAccess.mockResolvedValue(undefined);
       mockReadJsonFile.mockImplementation((filePath: string) => (
-        String(filePath).endsWith('/logs/runtime.json')
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime({ packageVersion: '1.0.2', version: '1.0.2' }))
+          : String(filePath).endsWith('/logs/runtime.json')
           ? Promise.resolve({
             status: 'active',
             packageVersion: '1.0.2',

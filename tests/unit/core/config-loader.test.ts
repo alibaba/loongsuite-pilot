@@ -2348,4 +2348,48 @@ describe('ConfigLoader', () => {
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
   });
+
+  describe('interceptor config', () => {
+    it('defaults to none when interceptor config is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('loads all mode and custom types as a mask-type subset', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: {
+          mode: 'custom',
+          types: ['apiKey', 'idCard', 'cloudAccessKey'],
+        },
+      });
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({
+        mode: 'custom',
+        types: ['apiKey', 'cloudAccessKey'],
+      });
+    });
+
+    it('uses interceptor env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: { mode: 'none', types: ['apiKey'] },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toMatchObject({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+      });
+    });
+
+    it('leaves mask mode all unchanged when interceptor is enabled', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all' },
+        interceptor: { mode: 'custom', types: ['apiKey'] },
+      });
+      const config = await loadConfig();
+      expect(config.mask.mode).toBe('all');
+    });
+  });
 });

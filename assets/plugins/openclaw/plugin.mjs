@@ -35,6 +35,12 @@ import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
 import {
+  evaluateInterceptor,
+  resolveDataDir,
+  SAME_TURN_POST_TOOL_HOOK,
+  SYNC_INTERCEPT_HOOKS,
+} from "./interceptor.mjs";
+import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
 } from "../shared/resource-context.mjs";
@@ -112,14 +118,6 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env);
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
-
-function resolveDataDir() {
-  return (
-    process.env.LOONGSUITE_PILOT_DATA_DIR ||
-    process.env.PILOT_DATA ||
-    path.join(os.homedir(), ".loongsuite-pilot")
-  );
-}
 
 function logDir() {
   return path.join(resolveDataDir(), "logs", "openclaw");
@@ -1328,19 +1326,110 @@ function handleAgentEnd(event, ctx, userId, emit) {
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
-function makeHandler(fn) {
-  // Keep this wrapper synchronous: OpenClaw's tool_result_persist and
+function makeHandler(fn, interceptHook) {
+  // Keep persistence hooks synchronous: OpenClaw's tool_result_persist and
   // before_message_write hooks reject Promise-returning handlers.
   return function safeHandler(event, ctx) {
-    try {
-      const cfg = loadPilotConfig();
-      const userId = resolveUserId(cfg);
-      const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
-      fn(event, ctx, userId, emit, cfg);
-    } catch (err) {
-      writeError(fn.name || "handler", err);
+    const collect = () => {
+      try {
+        const cfg = loadPilotConfig();
+        const userId = resolveUserId(cfg);
+        const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
+        fn(event, ctx, userId, emit, cfg);
+      } catch (err) {
+        writeError(fn.name || "handler", err);
+      }
+    };
+    if (!interceptHook) {
+      collect();
+      return;
     }
+
+    const options = {
+      cwd: agentCwd,
+      sync: SYNC_INTERCEPT_HOOKS.has(interceptHook),
+    };
+    if (options.sync) {
+      let decision;
+      try {
+        decision = evaluateInterceptor(interceptHook, event, ctx, options);
+      } catch (err) {
+        writeError("interceptor", err);
+      }
+      // Publish transcript/plugin JSONL only after the verdict record is durable.
+      collect();
+      return decision;
+    }
+
+    let pending;
+    try {
+      pending = evaluateInterceptor(interceptHook, event, ctx, options);
+    } catch (err) {
+      writeError("interceptor", err);
+      collect();
+      return undefined;
+    }
+    // Missing runtime is a synchronous fail-open; preserve the host hook's
+    // synchronous return contract while still recording unknown first.
+    if (!pending || typeof pending.then !== "function") {
+      collect();
+      return pending;
+    }
+    return Promise.resolve(pending)
+      .catch((err) => {
+        writeError("interceptor", err);
+        return undefined;
+      })
+      .then((decision) => {
+        // Prevent the collector from consuming this event before verdict storage.
+        collect();
+        return decision;
+      });
   };
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+// Same-turn PostToolUse: OpenClaw awaits tool-result middleware before the
+// current ReAct model call. tool_result_persist only rewrites transcript.
+function registerSameTurnToolResultIntercept(api) {
+  if (typeof api?.registerAgentToolResultMiddleware !== "function") {
+    debugFailureOnce(
+      "interceptor-middleware",
+      new Error("registerAgentToolResultMiddleware is unavailable; PostToolUse same-turn intercept disabled"),
+    );
+    return;
+  }
+  try {
+    api.registerAgentToolResultMiddleware(async (event, ctx) => {
+      try {
+        const payload = isPlainObject(event) ? event : {};
+        const decision = await evaluateInterceptor(
+          SAME_TURN_POST_TOOL_HOOK,
+          {
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            params: payload.args ?? payload.params,
+            result: payload.result,
+            sessionId: payload.sessionId,
+          },
+          isPlainObject(ctx) ? ctx : {},
+          { cwd: agentCwd },
+        );
+        if (isPlainObject(decision) && isPlainObject(decision.result)) {
+          return { result: decision.result };
+        }
+        return undefined;
+      } catch (err) {
+        writeError("interceptor-middleware", err);
+        return undefined;
+      }
+    }, { runtimes: ["openclaw"] });
+  } catch (err) {
+    writeError("interceptor-middleware-register", err);
+  }
 }
 
 function reportUnsupportedHost(api, detail) {
@@ -1399,8 +1488,17 @@ export default {
       debugFailureOnce("register", err);
     }
 
-    const on = (name, fn) => {
-      api.on(name, makeHandler(fn));
+    const on = (name, fn, opts) => {
+      const intercept = opts?.intercept;
+      const hookOpts = {};
+      if (opts) {
+        for (const [key, value] of Object.entries(opts)) {
+          if (key !== "intercept") hookOpts[key] = value;
+        }
+      }
+      const handler = makeHandler(fn, intercept);
+      if (Object.keys(hookOpts).length > 0) api.on(name, handler, hookOpts);
+      else api.on(name, handler);
     };
 
     if (capabilities.adapter === "legacy") {
@@ -1423,17 +1521,28 @@ export default {
     on("llm_output", handleLlmOutput);
     on("before_agent_finalize", handleBeforeAgentFinalize);
     on("agent_end", handleAgentEnd);
-    on("before_agent_run", handleBeforeAgentRun);
+    on("before_agent_run", handleBeforeAgentRun, {
+      intercept: "before_agent_run",
+      priority: 1000,
+      timeoutMs: 8_000,
+    });
 
     // 9 default-active hooks (prompt / model / tool / session / message write)
     on("before_prompt_build", handleBeforePromptBuild);
     on("model_call_started", handleModelCallStarted);
     on("model_call_ended", handleModelCallEnded);
-    on("before_tool_call", handleBeforeToolCall);
+    on("before_tool_call", handleBeforeToolCall, {
+      intercept: "before_tool_call",
+      priority: 1000,
+      timeoutMs: 8_000,
+    });
     on("after_tool_call", handleAfterToolCall);
-    on("tool_result_persist", handleToolResultPersist);
+    on("tool_result_persist", handleToolResultPersist, {
+      intercept: "tool_result_persist",
+    });
     on("before_message_write", handleBeforeMessageWrite);
     on("session_start", handleSessionStart);
     on("session_end", handleSessionEnd);
+    registerSameTurnToolResultIntercept(api);
   },
 };

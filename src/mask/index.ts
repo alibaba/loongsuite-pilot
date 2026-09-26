@@ -1,3 +1,8 @@
+export {
+  collectSensitiveRanges,
+  findFirstSensitiveMatch,
+  resolveStringMaskOptions,
+} from './detect.js';
 export * from './entry-masker.js';
 export * from './field-whitelist.js';
 export * from './masked-preview.js';

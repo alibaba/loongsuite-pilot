@@ -1,0 +1,135 @@
+import { describe, expect, it } from 'vitest';
+import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
+import { collectHookText } from '../../../src/interceptor/rules/hook-text.js';
+import { builtinRules } from '../../../src/interceptor/rules/registry.js';
+import {
+  createSensitiveTypeRule,
+  SENSITIVE_INTERCEPT_TYPES,
+} from '../../../src/interceptor/rules/sensitive-type.js';
+import type { HookRequest } from '../../../src/interceptor/types.js';
+
+function request(overrides: Partial<HookRequest> = {}): HookRequest {
+  return {
+    agent: 'qoder',
+    event: 'UserPromptSubmit',
+    raw: {},
+    ...overrides,
+  };
+}
+
+describe('sensitive-type interceptor rules', () => {
+  it('registers the four mask types in JSON order', () => {
+    expect(builtinRules().map(rule => rule.id)).toEqual([...SENSITIVE_INTERCEPT_TYPES]);
+  });
+
+  it('stays bypassed until the type is enabled', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set());
+    await expect(engine.evaluate(request({ prompt: 'LTAI1234567890ABCD' }))).resolves.toEqual({
+      action: 'allow',
+      evaluatedRules: [],
+    });
+  });
+
+  it.each([
+    ['cloudAccessKey', 'please use LTAI1234567890ABCD', '[ACCESSKEY_MASKED]'],
+    ['cloudAccessKey', 'aws=AKIAIOSFODNN7EXAMPLE', '[ACCESSKEY_MASKED]'],
+    ['cloudAccessKey', 'sts=ASIAABCDEFGHIJKLMNOP', '[ACCESSKEY_MASKED]'],
+    ['cloudAccessKey', 'tencent=AKIDabcdefghijklmnopqrstuvwxyz', '[ACCESSKEY_MASKED]'],
+    ['apiKey', 'openai=sk-1234567890abcdefghijklmnop', '[APIKEY_MASKED]'],
+    ['apiKey', 'github=ghp_1234567890abcdefghijklmnop', '[APIKEY_MASKED]'],
+    ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----', '[PRIVATEKEY_MASKED]'],
+    ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot', '[DATABASEURL_MASKED]'],
+    ['databaseUrl', 'jdbc:mysql://localhost:3306/db?user=root&password=MySynthMysql12', '[DATABASEURL_MASKED]'],
+  ] as const)('blocks %s text through the engine', async (type, prompt, reason) => {
+    const engine = new RuleEngine(builtinRules(), new Set([type]));
+    await expect(engine.evaluate(request({ prompt }))).resolves.toEqual({
+      action: 'block',
+      reason,
+      ruleId: type,
+      evaluatedRules: [type],
+    });
+  });
+
+  it('blocks secrets in tool input', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set(['apiKey']));
+    await expect(engine.evaluate(request({
+      event: 'PreToolUse',
+      toolName: 'Bash',
+      toolInput: { command: 'export KEY=sk-1234567890abcdefghijklmnop' },
+    }))).resolves.toEqual({
+      action: 'block',
+      reason: '[APIKEY_MASKED]',
+      ruleId: 'apiKey',
+      evaluatedRules: ['apiKey'],
+    });
+  });
+
+  it('blocks secrets in tool response', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set(['apiKey']));
+    await expect(engine.evaluate(request({
+      event: 'PostToolUse',
+      toolName: 'Bash',
+      toolResponse: { stdout: 'openai=sk-1234567890abcdefghijklmnop' },
+    }))).resolves.toEqual({
+      action: 'block',
+      reason: '[APIKEY_MASKED]',
+      ruleId: 'apiKey',
+      evaluatedRules: ['apiKey'],
+    });
+  });
+
+  it('blocks secrets in nested Read file content after a newline', async () => {
+    const engine = new RuleEngine(builtinRules(), new Set(['databaseUrl']));
+    await expect(engine.evaluate(request({
+      event: 'PostToolUse',
+      toolName: 'Read',
+      toolInput: { file_path: '/Users/henryzhang/Desktop/tmp' },
+      toolResponse: {
+        type: 'text',
+        file: {
+          filePath: '../../../../Desktop/tmp',
+          content: '我的一些mysql常用配置：\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot\npostgres://agent:PostgresPass123@127.0.0.1:5432/pilot\n',
+          numLines: 6,
+          startLine: 1,
+          totalLines: 6,
+        },
+      },
+    }))).resolves.toEqual({
+      action: 'block',
+      reason: '[DATABASEURL_MASKED]',
+      ruleId: 'databaseUrl',
+      evaluatedRules: ['databaseUrl'],
+    });
+  });
+
+  it('allows non-matching text when the switch is on', async () => {
+    const cloud = createSensitiveTypeRule('cloudAccessKey');
+    await expect(cloud.evaluate(request({ prompt: 'short_aliyun=LTAI123' }))).resolves.toEqual({
+      matched: false,
+    });
+    await expect(createSensitiveTypeRule('databaseUrl').evaluate(request({
+      prompt: 'mysql://localhost:3306/pilot',
+    }))).resolves.toEqual({ matched: false });
+  });
+});
+
+describe('collectHookText', () => {
+  it('joins prompt, tool name, and nested string leaves', () => {
+    expect(collectHookText(request({
+      prompt: 'hello',
+      toolName: 'Bash',
+      toolInput: { command: 'ls' },
+      toolResponse: { stdout: 'ok' },
+    }))).toBe('hello\nBash\nls\nok');
+  });
+
+  it('keeps real newlines inside nested file content', () => {
+    expect(collectHookText(request({
+      toolName: 'Read',
+      toolResponse: {
+        type: 'text',
+        file: { content: 'intro\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },
+      },
+    }))).toBe('Read\ntext\nintro\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot');
+  });
+});

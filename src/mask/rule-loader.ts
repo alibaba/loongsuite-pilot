@@ -1,10 +1,10 @@
-import { readFileSync } from 'node:fs';
 import {
   PII_MASK_TYPES,
   SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
 import type { MaskConfig, MaskType } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import sensitiveRulesManifest from './sensitive-rules.json' with { type: 'json' };
 import type {
   CompiledMaskRule,
   MaskPlan,
@@ -14,7 +14,6 @@ import type {
   SensitiveRulesManifest,
 } from './types.js';
 
-const RULES_URL = new URL('./sensitive-rules.json', import.meta.url);
 const logger = createLogger('MaskRuleLoader');
 const SUPPORTED_RULE_KINDS = new Set<MaskRuleKind>(['regex', 'block', 'urlWithPassword']);
 const PII_MASK_TYPE_SET = new Set<MaskType>(PII_MASK_TYPES);
@@ -25,17 +24,20 @@ const SUPPORTED_MASK_TYPE_SET = new Set<MaskType>(SUPPORTED_MASK_TYPES);
 
 let cachedRules: CompiledMaskRule[] | undefined;
 
+export function loadSensitiveRulesFromManifest(manifest: unknown): CompiledMaskRule[] {
+  try {
+    return compileSensitiveRules(manifest as SensitiveRulesManifest);
+  } catch (err) {
+    logger.error('failed to load sensitive rule manifest, manifest rules disabled', {
+      error: String(err),
+    });
+    return [];
+  }
+}
+
 export function loadSensitiveRules(): CompiledMaskRule[] {
   if (!cachedRules) {
-    try {
-      const raw = readFileSync(RULES_URL, 'utf8');
-      cachedRules = compileSensitiveRules(JSON.parse(raw) as SensitiveRulesManifest);
-    } catch (err) {
-      logger.error('failed to load sensitive rule manifest, manifest rules disabled', {
-        error: String(err),
-      });
-      cachedRules = [];
-    }
+    cachedRules = loadSensitiveRulesFromManifest(sensitiveRulesManifest);
   }
   return cachedRules;
 }

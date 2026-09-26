@@ -125,6 +125,18 @@ describe('Updater integration (real filesystem)', () => {
       pid: process.pid,
       updatedAt: new Date().toISOString(),
     }));
+    const interceptorDir = path.join(testDir, 'interceptor');
+    await fs.mkdir(interceptorDir, { recursive: true });
+    await fs.writeFile(path.join(interceptorDir, 'runtime.json'), JSON.stringify({
+      service: 'loongsuite-pilot-interceptor',
+      status: 'ok',
+      pid: process.pid,
+      version,
+      daemon_port: 18791,
+      packageVersion: version,
+      ...(gitCommit ? { gitCommit } : {}),
+      updatedAt: new Date().toISOString(),
+    }));
   }
 
   async function readPointer(name: string): Promise<string | null> {

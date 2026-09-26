@@ -237,6 +237,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       port: 8765,
     },
     agents: {},
+    interceptor: { mode: 'none', types: [] },
     ...overrides,
   };
 }

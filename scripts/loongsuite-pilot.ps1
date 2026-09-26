@@ -222,6 +222,7 @@ function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
     $required = @("collector-daemon.js", "updater-daemon.js")
+    $optional = @()
     foreach ($f in $required) {
         if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
     }
@@ -230,6 +231,13 @@ function Sync-InstalledScriptsFromVersion {
     foreach ($f in $required) {
         $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
         Copy-Item (Join-Path $srcDir $f) $tmp -Force
+        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
+    }
+    foreach ($f in $optional) {
+        $src = Join-Path $srcDir $f
+        if (-not (Test-Path $src)) { continue }
+        $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
+        Copy-Item $src $tmp -Force
         Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
     }
     return $true
@@ -623,10 +631,6 @@ function Wait-ForUpdaterAlive {
     return $false
 }
 
-# Best-effort: Start-ScheduledTask on a task that is still Running is often a no-op, so
-# restart would "succeed" against the outgoing instance. Mirror the 10s wait in
-# Start-CompatibleExistingCollectorTask. Failure to leave Running is not fatal; the
-# caller still Stop-PidFile / Start.
 function Wait-ForTaskNotRunning {
     param([string]$TaskName, [int]$TimeoutSeconds = 10)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -1233,9 +1237,6 @@ function Cmd-RunUpdater {
     & $nodeBin $entry
 }
 
-# ============================================================
-# CMD: start
-# ============================================================
 function Cmd-Start {
     $runtime = Get-CollectorRuntime
     if ($runtime) {
@@ -1877,7 +1878,6 @@ function Cmd-RestartUpdater {
     }
 }
 
-# ============================================================
 # CMD: status
 # ============================================================
 function Get-DashboardPort {
@@ -1945,6 +1945,18 @@ timer = setTimeout(() => {
     }
 }
 
+function Test-InterceptorEmbedded {
+    if (-not (Get-CollectorRuntime) -and -not (Test-PidRunning $PID_FILE)) { return $false }
+    $runtimePath = Join-Path $DATA_DIR "interceptor\runtime.json"
+    if (-not (Test-Path -LiteralPath $runtimePath)) { return $false }
+    try {
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return ($runtime.status -eq "ok")
+    } catch {
+        return $false
+    }
+}
+
 function Cmd-Status {
     $verInfo = ""
     $versionDir = Resolve-CurrentVersion
@@ -1957,13 +1969,15 @@ function Cmd-Status {
 
     # Collector status
     $collectorRunning = $false
+    $collectorPid = $null
     $runtime = Get-CollectorRuntime
     if ($runtime) {
-        Write-Host "loongsuite-pilot${verInfo} is running (PID $($runtime.pid), heartbeat)"
+        $collectorPid = [int]$runtime.pid
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $collectorPid, heartbeat)"
         $collectorRunning = $true
     } elseif (Test-PidRunning $PID_FILE) {
-        $pidVal = (Get-Content $PID_FILE).Trim()
-        Write-Host "loongsuite-pilot${verInfo} is running (PID $pidVal)"
+        $collectorPid = [int](Get-Content $PID_FILE).Trim()
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $collectorPid)"
         $collectorRunning = $true
     }
     if (-not $collectorRunning) {
@@ -1989,6 +2003,12 @@ function Cmd-Status {
         Write-Host "   updater: running (Task Scheduler)"
     } else {
         Write-Host "   updater: stopped"
+    }
+
+    if (Test-InterceptorEmbedded) {
+        Write-Host "   interceptor: running"
+    } else {
+        Write-Host "   interceptor: stopped"
     }
 
     # Autostart status

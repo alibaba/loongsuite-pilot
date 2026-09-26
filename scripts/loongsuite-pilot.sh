@@ -938,8 +938,6 @@ cmd_run_updater() {
     exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
 }
 
-# ---- User-facing commands ----
-
 cmd_start() {
     cleanup_legacy_monitor_processes
     for arg in "$@"; do
@@ -1462,6 +1460,25 @@ cmd_restart() {
     cmd_start
 }
 
+interceptor_embedded_status() {
+    if ! is_running; then
+        echo "stopped"
+        return
+    fi
+    local runtime runtime_status
+    runtime="$DATA_DIR/interceptor/runtime.json"
+    if [ ! -f "$runtime" ]; then
+        echo "stopped"
+        return
+    fi
+    runtime_status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$runtime" | head -n 1)
+    if [ "$runtime_status" = "ok" ]; then
+        echo "running"
+        return
+    fi
+    echo "stopped"
+}
+
 dashboard_port() {
     local node_bin
     node_bin=$(resolve_node 2>/dev/null) || {
@@ -1566,6 +1583,13 @@ cmd_status() {
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
+    fi
+    local interceptor_state
+    interceptor_state=$(interceptor_embedded_status)
+    if [ "$interceptor_state" = "stopped" ]; then
+        echo "   interceptor: stopped"
+    else
+        echo "   interceptor: running"
     fi
     autostart_status
 }
@@ -2647,6 +2671,7 @@ autostart_install_updater_only() {
             ;;
     esac
 }
+
 
 autostart_install() {
     local interactive="${1:-true}"
