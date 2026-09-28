@@ -114,7 +114,7 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 |--------------|----------------|--------------|
 | `none` | 不转换 | — |
 | `input` | 用户消息与工具结果中的 `input_image` | 粘贴剪贴板、Add file / Files mentioned；提示里贴路径后由 `view_image` 读入；生成后再 `view_image`（`function_call_output`） |
-| `output` | 工具结果中的 `input_image` | 提示里贴路径后 `view_image`；生成后再 `view_image`。助手消息尚无提取落点。 |
+| `output` | 目前不转换 | 助手消息尚无提取落点；工具结果跟随 `input`。 |
 | `all` | 用户消息与工具结果 | 同时覆盖粘贴/加文件与工具读图/生成图 |
 
 注意：

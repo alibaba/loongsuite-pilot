@@ -114,7 +114,7 @@ Codex converts matching `input_image` data-URLs to `uri` parts at write time; ba
 |--------------|---------------|---------------------|
 | `none` | No conversion | — |
 | `input` | `input_image` on user messages and in tool results | Paste/clipboard, Add file / Files mentioned; path in the prompt then `view_image`; generate-then-`view_image` (`function_call_output`) |
-| `output` | `input_image` in tool results | Path in the prompt then `view_image`; generate-then-`view_image`. No assistant-message extractor yet. |
+| `output` | No conversion today | No assistant-message extractor yet; tool-result images follow `input`. |
 | `all` | User messages and tool results | Covers paste/add-file and tool read/generate images |
 
 Notes:

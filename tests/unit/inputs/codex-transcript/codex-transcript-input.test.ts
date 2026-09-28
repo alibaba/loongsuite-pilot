@@ -4754,7 +4754,8 @@ describe('Codex transcript multimodal extraction', () => {
     const outputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'output' });
     expect(userParts(outputMode!).some((p: any) => p.type === 'uri')).toBe(false);
     const outputToolOut = outputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(true);
+    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    expect(JSON.stringify(outputMode)).not.toContain(png);
 
     const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'all' });
     expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });
