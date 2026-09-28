@@ -2278,6 +2278,26 @@ describe('QoderTraceInput multimodal', () => {
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img')).toBe(true);
     });
 
+    it('uploadMode gates tool.result: output skips; input enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'tool-gate.png', 'tool-gate');
+      const makeTool = () => mmEntry({
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.result': `Image file: ${img}`,
+      });
+
+      const outputOnly = makeTool();
+      await enrichIdeMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+      expect(outputOnly['gen_ai.tool.call.result']).toBe(`Image file: ${img}`);
+
+      const inputOnly = makeTool();
+      await enrichIdeMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+      expect(Array.isArray(inputOnly['gen_ai.tool.call.result'])).toBe(true);
+      expect((inputOnly['gen_ai.tool.call.result'] as any[]).some(
+        (p: any) => p.type === 'uri' && p.uri === 'oss://test/tool-gate',
+      )).toBe(true);
+    });
+
     it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
       const dir = makeMmTempDir();
       writePng(dir, 'rel.png', 'rel-img');

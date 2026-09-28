@@ -4,7 +4,6 @@ import { AGENT_INPUT_EVENT_NAMESPACE } from '../../normalization/agent-input-dua
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesOutput,
-  multimodalUploadIncludesTool,
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
@@ -98,8 +97,6 @@ async function enrichIdeMultimodalInner(
 
   if (multimodalUploadIncludesInput(opts.uploadMode)) {
     await enrichInputAttachedImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesTool(opts.uploadMode)) {
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
   }
   if (multimodalUploadIncludesOutput(opts.uploadMode)) {

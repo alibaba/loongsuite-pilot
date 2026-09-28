@@ -78,7 +78,7 @@ loongsuite-pilot restart
 |------|------|
 | `none` | 关闭多模态转换（默认）。 |
 | `input` | 转换用户/非助手消息以及工具结果中的支持图片。 |
-| `output` | 转换助手/模型输出以及工具结果中的支持图片（output 需该 Agent 有对应提取路径）。 |
+| `output` | 转换助手/模型输出中的支持图片（output 需该 Agent 有对应提取路径）。 |
 | `all` | 同时开启已接线的全部表面。 |
 
 未知取值会回落到 `none`。
@@ -130,7 +130,7 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
 | `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image）；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；Read 读图、ImageGen 生成图 |
-| `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名）；以及与 `input` 相同的 `tool.result` 路径 | 助手回复中嵌入已读/生成图；Read 读图、ImageGen 生成图 |
+| `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名） | 助手回复中嵌入已读/生成图 |
 | `all` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
 
 注意：
@@ -140,13 +140,13 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 
 ### Qoder CLI
 
-Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一条 `qoder-trace` 采集路径，在 CLI token 富化之后做写时转换。不查 SQLite；助手最终回复通常不含嵌入图，因此 `output` 仍会转工具结果图，但没有助手文本表面。失败 fail-open。
+Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一条 `qoder-trace` 采集路径，在 CLI token 富化之后做写时转换。不查 SQLite；助手最终回复通常不含嵌入图，因此 `output` 目前没有转换表面，工具结果跟随 `input`。失败 fail-open。
 
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
 | `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
-| `output` | 与 `input` 相同的 `tool.result` 路径 | 文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览。CLI 终端不把图嵌进最终助手文本。 |
+| `output` | 目前不转换 | CLI 终端不把图嵌进最终助手文本；工具结果跟随 `input`。 |
 | `all` | 用户附件与工具结果图 | 覆盖粘贴/`@` 与工具读图/生成 |
 
 注意：

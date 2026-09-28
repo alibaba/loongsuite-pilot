@@ -333,6 +333,26 @@ describe('enrichCliMultimodal', () => {
     )).toBe(true);
   });
 
+  it('uploadMode gates tool.result: output skips; input enriches', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'tool-gate.png', 'tool-gate');
+    const makeTool = () => cliEntry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.result': `Read image: ${img} (1KB)`,
+    });
+
+    const outputOnly = makeTool();
+    await enrichCliMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect(outputOnly['gen_ai.tool.call.result']).toBe(`Read image: ${img} (1KB)`);
+
+    const inputOnly = makeTool();
+    await enrichCliMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+    expect(Array.isArray(inputOnly['gen_ai.tool.call.result'])).toBe(true);
+    expect((inputOnly['gen_ai.tool.call.result'] as any[]).some(
+      (p: any) => p.type === 'uri' && p.uri === 'oss://test/tool-gate',
+    )).toBe(true);
+  });
+
   it('uploadMode none / missing file / toUri null leave entries unchanged', async () => {
     const dir = makeTempDir();
     const img = writePng(dir, 'x.png', 'x');

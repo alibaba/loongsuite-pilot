@@ -78,7 +78,7 @@ Configured per agent under `agents.<id>.multimodal.uploadMode`:
 |------|----------|
 | `none` | Disable multimodal conversion (default). |
 | `input` | Convert supported images in user / non-assistant messages and in tool results. |
-| `output` | Convert supported images in assistant / model output and in tool results (output requires an extractor path for that agent). |
+| `output` | Convert supported images in assistant / model output (output requires an extractor path for that agent). |
 | `all` | Enable all wired surfaces. |
 
 Unknown values fall back to `none`.
@@ -130,7 +130,7 @@ Qoder IDE (`qoder`) converts on the `qoder-trace` path after IDE token enrichmen
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
 | `input` | SQLite `chat_record.extra.attachedImagePaths` (and image context entries); `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; Read image, ImageGen |
-| `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions); same `tool.result` paths as `input` | Assistant replies that embed read/generated images; Read image, ImageGen |
+| `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions) | Assistant replies that embed read/generated images |
 | `all` | All of the above | Attachments, tool read/generate, and output embeds |
 
 Notes:
@@ -140,13 +140,13 @@ Notes:
 
 ### Qoder CLI
 
-Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts on the same `qoder-trace` path after CLI token enrichment. It does not query SQLite. Assistant finals usually have no embedded image, so `output` still converts tool-result images but has no assistant-text surface. Fail-open.
+Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts on the same `qoder-trace` path after CLI token enrichment. It does not query SQLite. Assistant finals usually have no embedded image, so `output` has no conversion surface today; tool-result images follow `input`. Fail-open.
 
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
 | `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
-| `output` | Same `tool.result` paths as `input` | Path in the prompt then Read; ImageGen then Read to preview. CLI does not embed images in the final assistant text. |
+| `output` | No conversion today | CLI does not embed images in the final assistant text; tool-result images follow `input`. |
 | `all` | User attachments and tool-result images | Paste/`@` plus tool read/generate |
 
 Notes:

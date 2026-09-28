@@ -1,7 +1,6 @@
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import {
   multimodalUploadIncludesInput,
-  multimodalUploadIncludesTool,
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
@@ -79,8 +78,6 @@ async function enrichCliMultimodalInner(
 
   if (multimodalUploadIncludesInput(opts.uploadMode)) {
     await enrichInputImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesTool(opts.uploadMode)) {
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
   }
 
