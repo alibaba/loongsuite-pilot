@@ -2457,10 +2457,9 @@ describe('QoderTraceInput multimodal', () => {
       });
       const result = tool['gen_ai.tool.call.result'] as any[];
       expect(result.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/ok')).toBe(true);
-      expect(tool['gen_ai.tool.multimodal_metadata']).toEqual([
+      expect(tool['gen_ai.input.multimodal_metadata']).toEqual([
         { uri: 'oss://test/ok', mime_type: 'image/png', modality: 'image' },
       ]);
-      expect(tool['gen_ai.input.multimodal_metadata']).toBeUndefined();
     });
   });
 

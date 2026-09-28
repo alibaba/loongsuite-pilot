@@ -10,7 +10,6 @@ export const FIELDS_TO_MASK = new Set<string>([
   'gen_ai.tool.call.result',
   'gen_ai.system_instructions',
   'gen_ai.tool.definitions',
-  'gen_ai.tool.multimodal_metadata',
   'error.message',
 
   'content',

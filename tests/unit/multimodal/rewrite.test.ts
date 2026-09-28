@@ -7,7 +7,6 @@ import {
 import {
   INPUT_MULTIMODAL_METADATA_FIELD,
   OUTPUT_MULTIMODAL_METADATA_FIELD,
-  TOOL_MULTIMODAL_METADATA_FIELD,
 } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
@@ -74,16 +73,36 @@ describe('multimodal rewrite helpers', () => {
     ]);
   });
 
-  it('collects uris from tool call results', () => {
+  it('collects tool result uris into input metadata', () => {
     const uri = 'oss://bucket/mm/tool.png';
     const entry = baseEntry({
       'gen_ai.tool.call.result': [{ type: 'uri', uri, mime_type: 'image/png', modality: 'image' }],
     });
     attachMultimodalMetadataForEntry(entry);
-    expect(entry[TOOL_MULTIMODAL_METADATA_FIELD]).toEqual([
+    expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
+      { uri, mime_type: 'image/png', modality: 'image' },
+    ]);
+    expect(entry[OUTPUT_MULTIMODAL_METADATA_FIELD]).toBeUndefined();
+  });
+
+  it('collects tool call argument uris into output metadata', () => {
+    const uri = 'oss://bucket/mm/call.png';
+    const entry = baseEntry({
+      'gen_ai.tool.call.arguments': [{ type: 'uri', uri, mime_type: 'image/png', modality: 'image' }],
+    });
+    attachMultimodalMetadataForEntry(entry);
+    expect(entry[OUTPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
       { uri, mime_type: 'image/png', modality: 'image' },
     ]);
     expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toBeUndefined();
+  });
+
+  it('ignores non-uri tool arguments', () => {
+    const entry = baseEntry({
+      'gen_ai.tool.call.arguments': { file_path: '/tmp/a.png' },
+    });
+    attachMultimodalMetadataForEntry(entry);
+    expect(entry[OUTPUT_MULTIMODAL_METADATA_FIELD]).toBeUndefined();
   });
 
   it('writes output message uris only to output metadata', () => {
