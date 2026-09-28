@@ -2298,6 +2298,46 @@ describe('QoderTraceInput multimodal', () => {
       )).toBe(true);
     });
 
+    it('rewrites Read tool.call file_path to text+uri parts', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'call.png', 'call-img');
+      const encoded = JSON.stringify({ file_path: img });
+      const tool = mmEntry({
+        'event.name': 'tool.call',
+        'gen_ai.tool.name': 'Read',
+        'gen_ai.tool.call.arguments': encoded,
+      });
+
+      await enrichIdeMultimodal([tool], { uploadMode: 'output', pathToUri: fakePathToUri });
+
+      const args = tool['gen_ai.tool.call.arguments'] as any[];
+      expect(args[0]).toEqual({ type: 'text', content: encoded });
+      expect(args[1]).toMatchObject({ type: 'uri', uri: 'oss://test/call-img', modality: 'image' });
+      expect(tool['gen_ai.output.multimodal_metadata']).toEqual([
+        { uri: 'oss://test/call-img', mime_type: 'image/png', modality: 'image' },
+      ]);
+    });
+
+    it('uploadMode gates tool.call: input skips; output enriches', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'call-gate.png', 'call-gate');
+      const makeCall = () => mmEntry({
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.arguments': { file_path: img },
+      });
+
+      const inputOnly = makeCall();
+      await enrichIdeMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+      expect(inputOnly['gen_ai.tool.call.arguments']).toEqual({ file_path: img });
+
+      const outputOnly = makeCall();
+      await enrichIdeMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+      expect(Array.isArray(outputOnly['gen_ai.tool.call.arguments'])).toBe(true);
+      expect((outputOnly['gen_ai.tool.call.arguments'] as any[]).some(
+        (p: any) => p.type === 'uri' && p.uri === 'oss://test/call-gate',
+      )).toBe(true);
+    });
+
     it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {
       const dir = makeMmTempDir();
       writePng(dir, 'rel.png', 'rel-img');

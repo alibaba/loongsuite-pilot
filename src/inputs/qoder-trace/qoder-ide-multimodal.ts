@@ -100,6 +100,7 @@ async function enrichIdeMultimodalInner(
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
   }
   if (multimodalUploadIncludesOutput(opts.uploadMode)) {
+    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
     await enrichOutputMarkdownImages(entries, opts.pathToUri, touched, stats);
   }
 
@@ -305,6 +306,34 @@ async function enrichToolResultImages(
   }
 }
 
+async function enrichToolCallImages(
+  entries: AgentActivityEntry[],
+  pathToUri: PathToUriFn,
+  touched: Set<AgentActivityEntry>,
+  stats: EnrichStats,
+): Promise<void> {
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'tool.call') continue;
+    const raw = entry['gen_ai.tool.call.arguments'];
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (Array.isArray(raw)) continue;
+
+    const paths = extractToolCallImagePaths(raw, cwdOf(entry));
+    if (paths.length === 0) continue;
+
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    if (uriParts.length === 0) continue;
+
+    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    entry['gen_ai.tool.call.arguments'] = [
+      { type: 'text', content: original },
+      ...uriParts,
+    ] as unknown as JsonValue;
+    stats.outputUri += uriParts.length;
+    touched.add(entry);
+  }
+}
+
 async function enrichOutputMarkdownImages(
   entries: AgentActivityEntry[],
   pathToUri: PathToUriFn,
@@ -426,6 +455,25 @@ export function extractToolImagePaths(text: string): string[] {
     ...matchAll(IMAGE_FILE_RE, text),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
   ]);
+}
+
+export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
+  let record: Record<string, unknown> | null = null;
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    record = args as Record<string, unknown>;
+  } else if (typeof args === 'string' && args) {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        record = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // hook writes JSON.stringify; ignore non-JSON argument strings
+    }
+  }
+  const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
+  if (!filePath) return [];
+  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
 }
 
 export function extractMarkdownImagePaths(text: string, cwd?: string): string[] {
