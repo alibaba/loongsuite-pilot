@@ -213,20 +213,20 @@ async function enrichInputAttachedImages(
       && Array.isArray(e['gen_ai.input.messages_delta'])
       && (!requestIdOf(e) || requestIdOf(e) === requestId),
     );
-    const targets = sibling ? [carrier, sibling] : [carrier];
-    let attached = 0;
-    for (const target of targets) {
-      const n = await appendUriPartsToMessagesDelta(
-        target, lookup.paths, pathToUri, entryTimeMs(target), stats,
-      );
-      if (n > 0) {
-        stats.inputUri += n;
-        touched.add(target);
-        attached += n;
-      }
+    const uriParts = await convertPathsToUriParts(
+      lookup.paths, pathToUri, entryTimeMs(carrier), stats,
+    );
+
+    let requestAttached = 0;
+    for (const target of [carrier, sibling]) {
+      if (!target) continue;
+      const n = applyUriPartsToMessagesDelta(target, uriParts);
+      if (n <= 0) continue;
+      stats.inputUri += n;
+      touched.add(target);
+      if (target['event.name'] === 'llm.request') requestAttached = n;
     }
-    if (attached > 0) {
-      // Consume paths so this request_id is not attached again on later batches.
+    if (requestAttached > 0) {
       attachedLookupByRequestId.set(requestId, { paths: [] });
     } else if (synthesized) {
       entries.pop();
@@ -375,17 +375,13 @@ async function enrichOutputMarkdownImages(
 }
 
 /** @returns number of uri parts appended */
-async function appendUriPartsToMessagesDelta(
+function applyUriPartsToMessagesDelta(
   entry: AgentActivityEntry,
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<number> {
+  uriParts: UriPart[],
+): number {
+  if (uriParts.length === 0) return 0;
   const messages = entry['gen_ai.input.messages_delta'];
   if (!Array.isArray(messages) || messages.length === 0) {
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-    if (uriParts.length === 0) return 0;
     entry['gen_ai.input.messages_delta'] = [
       { role: 'user', parts: uriParts },
     ] as unknown as JsonValue;
@@ -397,8 +393,6 @@ async function appendUriPartsToMessagesDelta(
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
   record.parts = parts;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-  if (uriParts.length === 0) return 0;
   parts.push(...uriParts);
   return uriParts.length;
 }

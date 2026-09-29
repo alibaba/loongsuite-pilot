@@ -1798,7 +1798,7 @@ describe('QoderTraceInput multimodal', () => {
       it('attaches paths to both llm.request and the same-turn other', async () => {
         const dir = makeMmTempDir();
         const img = writePng(dir, 'prefer.png', 'prefer');
-        const pathToUri = fakePathToUri;
+        const pathToUri = vi.fn(fakePathToUri);
         const user = mmEntry({
           'event.name': 'other',
           'gen_ai.input.messages_delta': [
@@ -1816,8 +1816,45 @@ describe('QoderTraceInput multimodal', () => {
 
         await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
 
+        expect(pathToUri).toHaveBeenCalledTimes(1);
         expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
         expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some((p: any) => p.type === 'uri')).toBe(true);
+      });
+
+      it('does not consume request_id when only other can take the uri', async () => {
+        const dir = makeMmTempDir();
+        const img = writePng(dir, 'retry.png', 'retry');
+        const pathToUri = vi.fn(fakePathToUri);
+        const user = mmEntry({
+          'event.name': 'other',
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'explain' }] },
+          ],
+        });
+        const request = mmEntry({
+          'event.name': 'llm.request',
+          'gen_ai.request.id': 'req-retry',
+          'gen_ai.input.messages_delta': [null] as any,
+        });
+        mockReadAttachedImagePaths.mockResolvedValue(new Map([['req-retry', attached([img])]]));
+
+        await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
+
+        expect(pathToUri).toHaveBeenCalledTimes(1);
+        expect(request['gen_ai.input.messages_delta']).toEqual([null]);
+        expect((user['gen_ai.input.messages_delta'] as any[])[0].parts.some(
+          (p: any) => p.type === 'uri' && p.uri === 'oss://test/retry',
+        )).toBe(true);
+
+        request['gen_ai.input.messages_delta'] = [
+          { role: 'user', parts: [{ type: 'text', content: 'ctx' }] },
+        ];
+        await enrichIdeMultimodal([request, user], { uploadMode: 'input', pathToUri });
+
+        expect(pathToUri).toHaveBeenCalledTimes(2);
+        expect((request['gen_ai.input.messages_delta'] as any[])[0].parts.some(
+          (p: any) => p.type === 'uri' && p.uri === 'oss://test/retry',
+        )).toBe(true);
       });
 
       it('batches multiple request_ids and only enriches matching rows', async () => {
