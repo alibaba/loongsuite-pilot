@@ -2323,6 +2323,7 @@ describe('QoderTraceInput multimodal', () => {
       const img = writePng(dir, 'call-gate.png', 'call-gate');
       const makeCall = () => mmEntry({
         'event.name': 'tool.call',
+        'gen_ai.tool.name': 'Read',
         'gen_ai.tool.call.arguments': { file_path: img },
       });
 
@@ -2336,6 +2337,26 @@ describe('QoderTraceInput multimodal', () => {
       expect((outputOnly['gen_ai.tool.call.arguments'] as any[]).some(
         (p: any) => p.type === 'uri' && p.uri === 'oss://test/call-gate',
       )).toBe(true);
+    });
+
+    it('does not extract tool.call file_path unless the tool is Read', async () => {
+      const dir = makeMmTempDir();
+      const img = writePng(dir, 'write.png', 'write-img');
+      const pathToUri = vi.fn(fakePathToUri);
+      const args = { file_path: img };
+
+      for (const name of ['Write', 'Writeable']) {
+        pathToUri.mockClear();
+        const tool = mmEntry({
+          'event.name': 'tool.call',
+          'gen_ai.tool.name': name,
+          'gen_ai.tool.call.arguments': args,
+        });
+        await enrichIdeMultimodal([tool], { uploadMode: 'output', pathToUri });
+        expect(pathToUri, name).not.toHaveBeenCalled();
+        expect(tool['gen_ai.tool.call.arguments']).toEqual(args);
+        expect(tool['gen_ai.output.multimodal_metadata']).toBeUndefined();
+      }
     });
 
     it('output mode resolves relative markdown images against agent.qoder.cwd', async () => {

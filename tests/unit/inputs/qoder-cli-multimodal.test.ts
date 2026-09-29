@@ -378,6 +378,7 @@ describe('enrichCliMultimodal', () => {
     const img = writePng(dir, 'call-gate.png', 'call-gate');
     const makeCall = () => cliEntry({
       'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.arguments': { file_path: img },
     });
 
@@ -398,6 +399,7 @@ describe('enrichCliMultimodal', () => {
     writePng(dir, 'rel.png', 'rel-call');
     const tool = cliEntry({
       'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.arguments': { file_path: 'rel.png' },
     });
     (tool as Record<string, unknown>)['agent.qoder.cwd'] = dir;
@@ -408,9 +410,30 @@ describe('enrichCliMultimodal', () => {
     )).toBe(true);
   });
 
+  it('does not extract tool.call file_path unless the tool is Read', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'write.png', 'write-img');
+    const pathToUri = vi.fn(fakePathToUri);
+    const args = { file_path: img };
+
+    for (const name of ['Write', 'Writeable']) {
+      pathToUri.mockClear();
+      const tool = cliEntry({
+        'event.name': 'tool.call',
+        'gen_ai.tool.name': name,
+        'gen_ai.tool.call.arguments': args,
+      });
+      await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri });
+      expect(pathToUri, name).not.toHaveBeenCalled();
+      expect(tool['gen_ai.tool.call.arguments']).toEqual(args);
+      expect(tool['gen_ai.output.multimodal_metadata']).toBeUndefined();
+    }
+  });
+
   it('leaves non-image tool.call arguments unchanged', async () => {
     const tool = cliEntry({
       'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.arguments': { file_path: '/tmp/notes.ts' },
     });
     await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri: fakePathToUri });

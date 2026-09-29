@@ -314,6 +314,7 @@ async function enrichToolCallImages(
 ): Promise<void> {
   for (const entry of entries) {
     if (entry['event.name'] !== 'tool.call') continue;
+    if (entry['gen_ai.tool.name'] !== 'Read') continue;
     const raw = entry['gen_ai.tool.call.arguments'];
     if (raw === undefined || raw === null || raw === '') continue;
     if (Array.isArray(raw)) continue;
