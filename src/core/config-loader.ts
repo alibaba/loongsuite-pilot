@@ -1131,7 +1131,7 @@ function buildSlsConfig(
     const userMode = readUserSlsMode(single);
     const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
     const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
-    const userApiKey = env('LOONGSUITE_SLS_API_KEY') ?? single.apiKey;
+    const userApiKey = single.apiKey;
     const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
     const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
     const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;

@@ -2097,6 +2097,32 @@ restore_pilot_after_deploy() {
 # ============================================================
 # CMD: install
 # ============================================================
+reject_multi_sls_config() {
+    local config_file="$DATA_DIR/config.json"
+    [ -f "$config_file" ] || return 0
+
+    local status
+    if "$NODE_BIN" -e '
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+' "$config_file"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 12 ]; then
+        msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" \
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually." >&2
+    else
+        msg "❌ 无法检查现有 config.json，请检查文件后重试" \
+            "❌ Cannot inspect existing config.json; check the file and retry." >&2
+    fi
+    return 1
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -2104,6 +2130,7 @@ cmd_install() {
 
     validate_install_user
     check_deps
+    reject_multi_sls_config
 
     # Migrate legacy layout if needed
     migrate_legacy_layout

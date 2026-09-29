@@ -125,6 +125,8 @@ API Key 模式传入：
 }
 ```
 
+`install` 命令不修改已有的 `sls` 数组，检测到后会报错退出；请手动编辑 `config.json` 中的目标和 Key。`upgrade` 命令会保留该文件。
+
 ## 环境变量
 
 | 环境变量 | 说明 |
@@ -133,10 +135,11 @@ API Key 模式传入：
 | `LOONGSUITE_SLS_PROJECT` | SLS project。 |
 | `LOONGSUITE_SLS_LOGSTORE` | SLS logstore。 |
 | `LOONGSUITE_SLS_MODE` | `webtracking`、`ak` 或 `apiKey`。 |
-| `LOONGSUITE_SLS_API_KEY` | API Key 模式的 API Key。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | AK 模式的 Access Key ID。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AK 模式的 Access Key Secret。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 上报。 |
+
+API Key 模式从 `config.sls` 读取 `apiKey`，不再支持环境变量覆盖。
 
 ## 验证 SLS 输出
 
