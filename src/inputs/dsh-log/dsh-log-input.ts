@@ -10,7 +10,7 @@ import {
   type SessionInputOptions,
 } from '../base/base-session-input.js';
 import {
-  transformDshRecord,
+  transformDshRecordEntries,
   newState,
   parseDshRequestHeader,
   type DshEventAggregatorState,
@@ -138,7 +138,7 @@ export class DshLogInput extends BaseSessionInput {
       inode: 0,
     };
     this.fileStates.set(filePath, runtime);
-    return this.processRecord(record, filePath, 0, runtime);
+    return this.processRecord(record, filePath, 0, runtime).at(-1) ?? null;
   }
 
   private async processDshFile(filePath: string): Promise<AgentActivityEntry[]> {
@@ -187,8 +187,7 @@ export class DshLogInput extends BaseSessionInput {
     const completeEnd = await this.forEachCompleteLine(filePath, offset, end, async (line, lineOffset) => {
       try {
         const record = JSON.parse(line) as Record<string, unknown>;
-        const entry = this.processRecord(record, filePath, lineOffset, runtime!);
-        if (entry) entries.push(entry);
+        entries.push(...this.processRecord(record, filePath, lineOffset, runtime!));
       } catch (err) {
         logger.warn('invalid dsh session line', { file: filePath, error: String(err) });
       }
@@ -270,7 +269,7 @@ export class DshLogInput extends BaseSessionInput {
     filePath: string,
     lineOffset: number,
     runtime: DshFileRuntimeState,
-  ): AgentActivityEntry | null {
+  ): AgentActivityEntry[] {
     const sid = typeof record.sid === 'string' && record.sid.length > 0
       ? record.sid
       : undefined;
@@ -282,7 +281,7 @@ export class DshLogInput extends BaseSessionInput {
           expectedSessionId: runtime.boundSessionId,
           actualSessionId: sid,
         });
-        return null;
+        return [];
       }
     }
 
@@ -292,11 +291,11 @@ export class DshLogInput extends BaseSessionInput {
     if (sid && parseDshRequestHeader(record)) {
       runtime.lastHeaderOffset = lineOffset;
     }
-    const entry = transformDshRecord(record, ClientType.Dsh, runtime.aggregator);
+    const entries = transformDshRecordEntries(record, ClientType.Dsh, runtime.aggregator);
     if (record.type === 'turn/end') {
       runtime.activeTurnStartOffset = undefined;
     }
-    return entry;
+    return entries;
   }
 
   private updateCheckpoint(
