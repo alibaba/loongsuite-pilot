@@ -3,14 +3,21 @@
  *
  * Uses REAL components — DeploymentManager, PluginInjectStrategy, HookWatchdog,
  * and the orchestrator's target builder — against a throwaway sandbox. No logic
- * is mocked (only the build-time global and logger noise). It proves the full
+ * is mocked (only home lookup, the build-time global and logger noise). It proves the full
  * loop: deploy → spec overwritten by a 3rd party → watchdog re-injects it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { isolateAgentHome } from '../helpers/isolated-agent-home.js';
 import type { AgentDefinition, HookWatchdogConfig } from '../../src/types/index.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 vi.mock('../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -45,6 +52,7 @@ describe('E2E: opencode plugin-inject watchdog self-heal', () => {
   let resolvedSpec: string;
   let def: AgentDefinition;
   let mgr: DeploymentManager;
+  let restoreHome: () => void;
 
   async function readPlugins(): Promise<unknown[]> {
     const json = JSON.parse(await fs.readFile(configFile, 'utf-8'));
@@ -54,6 +62,7 @@ describe('E2E: opencode plugin-inject watchdog self-heal', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode-selfheal-'));
+    restoreHome = isolateAgentHome(tmpDir);
     dataDir = path.join(tmpDir, 'pilot-data');
     configDir = path.join(tmpDir, 'opencode-config'); // exists → detectAgent() passes
     configFile = path.join(configDir, 'opencode.json');
@@ -78,13 +87,13 @@ describe('E2E: opencode plugin-inject watchdog self-heal', () => {
     };
 
     mgr = new DeploymentManager({ dataDir, pilotDir: tmpDir, builtinAgentsDir: path.join(tmpDir, 'agents.d') });
-    // Populate definitions without invoking deployAll() (which would run the
-    // real plugin-migration against the real $HOME).
+    // Drive deploySingle/watchdog directly; the startup sweep is not under test.
     (mgr as unknown as { definitions: AgentDefinition[] }).definitions = [def];
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
   });
 
   it('re-injects the plugin spec after it is overwritten by a third party', async () => {

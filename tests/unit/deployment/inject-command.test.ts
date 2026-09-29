@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 import { injectClaudeDirectory, mergeClaudeHooks, parseInjectCommandArgs, runInjectCommand } from '../../../src/deployment/inject-command.js';
 import { loadConfig } from '../../../src/core/config-loader.js';
 import { acquireSingleInstanceLock } from '../../../src/utils/single-instance-lock.js';
@@ -12,6 +13,12 @@ import type { AgentHookConfig } from '../../../src/types/deployment.js';
 
 let root: string;
 let hook: AgentHookConfig;
+let restoreHome: () => void;
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 vi.mock('../../../src/core/config-loader.js', () => ({ loadConfig: vi.fn() }));
 vi.mock('../../../src/deployment/deploy-command.js', () => ({
   resolvePilotDir: () => process.cwd(),
@@ -28,6 +35,7 @@ beforeAll(async () => {
 afterAll(async () => { await fs.rm(bundleDir, { recursive: true, force: true }); });
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-inject-'));
+  restoreHome = isolateAgentHome(root);
   const def = JSON.parse(await fs.readFile('agents.d/claude-code.json', 'utf8'));
   hook = { ...def.hook, hookCommand: path.join(root, 'hooks', 'claude-code-loongsuite-pilot-hook.sh') };
   await fs.mkdir(path.dirname(hook.hookCommand));
@@ -35,7 +43,10 @@ beforeEach(async () => {
   await fs.writeFile(path.join(root, 'hooks', 'claude-code-hook-processor.mjs'), '');
   vi.mocked(loadConfig).mockResolvedValue({ enabled: true, dataDir: root } as any);
 });
-afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  try { await fs.rm(root, { recursive: true, force: true }); }
+  finally { vi.unstubAllEnvs(); vi.restoreAllMocks(); restoreHome(); }
+});
 
 describe('session inject', () => {
   it('parses both option forms and rejects unsupported or empty arguments', () => {
@@ -128,7 +139,6 @@ describe('session inject', () => {
     await expect(fs.stat(path.join(root, 'deployed-agents.json'))).rejects.toThrow();
   });
   it('resolves explicit, environment and default targets and reports JSON', async () => {
-    vi.stubEnv('HOME', root);
     vi.stubEnv('CLAUDE_CONFIG_DIR', path.join(root, 'env-session'));
     const output = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(await runInjectCommand(['--agents=claude-code', '--json', '--config-dir', path.join(root, 'explicit')])).toBe(0);
@@ -137,7 +147,9 @@ describe('session inject', () => {
     expect(JSON.parse(output.mock.calls.at(-1)![0]).settingsPath).toContain('/env-session/settings.json');
     vi.stubEnv('CLAUDE_CONFIG_DIR', '');
     expect(await runInjectCommand(['--agents=claude-code', '--json'])).toBe(0);
-    expect(JSON.parse(output.mock.calls.at(-1)![0]).settingsPath).toContain('/.claude/settings.json');
+    const defaultSettings = path.join(await fs.realpath(root), '.claude', 'settings.json');
+    expect(JSON.parse(output.mock.calls.at(-1)![0]).settingsPath).toBe(defaultSettings);
+    expect(JSON.parse(await fs.readFile(defaultSettings, 'utf8')).env.LOONGSUITE_PILOT_DATA_DIR).toBe(root);
   });
   it('reports disabled collection and missing assets without creating settings', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => {});

@@ -4,8 +4,15 @@ import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -32,10 +39,12 @@ describe('DeploymentManager', () => {
   let dataDir: string;
   let pilotDir: string;
   let builtinDir: string;
+  let restoreHome: () => void;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deploy-mgr-'));
+    restoreHome = isolateAgentHome(tmpDir);
     dataDir = path.join(tmpDir, 'data');
     pilotDir = path.join(tmpDir, 'pilot');
     builtinDir = path.join(tmpDir, 'agents.d');
@@ -46,7 +55,8 @@ describe('DeploymentManager', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
   });
 
   function makeManager() {
