@@ -33,7 +33,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain("(allSupported || selected.has(id)) ? multimodalMode : 'none'");
     expect(installerSh).not.toContain('listed.has');
     expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
-    expect(installerSh).toContain('storage: { type: \'sls\' }');
+    expect(installerSh).toContain('target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore }');
     expect(installerSh).toContain("label: 'multimodal.storage.type'");
     expect(installerSh).toContain('"multimodalMode":"%s"');
   });
@@ -58,7 +58,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain("(allSupported || selected.has(id)) ? opts.multimodalMode : 'none'");
     expect(installerPs1).not.toContain('listed.has');
     expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
-    expect(installerPs1).toContain('storage: { type: \'sls\' }');
+    expect(installerPs1).toContain('target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore }');
     expect(installerPs1).toContain("label: 'multimodal.storage.type'");
     expect(installerPs1).toContain('multimodalMode = $script:MultimodalMode');
   });
@@ -370,7 +370,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.agents.cursor).toEqual({ enabled: false });
       });
 
-      it('writes type-only sls storage when mode is on and the SLS four-tuple is complete', () => {
+      it('writes sls type and target when mode is on and the SLS four-tuple is complete', () => {
         const result = runWriteConfig(platform, 'all', {
           ...enabledAgents,
           multimodal: { extra: true },
@@ -380,7 +380,14 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          storage: { type: 'sls' },
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+          },
         });
       });
 
@@ -394,7 +401,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.multimodal).toBeUndefined();
       });
 
-      it('replaces existing storage with type-only sls when mode is on and the four-tuple is complete', () => {
+      it('replaces existing storage with sls type and target when mode is on and the four-tuple is complete', () => {
         const result = runWriteConfig(platform, 'input', {
           ...enabledAgents,
           multimodal: {
@@ -411,7 +418,14 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          storage: { type: 'sls' },
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+          },
         });
       });
 

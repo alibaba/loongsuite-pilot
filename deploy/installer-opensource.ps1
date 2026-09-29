@@ -1597,7 +1597,12 @@ if (opts.multimodalMode) {
 }
 
 if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');

@@ -1302,7 +1302,12 @@ if (multimodalMode) {
 }
 
 if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
