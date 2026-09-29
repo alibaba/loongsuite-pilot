@@ -78,6 +78,10 @@ export interface InnerDataConfig {
   otlp?: OtlpEndpointEntry[];
   cms?: CmsEndpointEntry[];
   serviceNamePrefix?: string;
+  /** Default storage used when the user has not configured a multimodal block. */
+  multimodal?: ConfigFile['multimodal'];
+  /** Per-agent defaults; explicit user fields take precedence. */
+  agents?: ConfigFile['agents'];
 }
 
 /**
@@ -312,7 +316,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     listeners: buildListenersConfig(file),
     flushers,
     retention: buildRetentionConfig(file),
-    agents: buildAgentsConfig(file),
+    agents: buildAgentsConfig(file, innerDataConfig),
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),
@@ -320,7 +324,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
-    multimodal: buildMultimodalConfig(file, flushers.sls),
+    multimodal: buildMultimodalConfig(file, flushers.sls, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
     interceptor,
   };
@@ -357,14 +361,18 @@ type SlsApiKeyTarget = { endpoint: string; project: string; logstore: string; ap
 function buildMultimodalConfig(
   file: ConfigFile | null,
   sls?: SlsFlusherConfig,
+  innerDataConfig?: InnerDataConfig | null,
 ): MultimodalRuntimeConfig | undefined {
   const slsTarget = findUniqueSlsApiKeyTarget(sls, file);
-  const block = file?.multimodal;
+  // Select a whole block so managed storage targets and user credentials are not merged.
+  const block = file?.multimodal !== undefined
+    ? file.multimodal
+    : innerDataConfig?.multimodal;
   try {
-    if (block == null) {
+    if (block === undefined) {
       return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
     }
-    if (typeof block !== 'object' || Array.isArray(block)) {
+    if (block === null || typeof block !== 'object' || Array.isArray(block)) {
       throw new Error('multimodal must be an object');
     }
     if (block.storage === undefined) {
@@ -707,12 +715,25 @@ function buildCmsConfig(file: ConfigFile | null): CmsConfig {
   };
 }
 
-function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
-  const result: AgentsConfig = {};
-  if (!file?.agents || typeof file.agents !== 'object') return result;
+function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataConfig | null): AgentsConfig {
+  const policies: NonNullable<ConfigFile['agents']> = {};
+  for (const source of [innerDataConfig?.agents, file?.agents]) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    for (const [agentType, policy] of Object.entries(source)) {
+      if (!agentType || !policy || typeof policy !== 'object' || Array.isArray(policy)) continue;
+      const previous = policies[agentType];
+      policies[agentType] = {
+        ...previous,
+        ...policy,
+        ...(policy.multimodal && typeof policy.multimodal === 'object' && !Array.isArray(policy.multimodal)
+          ? { multimodal: { ...previous?.multimodal, ...policy.multimodal } }
+          : {}),
+      };
+    }
+  }
 
-  for (const [agentType, policy] of Object.entries(file.agents)) {
-    if (!agentType || !policy || typeof policy !== 'object') continue;
+  const result: AgentsConfig = {};
+  for (const [agentType, policy] of Object.entries(policies)) {
     const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
     const multimodal = buildAgentMultimodalConfig(policy.multimodal);
     result[agentType] = {
