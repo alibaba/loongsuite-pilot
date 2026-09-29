@@ -1,0 +1,170 @@
+# Copilot hook entrypoint for Windows.
+#
+# Registered command:
+#   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+#     -File "<pilot-data>\hooks\copilot-loongsuite-pilot-hook.ps1" <subcommand>
+#
+# The hook is fail-open: it prints nothing and always exits zero. The
+# processor records only structural wakeup hints.
+
+param(
+    [Parameter(Position = 0)]
+    [string]$Subcommand = "unknown"
+)
+
+$ErrorActionPreference = "Stop"
+$MIN_NODE_MAJOR = 18
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Processor = Join-Path $ScriptDir "copilot-hook-event-writer.mjs"
+$PilotDataDir = Split-Path -Parent $ScriptDir
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
+}
+
+function Write-EmptyResult {
+    # Wakeup-only hook: Copilot expects no stdout, so stay silent and fail open.
+    return
+}
+
+function Convert-NodePath {
+    param([string]$PathValue)
+    if (-not $PathValue) { return $PathValue }
+
+    $candidate = $PathValue.Trim().Trim('"')
+    if ($candidate -match '^/([A-Za-z])/(.*)$') {
+        $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
+    }
+    # -match, not [System.IO.Path]::HasExtension(): a static method call on a
+    # non-core type throws under ConstrainedLanguage mode (WDAC), and the catch at
+    # the bottom of this file would swallow it into a silent empty result. The regex
+    # is HasExtension's contract: a dot after the last separator that is not the
+    # final character. Trailing dot ("node.") and a dotted parent directory
+    # ("v18.20.4/node") both correctly yield no match.
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
+        $candidate = "$candidate.exe"
+    }
+    return $candidate
+}
+
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the major from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeMajor {
+    param([string]$bin)
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
+    return $null
+}
+
+function Test-NodeSuitable {
+    param([string]$Bin)
+    $resolved = Convert-NodePath $Bin
+    if (-not $resolved -or -not (Test-Path -LiteralPath $resolved)) { return $false }
+    $managedMajor = Get-ManagedNodeMajor $resolved
+    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
+    try {
+        $version = & $resolved --version 2>$null
+        if (-not $version) { return $false }
+        $major = [int](($version -replace '^v', '').Split('.')[0])
+        return $major -ge $MIN_NODE_MAJOR
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-NodeBin {
+    $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $env:LOONGSUITE_PILOT_DATA_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    }
+    $pinFile = Join-Path $dataDir "node-bin"
+    if (Test-Path -LiteralPath $pinFile) {
+        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+        # defaults Get-Content to ANSI, which turns it into "??".
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath (([string]$pinContent).Trim([char]0xFEFF))
+        if (Test-NodeSuitable $pinned) { return $pinned }
+    }
+
+    $candidates = @()
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME)) {
+        $nvmDirs = Get-ChildItem -LiteralPath $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $nvmDirs) {
+            $candidates += Join-Path $dir.FullName "node.exe"
+        }
+    }
+
+    $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
+    if (Test-Path -LiteralPath $fnmDir) {
+        $fnmDirs = Get-ChildItem -LiteralPath $fnmDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $fnmDirs) {
+            $candidates += Join-Path $dir.FullName "installation\node.exe"
+        }
+    }
+
+    $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
+    $candidates += "C:\Program Files\nodejs\node.exe"
+    $candidates += "C:\Program Files (x86)\nodejs\node.exe"
+    $pathNode = Get-Command node -ErrorAction SilentlyContinue
+    if ($pathNode) { $candidates += $pathNode.Source }
+
+    foreach ($candidate in $candidates) {
+        $resolved = Convert-NodePath $candidate
+        if (Test-NodeSuitable $resolved) { return $resolved }
+    }
+    return $null
+}
+
+if (-not (Test-Path -LiteralPath $Processor)) {
+    Write-EmptyResult
+    exit 0
+}
+
+try {
+    $nodeBin = Resolve-NodeBin
+    if (-not $nodeBin) {
+        Write-EmptyResult
+        exit 0
+    }
+
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads it directly; PowerShell never touches the bytes. The old code used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo, whose .NET
+    # calls throw under Constrained Language Mode (WDAC/Device Guard) and silently
+    # drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup now live in
+    # node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-EmptyResult
+        exit 0
+    }
+    $result = ($result | Out-String).Trim()
+
+    if ($result) {
+        Write-Output $result
+    } else {
+        Write-EmptyResult
+    }
+} catch {
+    Write-EmptyResult
+}
+
+exit 0

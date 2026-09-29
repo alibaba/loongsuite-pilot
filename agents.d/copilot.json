@@ -1,0 +1,20 @@
+{
+  "id": "copilot",
+  "displayName": "GitHub Copilot",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["$COPILOT_HOME"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "$COPILOT_HOME/hooks/loongsuite-pilot.json",
+    "events": ["SessionStart", "UserPromptSubmit", "Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
+    "format": "flat",
+    "matcher": "",
+    "eventSubcommand": "kebab-case"
+  },
+  "input": {
+    "type": "session-file-polling"
+  }
+}

@@ -819,6 +819,7 @@ function buildListenersConfig(
     'opencode-log': { enabled: true, pollInterval: 30_000 },
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
     workbuddy: { enabled: true, pollInterval: 30_000 },
+    copilot: { enabled: true, pollInterval: 30_000 },
     'hermes-agent-log': { enabled: true, pollInterval: 30_000 },
   };
 

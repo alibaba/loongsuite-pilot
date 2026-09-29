@@ -2078,7 +2078,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
-        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
+        (Join-Path $env:USERPROFILE ".copilot\hooks\loongsuite-pilot.json")
     )
 
     foreach ($cfg in $configs) {

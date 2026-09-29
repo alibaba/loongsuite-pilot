@@ -143,6 +143,7 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - Tool call arguments.
 - Tool call results.
 - OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. This metadata is masked even with message-content capture disabled; masking mode `none` still leaves it unchanged.
+- GitHub Copilot prompts, assistant text, tool arguments and tool results, which use the same `gen_ai.*` message fields as other agents. Copilot's system prompt is never collected.
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.
