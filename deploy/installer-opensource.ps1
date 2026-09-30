@@ -1597,7 +1597,12 @@ if (opts.multimodalMode) {
 }
 
 if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
@@ -2710,6 +2715,37 @@ function Start-PilotAndWait {
 # ============================================================
 # CMD: install
 # ============================================================
+function Assert-SingleSlsConfig {
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path -LiteralPath $configFile)) { return }
+
+    $prevEAP = $ErrorActionPreference
+    $configExit = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e @'
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+'@ $configFile
+        $configExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($configExit -eq 12) {
+        Msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" `
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually."
+        exit 1
+    }
+    if ($configExit -ne 0) {
+        Msg "❌ 无法检查现有 config.json，请检查文件后重试" `
+            "❌ Cannot inspect existing config.json; check the file and retry."
+        exit 1
+    }
+}
+
 function Cmd-Install {
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
@@ -2718,6 +2754,7 @@ function Cmd-Install {
     Warn-ElevatedInstall
 
     Check-Deps
+    Assert-SingleSlsConfig
     Migrate-LegacyLayout
 
     $curVer = Get-InstalledVersion
