@@ -813,6 +813,7 @@ function buildListenersConfig(
     'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
+    'cursor-cli-transcript': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'grok-build-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },

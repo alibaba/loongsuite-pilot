@@ -53,6 +53,7 @@ import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
+import { CursorCliTranscriptInput } from '../inputs/cursor-cli-transcript/cursor-cli-transcript-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
@@ -138,6 +139,7 @@ export class Orchestrator extends EventEmitter {
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
     'cursor-hook': 'cursor',
+    'cursor-cli-transcript': 'cursor-cli',
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
@@ -1325,6 +1327,24 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['cursor-hook']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
+      }),
+    );
+
+    // --- Cursor CLI Transcript (CLI session JSONL) ---
+    const cursorCliTranscriptInput = new CursorCliTranscriptInput({
+      stateStore: this.stateStore,
+    });
+    this.inputManager.registerInput(cursorCliTranscriptInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(cursorCliTranscriptInput, {
+        watchPaths: CursorCliTranscriptInput.getWatchPaths(),
+        isAvailable: CursorCliTranscriptInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['cursor-cli-transcript']) &&
+          this.agentControlManager.resolveEnabled(
+            'cursor-cli-transcript',
+            listenerCfg['cursor-cli-transcript']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['cursor-cli-transcript']?.pollInterval,
       }),
     );
 
