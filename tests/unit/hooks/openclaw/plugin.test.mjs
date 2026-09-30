@@ -1184,10 +1184,16 @@ describe('OpenClaw plugin stateful pipeline', () => {
     // These hooks are synchronous in OpenClaw and must not return Promises.
     expect(returnA).toBeUndefined();
     expect(returnB).toBeUndefined();
+    for (const suffix of ['b', 'a']) {
+      handlers.model_call_ended({ runId: `run-${suffix}`, callId: `run-${suffix}:model:1`,
+        timeToFirstByteMs: suffix === 'a' ? 12 : 34 }, { runId: `run-${suffix}` });
+    }
     const records = readOutputRecords().filter((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(records).toHaveLength(2);
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-a');
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-b');
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.response.time_to_first_token']).toBe(12_000_000);
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBe(34_000_000);
   });
 
   it('redacts content before persistence while retaining token usage', async () => {
@@ -1295,6 +1301,71 @@ describe('OpenClaw plugin stateful pipeline', () => {
       r['agent.openclaw.message_role'] !== 'assistant',
     );
     expect(nonAssistant.length).toBe(0);
+  });
+
+  it.each(['end-first', 'message-first'])('joins %s metadata once and preserves the assistant observation timestamp', async (order) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'timing-order', sessionId: 'timing-session', sessionKey: 'agent:main:timing-order' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const end = () => handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12.5, durationMs: 100, outcome: 'error', error: 'synthetic error' }, ctx);
+    if (order === 'end-first') end();
+    now += 100;
+    const observed = `${now}000000`;
+    const message = { message: { role: 'assistant', content: [], stopReason: 'error', usage: { input: 5, output: 0 }, responseId: 'response-native' } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    now += 500;
+    end();
+    end();
+    handlers.llm_output({ ...ctx, usage: { input: 5, output: 0 } }, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ time_unix_nano: observed,
+      'gen_ai.response.time_to_first_token': 12_500_000, 'gen_ai.usage.input_tokens': 5,
+      'gen_ai.response.id': 'response-native', 'error.message': 'synthetic error',
+      'agent.openclaw.duration_ms': 100, 'agent.openclaw.call_id': 'native-1' });
+  });
+
+  it.each(['llm_output', 'agent_end', 'model_call_started'])('flushes message-only responses at %s without inventing timing or borrowing a late call', async (boundary) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'missing-end', sessionId: 'missing-session', sessionKey: 'agent:main:missing-end' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const message = { message: { role: 'assistant', content: [{ type: 'text', text: 'first' }], stopReason: 'stop', usage: { input: 3, output: 1 } } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers[boundary]({ ...ctx, callId: 'native-2', success: true }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 999 }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'unknown-native', timeToFirstByteMs: 999 }, ctx);
+    if (boundary === 'model_call_started') {
+      handlers.before_message_write({ message: { ...message.message, responseId: 'second' } }, { sessionKey: ctx.sessionKey });
+      handlers.model_call_ended({ ...ctx, callId: 'native-2', timeToFirstByteMs: 24 }, ctx);
+    }
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(boundary === 'model_call_started' ? 2 : 1);
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
+    if (responses[1]) expect(responses[1]['gen_ai.response.time_to_first_token']).toBe(24_000_000);
+  });
+
+  it.each([0, 12.5, undefined, null, -1, NaN, Infinity, '12'])('validates end-only native TTFT %s without fabricating usage', async (ttft) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'end-only', sessionId: 'end-session', sessionKey: 'agent:main:end-only' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1' }, ctx);
+    now += 100;
+    const endTime = `${now}000000`;
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: ttft, outcome: 'error' }, ctx);
+    now += 100;
+    handlers.agent_end({ ...ctx, success: false }, ctx);
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0].time_unix_nano).toBe(endTime);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBe(typeof ttft === 'number' && Number.isFinite(ttft) && ttft >= 0 ? ttft * 1_000_000 : undefined);
   });
 
   it('timestamps completion when before_message_write fires, not when the assistant message was created', async () => {
