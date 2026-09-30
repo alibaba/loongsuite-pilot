@@ -312,6 +312,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
     ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
+    ...(session.dir ? { [`agent.${AGENT_TYPE}.cwd`]: session.dir } : {}),
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_BASE_FIELD_PATCH,
     ...RESOURCE_ATTRIBUTE_FIELDS,
@@ -952,10 +953,7 @@ function safe(fn) {
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
-export default {
-  id: "loongsuite-pilot-opencode",
-
-  server: async (input, _options) => {
+async function initPlugin(input, _options) {
     ensureDir(logDir());
 
     // OpenCode passes the instance context here; `directory` is the working
@@ -1021,5 +1019,312 @@ export default {
 
       dispose: safe(async function handleDispose() {}),
     };
-  },
+}
+
+function extractV2Text(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const out = value.map(extractV2Text).filter(Boolean).join("\n");
+    return out || null;
+  }
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.content === "string") return value.content;
+    if (Array.isArray(value.parts)) {
+      const out = value.parts
+        .map((p) => (typeof p?.text === "string" ? p.text : null))
+        .filter(Boolean)
+        .join("\n");
+      return out || null;
+    }
+  }
+  return null;
+}
+
+function claimV2EventLoop() {
+  const lockPath = path.join(logDir(), ".v2event-loop.lock");
+  const probePid = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return true;
+    } catch {}
+    let owner = NaN;
+    try {
+      owner = Number(fs.readFileSync(lockPath, "utf8").trim());
+    } catch {
+      return false;
+    }
+    if (owner === process.pid) return true;
+    if (Number.isFinite(owner) && owner > 0 && probePid(owner)) return false;
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function handleV2SessionCreated(data) {
+  const sessionID = data?.sessionID;
+  if (!sessionID) return;
+  const session = getSession(sessionID);
+  const model = data?.model;
+  if (model) {
+    const modelID = typeof model === "string" ? model : model.id || model.modelID;
+    const providerID = typeof model === "object" ? model.providerID : undefined;
+    if (modelID || providerID) session.modelInfo = { providerID, modelID };
+  }
+  if (data?.location?.directory) session.dir = data.location.directory;
+  if (data?.agent) {
+    session.agentMeta = {
+      name: typeof data.agent === "string" ? data.agent : data.agent?.name || AGENT_TYPE,
+    };
+  }
+}
+
+function handleV2Inbox(data, userId) {
+  const item = data?.item;
+  if (!item || item.type !== "text") return;
+  const sessionID = data?.sessionID;
+  if (!sessionID) return;
+  const session = getSession(sessionID);
+  session.turnSeq += 1;
+  if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
+  const traceId = generateTraceId();
+  const turnId = `${sessionID}:t${session.turnSeq}:${traceId}`;
+  session.currentTurn = { turnId, traceId, stepSeq: 0, userPromptText: null };
+  session.pendingParts = [];
+  session.emittedToolCalls = new Set();
+  session.stepStartTimeMs = null;
+  session.lastStepOutputParts = null;
+  session.textBuffer = new Map();
+  const userPromptText = extractV2Text(item?.payload?.text ?? item?.payload);
+  session.currentTurn.userPromptText = userPromptText;
+  const record = {
+    ...buildCommonFields(sessionID, session, userId),
+    "event.name": "other",
+  };
+  if (userPromptText) {
+    record["gen_ai.input.messages_delta"] = [
+      {
+        role: "user",
+        parts: [{ type: "text", content: truncate(userPromptText, MAX_CONTENT_SIZE) }],
+      },
+    ];
+  }
+  writeRecord(record);
+}
+
+function handleV2StepStarted(data, userId) {
+  const sessionID = data?.sessionID;
+  if (!sessionID) return;
+  const session = getSession(sessionID);
+  if (!session.currentTurn) {
+    const traceId = generateTraceId();
+    session.currentTurn = {
+      turnId: `${sessionID}:t${(session.turnSeq += 1)}:${traceId}`,
+      traceId,
+      stepSeq: 0,
+      userPromptText: null,
+    };
+    session.pendingParts = [];
+    session.emittedToolCalls = new Set();
+    session.textBuffer = new Map();
+  }
+  const turn = session.currentTurn;
+  turn.stepSeq += 1;
+  turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
+  turn.currentMessageId = data?.assistantMessageID;
+  session.stepStartTimeMs = typeof data?.started === "number" ? data.started : Date.now();
+  const model = data?.model;
+  const modelID = typeof model === "string" ? model : model?.id || model?.modelID;
+  const providerID = typeof model === "object" ? model?.providerID : undefined;
+  if (modelID || providerID) session.modelInfo = { providerID, modelID };
+  if (data?.agent) {
+    session.agentMeta = {
+      name: typeof data.agent === "string" ? data.agent : data.agent?.name || AGENT_TYPE,
+    };
+  }
+  const record = {
+    ...buildCommonFields(sessionID, session, userId),
+    "event.name": "llm.request",
+    "gen_ai.step.id": turn.currentStepId,
+    "gen_ai.provider.name": inferProviderName(session.modelInfo?.providerID),
+    "gen_ai.request.model": session.modelInfo?.modelID,
+    "opencode.message.id": data?.assistantMessageID,
+  };
+  record.time_unix_nano = msToNanos(session.stepStartTimeMs) || nowNanos();
+  writeRecord(record);
+}
+
+function handleV2TextPart(data, kind, userId) {
+  const sessionID = data?.sessionID;
+  if (!sessionID) return;
+  const session = getSession(sessionID);
+  if (!session.textBuffer) session.textBuffer = new Map();
+  const key = `${data?.assistantMessageID || ""}:${data?.ordinal ?? 0}`;
+  if (data && typeof data.delta === "string") {
+    const prev = session.textBuffer.get(key);
+    session.textBuffer.set(key, {
+      kind,
+      content: (prev?.content || "") + data.delta,
+    });
+    return;
+  }
+  if (data && typeof data.text === "string") {
+    session.pendingParts.push({ kind, content: data.text });
+    session.textBuffer.delete(key);
+  }
+}
+
+function handleV2StepEnded(data, userId) {
+  const sessionID = data?.sessionID;
+  if (!sessionID) return;
+  const session = getSession(sessionID);
+  const turn = session.currentTurn;
+  if (!turn) return;
+  for (const part of session.pendingParts) {
+    if ((part.kind === "text" || part.kind === "reasoning") && !part.content) {
+      part.content = "";
+    }
+  }
+  const tokens = data?.tokens || {};
+  const cacheRead = tokens.cache?.read || 0;
+  const cacheWrite = tokens.cache?.write || 0;
+  const outputTokens = tokens.output || 0;
+  const inputTotal = (tokens.input || 0) + cacheRead + cacheWrite;
+  const finishReasons =
+    data?.finish === "error"
+      ? ["error"]
+      : deriveFinishReasons({ parts: [] }, session.pendingParts);
+  const outputMessages = buildOutputMessages(session.pendingParts, finishReasons[0]);
+  const record = {
+    ...buildCommonFields(sessionID, session, userId),
+    "event.name": "llm.response",
+    "gen_ai.step.id": turn.currentStepId,
+    "opencode.message.id": data?.assistantMessageID,
+    "gen_ai.provider.name": inferProviderName(session.modelInfo?.providerID),
+    "gen_ai.request.model": session.modelInfo?.modelID,
+    "gen_ai.response.model": session.modelInfo?.modelID,
+    "gen_ai.response.finish_reasons": finishReasons,
+    "gen_ai.usage.input_tokens": inputTotal,
+    "gen_ai.usage.output_tokens": outputTokens,
+    "gen_ai.usage.cache_read.input_tokens": cacheRead,
+    "gen_ai.usage.cache_creation.input_tokens": cacheWrite,
+    "gen_ai.usage.total_tokens": inputTotal + outputTokens,
+  };
+  if (tokens.reasoning) record["gen_ai.usage.reasoning_tokens"] = tokens.reasoning;
+  record.time_unix_nano = nowNanos();
+  if (outputMessages) record["gen_ai.output.messages"] = truncateContent(outputMessages);
+  if (data?.cost != null) record["cost_usd"] = data.cost;
+  writeRecord(record);
+  session.lastStepOutputParts = [...session.pendingParts];
+  session.pendingParts = [];
+  session.stepFinishData = null;
+}
+
+let v2Wired = false;
+
+async function runV2EventLoop(ctx, userId) {
+  try {
+    const stream = ctx.event.subscribe();
+    for await (const ev of stream) {
+      try {
+        const type = ev?.type || "";
+        const data = ev?.data || {};
+        if (type === "session.created") handleV2SessionCreated(data);
+        else if (type === "session.inbox.enqueued") handleV2Inbox(data, userId);
+        else if (type === "session.step.started") handleV2StepStarted(data, userId);
+        else if (type === "session.text.started") handleV2TextPart(data, "text", userId);
+        else if (type === "session.reasoning.started") handleV2TextPart(data, "reasoning", userId);
+        else if (type === "session.text.ended") handleV2TextPart(data, "text", userId);
+        else if (type === "session.reasoning.ended") handleV2TextPart(data, "reasoning", userId);
+        else if (type === "session.step.ended") handleV2StepEnded(data, userId);
+        else if (type === "session.error" || type === "session.idle") {
+          const sid = data.sessionID || data.sessionId;
+          if (sid) clearSession(sid);
+        }
+      } catch (err) {
+        writeError("v2event", err);
+      }
+    }
+  } catch (err) {
+    writeError("v2subscribe", err);
+  }
+}
+
+async function initPluginV2(ctx) {
+  if (v2Wired) return;
+  v2Wired = true;
+  ensureDir(logDir());
+  const worktree = ctx?.worktree;
+  agentCwd =
+    (typeof worktree === "string" && worktree) ||
+    process.cwd() ||
+    undefined;
+  const cfg = loadPilotConfig();
+  const userId = resolveUserId(cfg);
+  const attempt = async (label, fn) => {
+    try {
+      await fn();
+    } catch (err) {
+      writeError(label, err);
+    }
+  };
+  if (ctx?.session?.hook) {
+    await attempt("v2context", () =>
+      ctx.session.hook("context", async (ev) => {
+        const sessionID = ev?.sessionID;
+        if (!sessionID) return;
+        const text = extractV2Text(ev?.system);
+        if (text) getSession(sessionID).systemPrompt = text;
+      })
+    );
+  }
+  if (ctx?.tool?.hook) {
+    await attempt("v2toolbefore", () =>
+      ctx.tool.hook("execute.before", async (ev) => {
+        handleToolExecuteBefore(
+          { sessionID: ev?.sessionID, callID: ev?.id, tool: ev?.tool },
+          { args: ev?.input },
+          userId
+        );
+      })
+    );
+    await attempt("v2toolafter", () =>
+      ctx.tool.hook("execute.after", async (ev) => {
+        const failed = ev?.status === "error";
+        handleToolExecuteAfter(
+          { sessionID: ev?.sessionID, callID: ev?.id, tool: ev?.tool, args: ev?.input },
+          failed
+            ? { error: ev?.error }
+            : { output: ev?.result },
+          userId
+        );
+      })
+    );
+  }
+  if (ctx?.event?.subscribe && claimV2EventLoop()) {
+    runV2EventLoop(ctx, userId);
+  }
+}
+
+export default {
+  id: "loongsuite-pilot-opencode",
+
+  server: initPlugin,
+
+  setup: initPluginV2,
 };

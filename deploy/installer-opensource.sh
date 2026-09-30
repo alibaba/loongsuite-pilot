@@ -2556,7 +2556,7 @@ remove_opencode_plugin() {
 const fs = require('fs');
 const f = process.argv[1];
 // Our entries are identified by the pluginId or the plugin file path.
-const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode'));
 const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
 // JSONC fallback: strip block comments, whole-line // comments, and trailing
 // // comments preceded by whitespace. URL values like file:/// are never
