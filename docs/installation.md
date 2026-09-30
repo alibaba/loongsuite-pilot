@@ -6,7 +6,7 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). On supported platforms the installer downloads a managed Node.js 22.22 runtime, so a preinstalled Node.js is not required. A system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough. Linux musl (Alpine) and Windows ARM64 have no managed runtime and must supply a Node.js that meets this floor, plus `npm`.
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows

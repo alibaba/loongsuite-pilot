@@ -112,13 +112,6 @@ vi.mock('axios', () => ({
 
 // This suite exercises orchestration only; loading the native sqlite binding is
 // unnecessary and makes the test depend on the local Node ABI.
-vi.mock('sqlite3', () => ({
-  default: {
-    Database: vi.fn(),
-    OPEN_READONLY: 1,
-  },
-}));
-
 vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   QoderWorkInput: vi.fn().mockImplementation(() => ({
     id: 'qoder-work',
