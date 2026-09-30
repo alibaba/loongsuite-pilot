@@ -1,0 +1,6 @@
+{
+  "session_id": "trae-cn-smoke-session",
+  "cwd": "/home/dev/demo-project",
+  "timestamp": "2026-08-18T01:00:05.000Z",
+  "last_assistant_message": "已写入 hello.js, 运行 `node hello.js` 即可输出 hi."
+}
