@@ -31,6 +31,11 @@ done
 if [ -z "$OUTPUT_PATH" ]; then
     OUTPUT_PATH="$PROJECT_ROOT/$PACKAGE_NAME.tar.gz"
 fi
+# zip runs from STAGE_DIR below; resolve relative output paths before changing cwd.
+case "$OUTPUT_PATH" in
+    /*) ;;
+    *) OUTPUT_PATH="$PROJECT_ROOT/$OUTPUT_PATH" ;;
+esac
 ZIP_OUTPUT_PATH="${OUTPUT_PATH%.tar.gz}.zip"
 
 cd "$PROJECT_ROOT"
@@ -142,4 +147,3 @@ tar -tzf "$OUTPUT_PATH" | sed -n '1,20p'
 echo "    ... (truncated)"
 echo ""
 echo "Done."
-

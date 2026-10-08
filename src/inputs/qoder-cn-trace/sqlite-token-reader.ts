@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import { loadSqlite3 } from '../../utils/sqlite3-runtime.js';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { createLogger } from '../../utils/logger.js';
 
@@ -175,7 +175,8 @@ function parseRecordModelKey(raw: string | null | undefined): string | undefined
   }
 }
 
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+async function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+  const sqlite3 = await loadSqlite3();
   return new Promise((resolve, reject) => {
     const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
       if (openErr) { reject(openErr); return; }

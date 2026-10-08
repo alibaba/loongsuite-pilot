@@ -34,8 +34,8 @@ buildSync({
   packages: 'external',
 });
 
-function runGuard(cwd, extraEnv = {}) {
-  return spawnSync(process.execPath, [cwd === tmp ? guardPath : join(cwd, 'native-deps-guard.cjs')], {
+function runGuard(cwd, extraEnv = {}, nodeArgs = []) {
+  return spawnSync(process.execPath, [...nodeArgs, cwd === tmp ? guardPath : join(cwd, 'native-deps-guard.cjs')], {
     cwd,
     env: { ...process.env, ...extraEnv },
     encoding: 'utf8',
@@ -48,6 +48,78 @@ afterAll(() => {
 });
 
 describe('native-deps-guard', () => {
+  // This overrides only the policy branch in a subprocess. Actual riscv64 ELF
+  // execution is covered separately by scripts/riscv64 in a full-system guest.
+  const platformPreload = join(tmp, 'riscv64-platform.cjs');
+  writeFileSync(platformPreload,
+    "Object.defineProperty(process, 'platform', { value: 'linux' });\n" +
+    "Object.defineProperty(process, 'arch', { value: 'riscv64' });\n");
+
+  it('keeps riscv64 core startup alive on addon failure, records the reason, and refreshes after repair', () => {
+    const dir = join(tmp, 'riscv64-broken');
+    const moduleDir = join(dir, 'node_modules', 'sqlite3');
+    mkdirSync(moduleDir, { recursive: true });
+    writeFileSync(join(moduleDir, 'package.json'), JSON.stringify({ name: 'sqlite3', main: 'index.js' }));
+    const entry = join(moduleDir, 'index.js');
+    writeFileSync(entry, "throw new Error('invalid ELF header: simulated broken sqlite3');\n");
+    copyFileSync(guardPath, join(dir, 'native-deps-guard.cjs'));
+    const data = join(dir, 'data');
+    const env = { NODE_PATH: '', LOONGSUITE_PILOT_DATA_DIR: data };
+    const failed = runGuard(dir, env, ['--require', platformPreload]);
+    expect(failed.status).toBe(0);
+    expect(failed.stderr).toContain('WARNING');
+    expect(failed.stderr).toContain('invalid ELF header');
+    expect(failed.stderr).toContain('SQLite-only listeners are disabled');
+    const capability = JSON.parse(readFileSync(join(data, 'native-capabilities.json'), 'utf8'));
+    expect(capability).toMatchObject({ schema: 1, arch: 'riscv64', sqlite3: { available: false } });
+    expect(capability.sqlite3.reason).toContain('invalid ELF header');
+    expect(() => readFileSync(join(data, 'daemon.fatal'))).toThrow();
+
+    // The guard checks loader availability; actual addon SQL behavior has its own probe.
+    writeFileSync(entry, 'module.exports = {};\n');
+    const repaired = runGuard(dir, env, ['--require', platformPreload]);
+    expect(repaired.status).toBe(0);
+    expect(repaired.stderr).toBe('');
+    expect(JSON.parse(readFileSync(join(data, 'native-capabilities.json'), 'utf8')))
+      .toMatchObject({ sqlite3: { available: true }, recovery: null });
+  });
+
+  it('reports an absent sqlite3 package on riscv64 without writing a fatal marker', () => {
+    const dir = join(tmp, 'riscv64-missing');
+    mkdirSync(dir);
+    copyFileSync(guardPath, join(dir, 'native-deps-guard.cjs'));
+    const data = join(dir, 'data');
+    const result = runGuard(dir, { NODE_PATH: '', LOONGSUITE_PILOT_DATA_DIR: data }, ['--require', platformPreload]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("Cannot find module 'sqlite3'");
+    expect(JSON.parse(readFileSync(join(data, 'native-capabilities.json'), 'utf8')).sqlite3.available).toBe(false);
+    expect(() => readFileSync(join(data, 'daemon.fatal'))).toThrow();
+  });
+
+  it('survives native child termination and prevents the collector bundle from loading that addon again', () => {
+    const dir = join(tmp, 'riscv64-signal');
+    const moduleDir = join(dir, 'node_modules', 'sqlite3');
+    mkdirSync(moduleDir, { recursive: true });
+    writeFileSync(join(moduleDir, 'package.json'), JSON.stringify({ name: 'sqlite3', main: 'index.js' }));
+    writeFileSync(join(moduleDir, 'index.js'), "process.kill(process.pid, 'SIGTERM');\n");
+    copyFileSync(guardPath, join(dir, 'native-deps-guard.cjs'));
+    const loader = join(dir, 'sqlite-loader.cjs');
+    buildSync({ entryPoints: ['src/utils/sqlite3-runtime.ts'], outfile: loader,
+      platform: 'node', target: 'es2022', format: 'cjs', bundle: true, packages: 'external' });
+    const script = "require('./native-deps-guard.cjs'); require('./sqlite-loader.cjs').loadSqlite3()" +
+      ".then(() => process.exit(2), err => { console.log(err.message); });";
+    const data = join(dir, 'data');
+    const result = spawnSync(process.execPath, ['--require', platformPreload, '-e', script], {
+      cwd: dir, env: { ...process.env, NODE_PATH: '', LOONGSUITE_PILOT_DATA_DIR: data },
+      encoding: 'utf8', timeout: 15000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.signal).toBeNull();
+    expect(result.stderr).toContain('SIGTERM');
+    expect(result.stdout).toContain('SQLite capability unavailable');
+    expect(JSON.parse(readFileSync(join(data, 'native-capabilities.json'), 'utf8')).sqlite3.available).toBe(false);
+  });
+
   it('exits 0 silently when sqlite3 loads, and writes no fatal marker', () => {
     // The tmp dir has no node_modules of its own; NODE_PATH points at the real
     // one, exactly like the payload layout where the guard resolves against the

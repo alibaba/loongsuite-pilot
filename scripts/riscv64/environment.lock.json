@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "source_commit": "d4ab8b6dd7ce010158f5baa76a23561a6079ecd8",
+  "target": {"os": "Ubuntu 24.04", "architecture": "riscv64", "libc": "glibc", "image_build": "20260826"},
+  "assets": {
+    "disk": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260826/noble-server-cloudimg-riscv64.img",
+      "sha256": "6d0e58dc153585213020b0ec51112ebd70bedd5d2bc563599207f819586e141f",
+      "checksum_source": "https://cloud-images.ubuntu.com/noble/20260826/SHA256SUMS"
+    },
+    "kernel": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260826/unpacked/noble-server-cloudimg-riscv64-vmlinuz-generic",
+      "sha256": "3947e5b59766258b08ad41647a20ec6b92fb8bb34e3ea4373e5812a9398ff960",
+      "checksum_source": "https://cloud-images.ubuntu.com/noble/20260826/unpacked/SHA256SUMS"
+    },
+    "initrd": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260826/unpacked/noble-server-cloudimg-riscv64-initrd-generic",
+      "sha256": "c2f1f29f83e25a7c6c8787fdafe711c11530ddf8286b24cbb432d23ae5827e05",
+      "checksum_source": "https://cloud-images.ubuntu.com/noble/20260826/unpacked/SHA256SUMS"
+    },
+    "node22": {
+      "url": "https://unofficial-builds.nodejs.org/download/release/v22.22.2/node-v22.22.2-linux-riscv64.tar.xz",
+      "sha256": "ffa6cd3702497badd03fc098df149d06d221ecd431acdda8c4a9d7c2cd05a783",
+      "checksum_source": "https://unofficial-builds.nodejs.org/download/release/v22.22.2/SHASUMS256.txt",
+      "support": "Node.js unofficial-builds experimental binary; validated in the pinned full-system Ubuntu guest, not a vendor support guarantee"
+    },
+    "node18": {
+      "url": "https://unofficial-builds.nodejs.org/download/release/v18.20.8/node-v18.20.8-linux-riscv64.tar.xz",
+      "sha256": "2b28a1f889ba918eb7f5b33afe30ae459cbf18ba5008e7a8c09cd2e5ed51da0f",
+      "checksum_source": "https://unofficial-builds.nodejs.org/download/release/v18.20.8/SHASUMS256.txt",
+      "support": "Compatibility probe only; not a recommendation to deploy an EOL runtime"
+    }
+  },
+  "qemu": {
+    "machine": "virt", "accelerator": "tcg", "cpus": 4, "memory_mib": 8192,
+    "disk_size": "24G", "ssh_port": 22226, "ssh_user": "pilot",
+    "boot_timeout_seconds": 900,
+    "firmware": "default (QEMU bundled OpenSBI); record actual file/version on each run",
+    "validated_host_version": "8.2.2; full-system guest boot, RISC-V npm/compiler/child-process identity and systemd-user lifecycle passed"
+  },
+  "agents": {
+    "primary": {
+      "id": "qwen-code-cli", "package": "@qwen-code/qwen-code", "version": "0.23.2",
+      "integrity": "sha512-OthkaYnzRauVopk9yhgbQUfbsQo/B45fB76yHo863gRiv2cp8NmDOs1+79KxPb0zoi/G3fC6OvUHVgqdCCcFJQ==",
+      "tarball": "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.23.2.tgz",
+      "node_engine": ">=22.0.0", "validation": "Real bundled CLI executed on RISC-V with local deterministic model transport; no external live model tested",
+      "model_route": "Verified OpenAI-compatible loopback test server; --auth-type openai --openai-base-url; optional PTY/audio/image addons omitted"
+    },
+    "backup": {
+      "id": "pi-coding-agent", "package": "@mariozechner/pi-coding-agent", "version": "0.73.1",
+      "integrity": "sha512-gXQh3SaZmWTfVMc4Ao5+LGbVeKvzyO7tolok0nLsZgq9nGjZx/EEU3NM8C+qUnB4Nvs2rswG5qOVgLzQkq0fHQ==",
+      "node_engine": ">=20.6.0", "validation": "metadata only; dependency lock and CLI/model configuration still need verification"
+    }
+  },
+  "toolchain": {
+    "packages": ["build-essential", "python3", "pkg-config", "curl", "ca-certificates", "git", "file"],
+    "version_policy": "Capture actual guest package versions in environment.json; apt package versions are not yet locked",
+    "node_gyp": "Actual production --omit=optional route uses npm10.9.7 bundled node-gyp11.5.0; Python3.12.3 source builds passed; sqlite3 N-API6 and zstd N-API8 pinned explicitly"
+  }
+}

@@ -265,16 +265,30 @@ wait_for_collector_process() {
     local timeout="${1:-15}"
     local i=0
     local pid=""
+    local stable_pid=""
+    local stable_polls=0
     while [ "$i" -lt "$timeout" ]; do
+        pid=""
         if [ -f "$PID_FILE" ]; then
             pid=$(cat "$PID_FILE" 2>/dev/null || true)
-            if process_matches_installed_entry "$pid" collector; then
-                return 0
-            fi
         fi
-        pid=$(find_installed_collector_pid)
+        if ! process_matches_installed_entry "$pid" collector; then
+            pid=$(find_installed_collector_pid)
+        fi
         if process_matches_installed_entry "$pid" collector; then
-            return 0
+            if [ "$pid" = "$stable_pid" ]; then
+                stable_polls=$((stable_polls + 1))
+            else
+                stable_pid="$pid"
+                stable_polls=1
+            fi
+            # The launcher writes a PID before Node imports the entry. Accepting
+            # the first observation can report success just before an import crash.
+            # Keep this probe read-only and require the same PID across 3 seconds.
+            if [ "$stable_polls" -ge 4 ]; then return 0; fi
+        else
+            stable_pid=""
+            stable_polls=0
         fi
         sleep 1
         i=$((i + 1))
@@ -321,20 +335,28 @@ sync_bootstrap_scripts() {
 sync_installed_scripts_from_version() {
     local version_dir="$1"
     local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+        echo "❌ Rollback target is missing its collector or CLI script: $src_dir" >&2
         return 1
     fi
 
-    mkdir -p "$BOOTSTRAP_DIR"
-    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
-    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+    # Public packages intentionally omit updater-daemon.js. Its absence is a
+    # supported payload shape, and must also remove an older bootstrap copy.
+    # This function is called inside `if ! ...`: errexit cannot catch failures.
+    mkdir -p "$BOOTSTRAP_DIR" || return 1
+    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp" || return 1
+    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js" || return 1
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp" || return 1
+        mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js" || return 1
+    else
+        rm -f "$BOOTSTRAP_DIR/updater-daemon.js" || return 1
+    fi
 
-    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
-    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
-    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp"
-    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
+    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")" || return 1
+    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp" || return 1
+    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp" || return 1
+    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN" || return 1
 }
 
 process_matches_installed_entry() {
@@ -722,6 +744,14 @@ resolve_node() {
     # 2. Fallback search: prefer user-managed Node over app-bundled PATH shims.
     local _candidates=()
 
+    # A custom --data-dir install pins Node beside config.json. systemd's PATH
+    # may not contain that runtime; recover the canonical cache pin from it.
+    if [ "$DATA_DIR/node-bin" != "$NODE_PIN_FILE" ] && [ -r "$DATA_DIR/node-bin" ]; then
+        local data_pinned=""
+        IFS= read -r data_pinned < "$DATA_DIR/node-bin" || true
+        [ -z "$data_pinned" ] || _candidates+=("$data_pinned")
+    fi
+
     # nvm (descending — newest first)
     local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
     local i
@@ -957,18 +987,17 @@ cmd_start() {
     sync_bootstrap_scripts
 
     if autostart_install "true"; then
-        sleep 2
-        if is_running; then
+        if wait_for_collector_process; then
             local init_type
-            init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+            init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]' || true)
             echo "✅ loongsuite-pilot started ($init_type)"
             return 0
         fi
         local init_type
-        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
-        echo "⚠️  Service registered (${init_type:-unknown}) but collector process not found after 2s. Check logs: $LOG_FILE" >&2
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+        echo "❌ Service registered (${init_type:-unknown}) but collector did not remain alive within the startup window. Check logs: $LOG_FILE" >&2
         echo "   Autostart is configured; the service manager will keep retrying." >&2
-        return 0
+        return 1
     fi
 
     echo "❌ Failed to register system service." >&2
@@ -1555,6 +1584,30 @@ timer = setTimeout(() => {
 ' "$port" "$effective_data_dir" >/dev/null 2>&1
 }
 
+print_native_capabilities() {
+    local report="$DATA_DIR/native-capabilities.json"
+    [ -f "$report" ] || return 0
+    echo "native_capabilities=$report"
+    local node_bin
+    node_bin=$(resolve_node false 2>/dev/null) || return 0
+    "$node_bin" -e '
+const fs = require("fs");
+const clean = value => String(value ?? "unknown").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500);
+try {
+  const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (report.schema !== 1 || typeof report.sqlite3?.available !== "boolean") throw new Error("invalid schema");
+  console.log("native_last_startup=" + clean(report.checked_at));
+  console.log("sqlite3=" + (report.sqlite3.available ? "available" : "unavailable (SQLite inputs disabled; Hook/JSONL collection remains available)"));
+  if (!report.sqlite3.available) {
+    console.log("sqlite3_reason=" + clean(report.sqlite3.reason));
+    console.log("native_recovery=" + clean(report.recovery));
+  }
+} catch {
+  console.log("native_capabilities_status=unreadable; inspect the diagnostic file and collector log");
+}
+' "$report" 2>/dev/null || true
+}
+
 cmd_status() {
     local ver_info=""
     local version_dir
@@ -1584,6 +1637,7 @@ cmd_status() {
     else
         echo "   updater: stopped"
     fi
+    print_native_capabilities
     local interceptor_state
     interceptor_state=$(interceptor_embedded_status)
     if [ "$interceptor_state" = "stopped" ]; then
@@ -1607,6 +1661,7 @@ cmd_info() {
     echo "config=$CONFIG_FILE"
     echo "log=$LOG_FILE"
     echo "versions_dir=$VERSIONS_DIR"
+    print_native_capabilities
 
     if [ -f "$NODE_PIN_FILE" ]; then
         local pinned_node
@@ -2076,6 +2131,16 @@ PLISTEOF
 
 SYSTEMD_USER_UNIT_DIR="$HOME/.config/systemd/user"
 
+_systemd_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//%/%%}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    printf '"%s"' "$value"
+}
+
 _write_systemd_user_unit() {
     mkdir -p "$SYSTEMD_USER_UNIT_DIR"
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
@@ -2086,8 +2151,10 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run
-WorkingDirectory=%h/.loongsuite-pilot
-Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+WorkingDirectory=${CACHE_DIR//%/%%}
+Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$CONFIG_FILE")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$DATA_DIR")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$CACHE_DIR")
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2107,8 +2174,10 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
-WorkingDirectory=%h/.loongsuite-pilot
-Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+WorkingDirectory=${CACHE_DIR//%/%%}
+Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$CONFIG_FILE")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$DATA_DIR")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$CACHE_DIR")
 KillMode=process
 Restart=on-failure
 RestartSec=60
@@ -2126,6 +2195,12 @@ _write_systemd_system_unit() {
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
     local target_config="$target_home/.loongsuite-pilot/config.json"
     local target_workdir="$target_home/.loongsuite-pilot"
+    local target_data="$target_workdir"
+    if [ "$target_user" = "$(whoami)" ]; then
+        target_config="$CONFIG_FILE"
+        target_workdir="$CACHE_DIR"
+        target_data="$DATA_DIR"
+    fi
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2140,10 +2215,12 @@ After=network.target
 Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
-ExecStart=${target_bin} run
-WorkingDirectory=${target_workdir}
-Environment=HOME=${target_home}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
+ExecStart=$(_systemd_quote "$target_bin") run
+WorkingDirectory=${target_workdir//%/%%}
+Environment=$(_systemd_quote "HOME=$target_home")
+Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$target_config")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$target_data")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$target_workdir")
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2200,6 +2277,12 @@ _write_systemd_system_updater_unit() {
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
     local target_config="$target_home/.loongsuite-pilot/config.json"
     local target_workdir="$target_home/.loongsuite-pilot"
+    local target_data="$target_workdir"
+    if [ "$target_user" = "$(whoami)" ]; then
+        target_config="$CONFIG_FILE"
+        target_workdir="$CACHE_DIR"
+        target_data="$DATA_DIR"
+    fi
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2214,10 +2297,12 @@ After=network.target
 Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
-ExecStart=${target_bin} run-updater
-WorkingDirectory=${target_workdir}
-Environment=HOME=${target_home}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
+ExecStart=$(_systemd_quote "$target_bin") run-updater
+WorkingDirectory=${target_workdir//%/%%}
+Environment=$(_systemd_quote "HOME=$target_home")
+Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$target_config")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$target_data")
+Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$target_workdir")
 KillMode=process
 Restart=on-failure
 RestartSec=60

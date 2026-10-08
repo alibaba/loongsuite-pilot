@@ -12,6 +12,8 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 - Windows 下需要 PowerShell 5.1 或更高版本
 - Node.js 18+ 与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 运行时**（见下文），无需预装；Linux musl（Alpine）与 Windows ARM64 等不受支持平台仍需自备 Node.js 18+ 与 `npm`
 
+Linux RISC-V64 需自备 `riscv64` Node/npm 与本机编译工具链，新部署建议使用已测的 Node 22。锁定的生产依赖声明 Node >=20，因此 Node 18 目前只有有限的运行兼容性证据，开启 `engine-strict=true` 时安装会失败。具体范围、原生构建、能力降级和当前发布状态见 [RISC-V 安装与验证指南](riscv64.md)。
+
 ## 在 Linux 或 macOS 从公开包安装
 
 ```bash
@@ -115,6 +117,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |---|---|---|---|
 | macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
 | Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
+| Linux riscv64（glibc） | ❌ | ❌ | 使用系统 Node/npm，本机源码构建；实测范围见 [RISC-V 指南](riscv64.md) |
 | Windows x64 | ✅ | ✅ | 托管下载 |
 | Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
 | Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |

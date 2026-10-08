@@ -38,13 +38,9 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  // The guard must run BEFORE this bundle's module graph loads: the graph
-  // imports sqlite3 at top level (orchestrator.ts → qoder-*-sqlite inputs), so
-  // on a libc that cannot load the addon the bundle dies mid-import, before any
-  // logging exists, and the spawners used to drop that stderr. A static import
-  // in the banner is evaluated first by Node, so the guard's check — and its
-  // readable FATAL diagnostic — precede the crash it replaces. See
-  // src/native-deps-guard.ts.
+  // Diagnose native capabilities before file logging starts. SQLite readers load
+  // lazily so linux-riscv64 can continue with Hook/session collection when the
+  // addon is unavailable. Other platforms retain the fatal guard contract.
   banner: { js: "import './native-deps-guard.cjs';" },
   define: commonDefine,
   plugins: commonPlugins,

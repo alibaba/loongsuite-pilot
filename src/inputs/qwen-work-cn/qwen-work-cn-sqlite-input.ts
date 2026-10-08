@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import { loadSqlite3 } from '../../utils/sqlite3-runtime.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
@@ -220,7 +220,8 @@ async function readLatestCursor(dbPath: string): Promise<{ updatedAt: number; ro
   return rows[0] ?? { updatedAt: 0, rowId: 0 };
 }
 
-function all<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+async function all<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+  const sqlite3 = await loadSqlite3();
   return new Promise((resolve, reject) => {
     const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, error => {
       if (error) reject(error);

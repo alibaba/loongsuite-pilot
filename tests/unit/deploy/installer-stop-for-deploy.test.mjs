@@ -114,7 +114,7 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
     // would launch a collector with no hooks / no node_modules.
     for (const file of SH_INSTALLERS.filter(existsSync)) {
       const fn = fnOf(read(file), 'deploy_package');
-      const writeAt = fn.indexOf('echo "$dir_name" > "$current_file.tmp"');
+      const writeAt = fn.indexOf('mv -f "$current_file.tmp" "$current_file"');
       const postAt = fn.indexOf('scripts/postinstall.js');
       const npmFailAt = fn.indexOf('Dependency installation failed');
       expect(writeAt, `${file}: current pointer write missing`).toBeGreaterThan(-1);

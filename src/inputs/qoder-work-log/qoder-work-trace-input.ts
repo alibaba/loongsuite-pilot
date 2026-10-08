@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
-import sqlite3 from 'sqlite3';
+import { loadSqlite3 } from '../../utils/sqlite3-runtime.js';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
@@ -1011,7 +1011,8 @@ function safeParseJson(value: string): JsonValue | undefined {
   try { return JSON.parse(value); } catch { return value; }
 }
 
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+async function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
+  const sqlite3 = await loadSqlite3();
   return new Promise((resolve, reject) => {
     const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
       if (openErr) { reject(openErr); return; }

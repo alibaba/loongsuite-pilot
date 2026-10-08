@@ -1,7 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import type sqlite3 from 'sqlite3';
+import { loadSqlite3 } from '../../utils/sqlite3-runtime.js';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
@@ -164,11 +165,12 @@ function readMaxEligibleRowId(dbPath: string): Promise<number> {
     .then(rows => rows[0]?.maxRowId ?? 0);
 }
 
-function queryReadonly<T>(
+async function queryReadonly<T>(
   dbPath: string,
   sql: string,
   params: unknown[],
 ): Promise<T[]> {
+  const sqlite3 = await loadSqlite3();
   return new Promise((resolve, reject) => {
     let db: sqlite3.Database;
     db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {

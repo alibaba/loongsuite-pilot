@@ -11,6 +11,8 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
 
+Linux RISC-V64 requires a system `riscv64` Node/npm and a native build toolchain; use the tested Node 22 runtime for new deployments. A locked production dependency declares Node >=20, so Node 18 has only limited runtime compatibility evidence and fails installation with `engine-strict=true`. See the [RISC-V installation and verification guide](riscv64.md) for the exact scope, source builds, degraded capabilities and release status.
+
 ## Install From Public Package On Linux Or macOS
 
 ```bash

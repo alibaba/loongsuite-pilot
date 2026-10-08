@@ -34,6 +34,9 @@ const logger = createLogger('Updater');
 const FETCH_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
+// Target QEMU measurements: sqlite3 604s + zstd 170s. The helper owns a 30m
+// total budget and kills its compiler process groups; allow 1m to flush/exit.
+const RISCV64_INSTALL_TIMEOUT_MS = 31 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
 const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
@@ -613,19 +616,33 @@ export class Updater {
 
       if (!usedPrebuiltModules) {
         logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
-        await execFileAsync('npm', ['install', '--production', '--no-optional'], {
-          cwd: stagingDir,
-          env: childEnv,
-          timeout: NPM_INSTALL_TIMEOUT_MS,
-          shell: process.platform === 'win32',
-        });
+        const riscvHelper = path.join(stagingDir, 'scripts', 'install-riscv64-deps.mjs');
+        const useRiscvHelper = process.platform === 'linux' && String(process.arch) === 'riscv64'
+          && await fs.access(riscvHelper).then(() => true).catch(() => false);
+        if (useRiscvHelper) {
+          await execFileAsync(nodeBin, [riscvHelper, '--package-dir', stagingDir,
+            '--log-dir', path.join(this.paths.dataDir, 'logs', 'native-install')], {
+            cwd: stagingDir, env: childEnv, timeout: RISCV64_INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024,
+          });
+        } else {
+          await execFileAsync('npm', ['install', '--production', '--no-optional'], {
+            cwd: stagingDir,
+            env: childEnv,
+            timeout: NPM_INSTALL_TIMEOUT_MS,
+            shell: process.platform === 'win32',
+          });
+        }
       }
 
-      logger.info('checking sqlite3 runtime', { node: nodeBin });
-      await execFileAsync(nodeBin, ['-e', "require('sqlite3')"], {
+      const guardPath = path.join(stagingDir, 'dist', 'native-deps-guard.cjs');
+      const useCapabilityGuard = process.platform === 'linux' && String(process.arch) === 'riscv64'
+        && await fs.access(guardPath).then(() => true).catch(() => false);
+      logger.info('checking native runtime capabilities', { node: nodeBin, useCapabilityGuard });
+      await execFileAsync(nodeBin, useCapabilityGuard ? [guardPath] : ['-e', "require('sqlite3')"], {
         cwd: stagingDir,
-        env: childEnv,
-        timeout: 30_000,
+        // A staged version must not overwrite the active install's capability file.
+        env: useCapabilityGuard ? { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: path.join(stagingDir, '.native-probe') } : childEnv,
+        timeout: useCapabilityGuard ? 45_000 : 30_000,
       });
 
       // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
@@ -743,6 +760,10 @@ export class Updater {
    * in which case the caller falls back to the running node + npm install.
    */
   private managedNodePlatform(): { os: string; arch: string } | null {
+    if (process.platform === 'linux' && String(process.arch) === 'riscv64') {
+      logger.info('managed node: RISC-V uses system Node.js and local native builds');
+      return null;
+    }
     let os: string;
     switch (process.platform) {
       case 'darwin': os = 'darwin'; break;

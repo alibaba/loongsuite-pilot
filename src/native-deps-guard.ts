@@ -1,31 +1,21 @@
-// native-deps-guard — fail loudly and early when the payload's native modules
-// cannot load on this container's libc.
+// native-deps-guard — diagnose native addon capabilities before logging starts.
+// Linux riscv64 can keep Hook/session collection running without sqlite3; its
+// SQLite readers import lazily and SQLite-only listeners are disabled. Other
+// platforms retain the existing fatal/preload crash-loop contract.
 //
-// Why this exists: the daemon's module graph imports sqlite3 unconditionally at
-// startup (orchestrator.ts → the qoder-*-sqlite inputs), so on a container whose
-// libc cannot load the prebuilt addon — most commonly musl/Alpine, where no
-// glibc-linked .node can be dlopen'd at all, but also a glibc older than the
-// addon's own requirement — the daemon crashes
-// during module load. That crash used to be invisible twice over: it happens
-// before initFileLogging() runs, and the spawners redirected daemon stderr to
-// /dev/null. The user saw "no telemetry" and nothing else.
+// Earlier bundles imported sqlite3 throughout the startup graph, so a loader
+// failure killed collection before file logging existed. The build banner still
+// loads this diagnostic first. On riscv64 a missing/broken addon is reported as a
+// reduced capability; other platforms retain the established fatal behavior.
 //
-// build.mjs prepends `import './native-deps-guard.cjs'` to the daemon bundle, so
-// this runs before any of that graph loads and turns the silent crash into an
-// actionable diagnostic with a non-zero exit.
-//
-// Deliberately checks ONLY what the startup graph actually loads: sqlite3.
-// zstd-napi also ships in the payload but nothing in src/ imports it, so a
-// broken zstd-napi must not stop the daemon. Keep this list in sync with the
-// daemon's real top-level native imports, not with package.json.
-//
-// Never import this from the daemon itself — it must run before the daemon's
-// imports execute, which is only possible from a separately loaded module.
+// Only sqlite3 is checked: zstd-napi is shipped but no src/ collector imports it.
+// A broken unused compression addon must not prevent core collection.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import * as path from 'node:path';
 import { resolveDataDir } from './utils/data-dir.js';
+import { recordSqliteStartupFailure } from './utils/sqlite3-runtime.js';
 
 /** Best-effort libc identification for the diagnostic; never throws. */
 function libcInfo(): string {
@@ -113,9 +103,59 @@ function fail(moduleName: string, err: unknown): never {
   process.exit(1);
 }
 
+// The project's Node18 type definitions predate the riscv64 Architecture member.
+const canDegrade = process.platform === 'linux' && String(process.arch) === 'riscv64';
+
+function recordSqliteCapability(available: boolean, detail?: string): void {
+  if (!canDegrade) return;
+  try {
+    const dir = resolveDataDir();
+    mkdirSync(dir, { recursive: true });
+    const destination = path.join(dir, 'native-capabilities.json');
+    const temporary = `${destination}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({
+      schema: 1,
+      checked_at: new Date().toISOString(),
+      platform: process.platform,
+      arch: process.arch,
+      node: process.version,
+      sqlite3: { available, ...(detail ? { reason: detail } : {}) },
+      recovery: available ? null : 'Rebuild sqlite3 for this Node/runtime and restart Pilot.',
+    }, null, 2) + '\n', 'utf8');
+    renameSync(temporary, destination);
+  } catch (err) {
+    process.stderr.write(`[pilot] Cannot record native capabilities: ${String(err)}\n`);
+  }
+}
+
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  require('sqlite3');
+  if (canDegrade) {
+    // A mismatched N-API binary can terminate Node with SIGSEGV instead of a
+    // catchable loader exception. Probe in a child before the collector loads it.
+    const entry = require.resolve('sqlite3');
+    const probe = spawnSync(process.execPath, ['-e', 'require(process.argv[1])', entry], {
+      encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
+    });
+    if (probe.error || probe.status !== 0) {
+      throw new Error(`sqlite3 probe failed (${(probe.error as NodeJS.ErrnoException | undefined)?.code ?? probe.signal ?? probe.status}): ${probe.stderr || probe.error?.message || 'native process terminated'}`);
+    }
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('sqlite3');
+  }
+  recordSqliteCapability(true);
 } catch (err) {
-  fail('sqlite3', err);
+  if (!canDegrade) fail('sqlite3', err);
+  const detail = ((err as Error)?.message || String(err)).replace(/\s+/g, ' ').slice(0, 2000);
+  recordSqliteStartupFailure(detail);
+  recordSqliteCapability(false, detail);
+  process.stderr.write([
+    '[pilot] WARNING: native module "sqlite3" is unavailable on linux-riscv64.',
+    `[pilot] Loader: ${detail}`,
+    '[pilot] SQLite-only listeners are disabled; SQLite token enrichment is unavailable.',
+    '[pilot] Hook and session-file collection can continue. No SQLite checkpoint is advanced by a failed read.',
+    '[pilot] Install a C/C++ toolchain and Python, rebuild sqlite3 for this Node/runtime, then restart Pilot.',
+    '[pilot] See native-capabilities.json in the Pilot data directory for the current startup result.',
+    '',
+  ].join('\n'));
 }

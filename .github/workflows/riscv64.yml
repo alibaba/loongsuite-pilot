@@ -1,0 +1,86 @@
+name: RISC-V installed artifact
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/riscv64.yml'
+      - 'src/**'
+      - 'scripts/**'
+      - 'deploy/**'
+      - 'assets/**'
+      - 'agents.d/**'
+      - 'tests/**'
+      - 'package*.json'
+      - '.npmrc'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - 'build.mjs'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/riscv64.yml'
+      - 'src/**'
+      - 'scripts/**'
+      - 'deploy/**'
+      - 'assets/**'
+      - 'agents.d/**'
+      - 'tests/**'
+      - 'package*.json'
+      - '.npmrc'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - 'build.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: riscv64-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  qemu-installed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install host tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-misc qemu-utils xorriso openssh-client python3 zip
+      - name: Cache immutable guest downloads
+        uses: actions/cache@v4
+        with:
+          path: e2e-artifacts/riscv64-cache
+          key: riscv64-downloads-${{ hashFiles('scripts/riscv64/environment.lock.json') }}
+      - name: Build dependencies and host regression
+        shell: bash
+        run: |
+          mkdir -p e2e-artifacts/riscv64-host
+          npm ci --ignore-scripts 2>&1 | tee e2e-artifacts/riscv64-host/dependencies.log
+          npm rebuild sqlite3 zstd-napi 2>&1 | tee e2e-artifacts/riscv64-host/native.log
+          npm run typecheck 2>&1 | tee e2e-artifacts/riscv64-host/typecheck.log
+          npm test -- --maxWorkers=4 --minWorkers=1 2>&1 | tee e2e-artifacts/riscv64-host/tests.log
+      - name: Fresh guest and installed acceptance
+        run: python3 scripts/riscv64/fresh-run.py --work-dir e2e-artifacts/riscv64-fresh --cache-dir e2e-artifacts/riscv64-cache
+      - name: Preserve evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-installed-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            e2e-artifacts/riscv64-host/*.log
+            e2e-artifacts/riscv64-fresh/*.log
+            e2e-artifacts/riscv64-fresh/*.json
+            e2e-artifacts/riscv64-fresh/guest/console.log
+            e2e-artifacts/riscv64-fresh/guest/ssh-wait.log
+            e2e-artifacts/riscv64-fresh/guest-evidence.tar.gz
+            e2e-artifacts/riscv64-fresh/pilot.tar.gz
+            e2e-artifacts/riscv64-fresh/upgrade-fixtures/upgrade-fixtures.json
