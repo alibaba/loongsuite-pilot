@@ -404,6 +404,7 @@ function findReusedApiKeyAuth(
   const entries = Array.isArray(raw) ? raw : raw ? [raw] : [];
   let apiKey: string | undefined;
   for (const ep of entries) {
+    if (!ep || typeof ep !== 'object') continue;
     if (inferSlsMode(ep) !== 'apiKey' || (ep.apiKey && (ep.accessKeyId || ep.accessKeySecret))) continue;
     const candidate = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
     const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;

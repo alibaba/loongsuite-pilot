@@ -2721,15 +2721,17 @@ function Assert-SingleSlsConfig {
 
     $prevEAP = $ErrorActionPreference
     $configExit = 1
+    $LASTEXITCODE = 1
+    $nodeOut = $null
     try {
         $ErrorActionPreference = "Continue"
-        & $script:NODE_BIN -e @'
+        $nodeOut = & $script:NODE_BIN -e @'
 const fs = require("fs");
 try {
   const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
   process.exit(Array.isArray(config?.sls) ? 12 : 0);
 } catch { process.exit(13); }
-'@ $configFile
+'@ $configFile 2>&1
         $configExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
@@ -2740,8 +2742,9 @@ try {
         exit 1
     }
     if ($configExit -ne 0) {
-        Msg "❌ 无法检查现有 config.json，请检查文件后重试" `
-            "❌ Cannot inspect existing config.json; check the file and retry."
+        $detail = (($nodeOut | Out-String).Trim())
+        Msg "❌ 无法检查现有 config.json，请检查文件后重试`n$detail" `
+            "❌ Cannot inspect existing config.json; check the file and retry.`n$detail"
         exit 1
     }
 }
