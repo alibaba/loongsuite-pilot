@@ -80,8 +80,8 @@ export interface InnerDataConfig {
   serviceNamePrefix?: string;
   /** Default storage used when the user has not configured a multimodal block. */
   multimodal?: ConfigFile['multimodal'];
-  /** Per-agent defaults; explicit user fields take precedence. */
-  agents?: ConfigFile['agents'];
+  /** Managed per-agent defaults only configure multimodal uploads. */
+  agents?: Record<string, Pick<NonNullable<ConfigFile['agents']>[string], 'multimodal'>>;
 }
 
 /**
@@ -717,16 +717,23 @@ function buildCmsConfig(file: ConfigFile | null): CmsConfig {
 
 function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataConfig | null): AgentsConfig {
   const policies: NonNullable<ConfigFile['agents']> = {};
-  for (const source of [innerDataConfig?.agents, file?.agents]) {
+  for (const [source, managed] of [
+    [innerDataConfig?.agents, true],
+    [file?.agents, false],
+  ] as const) {
     if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
     for (const [agentType, policy] of Object.entries(source)) {
       if (!agentType || !policy || typeof policy !== 'object' || Array.isArray(policy)) continue;
+      const multimodal = policy.multimodal;
+      if (managed && (!multimodal || typeof multimodal !== 'object' || Array.isArray(multimodal))) continue;
+      // Only user agent policies may supply enabled and captureMessageContent.
+      const acceptedPolicy = managed ? { multimodal } : policy;
       const previous = policies[agentType];
       policies[agentType] = {
         ...previous,
-        ...policy,
-        ...(policy.multimodal && typeof policy.multimodal === 'object' && !Array.isArray(policy.multimodal)
-          ? { multimodal: { ...previous?.multimodal, ...policy.multimodal } }
+        ...acceptedPolicy,
+        ...(multimodal && typeof multimodal === 'object' && !Array.isArray(multimodal)
+          ? { multimodal: { ...previous?.multimodal, ...multimodal } }
           : {}),
       };
     }

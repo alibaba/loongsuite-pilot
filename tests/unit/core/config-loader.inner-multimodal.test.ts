@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadConfig, type ConfigFile } from '../../../src/core/config-loader.js';
+import { buildOtlpTraceConfig, loadConfig, type ConfigFile } from '../../../src/core/config-loader.js';
 import { isAgentGatedEnabled } from '../../../src/deployment/deploy-command.js';
 import { anyAgentMultimodalEnabled, isAgentMultimodalEnabled } from '../../../src/multimodal/agent-gate.js';
 
@@ -211,6 +211,30 @@ describe('managed multimodal configuration', () => {
     expect(config.agents.cursor).toBeUndefined();
   });
 
+  it('ignores collection and content settings from inner agents', async () => {
+    writeFileSync(innerConfigPath, JSON.stringify({
+      agents: {
+        qoder: { enabled: false, multimodal: { uploadMode: 'all' } },
+        codex: { captureMessageContent: false, multimodal: { uploadMode: 'all' } },
+        cursor: { enabled: false, captureMessageContent: false },
+      },
+    }));
+    writeFileSync(configPath, JSON.stringify({
+      agents: {},
+      otlpTrace: { endpoint: 'http://127.0.0.1:4318/v1/traces' },
+    }));
+
+    const config = await loadConfig();
+
+    expect(config.agents.qoder.enabled).toBeUndefined();
+    expect(config.agents.codex.captureMessageContent).toBe(true);
+    expect(config.agents.cursor).toBeUndefined();
+    expect(isAgentGatedEnabled(config, 'qoder')).toBe(true);
+    expect(isAgentGatedEnabled(config, 'cursor')).toBe(true);
+    expect(isAgentMultimodalEnabled('codex', config.agents.codex)).toBe(true);
+    expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+  });
+
   it('overrides agent uploadMode by user field while retaining managed roots and other agents', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({
       agents: {
@@ -262,11 +286,11 @@ describe('managed multimodal configuration', () => {
     expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual(expected);
   });
 
-  it('preserves user enabled=false and captureMessageContent=false over internal defaults', async () => {
+  it('preserves explicit user enabled=false and captureMessageContent=false', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({
       agents: {
-        qoder: { enabled: true, multimodal: { uploadMode: 'all' } },
-        codex: { captureMessageContent: true, multimodal: { uploadMode: 'all' } },
+        qoder: { multimodal: { uploadMode: 'all' } },
+        codex: { multimodal: { uploadMode: 'all' } },
       },
     }));
     writeFileSync(configPath, JSON.stringify({
