@@ -2751,7 +2751,7 @@ function Assert-SingleSlsConfig {
 
     $prevEAP = $ErrorActionPreference
     $configExit = 1
-    $LASTEXITCODE = 1
+    $global:LASTEXITCODE = 1
     $nodeOut = $null
     try {
         $ErrorActionPreference = "Continue"
@@ -2762,7 +2762,7 @@ try {
   process.exit(Array.isArray(config?.sls) ? 12 : 0);
 } catch { process.exit(13); }
 '@ $configFile 2>&1
-        $configExit = $LASTEXITCODE
+        $configExit = $global:LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEAP
     }
