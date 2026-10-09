@@ -78,6 +78,10 @@ export interface InnerDataConfig {
   otlp?: OtlpEndpointEntry[];
   cms?: CmsEndpointEntry[];
   serviceNamePrefix?: string;
+  /** Default storage used when the user has not configured a multimodal block. */
+  multimodal?: ConfigFile['multimodal'];
+  /** Managed per-agent defaults only configure multimodal uploads. */
+  agents?: Record<string, Pick<NonNullable<ConfigFile['agents']>[string], 'multimodal'>>;
 }
 
 /**
@@ -311,7 +315,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
-    agents: buildAgentsConfig(file),
+    agents: buildAgentsConfig(file, innerDataConfig),
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),
@@ -319,7 +323,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
-    multimodal: buildMultimodalConfig(file),
+    multimodal: buildMultimodalConfig(file, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
     interceptor,
   };
@@ -353,11 +357,15 @@ type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['s
 
 function buildMultimodalConfig(
   file: ConfigFile | null,
+  innerDataConfig?: InnerDataConfig | null,
 ): MultimodalRuntimeConfig | undefined {
-  const block = file?.multimodal;
+  // Select a whole block so managed storage targets and user credentials are not merged.
+  const block = file?.multimodal !== undefined
+    ? file.multimodal
+    : innerDataConfig?.multimodal;
   try {
-    if (block == null) return undefined;
-    if (typeof block !== 'object' || Array.isArray(block)) {
+    if (block === undefined) return undefined;
+    if (block === null || typeof block !== 'object' || Array.isArray(block)) {
       throw new Error('multimodal must be an object');
     }
     if (block.storage === undefined) {
@@ -607,14 +615,61 @@ function buildCmsConfig(file: ConfigFile | null): CmsConfig {
   };
 }
 
-function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
-  const result: AgentsConfig = {};
-  if (!file?.agents || typeof file.agents !== 'object') return result;
+function configValueType(value: unknown): string {
+  return Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+}
 
-  for (const [agentType, policy] of Object.entries(file.agents)) {
-    if (!agentType || !policy || typeof policy !== 'object') continue;
+function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataConfig | null): AgentsConfig {
+  const policies: NonNullable<ConfigFile['agents']> = {};
+  for (const [source, managed] of [
+    [innerDataConfig?.agents, true],
+    [file?.agents, false],
+  ] as const) {
+    if (source === undefined) continue;
+    const sourceName = managed ? 'inner' : 'user';
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      logger.warn('Ignoring invalid agents config; expected an object', {
+        source: sourceName, type: configValueType(source),
+      });
+      continue;
+    }
+    for (const [agentType, policy] of Object.entries(source)) {
+      if (!agentType || !policy || typeof policy !== 'object' || Array.isArray(policy)) {
+        logger.warn('Ignoring invalid agent policy; expected an object', {
+          source: sourceName, agentType, type: configValueType(policy),
+        });
+        continue;
+      }
+      const multimodal = policy.multimodal;
+      if (managed) {
+        const ignoredFields = Object.keys(policy).filter(key => key !== 'multimodal');
+        if (!multimodal || typeof multimodal !== 'object' || Array.isArray(multimodal)) {
+          logger.warn('Ignoring managed agent policy without valid multimodal settings', {
+            agentType, type: configValueType(multimodal), ignoredFields,
+          });
+          continue;
+        }
+        if (ignoredFields.length > 0) {
+          logger.warn('Ignoring unsupported managed agent fields', { agentType, ignoredFields });
+        }
+      }
+      // Only user agent policies may supply enabled and captureMessageContent.
+      const acceptedPolicy = managed ? { multimodal } : policy;
+      const previous = policies[agentType];
+      policies[agentType] = {
+        ...previous,
+        ...acceptedPolicy,
+        ...(multimodal && typeof multimodal === 'object' && !Array.isArray(multimodal)
+          ? { multimodal: { ...previous?.multimodal, ...multimodal } }
+          : {}),
+      };
+    }
+  }
+
+  const result: AgentsConfig = {};
+  for (const [agentType, policy] of Object.entries(policies)) {
     const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
-    const multimodal = buildAgentMultimodalConfig(policy.multimodal);
+    const multimodal = buildAgentMultimodalConfig(agentType, policy.multimodal);
     result[agentType] = {
       enabled: policy.enabled,
       captureMessageContent,
@@ -626,14 +681,27 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 }
 
 function buildAgentMultimodalConfig(
+  agentType: string,
   block: { uploadMode?: string; allowedRootPaths?: string[] } | undefined,
 ): AgentMultimodalConfig | undefined {
-  if (!block || typeof block !== 'object') return undefined;
+  if (block == null) return undefined;
+  if (typeof block !== 'object' || Array.isArray(block)) {
+    logger.warn('Ignoring invalid agent multimodal config; expected an object', {
+      agentType, type: configValueType(block),
+    });
+    return undefined;
+  }
 
   const uploadModeRaw = block.uploadMode ?? 'none';
   const uploadMode = MULTIMODAL_UPLOAD_MODE_SET.has(uploadModeRaw)
     ? (uploadModeRaw as MultimodalUploadMode)
     : 'none';
+  if (uploadModeRaw !== uploadMode) {
+    logger.warn('Invalid agent multimodal uploadMode; using none', {
+      agentType, type: configValueType(uploadModeRaw),
+    });
+  }
+  if (uploadMode === 'none') return { uploadMode };
 
   const allowedRootPaths = Array.isArray(block.allowedRootPaths)
     ? [...new Set(

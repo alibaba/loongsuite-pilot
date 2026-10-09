@@ -1,5 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AnalyticsConfig } from '../../../src/types/index.js';
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const mkdir = vi.fn(actual.mkdir);
+  const writeFile = vi.fn(actual.writeFile);
+  return { ...actual, mkdir, writeFile, default: { ...actual, mkdir, writeFile } };
+});
 
 const { mockLoggerWarn } = vi.hoisted(() => ({
   mockLoggerWarn: vi.fn(),
@@ -49,7 +67,7 @@ vi.mock('../../../src/dashboard/index.js', () => ({
 }));
 
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
-const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, '/home/test'));
+const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, os.homedir()));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
@@ -112,13 +130,6 @@ vi.mock('axios', () => ({
 
 // This suite exercises orchestration only; loading the native sqlite binding is
 // unnecessary and makes the test depend on the local Node ABI.
-vi.mock('sqlite3', () => ({
-  default: {
-    Database: vi.fn(),
-    OPEN_READONLY: 1,
-  },
-}));
-
 vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   QoderWorkInput: vi.fn().mockImplementation(() => ({
     id: 'qoder-work',
@@ -243,12 +254,79 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
 }
 
 describe('Orchestrator', () => {
+  let homeDir: string;
+  let restoreHome: () => void;
   beforeEach(() => {
     vi.clearAllMocks();
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-home-'));
+    restoreHome = isolateAgentHome(homeDir);
+    mockResolveHome.mockImplementation(p => p.replace(/^~/, homeDir));
     discoveryEntries = [];
   });
 
+  afterEach(() => {
+    try { fs.rmSync(homeDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
+  });
+
   describe('startup sequence (T038)', () => {
+    it('creates a detected OpenCode config only inside the isolated home', async () => {
+      const binDir = path.join(homeDir, 'bin');
+      fs.mkdirSync(binDir);
+      const windows = process.platform === 'win32';
+      fs.writeFileSync(path.join(binDir, windows ? 'opencode.cmd' : 'opencode'),
+        windows ? '@exit /b 0\r\n' : '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ''}`;
+
+      const mkdir = vi.mocked(fsp.mkdir);
+      const writeFile = vi.mocked(fsp.writeFile);
+      const originalMkdir = mkdir.getMockImplementation()!;
+      const originalWriteFile = writeFile.getMockImplementation()!;
+      const writes: string[] = [];
+      const escapedTargets: string[] = [];
+      const checkTarget = (target: string) => {
+        const resolved = path.resolve(target);
+        const relative = path.relative(homeDir, resolved);
+        if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+          escapedTargets.push(resolved);
+          throw new Error(`Deployment write escaped temporary home: ${target}`);
+        }
+        writes.push(resolved);
+      };
+      mkdir.mockImplementation((target, options) => {
+        checkTarget(String(target));
+        return originalMkdir(target, options);
+      });
+      writeFile.mockImplementation((target, data, options) => {
+        checkTarget(String(target));
+        return originalWriteFile(target, data, options);
+      });
+
+      const dataDir = path.join(homeDir, 'pilot-data');
+      let orch: Orchestrator | undefined;
+      try {
+        orch = new Orchestrator(makeConfig({ dataDir }));
+        // Exercise real CLI detection and deployment for OpenCode only.
+        (orch as any).isAgentGatedEnabled = (id: string) => id === 'opencode';
+        await orch.start();
+        const configPath = path.join(homeDir, '.config', 'opencode', 'opencode.jsonc');
+        expect(escapedTargets).toEqual([]);
+        expect(writes).toContain(configPath);
+        expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugin).toEqual([
+          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode/plugin.mjs`,
+        ]);
+      } finally {
+        try { await orch?.stop(); }
+        finally {
+          mkdir.mockImplementation(originalMkdir);
+          writeFile.mockImplementation(originalWriteFile);
+          if (previousPath === undefined) delete process.env.PATH;
+          else process.env.PATH = previousPath;
+        }
+      }
+    });
+
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
         dashboard: {
@@ -409,7 +487,7 @@ describe('Orchestrator', () => {
       const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-trace');
       expect(detection?.watchPaths).toEqual([
         historyDir,
-        '/home/test/.qwenworkcn/logs/sessions',
+        `${homeDir}/.qwenworkcn/logs/sessions`,
       ]);
 
       await orch.stop();

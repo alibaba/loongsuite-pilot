@@ -4,7 +4,6 @@ import { AGENT_INPUT_EVENT_NAMESPACE } from '../../normalization/agent-input-dua
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesOutput,
-  multimodalUploadIncludesTool,
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
@@ -98,11 +97,10 @@ async function enrichIdeMultimodalInner(
 
   if (multimodalUploadIncludesInput(opts.uploadMode)) {
     await enrichInputAttachedImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesTool(opts.uploadMode)) {
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
   }
   if (multimodalUploadIncludesOutput(opts.uploadMode)) {
+    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
     await enrichOutputMarkdownImages(entries, opts.pathToUri, touched, stats);
   }
 
@@ -167,19 +165,13 @@ async function enrichInputAttachedImages(
   if (byRequest.size === 0) return;
   stats.attachedRequests = byRequest.size;
 
-  // Group input carriers by request_id (prefer llm.request; other rarely has request_id).
   const carriersByRequest = new Map<string, AgentActivityEntry>();
   for (const entry of entries) {
     const requestId = requestIdOf(entry);
     if (!requestId || !byRequest.has(requestId)) continue;
-    const name = entry['event.name'];
-    const hasDelta = Array.isArray(entry['gen_ai.input.messages_delta']);
-    if (!hasDelta) continue;
-    if (name === 'llm.request') {
-      carriersByRequest.set(requestId, entry);
-      continue;
-    }
-    if (name === 'other' && !carriersByRequest.has(requestId)) {
+    if (entry['event.name'] !== 'llm.request') continue;
+    if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
+    if (!carriersByRequest.has(requestId)) {
       carriersByRequest.set(requestId, entry);
     }
   }
@@ -212,12 +204,29 @@ async function enrichInputAttachedImages(
       }
     }
     if (!carrier) continue;
-    const timeMs = entryTimeMs(carrier);
-    const n = await appendUriPartsToMessagesDelta(carrier, lookup.paths, pathToUri, timeMs, stats);
-    if (n > 0) {
+    // Also attach the same-turn other, which has no request_id.
+    const siblingName = carrier['event.name'] === 'other' ? 'llm.request' : 'other';
+    const sibling = entries.find(e =>
+      e !== carrier
+      && e['gen_ai.turn.id'] === carrier['gen_ai.turn.id']
+      && e['event.name'] === siblingName
+      && Array.isArray(e['gen_ai.input.messages_delta'])
+      && (!requestIdOf(e) || requestIdOf(e) === requestId),
+    );
+    const uriParts = await convertPathsToUriParts(
+      lookup.paths, pathToUri, entryTimeMs(carrier), stats,
+    );
+
+    let requestAttached = 0;
+    for (const target of [carrier, sibling]) {
+      if (!target) continue;
+      const n = applyUriPartsToMessagesDelta(target, uriParts);
+      if (n <= 0) continue;
       stats.inputUri += n;
-      touched.add(carrier);
-      // Consume paths so this request_id is not attached again on later batches.
+      touched.add(target);
+      if (target['event.name'] === 'llm.request') requestAttached = n;
+    }
+    if (requestAttached > 0) {
       attachedLookupByRequestId.set(requestId, { paths: [] });
     } else if (synthesized) {
       entries.pop();
@@ -297,6 +306,35 @@ async function enrichToolResultImages(
   }
 }
 
+async function enrichToolCallImages(
+  entries: AgentActivityEntry[],
+  pathToUri: PathToUriFn,
+  touched: Set<AgentActivityEntry>,
+  stats: EnrichStats,
+): Promise<void> {
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'tool.call') continue;
+    if (entry['gen_ai.tool.name'] !== 'Read') continue;
+    const raw = entry['gen_ai.tool.call.arguments'];
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (Array.isArray(raw)) continue;
+
+    const paths = extractToolCallImagePaths(raw, cwdOf(entry));
+    if (paths.length === 0) continue;
+
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    if (uriParts.length === 0) continue;
+
+    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    entry['gen_ai.tool.call.arguments'] = [
+      { type: 'text', content: original },
+      ...uriParts,
+    ] as unknown as JsonValue;
+    stats.outputUri += uriParts.length;
+    touched.add(entry);
+  }
+}
+
 async function enrichOutputMarkdownImages(
   entries: AgentActivityEntry[],
   pathToUri: PathToUriFn,
@@ -337,17 +375,13 @@ async function enrichOutputMarkdownImages(
 }
 
 /** @returns number of uri parts appended */
-async function appendUriPartsToMessagesDelta(
+function applyUriPartsToMessagesDelta(
   entry: AgentActivityEntry,
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<number> {
+  uriParts: UriPart[],
+): number {
+  if (uriParts.length === 0) return 0;
   const messages = entry['gen_ai.input.messages_delta'];
   if (!Array.isArray(messages) || messages.length === 0) {
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-    if (uriParts.length === 0) return 0;
     entry['gen_ai.input.messages_delta'] = [
       { role: 'user', parts: uriParts },
     ] as unknown as JsonValue;
@@ -359,8 +393,6 @@ async function appendUriPartsToMessagesDelta(
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
   record.parts = parts;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-  if (uriParts.length === 0) return 0;
   parts.push(...uriParts);
   return uriParts.length;
 }
@@ -418,6 +450,25 @@ export function extractToolImagePaths(text: string): string[] {
     ...matchAll(IMAGE_FILE_RE, text),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
   ]);
+}
+
+export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
+  let record: Record<string, unknown> | null = null;
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    record = args as Record<string, unknown>;
+  } else if (typeof args === 'string' && args) {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        record = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // hook writes JSON.stringify; ignore non-JSON argument strings
+    }
+  }
+  const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
+  if (!filePath) return [];
+  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
 }
 
 export function extractMarkdownImagePaths(text: string, cwd?: string): string[] {

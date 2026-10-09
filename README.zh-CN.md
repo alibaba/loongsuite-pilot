@@ -7,7 +7,7 @@
 [![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
 [![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
 
 [English](README.md) | **简体中文**
@@ -103,7 +103,7 @@ Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent
 
 前置要求：
 
-- Node.js 18 或更高版本
+- 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）。受支持平台上安装器会下载托管 Node.js 22.22 运行时；系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受。Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。
 - `npm`
 - `curl` 或 `wget`
 

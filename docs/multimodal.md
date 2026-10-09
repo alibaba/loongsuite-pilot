@@ -8,7 +8,7 @@ LoongSuite Pilot can convert media in agent messages or tool results (images tod
 
 Multimodal conversion is separate from message content capture:
 
-- `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata`).
+- `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata` and `gen_ai.output.multimodal_metadata`).
 - `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media becomes `uri` parts.
 
 Multimodal also needs an explicit `config.multimodal.storage` block; a matching `config.sls` API Key can supply its auth. See [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
@@ -78,7 +78,7 @@ Configured per agent under `agents.<id>.multimodal.uploadMode`:
 |------|----------|
 | `none` | Disable multimodal conversion (default). |
 | `input` | Convert supported images in user / non-assistant messages and in tool results. |
-| `output` | Convert supported images in assistant / model output and in tool results (output requires an extractor path for that agent). |
+| `output` | Convert supported images in assistant / model output (output requires an extractor path for that agent). |
 | `all` | Enable all wired surfaces. |
 
 Unknown values fall back to `none`.
@@ -114,7 +114,7 @@ Codex converts matching `input_image` data-URLs to `uri` parts at write time; ba
 |--------------|---------------|---------------------|
 | `none` | No conversion | — |
 | `input` | `input_image` on user messages and in tool results | Paste/clipboard, Add file / Files mentioned; path in the prompt then `view_image`; generate-then-`view_image` (`function_call_output`) |
-| `output` | `input_image` in tool results | Path in the prompt then `view_image`; generate-then-`view_image`. No assistant-message extractor yet. |
+| `output` | No conversion today | No assistant-message extractor yet; tool-result images follow `input`. |
 | `all` | User messages and tool results | Covers paste/add-file and tool read/generate images |
 
 Notes:
@@ -130,7 +130,7 @@ Qoder IDE (`qoder`) converts on the `qoder-trace` path after IDE token enrichmen
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
 | `input` | SQLite `chat_record.extra.attachedImagePaths` (and image context entries); `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; Read image, ImageGen |
-| `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions); same `tool.result` paths as `input` | Assistant replies that embed read/generated images; Read image, ImageGen |
+| `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions); `tool.call` image `file_path` | Assistant replies that embed read/generated images; Read image by path |
 | `all` | All of the above | Attachments, tool read/generate, and output embeds |
 
 Notes:
@@ -140,14 +140,14 @@ Notes:
 
 ### Qoder CLI
 
-Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts on the same `qoder-trace` path after CLI token enrichment. It does not query SQLite. Assistant finals usually have no embedded image, so `output` still converts tool-result images but has no assistant-text surface. Fail-open.
+Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts on the same `qoder-trace` path after CLI token enrichment. It does not query SQLite. Assistant finals usually have no embedded image; `output` converts `tool.call` image paths. Tool-result images follow `input`. Fail-open.
 
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, and `@path` (relative paths join `agent.qoder.cwd`), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
-| `output` | Same `tool.result` paths as `input` | Path in the prompt then Read; ImageGen then Read to preview. CLI does not embed images in the final assistant text. |
-| `all` | User attachments and tool-result images | Paste/`@` plus tool read/generate |
+| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
+| `output` | `tool.call` image `file_path` | Path in the prompt then Read; find then Read |
+| `all` | User attachments, tool-result images, and tool-call image paths | Paste/`@` plus tool read/generate |
 
 Notes:
 
@@ -158,7 +158,7 @@ Notes:
 ## Output Shape (Short)
 
 - Message / tool-result `parts` use `type: "uri"` (with `mime_type`, etc.) instead of inline base64.
-- Optional `gen_ai.input.multimodal_metadata`: a summary list of `uri` media on that event.
+- Optional summaries of `uri` media, split by where the parts already sit: `gen_ai.input.multimodal_metadata` (input and tool output), `gen_ai.output.multimodal_metadata` (output and tool calls).
 
 Full field docs: [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 

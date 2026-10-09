@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { ClientType } from '../../../../src/types/index.js';
 import {
   transformDshRecord,
+  transformDshRecordEntries,
   newState,
 } from '../../../../src/inputs/dsh/dsh-event-transform.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -532,6 +533,109 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(request?.['gen_ai.request.model']).toBeUndefined();
     expect(request?.['gen_ai.system_instructions']).toBeUndefined();
   });
+});
+
+// DSH session format v2+ settles a compact stream on assistant/message,
+// without top-level assistant/chunk events. Shape verified against published
+// @deepseek-ai/dsh-agent-loop@0.1.5-rc.2 and dsh-llm AssistantStreamRecord.
+describe('dsh-event-transform (embedded assistant streams)', () => {
+  function response(stream: unknown, extra: Record<string, unknown> = {}) {
+    return {
+      type: 'assistant/message', sid: 'embedded-session', time: 200,
+      data: {
+        turn: 1, step: 1,
+        message: { id: 'response-1', content: [{ type: 'text', text: 'done' }] },
+        usage: { inputTokens: 10, outputTokens: 5 },
+        stream,
+        ...extra,
+      },
+    };
+  }
+
+  it.each([
+    ['stop', 'stop'], ['tool-calls', 'tool_calls'], ['max-tokens', 'length'],
+    ['error', 'error'], ['aborted', 'cancelled'],
+  ])('reads native %s from the same message stream', (kind, expected) => {
+    const entry = transformDshRecord(response([
+      { type: 'text-chunks', time0: 120, index: 0, dt: [10], texts: ['do', 'ne'] },
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind } } },
+    ]), ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual([expected]);
+    expect(entry?.['gen_ai.response.id']).toBe('response-1');
+    expect(entry?.['gen_ai.usage.output_tokens']).toBe(5);
+  });
+
+  it('does not borrow an earlier legacy finish for an unknown embedded reason', () => {
+    const state = newState();
+    transformDshRecord({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+    }, ClientType.Dsh, state);
+    const entry = transformDshRecord(response([
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'future-kind' } } },
+    ]), ClientType.Dsh, state);
+    expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(state.pendingFinish.size).toBe(0);
+  });
+
+  it('uses the native interruption marker for a cancelled prefix without a finish chunk', () => {
+    const entry = transformDshRecord(response([
+      { type: 'text-chunks', time0: 120, index: 0, dt: [], texts: ['partial'] },
+    ], { interrupted: true }), ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+  });
+
+  it.each([[], null, [{ type: 'chunk', time: 190, chunk: { type: 'usage' } }]])(
+    'leaves absent finish information unknown (%j)', (stream) => {
+      const entry = transformDshRecord(response(stream), ClientType.Dsh, newState());
+      expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+    },
+  );
+
+  it('does not duplicate a request when both legacy chunks and an embedded stream are present', () => {
+    const state = newState();
+    const request = transformDshRecordEntries({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'done' } },
+    }, ClientType.Dsh, state);
+    const settled = transformDshRecordEntries(response([
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'tool-calls' } } },
+    ]), ClientType.Dsh, state);
+    expect(request.map(entry => entry['event.name'])).toEqual(['llm.request']);
+    expect(settled.map(entry => entry['event.name'])).toEqual(['llm.response']);
+    expect(settled[0]['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+  });
+
+  it.each(['max-tokens', 'aborted'])('also maps native %s in legacy chunks', (kind) => {
+    const state = newState();
+    transformDshRecord({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'finish', reason: { kind } } },
+    }, ClientType.Dsh, state);
+    const { stream: _stream, ...data } = response([]).data;
+    const entry = transformDshRecord({ ...response([]), data }, ClientType.Dsh, state);
+    expect(entry?.['gen_ai.response.finish_reasons'])
+      .toEqual([kind === 'max-tokens' ? 'length' : 'cancelled']);
+  });
+
+  it.each(['text-chunks', 'reasoning-chunks', 'tool-call-chunks', 'chunk'])(
+    'reads first output timing from %s without expanding the stream', (type) => {
+      const state = newState();
+      transformDshRecord({
+        type: 'step/start', sid: 'embedded-session', time: 100,
+        data: { turn: 1, step: 1 },
+      }, ClientType.Dsh, state);
+      const first = type === 'chunk'
+        ? { type, time: 120, chunk: { type: 'text-delta', text: 'done' } }
+        : { type, time0: 120, index: 0, dt: [], texts: ['done'], args: ['{}'] };
+      const entries = transformDshRecordEntries(response([
+        first,
+        { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+      ]), ClientType.Dsh, state);
+      expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+      expect(entries[1]['gen_ai.response.time_to_first_token']).toBe(20_000_000);
+    },
+  );
 });
 
 describe('dsh-event-transform (message sources)', () => {

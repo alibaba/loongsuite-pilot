@@ -1021,33 +1021,31 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   // Find user prompt
   const userRow = contentEvents.find(isRealUserPrompt)
     || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const userText = userRow ? (extractUserTexts(userRow)[0] ?? '') : '';
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
   const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
 
   // User-hook event (ENTRY input)
-  if (userRow) {
-    const userText = extractUserText(userRow);
-    if (userText) {
-      const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
-      records.push({
-        'event.id': crypto.randomUUID(),
-        'event.name': 'other',
-        'gen_ai.turn.id': turnId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': agentType,
-        'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': userHookModel,
-        'user.id': userId,
-        'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
-        'agent.source': 'qoder-transcript-hook',
-        'agent.qoder.raw_type': 'user',
-        'agent.qoder.content_type': 'text',
-        time_unix_nano: timestampToUnixNanos(userRow.timestamp),
-        observed_time_unix_nano: observedTs,
-        ...cliAttachmentFields(agentType, userRow, allParsed),
-      });
-    }
+  if (userRow && userText) {
+    const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
+    records.push({
+      'event.id': crypto.randomUUID(),
+      'event.name': 'other',
+      'gen_ai.turn.id': turnId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.provider.name': providerName,
+      'gen_ai.request.model': userHookModel,
+      'user.id': userId,
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
+      'agent.source': 'qoder-transcript-hook',
+      'agent.qoder.raw_type': 'user',
+      'agent.qoder.content_type': 'text',
+      time_unix_nano: timestampToUnixNanos(userRow.timestamp),
+      observed_time_unix_nano: observedTs,
+      ...cliAttachmentFields(agentType, userRow, allParsed),
+    });
   }
 
   // If no assistant boundaries were detected, fall back to legacy behavior. The turn
@@ -1101,7 +1099,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     let inputDelta;
     let emitRequest = i > 0;
     if (i === 0 && userRow) {
-      inputDelta = [{ role: 'user', parts: buildUserMessageParts(extractUserText(userRow), contentEvents, agentType) }];
+      inputDelta = [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }];
       emitRequest = true;
     } else if (inputToolResults.length > 0) {
       inputDelta = [];
@@ -1626,16 +1624,19 @@ function isControlUserRow(row) {
   return tags !== null && isControlEnvelopeSequence(tags, row);
 }
 
-function extractUserText(row) {
+function extractUserTexts(row) {
   const content = row.message?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === 'text') return block.text || '';
-      if (typeof block === 'string') return block;
+  if (typeof content === 'string') return content ? [content] : [];
+  if (!Array.isArray(content)) return [];
+  const texts = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      if (block) texts.push(block);
+      continue;
     }
+    if (block?.type === 'text' && block.text) texts.push(block.text);
   }
-  return '';
+  return texts;
 }
 
 function buildUserMessageParts(userText, contentEvents, agentType) {
@@ -1644,10 +1645,11 @@ function buildUserMessageParts(userText, contentEvents, agentType) {
   const seen = new Set([userText]);
   for (const row of contentEvents) {
     if (row.type !== 'user' || isToolResult(row)) continue;
-    const text = extractUserText(row);
-    if (!text || seen.has(text)) continue;
-    parts.push({ type: 'text', content: text });
-    seen.add(text);
+    for (const text of extractUserTexts(row)) {
+      if (!text || seen.has(text)) continue;
+      parts.push({ type: 'text', content: text });
+      seen.add(text);
+    }
   }
   return parts;
 }

@@ -86,6 +86,57 @@ describe('DshLogInput state isolation and restart recovery', () => {
     return `dsh-log:${filePath}`;
   }
 
+  it('collects embedded streams across restart with one paired request and response per step', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, prefix('session-a', 'provider-a', 'private-prompt'));
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+
+    const message = (step: number, kind: string, time: number) => ({
+      type: 'assistant/message', sid: 'session-a', time,
+      data: {
+        turn: 1, step,
+        message: {
+          id: `response-${step}`,
+          source: { provider: 'provider-a', model: 'provider-a-model' },
+          content: [{ type: 'text', text: `answer-${step}` }],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+        stream: [
+          { type: 'chunk', time: time - 4, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
+          { type: 'text-chunks', time0: time - 3, index: 0, dt: [1], texts: ['answer', `-${step}`] },
+          { type: 'chunk', time: time - 1, chunk: { type: 'finish', reason: { kind } } },
+        ],
+      },
+    });
+    await appendRecords(file, [message(1, 'tool-calls', 11)]);
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries[0]['time_unix_nano']).toBe('5000000');
+    expect(entries[1]['gen_ai.response.time_to_first_token']).toBe(3_000_000);
+    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+    expect(JSON.stringify(entries[0]['gen_ai.input.messages'])).toContain('private-prompt');
+    expect(JSON.stringify(entries[0]['gen_ai.input.messages'])).not.toContain('answer-1');
+    await second.store.save();
+
+    await appendRecords(file, [
+      { type: 'step/start', sid: 'session-a', time: 12, data: { turn: 1, step: 2 } },
+      message(2, 'stop', 20),
+      { type: 'turn/end', sid: 'session-a', time: 21, data: { turn: 1 } },
+    ]);
+    const third = await makeInput();
+    const later = await third.input.runCollect();
+    expect(later.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(later[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).toContain('answer-1');
+    expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).not.toContain('private-prompt');
+    expect(JSON.stringify(later[0]['gen_ai.input.messages'])).not.toContain('answer-2');
+    expect(await third.input.runCollect()).toEqual([]);
+    expect(await fs.readFile(statePath, 'utf-8')).not.toContain('private-prompt');
+  });
+
   it('keeps aggregators isolated when two session files advance across poll cycles', async () => {
     const fileA = path.join(tmpDir, 'dsh-session-a.jsonl');
     const fileB = path.join(tmpDir, 'dsh-session-b.jsonl');

@@ -187,11 +187,6 @@ export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): bool
   return mode === 'output' || mode === 'all';
 }
 
-/** uploadMode covers tool results (included by every non-none mode). */
-export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'output' || mode === 'all';
-}
-
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
 export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 

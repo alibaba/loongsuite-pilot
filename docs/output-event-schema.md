@@ -90,8 +90,9 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on this entry; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and the message contains media; stripped when `captureMessageContent` is false. |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.output.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on output and tool calls. Same item shape as the input summary; omitted when those surfaces have no media. |
 | `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
