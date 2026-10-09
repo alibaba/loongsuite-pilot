@@ -311,11 +311,30 @@ async function main() {
           `range=${targetWindow.startLine}-${targetWindow.endLine}, ` +
           `stop=${targetWindow.stopLine}, terminal=${targetWindow.reason}`,
         );
-        if (range.startLine >= targetWindow.endLine) {
-          logDebug(
-            agentId,
-            `Retry skipped: cursor ${range.startLine} already passed target ${targetWindow.endLine}`,
-          );
+        // Strategy (c) from #350: when the cursor is inside or past the target
+        // window, skip reprocessing. Do not resume with
+        // Math.max(targetWindow.startLine, range.startLine) — that drops
+        // UserPromptSubmit / earlier llm.request rows and yields an orphaned
+        // response that is worse than a countable duplicate. Mid-window skips
+        // advance the cursor to the window end so a repeated retry cannot
+        // re-enter the same overlap; the unexported tail is dropped and logged.
+        const overlap = resolveRetryWindowOverlap(range, targetWindow);
+        if (overlap.action === 'skip') {
+          if (overlap.relation === 'mid-window') {
+            logDebug(
+              agentId,
+              `Retry skipped: cursor ${range.startLine} overlaps committed prefix ` +
+              `of target window ${targetWindow.startLine}-${targetWindow.endLine}; ` +
+              `dropping unexported tail [${range.startLine}, ${targetWindow.endLine}) ` +
+              `and advancing cursor`,
+            );
+            updateLineRecord(agentId, transcriptPath, sessionId, overlap.advanceTo);
+          } else {
+            logDebug(
+              agentId,
+              `Retry skipped: cursor ${range.startLine} already passed target ${targetWindow.endLine}`,
+            );
+          }
           return;
         }
       } else {
@@ -679,6 +698,34 @@ export function readTranscriptSnapshot(transcriptPath, { includeContentHash = fa
   } catch {
     return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
   }
+}
+
+/**
+ * Resolve cursor-vs-window overlap on the retry path (#350 strategy c).
+ *
+ * Three relations are handled explicitly:
+ * - before-or-at-start: process the full window (no committed overlap)
+ * - mid-window: skip, advance cursor to window end, drop unexported tail
+ * - past-end: skip without regressing the cursor
+ *
+ * max(start, cursor) is intentionally not used: resuming mid-window would
+ * omit the prompt/request prefix and emit an orphaned response.
+ */
+export function resolveRetryWindowOverlap(range, targetWindow) {
+  if (!range || !targetWindow || targetWindow.status !== 'complete') {
+    return { action: 'process', relation: 'no-window' };
+  }
+  if (range.startLine <= targetWindow.startLine) {
+    return { action: 'process', relation: 'before-or-at-start' };
+  }
+  if (range.startLine >= targetWindow.endLine) {
+    return { action: 'skip', relation: 'past-end', advanceTo: null };
+  }
+  return {
+    action: 'skip',
+    relation: 'mid-window',
+    advanceTo: targetWindow.endLine,
+  };
 }
 
 export function assessStableEofCandidate(previousKey, targetWindow, snapshot) {
