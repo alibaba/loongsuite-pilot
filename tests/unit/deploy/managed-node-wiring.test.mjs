@@ -35,9 +35,9 @@ describe('sh installer variants wire the managed node runtime', () => {
       expect(sh).toContain('sha256 mismatch');
       expect(sh).toContain('xattr -dr com.apple.quarantine');
     });
-    it.skipIf(!present)(`${f} rejects musl and win-arm64 with explicit notices`, () => {
+    it.skipIf(!present)(`${f} rejects musl with an explicit notice`, () => {
       expect(sh).toContain('ld-musl-');
-      expect(sh).toContain('win-arm64');
+      expect(sh).toContain('linux-musl');
     });
     it.skipIf(!present)(`${f} check_deps prefers managed node by default with system fallback`, () => {
       const checkDeps = sh.slice(sh.indexOf('check_deps() {'));

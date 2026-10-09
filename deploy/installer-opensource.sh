@@ -375,11 +375,6 @@ managed_node_platform() {
             echo "managed node: unsupported architecture $(uname -m)" >&2
             return 1 ;;
     esac
-    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
-        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
-                "managed node: no win-arm64 artifact, falling back to system node + npm install"
-        return 1
-    fi
     if [ "$os" = "linux" ] && managed_node_is_musl; then
         _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
                 "managed node: no linux-musl artifact, falling back to system node + npm install"
