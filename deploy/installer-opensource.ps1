@@ -331,11 +331,7 @@ function Get-ManagedNodePlatform {
     if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
     switch ($archRaw) {
         "AMD64" { return [pscustomobject]@{ Os = "win"; Arch = "x64" } }
-        "ARM64" {
-            Msg "    ⚠️ 托管 Node.js 无 win-arm64 产物，回退系统 node + npm install" `
-                "    ⚠️ No win-arm64 managed Node.js artifact, falling back to system node + npm install"
-            return $null
-        }
+        "ARM64" { return [pscustomobject]@{ Os = "win"; Arch = "arm64" } }
         default {
             Msg "    ⚠️ 托管 Node.js 不支持架构 $archRaw，回退系统 node + npm install" `
                 "    ⚠️ Managed Node.js does not support arch $archRaw, falling back to system node + npm install"
@@ -685,7 +681,7 @@ function Ensure-ManagedNode {
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     try {
-        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-x64)..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-x64)..."
+        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-$($platform.Arch))..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-$($platform.Arch))..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
         if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $null }
@@ -731,7 +727,7 @@ function Ensure-NodeModules {
     $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     try {
-        Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
+        Msg "==> 下载预编译 node_modules (win-$($platform.Arch), app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-$($platform.Arch), app v$AppVersion)..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
         if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $false }
