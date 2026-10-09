@@ -143,7 +143,7 @@ describe('managed multimodal configuration', () => {
     expect(config.flushers.sls.endpoints[0].project).toBe('user');
   });
 
-  it('retains user SLS shorthand without borrowing managed multimodal credentials', async () => {
+  it('disables a logstore-only target without filling it from user SLS or managed storage', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({ multimodal: slsMultimodal('managed') }));
     writeFileSync(configPath, JSON.stringify({
       sls: {
@@ -155,14 +155,8 @@ describe('managed multimodal configuration', () => {
 
     const config = await loadConfig();
 
-    expect(config.multimodal).toEqual({
-      storage: {
-        type: 'sls',
-        target: { endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'user', logstore: 'images' },
-        auth: { mode: 'apiKey', apiKey: 'user-test-key' },
-      },
-      storageBasePath: 'sls://user/images',
-    });
+    expect(config.multimodal).toBeUndefined();
+    expect(config.flushers.sls.endpoints[0].apiKey).toBe('user-test-key');
   });
 
   it('does not infer storage when the user explicitly supplies a null block', async () => {
@@ -178,7 +172,7 @@ describe('managed multimodal configuration', () => {
     expect((await loadConfig()).multimodal).toBeUndefined();
   });
 
-  it('uses user SLS inference for an explicit empty user block instead of managed storage', async () => {
+  it('does not infer storage from user SLS when the user block is empty', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({ multimodal: slsMultimodal('managed') }));
     writeFileSync(configPath, JSON.stringify({
       sls: {
@@ -190,11 +184,8 @@ describe('managed multimodal configuration', () => {
 
     const config = await loadConfig();
 
-    expect(config.multimodal?.storage).toEqual({
-      type: 'sls',
-      target: { endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'user', logstore: 'events' },
-      auth: { mode: 'apiKey', apiKey: 'user-test-key' },
-    });
+    expect(config.multimodal).toBeUndefined();
+    expect(config.flushers.sls.endpoints[0].apiKey).toBe('user-test-key');
   });
 
   it('keeps agent upload policies under user configuration', async () => {
