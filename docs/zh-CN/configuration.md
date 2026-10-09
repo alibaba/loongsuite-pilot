@@ -10,9 +10,16 @@ Pilot 按以下顺序解析配置：
 
 1. 环境变量。
 2. 配置文件，默认路径为 `~/.loongsuite-pilot/config.json`。
-3. 内置默认值。
+3. 集团版的托管默认配置 `~/.loongsuite-pilot/configs/inner/data_config.json`（仅适用于其支持的配置项）。
+4. 内置默认值。
 
 如需使用其他配置文件路径，可以设置 `AGENT_DATA_COLLECTION_CONFIG`。
+
+对多模态配置，用户的 `config.json` 始终优先于托管默认配置：
+
+- 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。
+- `agents` 按 Agent 名合并，用户字段覆盖托管默认值；其中 `multimodal` 子对象按字段浅合并。例如用户只改 `uploadMode`，可保留托管配置的 `allowedRootPaths`。
+- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 `enabled` 或 `captureMessageContent`。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
 
 ## 常用全局配置
 

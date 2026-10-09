@@ -6,8 +6,9 @@ import { buildOtlpTraceConfig, loadConfig, type ConfigFile } from '../../../src/
 import { isAgentGatedEnabled } from '../../../src/deployment/deploy-command.js';
 import { anyAgentMultimodalEnabled, isAgentMultimodalEnabled } from '../../../src/multimodal/agent-gate.js';
 
+const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }));
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+  createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: logWarn, error: vi.fn() }),
 }));
 
 function slsMultimodal(project: string): NonNullable<ConfigFile['multimodal']> {
@@ -30,6 +31,7 @@ describe('managed multimodal configuration', () => {
   let innerConfigPath: string;
 
   beforeEach(() => {
+    logWarn.mockClear();
     dataDir = mkdtempSync(path.join(tmpdir(), 'pilot-inner-multimodal-'));
     configPath = path.join(dataDir, 'config.json');
     innerConfigPath = path.join(dataDir, 'configs', 'inner', 'data_config.json');
@@ -176,6 +178,25 @@ describe('managed multimodal configuration', () => {
     expect((await loadConfig()).multimodal).toBeUndefined();
   });
 
+  it('uses user SLS inference for an explicit empty user block instead of managed storage', async () => {
+    writeFileSync(innerConfigPath, JSON.stringify({ multimodal: slsMultimodal('managed') }));
+    writeFileSync(configPath, JSON.stringify({
+      sls: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'user', logstore: 'events', mode: 'apiKey', apiKey: 'user-test-key',
+      },
+      multimodal: {},
+    }));
+
+    const config = await loadConfig();
+
+    expect(config.multimodal?.storage).toEqual({
+      type: 'sls',
+      target: { endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'user', logstore: 'events' },
+      auth: { mode: 'apiKey', apiKey: 'user-test-key' },
+    });
+  });
+
   it('keeps agent upload policies under user configuration', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({ multimodal: slsMultimodal('managed') }));
     writeFileSync(configPath, JSON.stringify({
@@ -233,6 +254,41 @@ describe('managed multimodal configuration', () => {
     expect(isAgentGatedEnabled(config, 'cursor')).toBe(true);
     expect(isAgentMultimodalEnabled('codex', config.agents.codex)).toBe(true);
     expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    expect(logWarn).toHaveBeenCalledWith('Ignoring unsupported managed agent fields', {
+      agentType: 'qoder', ignoredFields: ['enabled'],
+    });
+    expect(logWarn).toHaveBeenCalledWith('Ignoring managed agent policy without valid multimodal settings', {
+      agentType: 'cursor', type: 'undefined', ignoredFields: ['enabled', 'captureMessageContent'],
+    });
+  });
+
+  it.each([
+    [[], 'Ignoring invalid agents config; expected an object', { source: 'inner', type: 'array' }],
+    [{ qoder: [] }, 'Ignoring invalid agent policy; expected an object', { source: 'inner', agentType: 'qoder', type: 'array' }],
+  ])('warns when managed agents are malformed: %j', async (agents, message, details) => {
+    writeFileSync(innerConfigPath, JSON.stringify({ agents }));
+
+    const config = await loadConfig();
+
+    expect(logWarn).toHaveBeenCalledWith(message, details);
+    expect(isAgentGatedEnabled(config, 'qoder')).toBe(true);
+  });
+
+  it('warns and disables a user multimodal array overriding managed settings', async () => {
+    writeFileSync(innerConfigPath, JSON.stringify({
+      agents: { qoder: { multimodal: { uploadMode: 'all' } } },
+    }));
+    writeFileSync(configPath, JSON.stringify({
+      agents: { qoder: { multimodal: ['input'] } },
+    }));
+
+    const config = await loadConfig();
+
+    expect(config.agents.qoder.multimodal).toBeUndefined();
+    expect(isAgentGatedEnabled(config, 'qoder')).toBe(true);
+    expect(logWarn).toHaveBeenCalledWith('Ignoring invalid agent multimodal config; expected an object', {
+      agentType: 'qoder', type: 'array',
+    });
   });
 
   it('overrides agent uploadMode by user field while retaining managed roots and other agents', async () => {
@@ -256,7 +312,7 @@ describe('managed multimodal configuration', () => {
 
   it('allows user uploadMode=none to disable managed multimodal without disabling collection', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({
-      agents: { qoder: { multimodal: { uploadMode: 'all' } } },
+      agents: { qoder: { multimodal: { uploadMode: 'all', allowedRootPaths: ['/managed/workspace'] } } },
     }));
     writeFileSync(configPath, JSON.stringify({
       agents: { qoder: { multimodal: { uploadMode: 'none' } } },
@@ -264,9 +320,23 @@ describe('managed multimodal configuration', () => {
 
     const config = await loadConfig();
 
+    expect(config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
     expect(isAgentMultimodalEnabled('qoder', config.agents.qoder)).toBe(false);
     expect(isAgentGatedEnabled(config, 'qoder')).toBe(true);
     expect(isAgentGatedEnabled(config, 'cursor')).toBe(true);
+  });
+
+  it('warns on an unknown uploadMode and omits inactive roots', async () => {
+    writeFileSync(configPath, JSON.stringify({
+      agents: { qoder: { multimodal: { uploadMode: 'invalid', allowedRootPaths: ['/user/workspace'] } } },
+    }));
+
+    const config = await loadConfig();
+
+    expect(config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
+    expect(logWarn).toHaveBeenCalledWith('Invalid agent multimodal uploadMode; using none', {
+      agentType: 'qoder', type: 'string',
+    });
   });
 
   it.each([
