@@ -99,87 +99,43 @@ describe('plugin-migration: Claude 清理', () => {
   });
 });
 
-describe('plugin-migration: Codex 清理', () => {
-  test('清理 hooks.json 中 otel-codex-hook 条目', async () => {
-    ensureDir(path.join(TMP_HOME, '.cache', 'opentelemetry.instrumentation.codex'));
-    writeJson(path.join(TMP_HOME, '.codex', 'hooks.json'), {
-      hooks: {
-        SessionStart: [
-          { hooks: [{ type: 'command', command: 'bash /Users/x/.cache/opentelemetry.instrumentation.codex/hook-entry.sh session-start' }] },
-        ],
-        Stop: [
-          { hooks: [{ type: 'command', command: 'bash /Users/x/.cache/opentelemetry.instrumentation.codex/hook-entry.sh stop' }] },
-        ],
-      },
-    });
-
-    const report = await runPluginMigration();
-    expect(report.codex.migrated).toBe(true);
-
-    // hooks.json 全是 otel 条目 → 整文件被删
-    expect(fs.existsSync(path.join(TMP_HOME, '.codex', 'hooks.json'))).toBe(false);
-  });
-
-  test('config.toml 清 # OpenTelemetry instrumentation hooks marker 段 + codex_hooks alias', async () => {
-    ensureDir(path.join(TMP_HOME, '.cache', 'opentelemetry.instrumentation.codex'));
-    const tomlContent = [
-      '[features]',
-      'codex_hooks = true',
-      '',
-      '# OpenTelemetry instrumentation hooks',
-      '[[hooks.SessionStart]]',
-      '',
-      '[[hooks.SessionStart.hooks]]',
-      'type = "command"',
-      'command = "otel-codex-hook session-start"',
-      '',
-      '[[hooks.Stop]]',
-      '',
-      '[[hooks.Stop.hooks]]',
-      'type = "command"',
-      'command = "otel-codex-hook stop"',
-      '',
-      '[other]',
-      'foo = "bar"',
-    ].join('\n');
-    writeText(path.join(TMP_HOME, '.codex', 'config.toml'), tomlContent);
-
-    await runPluginMigration();
-
-    const after = fs.readFileSync(path.join(TMP_HOME, '.codex', 'config.toml'), 'utf-8');
-    expect(after).not.toContain('# OpenTelemetry instrumentation hooks');
-    expect(after).not.toContain('codex_hooks');
-    expect(after).not.toContain('otel-codex-hook');
-    expect(after).not.toContain('[features]'); // 空 features 被一并删
-    expect(after).toContain('[other]'); // 用户其他配置保留
-    expect(after).toContain('foo = "bar"');
-  });
-
-  test('config.toml 不动 BEGIN/END trust block (留给 hook-strategy 自然替换)', async () => {
-    ensureDir(path.join(TMP_HOME, '.cache', 'opentelemetry.instrumentation.codex'));
-    const tomlContent = [
-      '# BEGIN otel-codex-hook trust',
-      '[hooks.state."/abs/hooks.json:session_start:0:0"]',
-      'trusted_hash = "sha256:abc"',
-      '# END otel-codex-hook trust',
-    ].join('\n');
-    writeText(path.join(TMP_HOME, '.codex', 'config.toml'), tomlContent);
-
-    await runPluginMigration();
-
-    const after = fs.readFileSync(path.join(TMP_HOME, '.codex', 'config.toml'), 'utf-8');
-    expect(after).toContain('# BEGIN otel-codex-hook trust');
-    expect(after).toContain('# END otel-codex-hook trust');
-  });
-
-  test('cache 目录被删', async () => {
+describe('plugin-migration: Codex 资产不归 Pilot 自动迁移', () => {
+  test('保留 Codex OTel cache、hook 和配置', async () => {
     const cache = path.join(TMP_HOME, '.cache', 'opentelemetry.instrumentation.codex');
     ensureDir(path.join(cache, 'sessions'));
     writeText(path.join(cache, 'hook-entry.sh'), '#!/bin/bash');
+    const hooksPath = path.join(TMP_HOME, '.codex', 'hooks.json');
+    const configPath = path.join(TMP_HOME, '.codex', 'config.toml');
+    const otelConfigPath = path.join(TMP_HOME, '.codex', 'otel-config.json');
+    writeJson(hooksPath, {
+      hooks: {
+        Stop: [{
+          hooks: [{
+            type: 'command',
+            command: 'bash /Users/x/.cache/opentelemetry.instrumentation.codex/hook-entry.sh stop',
+          }],
+        }],
+      },
+    });
+    writeText(configPath, [
+      '# BEGIN otel-codex-hook trust',
+      '[hooks.state."/abs/hooks.json:stop:0:0"]',
+      'trusted_hash = "sha256:abc"',
+      '# END otel-codex-hook trust',
+    ].join('\n'));
+    writeJson(otelConfigPath, { log_enabled: true });
 
-    await runPluginMigration();
+    const hooksBefore = fs.readFileSync(hooksPath);
+    const configBefore = fs.readFileSync(configPath);
+    const otelConfigBefore = fs.readFileSync(otelConfigPath);
 
-    expect(fs.existsSync(cache)).toBe(false);
+    const report = await runPluginMigration();
+
+    expect(report.codex.migrated).toBe(false);
+    expect(fs.existsSync(cache)).toBe(true);
+    expect(fs.readFileSync(hooksPath)).toEqual(hooksBefore);
+    expect(fs.readFileSync(configPath)).toEqual(configBefore);
+    expect(fs.readFileSync(otelConfigPath)).toEqual(otelConfigBefore);
   });
 });
 

@@ -64,6 +64,7 @@ describe('codex transcript discovery hook', () => {
       'PostToolUse',
       'PostToolUseFailure',
     ]);
+    expect(definition.hook).not.toHaveProperty('replaceHookCommands');
   });
 
   test('writes an atomic wakeup marker with the effective CODEX_HOME', () => {

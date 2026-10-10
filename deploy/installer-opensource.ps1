@@ -2644,11 +2644,10 @@ try {
 }
 
 # ============================================================
-# Remove OTel plugin (Claude/Codex)
+# Remove legacy OTel plugin assets owned by Pilot
 # ============================================================
 function Remove-OtelPlugin {
     $OTEL_CLAUDE_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.claude"
-    $OTEL_CODEX_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.codex"
 
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
@@ -2683,7 +2682,7 @@ try {
     }
 
     # Remove plugin directories
-    foreach ($dir in @($OTEL_CLAUDE_DIR, $OTEL_CODEX_DIR)) {
+    foreach ($dir in @($OTEL_CLAUDE_DIR)) {
         if (Test-Path $dir) {
             if ($Purge) {
                 Remove-Item $dir -Recurse -Force
@@ -2925,24 +2924,10 @@ fs.writeFileSync(process.argv[2], content);
     if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
-function Remove-CodexTrustState {
-    $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
-    if (-not (Test-Path -LiteralPath $configPath)) { return }
-
-    $content = Get-Content -LiteralPath $configPath -Raw
-    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
-    $updated = $content -replace $pattern, ""
-    if ($updated -eq $content) { return }
-
-    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
-    Write-FileUtf8NoBom -Path $configPath -Content $updated
-    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
-}
-
 function Test-IsPilotCodexHookCommand {
     param([object]$Command)
     if ($null -eq $Command) { return $false }
-    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook|otel-codex-hook)'
+    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook)'
 }
 
 function Remove-CodexHookConfig {
@@ -3533,12 +3518,6 @@ function Cmd-Uninstall {
         Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
             "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
     }
-    try {
-        Remove-CodexTrustState
-    } catch {
-        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
-            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
-    }
     Write-Host ""
 
     Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
@@ -3565,7 +3544,7 @@ function Cmd-Uninstall {
     }
     Write-Host ""
 
-    Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     Remove-OtelPlugin
     Write-Host ""
 
