@@ -190,7 +190,7 @@ export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): bool
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
 export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey', 'anonymous'] as const;
 export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
 
 export interface MultimodalAkAuth {
@@ -205,8 +205,14 @@ export interface MultimodalApiKeyAuth {
   apiKey: string;
 }
 
-/** Discriminated auth after load. User config must be exactly one complete credential set. */
-export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+export interface MultimodalAnonymousAuth {
+  mode: 'anonymous';
+}
+
+/** Credential-bearing auth shared by SLS, delegated OSS, and direct OSS. */
+export type MultimodalCredentialAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+/** SLS PutObject also supports explicit credential-free anonymous writes. */
+export type MultimodalStorageAuth = MultimodalCredentialAuth | MultimodalAnonymousAuth;
 
 export interface MultimodalSlsTarget {
   endpoint: string;
@@ -221,7 +227,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalCredentialAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**

@@ -752,6 +752,54 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('loads explicit anonymous auth for sls without credentials', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: { mode: 'anonymous' },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('disables anonymous sls auth when credentials are also present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous', apiKey: 'must-not-be-used' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
+    });
+
     it('loads delegatedOss with apiKey auth', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         multimodal: {
@@ -779,6 +827,24 @@ describe('ConfigLoader', () => {
         },
         storageBasePath: 'sls://my-project/mm-store',
       });
+    });
+
+    it('disables anonymous auth for delegatedOss', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
     });
 
     it('infers auth.mode=ak when mode is omitted and both access keys exist', async () => {
@@ -978,6 +1044,23 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when type=oss uses anonymous auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
     });
 
     it('disables multimodal when sls credentials are incomplete', async () => {

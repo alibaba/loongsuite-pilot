@@ -134,7 +134,9 @@ export class SlsUploader implements Uploader {
           accessKeySecret: auth.accessKeySecret,
           securityToken: auth.securityToken,
         }
-        : { apiKey: auth.apiKey }),
+        : auth.mode === 'apiKey'
+          ? { apiKey: auth.apiKey }
+          : {}),
       body: item.data!,
       contentType: item.contentType,
       timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,

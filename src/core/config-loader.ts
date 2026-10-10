@@ -471,7 +471,14 @@ function buildMultimodalSlsBackedStorage(
   const auth = buildMultimodalStorageAuth(
     raw.auth ?? findReusedApiKeyAuth({ endpoint, project, logstore }, file),
   );
-  return { type, target: { endpoint, project, logstore }, auth };
+  const target = { endpoint, project, logstore };
+  if (type === 'delegatedOss') {
+    if (auth.mode === 'anonymous') {
+      throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+    }
+    return { type, target, auth };
+  }
+  return { type, target, auth };
 }
 
 const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
@@ -545,6 +552,12 @@ function buildMultimodalStorageAuth(
   }
 
   const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
+  if (mode === 'anonymous') {
+    if (accessKeyId || accessKeySecret || securityToken || apiKey) {
+      throw new Error('multimodal.storage.auth.mode=anonymous cannot include credentials');
+    }
+    return { mode: 'anonymous' };
+  }
   if (mode === 'apiKey') {
     if (!apiKey) throw new Error('multimodal.storage.auth requires apiKey when mode=apiKey');
     return { mode: 'apiKey', apiKey };

@@ -23,13 +23,17 @@ export interface SlsAuthApiKey {
   apiKey: string;
 }
 
-export type SlsObjectAuth = SlsAuthAk | SlsAuthApiKey;
+export interface SlsAuthAnonymous {
+  mode: 'anonymous';
+}
+
+export type SlsObjectAuth = SlsAuthAk | SlsAuthApiKey | SlsAuthAnonymous;
 
 export interface SlsRequest {
   endpoint: string;
   project: string;
   logstore: string;
-  mode?: 'ak' | 'apiKey';
+  mode?: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
@@ -182,16 +186,24 @@ export function slsProjectHost(project: string, endpointHost: string): string {
 }
 
 export function resolveSlsObjectAuth(params: {
-  mode?: 'ak' | 'apiKey';
+  mode?: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
   apiKey?: string;
-}): { kind: 'ak' } & SlsAuthAk | { kind: 'apiKey' } & SlsAuthApiKey {
+}): { kind: 'ak' } & SlsAuthAk
+  | { kind: 'apiKey' } & SlsAuthApiKey
+  | { kind: 'anonymous' } {
   const apiKey = params.apiKey?.trim() ?? '';
   const accessKeyId = params.accessKeyId?.trim() ?? '';
   const accessKeySecret = params.accessKeySecret?.trim() ?? '';
   const securityToken = params.securityToken?.trim() || undefined;
+  if (params.mode === 'anonymous') {
+    if (apiKey || accessKeyId || accessKeySecret || securityToken) {
+      throw new Error('SLS anonymous auth cannot include credentials');
+    }
+    return { kind: 'anonymous' };
+  }
   if (params.mode === 'apiKey') {
     if (!apiKey) throw new Error('SLS apiKey is required');
     return { kind: 'apiKey', apiKey };
@@ -311,6 +323,34 @@ export function buildBearerJsonRequest(args: {
     headers['Content-Length'] = String(bodyLength);
   }
   return { url, headers };
+}
+
+export function buildAnonymousPutRequest(args: {
+  endpoint: SlsEndpoint;
+  project: string;
+  resource: string;
+  contentType: string;
+  bodyLength: number;
+  extraHeaders?: Record<string, string>;
+  now?: Date;
+}): { url: string; headers: Record<string, string> } {
+  const host = slsProjectHost(args.project, args.endpoint.host);
+  const url = `${args.endpoint.scheme}://${host}${args.resource}`;
+  const date = formatRfc822Gmt(args.now ?? new Date());
+  return {
+    url,
+    headers: {
+      Host: host,
+      Date: date,
+      'x-log-date': date,
+      'User-Agent': 'loongsuite-pilot-multimodal-sls/1.0',
+      'x-log-apiversion': SLS_API_VERSION,
+      'x-log-bodyrawsize': String(args.bodyLength),
+      'Content-Type': args.contentType,
+      'Content-Length': String(args.bodyLength),
+      ...(args.extraHeaders ?? {}),
+    },
+  };
 }
 
 export function buildLogV1JsonRequest(args: {
@@ -436,8 +476,18 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
     const prepared = prepareSlsObjectTarget(params);
     const contentType = params.contentType || 'application/octet-stream';
     const resource = slsObjectResource(prepared.logstore, prepared.objectKey);
-    const { url, headers } = prepared.auth.kind === 'apiKey'
-      ? buildBearerJsonRequest({
+    let request: { url: string; headers: Record<string, string> };
+    if (prepared.auth.kind === 'anonymous') {
+      request = buildAnonymousPutRequest({
+        endpoint: prepared.endpoint,
+        project: prepared.project,
+        resource,
+        contentType,
+        bodyLength: params.body.length,
+        extraHeaders: metadataHeaders(params.meta),
+      });
+    } else if (prepared.auth.kind === 'apiKey') {
+      request = buildBearerJsonRequest({
         endpoint: prepared.endpoint,
         project: prepared.project,
         method: 'PUT',
@@ -446,8 +496,9 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
         contentType,
         bodyLength: params.body.length,
         extraHeaders: metadataHeaders(params.meta),
-      })
-      : buildLogV1JsonRequest({
+      });
+    } else {
+      request = buildLogV1JsonRequest({
         endpoint: prepared.endpoint,
         project: prepared.project,
         method: 'PUT',
@@ -459,11 +510,12 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
         bodyLength: params.body.length,
         extraHeaders: metadataHeaders(params.meta),
       });
+    }
 
     return await slsHttpRequest({
-      url,
+      url: request.url,
       method: 'PUT',
-      headers,
+      headers: request.headers,
       body: params.body,
       timeoutMs: params.timeoutMs,
       signal: params.signal,
@@ -477,6 +529,9 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
 export async function slsGeneratePresignedUrl(params: SlsObjectTarget): Promise<SlsPresignResult> {
   try {
     const prepared = prepareSlsObjectTarget(params);
+    if (prepared.auth.kind === 'anonymous') {
+      throw new Error('SLS presign does not support anonymous auth');
+    }
     const body = Buffer.from(JSON.stringify({ key: prepared.objectKey, method: 'PUT' }), 'utf8');
     const { url, headers } = prepared.auth.kind === 'apiKey'
       ? buildBearerJsonRequest({
@@ -681,12 +736,15 @@ async function probeSlsMultimodalCapability(
 }
 
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
-  mode: 'ak' | 'apiKey';
+  mode: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
   apiKey?: string;
 } {
+  if (auth.mode === 'anonymous') {
+    return { mode: 'anonymous' };
+  }
   if (auth.mode === 'apiKey') {
     return { mode: 'apiKey', apiKey: auth.apiKey };
   }
@@ -743,14 +801,16 @@ export async function resolveMultimodalEventStorageBasePath(
     }
     if (config.storage.type === 'sls') {
       const { target, auth } = config.storage;
-      const probe = await probeSlsMultimodalCapability({
-        endpoint: target.endpoint,
-        project: target.project,
-        logstore: target.logstore,
-        ...slsStorageAuthFields(auth),
-      });
-      if (!probe.ok) {
-        return { ok: false, error: probe.error || 'sls multimodal probe failed' };
+      if (auth.mode !== 'anonymous') {
+        const probe = await probeSlsMultimodalCapability({
+          endpoint: target.endpoint,
+          project: target.project,
+          logstore: target.logstore,
+          ...slsStorageAuthFields(auth),
+        });
+        if (!probe.ok) {
+          return { ok: false, error: probe.error || 'sls multimodal probe failed' };
+        }
       }
     }
     return { ok: true, storageBasePath };
