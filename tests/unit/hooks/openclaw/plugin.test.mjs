@@ -1343,3 +1343,61 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(response['agent.openclaw.duration_ms']).toBe(5_000);
   });
 });
+
+describe('subagent trace propagation', () => {
+  it('links an early asynchronous child to the exact spawn tool, preserving its own turn', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    const handlers = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await handlers.before_agent_run({ prompt: 'delegate', senderId: 'user-a' }, parent);
+    await handlers.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', params: {} }, parent);
+    const child = { runId: 'child-run', sessionId: 'child-session', sessionKey: 'agent:main:subagent:child-a' };
+    await handlers.before_agent_run({ prompt: 'child task' }, child);
+    await handlers.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } }, parent);
+    await handlers.llm_output({}, child);
+    const records = readOutputRecords();
+    const spawn = records.find(r => r['event.name'] === 'tool.call');
+    const children = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(spawn.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(children.every(r => r.trace_id === spawn.trace_id)).toBe(true);
+    expect(children.every(r => r.parent_span_id === spawn.span_id)).toBe(true);
+    expect(children.every(r => r['user.id'] === 'user-a')).toBe(true);
+    expect(children.every(r => r['gen_ai.session.id'] === 'child-session')).toBe(true);
+  });
+});
+
+it('keeps simultaneous spawns separate and recovers their identity after plugin restart with content off', async () => {
+  delete process.env.LOONGSUITE_USER_ID;
+  fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
+  const h = registerPlugin(await loadPlugin());
+  const parents = [0, 1].map(i => ({ runId: `p${i}`, sessionId: `ps${i}`, sessionKey: `agent:main:p${i}` }));
+  for (const [i, parent] of parents.entries()) {
+    await h.before_agent_run({ prompt: 'secret-task', senderId: `user-${i}` }, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', params: { task: 'secret-task' } }, parent);
+  }
+  // The second tool completes first; neither timing nor call id alone is a join.
+  for (const i of [1, 0]) await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', result: {
+    details: { status: 'accepted', runId: `c${i}`, childSessionKey: `agent:main:subagent:c${i}` },
+  } }, parents[i]);
+  const restarted = registerPlugin(await loadPlugin());
+  for (const i of [0, 1]) {
+    const child = { runId: `c${i}`, sessionId: `cs${i}`, sessionKey: `agent:main:subagent:c${i}` };
+    await restarted.before_agent_run({ prompt: 'secret-task' }, child);
+    await restarted.llm_output({}, child);
+  }
+  const rows = readOutputRecords();
+  const calls = rows.filter(r => r['event.name'] === 'tool.call');
+  expect(new Set(calls.map(r => r.span_id)).size).toBe(2);
+  for (const i of [0, 1]) {
+    const call = calls.find(r => r['gen_ai.turn.id'] === `p${i}`);
+    const child = rows.filter(r => r['gen_ai.turn.id'] === `c${i}`);
+    expect(child.length).toBeGreaterThan(0);
+    expect(child.every(r => r.trace_id === call.trace_id && r.parent_span_id === call.span_id && r['user.id'] === `user-${i}`)).toBe(true);
+  }
+  expect(JSON.stringify(rows)).not.toContain('secret-task');
+  const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
+  expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
+});

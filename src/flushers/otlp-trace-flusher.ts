@@ -14,6 +14,7 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
+import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
@@ -420,6 +421,7 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
   'gen_ai.subagent.parent_tool_call.id',
+  'agent.pilot.parent.turn.id',
   'agent.qwen-code-cli.subagent.collection',
   'agent.qwen-code-cli.subagent.status',
   'agent.qwen-code-cli.timing.source',
@@ -1086,7 +1088,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const convertStarted = performance.now();
         let succeeded = false;
         try {
-          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents : convertEventLogToTrace;
+          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+            : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
+            : convertEventLogToTrace;
           result = convert(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },

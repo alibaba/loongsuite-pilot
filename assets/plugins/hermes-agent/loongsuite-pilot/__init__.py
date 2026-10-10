@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import contextvars
+import functools
+import importlib
+import inspect
 import json
 import os
 import secrets
@@ -46,6 +50,90 @@ _PROCESS_FILE_TOKEN = "%s-%s-%s" % (
 )
 _STATE_LOCK = threading.RLock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
+_ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+
+
+def _parent_context_path(session_id: str) -> Path:
+    return _data_dir() / "subagent-contexts" / "hermes" / (hashlib.sha256(session_id.encode()).hexdigest() + ".json")
+
+
+def _read_parent_context(session_id: str) -> Dict[str, Any]:
+    value = _read_json_object(_parent_context_path(session_id))
+    if (value.get("session_id") == session_id
+            and isinstance(value.get("expires_at"), (int, float)) and value["expires_at"] > time.time()
+            and isinstance(value.get("trace_id"), str) and len(value["trace_id"]) == 32
+            and set(value["trace_id"]) <= set("0123456789abcdef") and set(value["trace_id"]) != {"0"}
+            and isinstance(value.get("parent_span_id"), str) and len(value["parent_span_id"]) == 16
+            and set(value["parent_span_id"]) <= set("0123456789abcdef") and set(value["parent_span_id"]) != {"0"}
+            and isinstance(value.get("user_id"), str) and bool(value["user_id"])
+            and all(isinstance(value.get(key), str) and value[key] for key in ("parent_session_id", "parent_turn_id", "tool_call_id"))):
+        return value
+    return {}
+
+
+def _install_delegate_context() -> None:
+    """Hermes hooks omit parent/tool identity. Adapt the native child factory,
+    before thread submission, instead of guessing from goals or active sessions.
+    Only this optional factory is wrapped; arguments, results and exceptions
+    retain their original behavior. Older hosts without it keep normal hooks.
+    """
+    try:
+        module = importlib.import_module("tools.delegate_tool")
+        original = module._build_child_agent
+        if getattr(original, "_pilot_subagent_context", False):
+            return
+        signature = inspect.signature(original)
+        if "parent_agent" not in signature.parameters:
+            return
+
+        @functools.wraps(original)
+        def build_child(*args: Any, **kwargs: Any) -> Any:
+            relation = None
+            try:
+                parent = signature.bind(*args, **kwargs).arguments.get("parent_agent")
+                active = _ACTIVE_DELEGATION.get()
+                with _STATE_LOCK:
+                    if active and active[0] == getattr(parent, "session_id", None):
+                        turn = _SESSIONS.get(active[0], {}).get("current_turn")
+                        tool = turn.get("tools", {}).get(active[2]) if turn else None
+                        if turn and _turn_id(turn) == active[1] and tool and tool.get("end_ns") is None:
+                            relation = {
+                                "trace_id": turn["trace_id"], "parent_span_id": tool["span_id"],
+                                "parent_session_id": turn["session_id"], "parent_turn_id": _turn_id(turn),
+                                "tool_call_id": active[2], "user_id": turn["user_id"],
+                            }
+            except Exception as error:
+                _report_internal_error("delegate_context", error)
+            child = original(*args, **kwargs)
+            try:
+                sid = getattr(child, "session_id", None)
+                if relation and isinstance(sid, str) and sid:
+                    target = _parent_context_path(sid)
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    # Clean expired identity-only records, never transcripts.
+                    for old in target.parent.glob("*.json"):
+                        if time.time() - old.stat().st_mtime > LOG_RETENTION_SECONDS:
+                            old.unlink(missing_ok=True)
+                    value = dict(relation, session_id=sid, expires_at=time.time() + LOG_RETENTION_SECONDS)
+                    temp = target.with_suffix("." + uuid.uuid4().hex + ".tmp")
+                    try:
+                        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        with os.fdopen(fd, "w") as stream:
+                            json.dump(value, stream)
+                        os.replace(temp, target)
+                    finally:
+                        temp.unlink(missing_ok=True)
+            except Exception as error:
+                _report_internal_error("delegate_context", error)
+            return child
+
+        build_child._pilot_subagent_context = True
+        module._build_child_agent = build_child
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("delegate_context", error)
+
 
 
 def _read_json_object(path: Path) -> Dict[str, Any]:
@@ -456,6 +544,9 @@ def _new_turn(
     config = _config()
     normalized_sender_id = _normalized_identity(sender_id)
     user_identity = _resolve_user_identity(normalized_sender_id, config)
+    parent = _read_parent_context(session_id)
+    if parent and user_identity["source"] in ("config", "hostname"):
+        user_identity = {"user_id": parent["user_id"], "source": "parent"}
     return {
         "session_id": session_id,
         "task_id": None,
@@ -463,7 +554,8 @@ def _new_turn(
             observer_turn_id if isinstance(observer_turn_id, str) and observer_turn_id else None
         ),
         "fallback_turn_id": "%s:%s" % (session_id, uuid.uuid4()),
-        "trace_id": _new_trace_id(),
+        "trace_id": parent.get("trace_id") or _new_trace_id(),
+        "parent_context": parent,
         "user_id": user_identity["user_id"],
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
@@ -624,10 +716,19 @@ def _common_fields(
         "gen_ai.step.id": step_id,
         "gen_ai.agent.type": AGENT_TYPE,
     }
-    if turn.get("user_id_source") in ("invocation", "environment", "sender"):
+    if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
         fields["agent.hermes.sender.id"] = turn["sender_id"]
+    parent = turn.get("parent_context")
+    if parent:
+        fields.update({
+            "parent_span_id": parent["parent_span_id"],
+            "gen_ai.agent.scope": "subagent",
+            "gen_ai.agent.parent.id": parent["parent_session_id"],
+            "gen_ai.subagent.parent_tool_call.id": parent["tool_call_id"],
+            "agent.pilot.parent.turn.id": parent["parent_turn_id"],
+        })
     worker_name = _worker_name()
     if worker_name:
         fields["gen_ai.agent.name"] = worker_name
@@ -840,7 +941,7 @@ def _build_records(
                     api_index = index
         api_index = min(api_index, len(apis) - 1)
         step_id = "%s:s%s" % (turn_id, api_index + 1)
-        span_id = _new_span_id()
+        span_id = tool.get("span_id") or _new_span_id()
         tool_name = str(tool.get("tool_name") or "unknown")
         call = _common_fields(
             turn, session_state, "tool.call", int(tool["start_ns"]), step_id, span_id
@@ -1113,6 +1214,7 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     if call_id not in turn["tools"]:
         tool: Dict[str, Any] = {
             "tool_name": payload.get("tool_name"),
+            "span_id": _new_span_id(),
             "start_ns": now_ns,
             "end_ns": None,
             "skill_attributes": _skill_attributes(
@@ -1122,6 +1224,8 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
         if turn["capture_content"]:
             tool["args"] = _bounded_value(payload.get("args"))
         turn["tools"][call_id] = tool
+    if payload.get("tool_name") == "delegate_task":
+        _ACTIVE_DELEGATION.set((session_id, _turn_id(turn), call_id))
 
 
 def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1225,6 +1329,7 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
 
 def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
+    _install_delegate_context()
     _purge_old_logs()
     for hook_name in HOOKS:
         try:
