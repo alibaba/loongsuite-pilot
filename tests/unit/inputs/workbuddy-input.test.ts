@@ -87,6 +87,7 @@ describe('WorkBuddy audit-event builder', () => {
     const built = await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' });
     const entries = built;
     expect(entries.map(entry => entry['event.name'])).toEqual([
+      'other',
       'llm.request',
       'llm.response',
       'tool.call',
@@ -99,6 +100,19 @@ describe('WorkBuddy audit-event builder', () => {
 
     const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
     const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    const userInput = entries.find(entry => entry['event.name'] === 'other')!;
+    expect(userInput).toMatchObject({
+      'gen_ai.turn.id': 'turn-synthetic-1',
+      'gen_ai.turn.start': true,
+      'gen_ai.input.messages_delta': [{
+        role: 'user',
+        parts: [{ type: 'text', content: 'SYNTHETIC_PROMPT' }],
+      }],
+      trace_id: TRACE_ID,
+    });
+    expect(userInput['gen_ai.step.id']).toBeUndefined();
+    expect(requests[0]['gen_ai.turn.start']).toBeUndefined();
+    expect(entries.filter(entry => entry['gen_ai.turn.start'] === true)).toHaveLength(1);
     expect(requests.map(entry => entry['gen_ai.step.id'])).toEqual([
       'request-synthetic-1:s1',
       'request-synthetic-1:s2',
@@ -168,6 +182,7 @@ describe('WorkBuddy audit-event builder', () => {
 
     expect(entries.map(entry => entry.time_unix_nano)).toEqual([
       (BigInt(userTimestamp) * 1_000_000n).toString(),
+      (BigInt(userTimestamp) * 1_000_000n).toString(),
       (BigInt(assistantTimestamp) * 1_000_000n).toString(),
     ]);
     expect(entries.every(entry => /^\d+$/.test(entry.observed_time_unix_nano))).toBe(true);
@@ -182,6 +197,9 @@ describe('WorkBuddy audit-event builder', () => {
       expect(entry['gen_ai.tool.call.arguments']).toBeUndefined();
       expect(entry['gen_ai.tool.call.result']).toBeUndefined();
     }
+    const userInput = entries.find(entry => entry['event.name'] === 'other')!;
+    expect(userInput['gen_ai.turn.start']).toBe(true);
+    expect(userInput['gen_ai.step.id']).toBeUndefined();
   });
 
   it('replaces WorkBuddy all-zero trace IDs with a stable valid trace ID', async () => {
@@ -408,7 +426,7 @@ describe('WorkBuddy audit-event builder', () => {
     });
 
     expect(entries.map(entry => entry.time_unix_nano))
-      .toEqual(['2000000000', '2500000000']);
+      .toEqual(['2000000000', '2000000000', '2500000000']);
   });
 
   it('prefers transcript response time over an earlier Stop Hook observation', async () => {
@@ -426,7 +444,7 @@ describe('WorkBuddy audit-event builder', () => {
     });
 
     expect(entries.map(entry => entry.time_unix_nano))
-      .toEqual(['1000000000', '1500000000']);
+      .toEqual(['1000000000', '1000000000', '1500000000']);
   });
 
   it('preserves Hook fallback boundaries for later records that lack transcript timestamps', async () => {
@@ -462,7 +480,10 @@ describe('WorkBuddy audit-event builder', () => {
     });
 
     expect(entries.map(entry => entry.time_unix_nano))
-      .toEqual(['1000000000', '1500000000', '2000000000', '2500000000']);
+      .toEqual([
+        '1000000000', '1000000000', '1500000000',
+        '2000000000', '2000000000', '2500000000',
+      ]);
   });
 
   it('drops tool events when neither transcript nor Hook provides a call timestamp', async () => {
@@ -494,6 +515,14 @@ describe('WorkBuddy audit-event builder', () => {
     try {
       const conversion = await convertEventLogToReadableSpans(entries);
       expect(conversion.warnings).toEqual([]);
+
+      const agentSpan = conversion.spans
+        .find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+      const agentInput = JSON.parse(String(agentSpan.attributes['gen_ai.input.messages']));
+      expect(agentInput[0]).toEqual({
+        role: 'user',
+        parts: [{ type: 'text', content: 'SYNTHETIC_PROMPT' }],
+      });
 
       const llmSpans = conversion.spans
         .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
@@ -532,6 +561,56 @@ describe('WorkBuddy audit-event builder', () => {
         process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
       }
     }
+  });
+
+  it('preserves a prompt-only turn as one stable other event', async () => {
+    const user = fixtureRecords()[0];
+    const build = () => buildWorkBuddyEvents([user], { sessionId: 'session-prompt-only' });
+    const entries = await build();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'other',
+      'gen_ai.turn.id': 'turn-synthetic-1',
+      'gen_ai.turn.start': true,
+      'gen_ai.input.messages_delta': [{
+        role: 'user',
+        parts: [{ type: 'text', content: 'SYNTHETIC_PROMPT' }],
+      }],
+    });
+    expect(entries[0]['gen_ai.step.id']).toBeUndefined();
+    expect(entries[0]['gen_ai.turn.end']).toBeUndefined();
+    expect(entries[0]['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(entries[0].trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect((await build())[0]['event.id']).toBe(entries[0]['event.id']);
+  });
+
+  it('uses an interrupted pre-step trace without fabricating a step or terminal reason', async () => {
+    const user = fixtureRecords()[0];
+    const entries = await buildWorkBuddyEvents([
+      user,
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'incomplete',
+        id: 'response-incomplete-before-step',
+        timestamp: 1_100,
+        providerData: {
+          traceId: TRACE_ID,
+          conversationRequestId: 'request-incomplete-before-step',
+        },
+      },
+    ], { sessionId: 'session-incomplete-before-step' });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'other',
+      trace_id: TRACE_ID,
+      'gen_ai.turn.start': true,
+    });
+    expect(entries[0]['gen_ai.step.id']).toBeUndefined();
+    expect(entries[0]['gen_ai.turn.end']).toBeUndefined();
+    expect(entries[0]['gen_ai.response.finish_reasons']).toBeUndefined();
   });
 
   it('does not infer model finish semantics from assistant status', async () => {
@@ -717,8 +796,8 @@ describe('WorkBuddyInput checkpoints', () => {
     });
     expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
-    expect(entries).toHaveLength(2);
-    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries).toHaveLength(3);
+    expect(entries.map(entry => entry['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
     expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-synthetic-2')).toBe(true);
     await stateStore.save();
     expect(await input.collectNow()).toEqual([]);
@@ -728,6 +807,51 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(persistedState).toBeDefined();
     expect(Object.values(persistedState.extra.workbuddyTranscriptBytes))
       .toEqual([Buffer.byteLength(await readFile(transcript, 'utf8'))]);
+  });
+
+  it('checkpoints a prompt-only turn after emitting its other event once', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-prompt-only-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookEventDir = path.join(root, 'pilot-events');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
+    const transcript = path.join(projects, 'session-prompt-only.jsonl');
+    await writeFile(transcript, '');
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
+    expect(await input.collectNow()).toEqual([]);
+
+    const user = { ...fixtureRecords()[0], id: 'turn-prompt-only', timestamp: 2_000 };
+    await appendFile(transcript, `${JSON.stringify(user)}\n`);
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 2_000,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'session-prompt-only',
+      transcript_path: transcript,
+    });
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 2_100,
+      hook_event_name: 'Stop',
+      session_id: 'session-prompt-only',
+      transcript_path: transcript,
+    });
+
+    expect(await input.collectNow()).toEqual([]);
+    const entries = await input.collectNow();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'other',
+      'gen_ai.turn.id': 'turn-prompt-only',
+      'gen_ai.turn.start': true,
+    });
+    expect(entries[0]['gen_ai.turn.end']).toBeUndefined();
+    expect(await input.collectNow()).toEqual([]);
   });
 
   it('waits for Stop before processing a turn written in several chunks', async () => {
@@ -835,6 +959,7 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
     expect(entries.map(entry => entry['event.name'])).toEqual([
+      'other',
       'llm.request',
       'llm.response',
     ]);
@@ -989,7 +1114,7 @@ describe('WorkBuddyInput checkpoints', () => {
 
     expect(await input.collectNow()).toEqual([]);
     const recovered = await input.collectNow();
-    expect(recovered.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(recovered.map(entry => entry['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
     expect(recovered.every(entry => entry['gen_ai.turn.id'] === 'turn-after-recovery')).toBe(true);
   });
 
