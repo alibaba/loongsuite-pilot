@@ -32,6 +32,7 @@ HOOKS = (
     "on_session_finalize",
 )
 MAX_SESSIONS = 100
+MAX_ACTIVE_TURNS = 100
 MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
@@ -491,7 +492,7 @@ def _session(session_id: str) -> Dict[str, Any]:
         state = {
             "model": None,
             "platform": None,
-            "current_turn": None,
+            "turns": {},
         }
         _SESSIONS[session_id] = state
         while len(_SESSIONS) > MAX_SESSIONS:
@@ -499,18 +500,17 @@ def _session(session_id: str) -> Dict[str, Any]:
                 (
                     candidate
                     for candidate, candidate_state in _SESSIONS.items()
-                    if candidate != session_id and candidate_state.get("current_turn") is None
+                    if candidate != session_id and not candidate_state["turns"]
                 ),
                 next(iter(_SESSIONS)),
             )
             evicted = _SESSIONS.pop(oldest, None)
-            turn = evicted.get("current_turn") if evicted else None
-            if turn and any(api.get("post_ns") is not None for api in turn["apis"]):
-                try:
-                    evicted["current_turn"] = None
-                    _write_records(_build_records(turn, evicted, {}))
-                except Exception as error:
-                    _report_internal_error("session eviction flush", error)
+            if evicted:
+                for turn in list(evicted["turns"].values()):
+                    try:
+                        _flush_turn(evicted, turn, {})
+                    except Exception as error:
+                        _report_internal_error("session eviction flush", error)
     else:
         _SESSIONS.pop(session_id, None)
         _SESSIONS[session_id] = state
@@ -530,6 +530,7 @@ def _new_turn(
     return {
         "session_id": session_id,
         "task_id": None,
+        "thread_id": threading.get_ident(),
         "observer_turn_id": (
             observer_turn_id if isinstance(observer_turn_id, str) and observer_turn_id else None
         ),
@@ -544,6 +545,47 @@ def _new_turn(
         "apis": [],
         "tools": {},
     }
+
+
+def _find_turn(state: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    turns = list(state["turns"].values())
+    observer_id = payload.get("turn_id")
+    task_id = payload.get("task_id")
+    if isinstance(observer_id, str) and observer_id:
+        found = next((turn for turn in turns if turn["observer_turn_id"] == observer_id), None)
+        if found is not None:
+            return found
+        turns = [turn for turn in turns if not turn["observer_turn_id"]]
+    if isinstance(task_id, str) and task_id:
+        matching = [turn for turn in turns if turn["task_id"] == task_id]
+        if len(matching) == 1:
+            return matching[0]
+        if matching:
+            turns = matching
+        else:
+            turns = [turn for turn in turns if not turn["task_id"]]
+    # Older hooks omit IDs at pre_llm_call/finish. Only adopt an unambiguous
+    # turn on the same thread; never pick another thread's current invocation.
+    turns = [turn for turn in turns if turn["thread_id"] == threading.get_ident()]
+    return turns[0] if len(turns) == 1 else None
+
+
+def _remember_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    task_id = payload.get("task_id")
+    if isinstance(task_id, str) and task_id:
+        turn["task_id"] = task_id
+    turn["model"] = payload.get("model") or state.get("model")
+    turn["platform"] = payload.get("platform") or state.get("platform")
+    state["turns"][turn["fallback_turn_id"]] = turn
+    while len(state["turns"]) > MAX_ACTIVE_TURNS:
+        oldest = next(iter(state["turns"].values()))
+        _flush_turn(state, oldest, {})
+
+
+def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    state["turns"].pop(turn["fallback_turn_id"], None)
+    if any(api.get("post_ns") is not None for api in turn["apis"]):
+        _write_records(_build_records(turn, state, payload))
 
 
 def _turn_id(turn: Dict[str, Any]) -> str:
@@ -678,7 +720,7 @@ def _common_fields(
     step_id: str,
     span_id: str,
 ) -> Dict[str, Any]:
-    platform = session_state.get("platform") or "cli"
+    platform = turn.get("platform") or session_state.get("platform") or "cli"
     fields: Dict[str, Any] = {
         "time_unix_nano": str(timestamp_ns),
         "observed_time_unix_nano": str(timestamp_ns),
@@ -844,7 +886,7 @@ def _build_records(
         input_delta = _messages(delta_source, capture)
         output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
-        request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
+        request_model = str(pre.get("model") or post.get("model") or turn.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
         request_id = api.get("api_request_id") or "%s:a%s" % (
             turn_id, api.get("api_call_count") or step_number
@@ -1023,13 +1065,14 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     history_length = len(history) if isinstance(history, list) else 1
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
-    state["current_turn"] = _new_turn(
+    turn = _new_turn(
         session_id,
         payload.get("user_message", ""),
         history_length,
         payload.get("sender_id", ""),
         payload.get("turn_id", ""),
     )
+    _remember_turn(state, turn, payload)
 
 
 def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1038,24 +1081,21 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     observer_turn_id = payload.get("turn_id")
     if turn is None:
-        turn = _new_turn(session_id, observer_turn_id=observer_turn_id)
-        state["current_turn"] = turn
+        history = payload.get("conversation_history")
+        history_length = len(history) if isinstance(history, list) else 1
+        user_message = payload.get("user_message", "")
+        if not user_message and isinstance(history, list):
+            user_message = next((item.get("content", "") for item in reversed(history)
+                                 if isinstance(item, dict) and item.get("role") == "user"), "")
+        turn = _new_turn(session_id, user_message, history_length,
+                         payload.get("sender_id", ""), observer_turn_id)
     elif isinstance(observer_turn_id, str) and observer_turn_id:
-        existing_turn_id = turn.get("observer_turn_id")
-        if existing_turn_id and existing_turn_id != observer_turn_id:
-            turn = _new_turn(session_id, observer_turn_id=observer_turn_id)
-            state["current_turn"] = turn
-        else:
-            turn["observer_turn_id"] = observer_turn_id
+        turn["observer_turn_id"] = observer_turn_id
+    _remember_turn(state, turn, payload)
     task_id = payload.get("task_id")
-    if isinstance(task_id, str) and task_id:
-        if not turn.get("observer_turn_id") and turn.get("task_id") not in (None, task_id):
-            turn = _new_turn(session_id, observer_turn_id=observer_turn_id)
-            state["current_turn"] = turn
-        turn["task_id"] = task_id
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
     api = {
@@ -1096,7 +1136,7 @@ def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None:
         return
     api = _match_api(
@@ -1137,7 +1177,7 @@ def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None:
         return
     api = _match_api(
@@ -1188,7 +1228,7 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id or not isinstance(call_id, str) or not call_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None:
         return
     task_id = payload.get("task_id")
@@ -1217,7 +1257,7 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id or not isinstance(call_id, str) or not call_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None:
         return
     task_id = payload.get("task_id")
@@ -1255,13 +1295,12 @@ def _handle_post_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     if not isinstance(session_id, str) or not session_id:
         return
     state = _session(session_id)
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None:
         return
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
-    state["current_turn"] = None
-    _write_records(_build_records(turn, state, payload))
+    _flush_turn(state, turn, payload)
 
 
 def _handle_on_session_end(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1272,11 +1311,10 @@ def _handle_on_session_end(now_ns: int, payload: Dict[str, Any]) -> None:
     state = _SESSIONS.get(session_id)
     if state is None:
         return
-    turn = state.get("current_turn")
+    turn = _find_turn(state, payload)
     if turn is None or not any(api.get("post_ns") is not None for api in turn["apis"]):
         return
-    state["current_turn"] = None
-    _write_records(_build_records(turn, state, payload))
+    _flush_turn(state, turn, payload)
 
 
 def _handle_on_session_finalize(now_ns: int, payload: Dict[str, Any]) -> None:

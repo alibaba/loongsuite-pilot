@@ -16,6 +16,13 @@ Older runtimes without that callback, other API modes, non-streaming responses,
 and requests without an observed first output omit TTFT. Total API duration is
 never used as a substitute. Restart the Hermes process after updating the plugin.
 
+## Hermes concurrent conversations
+
+Foreground conversations and background skill reviews can share a session. Pilot
+keeps their identity, input and model/tool calls separate by turn/task identity.
+Background reviews without a native sender ID retain the configured identity or
+hostname fallback; they do not inherit the last IM user in the session.
+
 ## Supported Agent IDs
 
 These IDs identify the supported integrations. Most can be used in installer

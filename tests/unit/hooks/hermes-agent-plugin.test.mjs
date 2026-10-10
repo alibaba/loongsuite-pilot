@@ -339,9 +339,17 @@ class Context:
 
 ctx = Context()
 module.register(ctx)
+from concurrent.futures import ThreadPoolExecutor
+workers = {}
 for line in events_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
-    ctx.hooks[event["hook"]](**event["payload"])
+    if event.get("thread"):
+        worker = workers.setdefault(event["thread"], ThreadPoolExecutor(max_workers=1))
+        worker.submit(ctx.hooks[event["hook"]], **event["payload"]).result()
+    else:
+        ctx.hooks[event["hook"]](**event["payload"])
+for worker in workers.values():
+    worker.shutdown()
 print(json.dumps(sorted(ctx.hooks)))
 `;
   const env = {
@@ -429,6 +437,47 @@ afterEach(() => {
 });
 
 describe('Hermes Agent native plugin', () => {
+  it.each([[true, true], [false, true], [true, false], [true, 'legacy-thread']])('isolates overlapping turns in one IM session (capture=%s, observer=%s)', (captureMessageContent, observerIds) => {
+    // Synthetic payloads follow the observed foreground/background hook interleaving.
+    const makeTurn = (label, sender) => observerV1Turn()
+      .filter(event => !['on_session_start', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll('probe-sender', sender)
+          .replaceAll('approved files', `${label} files`)
+          .replaceAll('call_fixture_001', `call_${label}`)
+          .replaceAll('api-request-', `${label}-api-`));
+        if (observerIds === true) payload.turn_id = label;
+        else delete payload.turn_id;
+        payload.task_id = label;
+        payload.platform = 'dingtalk';
+        if (observerIds === 'legacy-thread' && (event.hook.includes('llm') || event.hook === 'on_session_end')) delete payload.task_id;
+        return { hook: event.hook, payload, ...(observerIds === 'legacy-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground', 'im-user-A');
+    const background = makeTurn('background', '');
+    // Foreground API is in flight when background pre_llm_call arrives.
+    const events = [...foreground.slice(0, 2), ...background.slice(0, 2),
+      ...foreground.slice(2),
+      // A duplicate finish for the completed foreground must not end background.
+      foreground.at(-1), ...background.slice(2)];
+    const { records } = replay(events, { configUser: '', captureMessageContent });
+    expect(records).toHaveLength(12);
+    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', os.hostname()]]) {
+      const own = records.filter(record => record['gen_ai.turn.id'] === label);
+      expect(own).toHaveLength(6);
+      expect(new Set(own.map(record => record.trace_id)).size).toBe(1);
+      expect(own.every(record => record['user.id'] === sender)).toBe(true);
+      expect(own.filter(record => record['event.name'] === 'llm.request')
+        .map(record => record['gen_ai.request.id'])).toEqual([`${label}-api-1`, `${label}-api-2`]);
+      const input = JSON.stringify(own.find(record => record['event.name'] === 'llm.request')['gen_ai.input.messages']);
+      if (captureMessageContent) expect(input).toContain(`${label} files`);
+      else expect(input).not.toContain('files');
+      expect(own.find(record => record['event.name'] === 'tool.call')['gen_ai.tool.call.id']).toBe(`call_${label}`);
+    }
+    expect(new Set(records.map(record => record.trace_id)).size).toBe(2);
+  });
+
   it('registers all native callbacks and emits the canonical six-event tool turn', () => {
     const { hooks, records } = replay(firstTurn(), {
       pilotEnvUser: 'pilot-env-user',

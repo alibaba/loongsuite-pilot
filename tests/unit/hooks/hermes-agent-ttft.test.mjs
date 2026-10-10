@@ -180,6 +180,42 @@ assert not failures, failures
       .toEqual({ one: 30, two: 900 });
   });
 
+  it('keeps identity and TTFT isolated for overlapping turns in the same session', () => {
+    const { responses } = runScenario(String.raw`
+barrier = threading.Barrier(2)
+failures = []
+def conversation(turn, sender, start, delta):
+    try:
+        data = dict(payload("shared"), task_id=turn, turn_id=turn,
+                    api_request_id=turn + "-api", sender_id=sender, platform="dingtalk")
+        ctx.hooks["pre_llm_call"](**data, user_message=turn)
+        clock.value = start
+        ctx.hooks["pre_api_request"](**data)
+        barrier.wait(timeout=5)
+        AIAgent("shared")._interruptible_streaming_api_call({"delta_times": [delta]})
+        ctx.hooks["post_api_request"](**data, finish_reason="stop",
+                                     usage={"input_tokens": 2, "output_tokens": 1})
+        ctx.hooks["post_llm_call"](**data, user_message=turn, assistant_response="done")
+    except BaseException as error:
+        failures.append(error)
+threads = [threading.Thread(target=conversation, args=("foreground", "im-user-A", 100, 130)),
+           threading.Thread(target=conversation, args=("background", "", 1000, 1900))]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+assert not failures, failures
+`);
+    expect(responses).toHaveLength(2);
+    const byTurn = Object.fromEntries(responses.map(record => [record['gen_ai.turn.id'], record]));
+    expect(byTurn.foreground[TTFT]).toBe(30);
+    expect(byTurn.background[TTFT]).toBe(900);
+    expect(byTurn.foreground['user.id']).toBe('im-user-A');
+    expect(byTurn.background['user.id']).toBe(os.hostname());
+    expect(byTurn.foreground.trace_id).not.toBe(byTurn.background.trace_id);
+  });
+
   it('omits TTFT when the stream emits no first delta', () => {
     const { responses } = runScenario(String.raw`
 begin("empty")
