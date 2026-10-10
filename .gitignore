@@ -26,6 +26,7 @@ Thumbs.db
 
 # Build artifacts
 *.tsbuildinfo
+__pycache__/
 VERSION
 
 # Test coverage

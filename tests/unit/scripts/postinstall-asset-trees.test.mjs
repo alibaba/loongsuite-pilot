@@ -355,11 +355,19 @@ describe('installers report what postinstall actually did', () => {
       // Two failure branches, each leaving deploy_package.
       const branches = text.match(/hooks\/plugins are missing"\n\s*return 1/g) ?? [];
       expect(branches.length, `${file}: deploy_package does not give up`).toBe(2);
-      // And both callers act on it: the install says why before exiting, the upgrade rolls the
-      // version pointer back. A bare `deploy_package "$INSTALL_SRC"` would abort under set -e
-      // without either.
+      // Both callers act on the failure. The public installer leaves current
+      // untouched until deployment succeeds, so its failed deploy restarts the
+      // preserved install instead of swapping to an older previous version.
       expect(text.match(/if ! deploy_package "\$INSTALL_SRC"; then/g)?.length, `${file}: an unguarded call site`).toBe(2);
-      expect(text, `${file}: the upgrade path does not roll back`).toMatch(/rollback 2>\/dev\/null \|\| _rollback_ok=0/);
+      if (file === 'deploy/installer-opensource.sh') {
+        const upgrade = text.slice(text.indexOf('cmd_upgrade() {'));
+        const failure = upgrade.slice(upgrade.indexOf('if ! deploy_package'), upgrade.indexOf('    install_loongsuite_pilot_command'));
+        expect(failure).toContain('if run_pilot_cli start; then');
+        expect(failure).not.toContain('run_pilot_cli rollback');
+        expect(failure).toContain('exit 1');
+      } else {
+        expect(text, `${file}: the upgrade path does not roll back`).toMatch(/rollback 2>\/dev\/null \|\| _rollback_ok=0/);
+      }
     }
   });
 

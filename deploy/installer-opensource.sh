@@ -371,6 +371,10 @@ managed_node_platform() {
     case "$(uname -m)" in
         arm64|aarch64) arch="arm64" ;;
         x86_64|amd64) arch="x64" ;;
+        riscv64)
+            _mn_msg "managed node: RISC-V 使用能加载 node:sqlite 的系统 Node.js" \
+                    "managed node: RISC-V uses system Node.js with node:sqlite"
+            return 1 ;;
         *)
             echo "managed node: unsupported architecture $(uname -m)" >&2
             return 1 ;;
@@ -603,6 +607,16 @@ check_deps() {
         msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
             "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
+    fi
+
+    # Validate before overwriting an existing install's runtime pin.
+    if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "riscv64" ]; then
+        local node_arch; node_arch=$("$NODE_BIN" -p 'process.arch')
+        if [ "$node_arch" != "riscv64" ]; then
+            msg "❌ RISC-V Linux 需要 riscv64 Node.js，当前 Node 架构为 $node_arch" \
+                "❌ RISC-V Linux requires riscv64 Node.js; selected Node architecture is $node_arch"
+            exit 1
+        fi
     fi
 
     # Pin the node binary path
@@ -943,9 +957,11 @@ for (const c of changed) {
 deploy_bootstrap_scripts() {
     local src_dir="$PERMANENT_DIR/scripts"
     local boot_dir="$HOME/.loongsuite-pilot/bin"
-    mkdir -p "$boot_dir"
-    cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
-    [ -f "$src_dir/updater-daemon.js" ] && cp -f "$src_dir/updater-daemon.js" "$boot_dir/" || true
+    mkdir -p "$boot_dir" || return 1
+    cp -f "$src_dir/collector-daemon.js" "$boot_dir/" || return 1
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        cp -f "$src_dir/updater-daemon.js" "$boot_dir/" || return 1
+    fi
 }
 
 # ============================================================
@@ -967,19 +983,18 @@ deploy_package() {
     if [ -n "$ver" ] && [ -n "$commit" ]; then
         local dir_name="${ver}_${commit}"
         local target="$versions_dir/$dir_name"
-
-        if [ -f "$current_file" ]; then
-            local old_dir
-            old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
-            if [ -n "$old_dir" ] && [ "$old_dir" != "$dir_name" ]; then
-                echo "$old_dir" > "$previous_file"
-            fi
+        local old_dir=""
+        old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]' || true)
+        mkdir -p "$versions_dir" || return 1
+        # Reinstalling the same version must preserve the active payload until
+        # dependencies and hooks are ready.
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            target=$(mktemp -d "$versions_dir/${dir_name}_XXXXXXXX") || return 1
+            dir_name="${target##*/}"
         fi
 
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
-        mkdir -p "$versions_dir"
-        rm -rf "$target"
-        if ! cp -r "$src" "$target"; then
+        if ! mkdir -p "$target" || ! cp -r "$src/." "$target"; then
             msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
             return 1
         fi
@@ -998,8 +1013,6 @@ deploy_package() {
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
 
-    deploy_bootstrap_scripts
-
     msg "==> 安装依赖..." "==> Installing dependencies..."
     local modules_ver="${ver:-${INSTALL_VERSION:-latest}}"
     if ensure_node_modules "$modules_ver"; then
@@ -1007,8 +1020,10 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
-            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        local dependency_status=0
+        (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1) || dependency_status=$?
+        if [ "$dependency_status" -ne 0 ]; then
+            msg "    ❌ JavaScript 依赖安装失败" "    ❌ JavaScript dependency installation failed"
             return 1
         fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
@@ -1051,10 +1066,16 @@ deploy_package() {
     fi
     echo ""
 
-    # Write current pointer only after all deploy steps succeed
+    deploy_bootstrap_scripts || return 1
+
+    # Publish version pointers only after all deploy steps succeed.
     if [ -n "$ver" ] && [ -n "$commit" ]; then
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
+        if [ -n "$old_dir" ] && [ "$old_dir" != "$dir_name" ]; then
+            printf '%s\n' "$old_dir" > "$previous_file.tmp" || return 1
+            mv -f "$previous_file.tmp" "$previous_file" || return 1
+        fi
+        printf '%s\n' "$dir_name" > "$current_file.tmp" || return 1
+        mv -f "$current_file.tmp" "$current_file" || return 1
     fi
 }
 
@@ -2247,25 +2268,24 @@ cmd_upgrade() {
     # Old version stays untouched; deploy_package writes current/previous pointers
     if ! deploy_package "$INSTALL_SRC"; then
         echo ""
-        msg "⚠️  部署失败，正在回滚到旧版本..." \
-            "⚠️  Deployment failed, rolling back to old version..."
-        local _rollback_ok=1
-        run_pilot_cli rollback 2>/dev/null || _rollback_ok=0
-        if [ "$_rollback_ok" -eq 1 ]; then
-            if run_pilot_cli start; then
-                PILOT_HELD_FOR_DEPLOY=0
-            else
-                _rollback_ok=0
-            fi
-        fi
-        if [ "$_rollback_ok" -eq 1 ]; then
-            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
-                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        # No candidate was activated. Swapping current/previous here would
+        # downgrade a working install to its older rollback target.
+        msg "⚠️  部署失败，正在重新启动保留的旧版本..." \
+            "⚠️  Deployment failed, restarting the preserved current version..."
+        local _restart_ok=1
+        if run_pilot_cli start; then
+            PILOT_HELD_FOR_DEPLOY=0
         else
-            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
-                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
-            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
-                "   loongsuite-pilot rollback && loongsuite-pilot start"
+            _restart_ok=0
+        fi
+        if [ "$_restart_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已保留 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error); preserved v${old_ver:-unknown} and restarted the service"
+        else
+            msg "❌ 升级失败，保留版本的服务重启未成功，请检查日志后手动启动:" \
+                "❌ Upgrade failed; the preserved version could not restart. Inspect logs, then start it manually:"
+            msg "   loongsuite-pilot logs; loongsuite-pilot start" \
+                "   loongsuite-pilot logs; loongsuite-pilot start"
         fi
         exit 1
     fi

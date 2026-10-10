@@ -12,6 +12,8 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 - Windows 下需要 PowerShell 5.1 或更高版本
 - 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 22.22 运行时**（见下文），无需预装。系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受；Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。Linux musl（Alpine）与 Windows ARM64 等没有托管运行时的平台，仍需自备满足该要求的 Node.js 与 `npm`
 
+Linux RISC-V64 需自备可加载 `node:sqlite` 的系统 `riscv64` Node/npm（要求同上），固定 guest 使用 Node 22.22.2。SQLite 由 Node 提供，zstd-napi 已移除，无需原生 addon 构建。拒绝与恢复行为、验收范围及发布状态见 [RISC-V 安装与验证指南](riscv64.md)。
+
 ## 在 Linux 或 macOS 从公开包安装
 
 ```bash
@@ -115,6 +117,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |---|---|---|---|
 | macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
 | Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
+| Linux riscv64（glibc） | ❌ | ❌ | 使用系统 Node/npm，本机源码构建；实测范围见 [RISC-V 指南](riscv64.md) |
 | Windows x64 | ✅ | ✅ | 托管下载 |
 | Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
 | Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
