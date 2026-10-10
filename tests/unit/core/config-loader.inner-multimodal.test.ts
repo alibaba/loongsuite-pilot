@@ -59,6 +59,18 @@ describe('managed multimodal configuration', () => {
     });
   });
 
+  it('loads explicit anonymous SLS storage from inner config without credentials', async () => {
+    unlinkSync(configPath);
+    const multimodal = slsMultimodal('managed-project');
+    multimodal.storage!.auth = { mode: 'anonymous' };
+    writeFileSync(innerConfigPath, JSON.stringify({ multimodal }));
+
+    expect((await loadConfig()).multimodal).toEqual({
+      ...multimodal,
+      storageBasePath: 'sls://managed-project/multimodal',
+    });
+  });
+
   it.each(['oss', 'delegatedOss'])('reuses the storage parser for managed %s storage', async (type) => {
     const multimodal = type === 'oss'
       ? {

@@ -163,6 +163,28 @@ ApiKey:
 }
 ```
 
+Anonymous PutObject (the target Logstore must have anonymous multimodal writes enabled):
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "anonymous"
+      }
+    }
+  }
+}
+```
+
+Anonymous mode must be explicit, accepts no credential fields, and is supported only by `type=sls`.
+
 ### `type: delegatedOss`
 
 Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
@@ -216,7 +238,7 @@ Writes directly to OSS. AK only.
 | `multimodal.storage.target.project` | SLS project for `sls` / `delegatedOss`. Required unless the target endpoint is project-qualified. An explicit empty value disables upload. |
 | `multimodal.storage.target.logstore` | Required for `sls` / `delegatedOss`. Must match an SLS entry when reusing its API Key. |
 | `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.storage.auth.mode` | `ak` or `apiKey`. If omitted, inferred from explicit credentials or a matching SLS API Key. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.mode` | `ak`, `apiKey`, or explicit `anonymous`. If omitted, inferred from explicit credentials or a matching SLS API Key; it never infers anonymous. `anonymous` is supported only by `type=sls`; `type=oss` requires `ak`. |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
 | `multimodal.storage.auth.apiKey` | Required for explicit `mode=apiKey`; may be omitted with the entire `auth` block when a matching `config.sls` API Key exists. Must not be set together with access keys. |
 

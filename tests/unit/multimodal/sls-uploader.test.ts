@@ -136,6 +136,34 @@ describe('SlsUploader', () => {
     expect(put.mock.calls[0]?.[0]).not.toHaveProperty('accessKeyId');
   });
 
+  it('uploads anonymously without forwarding credentials', async () => {
+    const put = vi.spyOn(slsClient, 'slsPutObject').mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      requestId: 'r-anonymous',
+    });
+    const uploader = new SlsUploader({
+      ...sls,
+      auth: { mode: 'anonymous' },
+    }, 'sls://proj/logstore');
+
+    expect(await uploader.upload({
+      targetPath: 'anonymous_object',
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    })).toBe(true);
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'anonymous',
+      objectKey: 'anonymous_object',
+    }));
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('apiKey');
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('accessKeyId');
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('accessKeySecret');
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('securityToken');
+  });
+
   it('uploads via ApiKey presigned HTTP and skips PutObject', async () => {
     const put = vi.spyOn(slsClient, 'slsPutObject');
     const viaHttp = vi.spyOn(slsClient, 'slsPutViaPresignedHttp').mockResolvedValue({

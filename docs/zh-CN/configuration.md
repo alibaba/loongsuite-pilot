@@ -170,6 +170,28 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 }
 ```
 
+匿名 PutObject（目标 Logstore 必须已开启多模态匿名写入）：
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "anonymous"
+      }
+    }
+  }
+}
+```
+
+匿名模式必须显式声明，不接受任何凭证字段，且只支持 `type=sls`。
+
 ### `type: delegatedOss`
 
 先向 SLS 换预签名，再写入 OSS。事件 URI 为 `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`。
@@ -223,7 +245,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 | `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。必填，除非 target endpoint 自带 project。显式空值则关闭上传。 |
 | `multimodal.storage.target.logstore` | `sls` / `delegatedOss` 必填。复用 API Key 时须与某个 SLS 条目一致。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
-| `multimodal.storage.auth.mode` | `ak` 或 `apiKey`。未填时按显式凭证或匹配的 SLS API Key 推断。`type=oss` 必须是 `ak`。 |
+| `multimodal.storage.auth.mode` | `ak`、`apiKey` 或显式 `anonymous`。未填时按显式凭证或匹配的 SLS API Key 推断，绝不自动推断匿名。`anonymous` 只支持 `type=sls`；`type=oss` 必须是 `ak`。 |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
 | `multimodal.storage.auth.apiKey` | 显式写 `mode=apiKey` 时必填；有匹配的 `config.sls` API Key 时可省略整个 `auth`。不能与 AK 同时写。 |
 
