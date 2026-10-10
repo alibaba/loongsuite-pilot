@@ -44,6 +44,9 @@ import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
 } from "../shared/resource-context.mjs";
+import { installFirstTokenObserver } from "./first-token.mjs";
+
+let firstTokenObserver;
 
 const AGENT_TYPE = "openclaw";
 const PLUGIN_ID = "loongsuite-pilot-openclaw";
@@ -452,6 +455,7 @@ function getRun(runId, event, ctx) {
       userPromptText: null,
       systemPrompt: null,
       modelCallEnds: new Map(),
+      pendingAssistantResponses: new Map(),
       modelCallStartedAtNanos: new Map(),
       assistantResponseCallIds: new Set(),
       toolStepCallIds: new Map(),
@@ -475,6 +479,7 @@ function getRun(runId, event, ctx) {
     // Completed tombstones must not evict a long-running active turn.
     const oldest = [...runs].find(([, run]) => run.completed)?.[0] ?? runs.keys().next().value;
     const evicted = runs.get(oldest);
+    flushUnmatchedModelResponses(evicted, resolveUserId(loadPilotConfig()), emitRecord);
     runs.delete(oldest);
     for (const [key, value] of sessionRunIds) {
       if (value === oldest) sessionRunIds.delete(key);
@@ -530,6 +535,7 @@ function resetCompletedRunState(run) {
   run.userPromptText = null;
   run.systemPrompt = null;
   run.modelCallEnds.clear();
+  run.pendingAssistantResponses.clear();
   run.modelCallStartedAtNanos.clear();
   run.assistantResponseCallIds.clear();
   run.toolStepCallIds.clear();
@@ -774,24 +780,10 @@ function usageMismatch(aggregate, summed, observedCalls) {
   ) || undefined;
 }
 
-function emitUnmatchedModelResponse(run, callId, userId, emit) {
-  const ended = run?.modelCallEnds?.get(callId);
-  if (!ended || run.assistantResponseCallIds.has(callId)) return;
-  run.modelCallEnds.delete(callId);
-  const failed = ended.outcome === "error";
-  const record = {
-    ...buildCommonFields(run, run.sessionId, userId),
-    "event.name": "llm.response",
-    "gen_ai.step.id": callId,
-    "gen_ai.response.id": callId,
-    "gen_ai.provider.name": inferProviderName(ended.provider || run.provider, ended.model || run.model),
-    "gen_ai.request.model": ended.model || run.model,
-    "gen_ai.response.model": ended.model || run.model,
-    "gen_ai.response.finish_reasons": failed ? ["error"] : undefined,
-    "error.type": failed ? "model_call_error" : undefined,
-    "error.message": failed ? ended.error : undefined,
-    "agent.openclaw.hook": "model_call_ended",
-    "agent.openclaw.call_id": ended.callId || callId,
+function modelEndFields(ended) {
+  if (!ended) return {};
+  return {
+    "agent.openclaw.call_id": ended.callId,
     "agent.openclaw.duration_ms": ended.durationMs,
     "agent.openclaw.outcome": ended.outcome,
     "agent.openclaw.error_category": ended.errorCategory,
@@ -804,11 +796,53 @@ function emitUnmatchedModelResponse(run, callId, userId, emit) {
     "gen_ai.usage.context_token_budget": ended.contextTokenBudget,
     "agent.openclaw.context_window_source": ended.contextWindowSource,
   };
+}
+
+function emitPendingAssistantResponse(run, callId, emit) {
+  const record = run.pendingAssistantResponses.get(callId);
+  if (!record) return;
+  const ended = run.modelCallEnds.get(callId);
+  // Keep the original response timestamp/identity, not the later flush time.
+  const fields = modelEndFields(ended);
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) record[key] = value;
+  }
+  if (record["error.type"] && ended?.error) record["error.message"] = ended.error;
+  run.pendingAssistantResponses.delete(callId);
+  run.modelCallEnds.delete(callId);
+  addBounded(run.assistantResponseCallIds, callId);
+  emit(record);
+}
+
+function emitUnmatchedModelResponse(run, callId, userId, emit) {
+  const ended = run?.modelCallEnds?.get(callId);
+  if (!ended || run.assistantResponseCallIds.has(callId)) return;
+  run.modelCallEnds.delete(callId);
+  const failed = ended.outcome === "error";
+  const record = {
+    ...buildCommonFields(run, run.sessionId, userId),
+    time_unix_nano: ended.pilotObservedAtNanos,
+    "event.name": "llm.response",
+    "gen_ai.step.id": callId,
+    "gen_ai.response.id": callId,
+    "gen_ai.provider.name": inferProviderName(ended.provider || run.provider, ended.model || run.model),
+    "gen_ai.request.model": ended.model || run.model,
+    "gen_ai.response.model": ended.model || run.model,
+    "gen_ai.response.finish_reasons": failed ? ["error"] : undefined,
+    ...modelEndFields(ended),
+    "error.type": failed ? "model_call_error" : undefined,
+    "error.message": failed ? ended.error : undefined,
+    "agent.openclaw.hook": "model_call_ended",
+    "agent.openclaw.call_id": ended.callId || callId,
+  };
   emit(record);
   addBounded(run.assistantResponseCallIds, callId);
 }
 
 function flushUnmatchedModelResponses(run, userId, emit, exceptCallId) {
+  for (const callId of [...run.pendingAssistantResponses.keys()]) {
+    if (callId !== exceptCallId) emitPendingAssistantResponse(run, callId, emit);
+  }
   for (const callId of [...run.modelCallEnds.keys()]) {
     if (callId !== exceptCallId) emitUnmatchedModelResponse(run, callId, userId, emit);
   }
@@ -835,6 +869,15 @@ function handleSessionStart(event, ctx, userId, emit) {
 
 function handleSessionEnd(event, ctx, userId, emit) {
   const sessionId = event?.sessionId || ctx?.sessionId;
+  const sessionKey = event?.sessionKey || ctx?.sessionKey;
+  if (!sessionId && !sessionKey) return;
+  for (const run of runs.values()) {
+    if (!run.completed && ((sessionId && run.sessionId === sessionId)
+      || (sessionKey && run.sessionKey === sessionKey))) {
+      flushUnmatchedModelResponses(run, userId, emit);
+      completeRun(run);
+    }
+  }
   if (!sessionId) return;
   const s = getSession(sessionId);
   const record = {
@@ -942,8 +985,8 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
-  // A supported OpenClaw runtime writes the assistant message immediately
-  // after model_call_ended. If the next call starts first, close the unmatched
+  // Assistant persistence and model_call_ended can arrive in either order.
+  // If the next call starts first, close the unmatched
   // previous call explicitly so retries/errors do not become orphan requests.
   flushUnmatchedModelResponses(run, userId, emit);
   const callId = `${runId}:model:${++run.callSeq}`;
@@ -1001,14 +1044,16 @@ function handleModelCallEnded(event, ctx, userId, emit) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
-  const callId = (event?.callId && run.nativeCallIds.get(event.callId))
-    || run.currentStepCallId;
-  if (callId) run.lastCallId = callId;
+  // An unknown/late native ID must not decorate a different active call.
+  const callId = event?.callId ? run.nativeCallIds.get(event.callId) : run.currentStepCallId;
+  if (run.completed || run.assistantResponseCallIds.has(callId)) return;
   if (callId) {
-    // Per-call usage, output and stopReason arrive on the following
-    // before_message_write AssistantMessage. Stash end metadata and emit one
-    // canonical llm.response there instead of producing split response records.
-    setBounded(run.modelCallEnds, callId, { ...event });
+    // OpenClaw 6.5 writes the assistant first; newer hosts may end first.
+    // Join both hooks before emitting one canonical response in either order.
+    if (!run.modelCallEnds.has(callId)) {
+      setBounded(run.modelCallEnds, callId, { ...event, pilotObservedAtNanos: nowNanos() });
+    }
+    emitPendingAssistantResponse(run, callId, emit);
   }
 }
 
@@ -1197,7 +1242,7 @@ function buildAssistantOutputMessagesFromOpenClawMessage(message) {
   return [{ role: "assistant", parts }];
 }
 
-function handleBeforeMessageWrite(event, ctx, userId, emit) {
+function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = true) {
   const message = event?.message;
   const role = message?.role;
 
@@ -1208,9 +1253,10 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
   if (role === "assistant") {
     const run = resolveContextRun(event, ctx);
     if (!run) return;
-    const targetCallId = run.lastCallId || run.currentStepCallId;
+    const targetCallId = run.currentStepCallId || run.lastCallId;
     if (!targetCallId) return;
     if (run.assistantResponseCallIds.has(targetCallId)) return;
+    if (run.pendingAssistantResponses.has(targetCallId)) return;
     const rawOutputMessages = buildAssistantOutputMessagesFromOpenClawMessage(message);
     const finishReason = mapStopReason(message.stopReason, rawOutputMessages);
     // OpenClaw legitimately persists empty assistant messages for provider
@@ -1226,14 +1272,13 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
     const ended = run.modelCallEnds.get(targetCallId);
     const responseId = message.responseId || targetCallId;
     rememberCallUsage(run, targetCallId, usage);
-    run.modelCallEnds.delete(targetCallId);
-    addBounded(run.assistantResponseCallIds, targetCallId);
     const stopReason = message.stopReason;
     const record = {
       ...buildCommonFields(run, run.sessionId, userId),
       "event.name": "llm.response",
       "gen_ai.step.id": targetCallId,
       "gen_ai.response.id": responseId,
+      "gen_ai.response.time_to_first_token": firstTokenObserver?.take(message.api, message.responseId),
       "gen_ai.provider.name": inferProviderName(message.provider || run.provider, message.model || run.model),
       "gen_ai.request.model": message.model || run.model,
       "gen_ai.response.model": message.model || run.model,
@@ -1245,10 +1290,6 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
       "gen_ai.usage.cache_creation.input_tokens": usage.cacheWrite,
       "gen_ai.usage.reasoning_tokens": usage.reasoning,
       "gen_ai.usage.total_tokens": usage.total,
-      // OpenClaw reports timeToFirstByteMs in milliseconds; the GenAI field is nanoseconds.
-      "gen_ai.response.time_to_first_token": ended?.timeToFirstByteMs !== undefined
-        ? Number(ended.timeToFirstByteMs) * 1_000_000
-        : undefined,
       "error.type": finishReason === "error"
         ? "model_call_error"
         : (finishReason === "cancelled" ? "model_call_cancelled" : undefined),
@@ -1259,20 +1300,21 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
       "agent.openclaw.message_role": role,
       "agent.openclaw.stop_reason": stopReason,
       "agent.openclaw.response_id": message.responseId,
-      "agent.openclaw.call_id": ended?.callId || targetCallId,
-      "agent.openclaw.duration_ms": ended?.durationMs,
-      "agent.openclaw.outcome": ended?.outcome,
-      "agent.openclaw.error_category": ended?.errorCategory,
-      "agent.openclaw.failure_kind": ended?.failureKind,
-      "agent.openclaw.request_payload_bytes": ended?.requestPayloadBytes,
-      "agent.openclaw.response_stream_bytes": ended?.responseStreamBytes,
-      "agent.openclaw.time_to_first_byte_ms": ended?.timeToFirstByteMs,
-      "agent.openclaw.api": ended?.api || message.api,
-      "agent.openclaw.transport": ended?.transport,
-      "gen_ai.usage.context_token_budget": ended?.contextTokenBudget,
-      "agent.openclaw.context_window_source": ended?.contextWindowSource,
+      "agent.openclaw.call_id": targetCallId,
+      "agent.openclaw.api": message.api,
     };
-    emit(record);
+    // Legacy hosts have no model_call_ended; preserve their immediate adapter emission.
+    if (!waitForEnd) {
+      addBounded(run.assistantResponseCallIds, targetCallId);
+      emit(record);
+      return;
+    }
+    // A new call flushes the previous pending response, so this map is bounded
+    // by the existing per-run call lifecycle. Apply privacy at observation as
+    // well as emission so a later config change cannot expose withheld content.
+    setBounded(run.pendingAssistantResponses, targetCallId,
+      shouldCaptureContent(cfg) ? record : redactRecordContent(record));
+    if (ended) emitPendingAssistantResponse(run, targetCallId, emit);
     return;
   }
 
@@ -1306,7 +1348,7 @@ function handleAgentEnd(event, ctx, userId, emit) {
   if (!runId) return;
   const run = getRun(runId, event, ctx);
   const success = event?.success !== false;
-  if (!success) flushUnmatchedModelResponses(run, userId, emit);
+  flushUnmatchedModelResponses(run, userId, emit);
   const record = {
     ...buildCommonFields(run, run.sessionId, userId),
     "event.name": "other",
@@ -1326,6 +1368,10 @@ function handleAgentEnd(event, ctx, userId, emit) {
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
+function emitRecord(record) {
+  writeRecord(record, shouldCaptureContent(loadPilotConfig()));
+}
+
 function makeHandler(fn, interceptHook) {
   // Keep persistence hooks synchronous: OpenClaw's tool_result_persist and
   // before_message_write hooks reject Promise-returning handlers.
@@ -1334,8 +1380,7 @@ function makeHandler(fn, interceptHook) {
       try {
         const cfg = loadPilotConfig();
         const userId = resolveUserId(cfg);
-        const emit = (record) => writeRecord(record, shouldCaptureContent(cfg));
-        fn(event, ctx, userId, emit, cfg);
+        fn(event, ctx, userId, emitRecord, cfg);
       } catch (err) {
         writeError(fn.name || "handler", err);
       }
@@ -1506,12 +1551,18 @@ export default {
       const handlers = createLegacyHandlers({
         nowNanos, buildCommonFields, advanceClockTo: value => legacyClock.advanceTo(value),
         resolveContextRun, safeStringify, buildAssistantOutputMessagesFromOpenClawMessage,
-        handleLlmInput, handleBeforeAgentRun, handleModelCallStarted, handleBeforeMessageWrite,
+        handleLlmInput, handleBeforeAgentRun, handleModelCallStarted,
+        handleBeforeMessageWrite: (event, ctx, userId, emit) =>
+          handleBeforeMessageWrite(event, ctx, userId, emit, undefined, false),
         handleBeforeToolCall, handleAfterToolCall, handleToolResultPersist,
         handleAgentEnd, handleLlmOutput, handleSessionStart, handleSessionEnd, completeRun,
       });
       for (const [name, handler] of Object.entries(handlers)) on(name, handler);
       return;
+    }
+
+    try { firstTokenObserver = installFirstTokenObserver(); } catch (err) {
+      debugFailureOnce("first-token-observer", err);
     }
 
     // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)

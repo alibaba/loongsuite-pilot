@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -8,20 +8,25 @@ import { OpenClawPluginInput } from '../../src/inputs/openclaw-plugin/openclaw-p
 import { ClientType } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
+// @ts-expect-error synthetic SSE helper has no declaration file
+import { fakeStreamingFetch } from '../helpers/openclaw-stream.mjs';
 
-const PLUGIN_PATH = path.resolve('assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PATH = process.env.PILOT_OPENCLAW_TEST_PLUGIN || path.resolve('assets/plugins/openclaw/plugin.mjs');
 const FIXTURE_PATH = path.resolve('tests/unit/hooks/openclaw/fixtures/pilot-probe-events-cp2.jsonl');
 
 describe('OpenClaw plugin to InputManager trace flow', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
+    (globalThis as any)[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
     for (const directory of temporaryDirectories.splice(0)) {
       await fs.rm(directory, { recursive: true, force: true });
     }
   });
 
-  it('dispatches real-context plugin JSONL through OpenClawPluginInput to a flusher', async () => {
+  it.each(['end-first', 'message-first'])('dispatches %s plugin JSONL with TTFT through InputManager to spans', async (order) => {
+    const observeStream = fakeStreamingFetch();
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
@@ -40,7 +45,21 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     try {
       const plugin = (await import(`${PLUGIN_PATH}?integration=${Date.now()}`)).default;
       const fixture = await fs.readFile(FIXTURE_PATH, 'utf8');
-      const envelopes = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const source = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const envelopes = [];
+      let pendingEnd;
+      for (const envelope of source) {
+        if (envelope.hook === 'model_call_ended') {
+          envelope.event.timeToFirstByteMs = 12.5;
+          if (order === 'message-first') { pendingEnd = envelope; continue; }
+        }
+        envelopes.push(envelope);
+        if (envelope.hook === 'before_message_write' && envelope.event.message?.role === 'assistant' && pendingEnd) {
+          envelopes.push(pendingEnd);
+          pendingEnd = undefined;
+        }
+      }
+      expect(pendingEnd).toBeUndefined();
       const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
       plugin.register({
         pluginConfig: {},
@@ -73,6 +92,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
               sessionKey: envelope.event?.sessionKey || knownSessionKey,
               channel: 'telegram',
             };
+        if (envelope.hook === 'before_message_write' && envelope.event.message?.role === 'assistant') {
+          await observeStream(envelope.event.message.responseId, { delayMs: 50 });
+        }
         await Promise.resolve(handler(event, ctx));
       }
     } finally {
@@ -160,6 +182,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
         span.attributes['gen_ai.user.id'] === 'channel-sender')).toBe(true);
 
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token'])).toEqual([50_000_000, 50_000_000]);
       expect(llmSpans.map(span => [
         span.attributes['gen_ai.usage.input_tokens'],
         span.attributes['gen_ai.usage.output_tokens'],
