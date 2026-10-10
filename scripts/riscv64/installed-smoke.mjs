@@ -6,7 +6,7 @@ import os from 'node:os';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { runCommand } from '../install-riscv64-deps.mjs';
+import { runCommand } from './run-command.mjs';
 import { JSONL_VALIDATOR_JS } from '../e2e/lib/e2e-scenarios.mjs';
 import { createFixtureProbe, eventQuality } from './installed-fixture.mjs';
 import { installationBoundaries, publicUpgradeEnvironment } from './installation-boundaries.mjs';
@@ -19,7 +19,7 @@ while (args.length) {
   options[flag.slice(2)] = value;
 }
 assert.equal(process.arch, 'riscv64'); assert.equal(process.platform, 'linux');
-assert.ok(['all', 'install', 'lifecycle', 'agent', 'upgrade', 'fixture', 'native-failure', 'node18', 'node18-install', 'boundaries'].includes(options.case), 'Only implemented cases may be selected');
+assert.ok(['all', 'install', 'lifecycle', 'agent', 'upgrade', 'fixture', 'sqlite-runtime', 'unsupported-runtime', 'boundaries'].includes(options.case), 'Only implemented cases may be selected');
 assert.ok(options.artifacts && options['data-dir'], '--artifacts and --data-dir are required');
 const artifacts = path.resolve(options.artifacts);
 assert.ok(!fs.existsSync(artifacts), 'Choose a new artifact directory; earlier results must be retained');
@@ -72,12 +72,12 @@ async function waitHealthy(previousPid) {
 
 try {
   if (options.case === 'all') {
-    for(const key of ['package','installer','agent-entry','agent-node','package-b','package-bad','package-deps-bad','node18']) {
+    for(const key of ['package','installer','agent-entry','agent-node','package-b','package-bad','package-deps-bad','node18','sqlite-reader']) {
       assert.ok(options[key],`All cases require --${key}; do not silently skip a planned acceptance`);
     }
     report.cases=[];
     for(const [label,selected] of [['install','install'],['lifecycle','lifecycle'],['boundaries','boundaries'],['upgrade','upgrade'],
-      ['fixture','fixture'],['agent','agent'],['native-failure','native-failure'],['node18-install','node18-install'],['node18','node18'],['agent-restored','agent']]) {
+      ['fixture','fixture'],['agent','agent'],['sqlite-runtime','sqlite-runtime'],['unsupported-runtime','unsupported-runtime'],['agent-restored','agent']]) {
       const childOptions={...options,case:selected,artifacts:path.join(artifacts,label)};
       await command(`case-${label}`,process.execPath,[fileURLToPath(import.meta.url),
         ...Object.entries(childOptions).flatMap(([k,v])=>[`--${k}`,v])],90*60_000);
@@ -96,8 +96,7 @@ try {
     for (const file of ['hooks/qwen-code-cli-loongsuite-pilot-hook.sh','plugins/pi-coding-agent/index.mjs']) {
       assert.ok(fs.existsSync(path.join(data,file)), `Missing installed asset ${file}`);
     }
-    report.capabilities = readJson(path.join(data,'native-capabilities.json'));
-    assert.ok(report.capabilities, 'Missing native capability diagnostics');
+    assert.ok(fs.existsSync(path.join(versionDir().dir,'compat/sqlite3/package.json')), 'Missing cross-version updater compatibility shim');
   } else if (options.case === 'lifecycle') {
     await command('start-initial', cli, ['start']);
     const initial = await waitHealthy();
@@ -180,98 +179,41 @@ try {
     await fixture.phase('after-restart');
   } else if (options.case === 'boundaries') {
     report.boundaries=await installationBoundaries({data,cache,cli,artifacts,options,env,command,waitHealthy});
-  } else if (options.case === 'node18-install') {
-    assert.ok(options.node18, 'Node18 installation requires --node18');
-    const node18 = fs.realpathSync(options.node18);
-    await command('node18-version', node18, ['-e', "if(process.arch!=='riscv64'||!process.version.startsWith('v18.'))process.exit(1);console.log(process.version,process.arch)"]);
-    const installed = versionDir().dir;
-    const clean = path.join(artifacts, 'clean-package'); fs.mkdirSync(clean);
-    for (const file of ['package.json','package-lock.json']) fs.copyFileSync(path.join(installed,file),path.join(clean,file));
-    const npm = path.join(path.dirname(node18),'npm');
-    const nodeEnv = { PATH: `${path.dirname(node18)}:${env.PATH}` };
-    const strict = await command('engine-strict', node18, [npm,'install','--prefix',clean,
-      '--omit=dev','--omit=optional','--ignore-scripts','--engine-strict','--no-audit','--no-fund'], 5*60_000, false, nodeEnv);
-    assert.equal(strict.timed_out,false);
-    const strictLog = fs.readFileSync(path.join(artifacts,'engine-strict.log'),'utf8');
-    if (strict.exit_code !== 0) {
-      assert.match(strictLog,/EBADENGINE/);
-      assert.match(strictLog,/@loongsuite\/otel-util-genai/);
-    }
-    report.engine_strict = { exit_code: strict.exit_code, compatible: strict.exit_code === 0,
-      note: 'The upstream dependency declares Node >=20. A runtime probe does not override that declaration.' };
-    // Start the default-policy check without dependencies left by the strict attempt.
-    fs.rmSync(path.join(clean,'node_modules'),{recursive:true,force:true});
-    await command('clean-native-install',node18,[path.join(installed,'scripts/install-riscv64-deps.mjs'),
-      '--package-dir',clean,'--log-dir',path.join(artifacts,'native-install'),'--npm-bin',npm],35*60_000,true,
-      {...nodeEnv,npm_config_engine_strict:'false'});
-    const compatibility = path.join(path.dirname(fileURLToPath(import.meta.url)),'runtime-native-compat.cjs');
-    await command('clean-native-compatibility',node18,[compatibility,clean,path.join(artifacts,'native-compatibility'),node18]);
-    await command('real-genai-conversion',node18,[path.join(path.dirname(fileURLToPath(import.meta.url)),
-      'genai-runtime-probe.mjs'),clean]);
-  } else if (options.case === 'node18') {
-    assert.ok(options.node18,'Node18 compatibility requires --node18 /absolute/path/to/node');
+  } else if (options.case === 'sqlite-runtime') {
+    assert.ok(options['sqlite-reader'],'SQLite runtime case requires --sqlite-reader built from this source');
+    const probe=path.join(path.dirname(fileURLToPath(import.meta.url)),'sqlite-runtime-probe.mjs');
+    await command('sqlite-runtime',process.execPath,[probe,versionDir().dir,
+      path.join(artifacts,'sqlite'),path.resolve(options['sqlite-reader'])]);
+    report.sqlite=readJson(path.join(artifacts,'sqlite/result.json'));
+    assert.equal(report.sqlite?.status,'passed');
+  } else if (options.case === 'unsupported-runtime') {
+    assert.ok(options.node18,'Unsupported-runtime rejection requires --node18');
     const node18=fs.realpathSync(options.node18);
-    await command('node18-version',node18,['-e',"if(process.arch!=='riscv64'||!process.version.startsWith('v18.'))process.exit(1);console.log(process.version,process.arch)"]);
-    report.before=await waitHealthy();
-    const compatibility=path.join(path.dirname(fileURLToPath(import.meta.url)),'runtime-native-compat.cjs');
-    await command('native-compatibility',process.execPath,[compatibility,versionDir().dir,
-      path.join(artifacts,'native-compatibility'),node18,process.execPath]);
-    const pins=[path.join(cache,'node-bin'),path.join(data,'node-bin')];
-    const previousPins=pins.map(file=>fs.existsSync(file)?fs.readFileSync(file):null);
-    const fixture=createFixtureProbe({data,artifacts,command});report.fixture=fixture.report;
-    await fixture.phase('node22-baseline');
-    try {
-      for(const pin of pins)fs.writeFileSync(pin,node18+'\n');
-      await command('restart-node18',cli,['restart']);
-      report.node18=await waitHealthy(report.before.pid);
-      assert.equal(fs.realpathSync(`/proc/${report.node18.pid}/exe`),node18);
-      await fixture.phase('node18-capture');
-      const selected={...options,case:'agent',artifacts:path.join(artifacts,'node18-real-agent')};
-      await command('node18-real-agent',process.execPath,[fileURLToPath(import.meta.url),
-        ...Object.entries(selected).flatMap(([k,v])=>[`--${k}`,v])],10*60_000);
-    } finally {
-      pins.forEach((file,i)=>{if(previousPins[i])fs.writeFileSync(file,previousPins[i]);else fs.rmSync(file,{force:true});});
-      await command('restore-runtime',cli,['restart']);
-      report.restored=await waitHealthy(report.node18?.pid);
+    const before=await waitHealthy();report.before=before;
+    const pinFile=path.join(data,'node-bin');
+    const pin=fs.readFileSync(pinFile);
+    const pointer=fs.readFileSync(path.join(cache,'current'));
+    const reject=await command('reject-node18-installer','bash',[path.resolve(options.installer),'upgrade',
+      '--data-dir',data,'--prefer-system-node','--package-url',`file://${path.resolve(options.package)}`,
+      '--lang','en'],120000,false,{PATH:`${path.dirname(node18)}:/usr/local/bin:/usr/bin:/bin`});
+    assert.notEqual(reject.exit_code,0);assert.equal(reject.timed_out,false);
+    assert.match(fs.readFileSync(path.join(artifacts,'reject-node18-installer.log'),'utf8'),/No usable Node.js|cannot load node:sqlite/);
+    assert.deepEqual(fs.readFileSync(pinFile),pin,'Unsupported runtime replaced the working pin');
+    assert.deepEqual(fs.readFileSync(path.join(cache,'current')),pointer,'Unsupported runtime changed current');
+    const guard=path.join(versionDir().dir,'dist/native-deps-guard.cjs');
+    for(const [label,node,nodeArgs] of [['node18',node18,[]],['sqlite-disabled',process.execPath,['--no-experimental-sqlite']]]) {
+      const isolated=path.join(artifacts,label);fs.mkdirSync(isolated);
+      const result=await command(`${label}-guard`,node,[...nodeArgs,guard],30000,false,
+        {LOONGSUITE_PILOT_DATA_DIR:isolated});
+      assert.notEqual(result.exit_code,0);assert.equal(result.timed_out,false);
+      assert.match(fs.readFileSync(path.join(artifacts,`${label}-guard.log`),'utf8'),/node:sqlite/);
+      assert.ok(fs.existsSync(path.join(isolated,'daemon.fatal')),'Missing isolated fatal diagnostic');
     }
-    await fixture.phase('node22-restored-capture');
-  } else if (options.case === 'native-failure') {
-    const initial = await waitHealthy(); report.initial=initial;
+    report.after=await waitHealthy();assert.equal(report.after.pid,before.pid);
+    assert.equal(fs.existsSync(path.join(data,'daemon.fatal')),false,'Negative probe affected the live install');
     const fixture=createFixtureProbe({data,artifacts,command});report.fixture=fixture.report;
-    await fixture.phase('healthy-baseline');
-    const sqlite=path.join(versionDir().dir,'node_modules/sqlite3');
-    const saved=path.join(artifacts,'sqlite3.backup');
-    const binary=path.join(sqlite,'build/Release/node_sqlite3.node');
-    const original=path.join(artifacts,'node_sqlite3.node.backup');
-    assert.ok(fs.existsSync(binary),'Start native failure checks from a healthy source-built addon');
-    fs.copyFileSync(binary,original);
-    report.failures=[];
-    for(const mode of ['missing','broken']) {
-      const before=await waitHealthy();
-      await command(`${mode}-stop`,cli,['stop']);
-      try {
-        if(mode==='missing') fs.renameSync(sqlite,saved);
-        else fs.writeFileSync(binary,'riscv64 deliberately invalid ELF file\n');
-        await command(`${mode}-start`,cli,['start']);
-        const health=await waitHealthy(before.pid);
-        const capability=readJson(path.join(data,'native-capabilities.json'));
-        assert.equal(capability?.sqlite3?.available,false);
-        assert.ok(Date.parse(capability.checked_at)>=Date.now()-120000,'Capability report is stale');
-        assert.equal(fs.existsSync(path.join(data,'daemon.fatal')),false,'Degraded core must not leave a native fatal marker');
-        await command(`${mode}-status`,cli,['status']);
-        await command(`${mode}-info`,cli,['info']);
-        await fixture.phase(`${mode}-capture`);
-        report.failures.push({mode,health,capability});
-      } finally {
-        await command(`${mode}-stop-for-restore`,cli,['stop']);
-        if(mode==='missing' && fs.existsSync(saved)) fs.renameSync(saved,sqlite);
-        if(mode==='broken') fs.copyFileSync(original,binary);
-        await command(`${mode}-restore`,cli,['start']);
-        report.restored=await waitHealthy(before.pid);
-      }
-      assert.equal(readJson(path.join(data,'native-capabilities.json'))?.sqlite3?.available,true);
-      await fixture.phase(`${mode}-restored-capture`);
-    }
+    await fixture.phase('after-runtime-rejection');
+
   } else {
     for (const key of ['package-b','package-bad','installer']) assert.ok(options[key], `Upgrade requires --${key}`);
     const upgradeEnv=publicUpgradeEnvironment({artifacts,installer:options.installer,env});

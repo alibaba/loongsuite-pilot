@@ -9,6 +9,7 @@ import type { TraceExporterLike } from '../../../../src/flushers/otlp-trace-flus
 import {
   newState,
   transformDshRecord,
+  transformDshRecordEntries,
 } from '../../../../src/inputs/dsh/dsh-event-transform.js';
 import { ClientType } from '../../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -173,5 +174,52 @@ describe('DSH event-to-span OTLP flow', () => {
     ]);
     expect(messageText(llmInputs[0][0])).toContain('Create a hello.txt file');
     expect(messageText(llmInputs[0][1])).toContain('Current runtime context');
+  });
+
+  it('exports each embedded-stream response once with its own finish reason and native timing', async () => {
+    const fixture = await fs.readFile(path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl'), 'utf8');
+    const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    // Re-encode the real capture as v2's compact AssistantStreamRecord shape,
+    // keeping original message bodies, terminal facts, usage and timestamps.
+    const streams = new Map<string, unknown[]>();
+    const state = newState();
+    const entries: AgentActivityEntry[] = [];
+    for (const record of records) {
+      const key = `${record.sid}:${record.data?.turn}:${record.data?.step}`;
+      if (record.type === 'assistant/chunk') {
+        const chunk = record.data.chunk;
+        const stream = streams.get(key) ?? [];
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+          stream.push({
+            type: chunk.type === 'text-delta' ? 'text-chunks' : 'reasoning-chunks',
+            time0: record.time, index: chunk.index, dt: [], texts: [chunk.text],
+          });
+        } else if (chunk.type === 'tool-call-delta') {
+          stream.push({
+            type: 'tool-call-chunks', time0: record.time, index: chunk.index,
+            id: chunk.id, name: chunk.name, dt: [], args: [chunk.argumentsDelta],
+          });
+        } else {
+          stream.push({ type: 'chunk', time: record.time, chunk });
+        }
+        streams.set(key, stream);
+        continue;
+      }
+      if (record.type === 'assistant/message') {
+        record.data.stream = streams.get(key);
+        streams.delete(key);
+      }
+      entries.push(...transformDshRecordEntries(record, ClientType.Dsh, state));
+    }
+    expect(entries.filter(entry => entry['event.name'] === 'llm.request')).toHaveLength(3);
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(3);
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+    const spans = captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM').sort(compareSpanStart);
+    expect(spans).toHaveLength(3);
+    expect(spans.map(span => span.attributes['gen_ai.response.finish_reasons']))
+      .toEqual([['tool_calls'], ['tool_calls'], ['stop']]);
+    expect(spans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
+      .toEqual([671_000_000, 591_000_000, 943_000_000]);
   });
 });

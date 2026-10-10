@@ -65,7 +65,7 @@ describe.skipIf(process.platform === 'win32')('Unix versioned deployment preserv
     expect(fs.readFileSync(path.join(tmp, 'cache/previous'), 'utf8').trim()).toBe('1.1.0_previous');
   });
 
-  it('restarts current after a failed upgrade deployment without swapping to previous', () => {
+  it.each([true, false])('reports preserved-version restart accurately when restart succeeds=%s', (restartOk) => {
     const upgrade = source.match(/cmd_upgrade\(\) \{[\s\S]*?\n\}/)[0];
     const result = spawnSync('bash', ['-c', `set -euo pipefail
 PACKAGE_NAME=loongsuite-pilot
@@ -82,11 +82,14 @@ download_and_extract() { INSTALL_SRC="$TEST_ROOT/source"; }
 stop_pilot_for_deploy() { :; }
 restore_pilot_after_deploy() { :; }
 deploy_package() { return 23; }
-run_pilot_cli() { printf '%s\\n' "$1" >> "$TEST_ROOT/cli-calls"; }
+run_pilot_cli() { printf '%s\\n' "$1" >> "$TEST_ROOT/cli-calls"; return ${restartOk ? 0 : 1}; }
 ${upgrade}
 cmd_upgrade
 `], { encoding: 'utf8', timeout: 5000, env: { ...process.env, TEST_ROOT: tmp } });
     expect(result.status, result.stderr).toBe(1);
     expect(fs.readFileSync(path.join(tmp, 'cli-calls'), 'utf8').trim()).toBe('start');
+    expect(result.stdout).toContain('preserved');
+    expect(result.stdout).not.toMatch(/rolled back|auto-rollback|rollback &&/);
+    if (!restartOk) expect(result.stdout).toContain('loongsuite-pilot logs; loongsuite-pilot start');
   });
 });

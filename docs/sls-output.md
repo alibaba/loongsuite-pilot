@@ -125,6 +125,8 @@ Use an array when the same events should be sent to multiple SLS destinations:
 }
 ```
 
+The `install` command does not edit an existing `sls` array. It stops with an error; change its destinations and keys in `config.json` manually. The `upgrade` command preserves this file.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -133,10 +135,11 @@ Use an array when the same events should be sent to multiple SLS destinations:
 | `LOONGSUITE_SLS_PROJECT` | SLS project. |
 | `LOONGSUITE_SLS_LOGSTORE` | SLS logstore. |
 | `LOONGSUITE_SLS_MODE` | `webtracking`, `ak`, or `apiKey`. |
-| `LOONGSUITE_SLS_API_KEY` | API Key for API Key mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | Access Key ID for AK mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | Access Key Secret for AK mode. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS reporting. |
+
+API Key mode reads `apiKey` from `config.sls`; it has no environment variable override.
 
 ## Verify SLS Output
 

@@ -38,18 +38,19 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  // Diagnose native capabilities before file logging starts. SQLite readers load
-  // lazily so linux-riscv64 can continue with Hook/session collection when the
-  // addon is unavailable. Other platforms retain the fatal guard contract.
+  // The guard must run BEFORE this bundle's module graph loads. SQLite reads
+  // use node:sqlite; if that builtin cannot load on an unflagged Node
+  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
+  // exists. A static
+  // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
   banner: { js: "import './native-deps-guard.cjs';" },
   define: commonDefine,
   plugins: commonPlugins,
 });
 
 // Loaded by the banner above, before the daemon graph. Must keep
-// `packages: 'external'`: its require('sqlite3') has to resolve against the
-// payload's node_modules at runtime — bundling it would try to inline a native
-// addon and defeat the check.
+// `packages: 'external'`: require('node:sqlite') has to hit the runtime Node,
+// not a bundler rewrite.
 await build({
   entryPoints: ['src/native-deps-guard.ts'],
   outfile: 'dist/native-deps-guard.cjs',

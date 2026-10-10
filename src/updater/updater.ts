@@ -24,6 +24,7 @@ import {
   writeRestartFailure,
   type RestartFailureBreadcrumb,
 } from '../utils/restart-breadcrumb.js';
+import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -34,9 +35,6 @@ const logger = createLogger('Updater');
 const FETCH_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
-// Target QEMU measurements: sqlite3 604s + zstd 170s. The helper owns a 30m
-// total budget and kills its compiler process groups; allow 1m to flush/exit.
-const RISCV64_INSTALL_TIMEOUT_MS = 31 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
 const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
@@ -616,33 +614,28 @@ export class Updater {
 
       if (!usedPrebuiltModules) {
         logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
-        const riscvHelper = path.join(stagingDir, 'scripts', 'install-riscv64-deps.mjs');
-        const useRiscvHelper = process.platform === 'linux' && String(process.arch) === 'riscv64'
-          && await fs.access(riscvHelper).then(() => true).catch(() => false);
-        if (useRiscvHelper) {
-          await execFileAsync(nodeBin, [riscvHelper, '--package-dir', stagingDir,
-            '--log-dir', path.join(this.paths.dataDir, 'logs', 'native-install')], {
-            cwd: stagingDir, env: childEnv, timeout: RISCV64_INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024,
-          });
-        } else {
-          await execFileAsync('npm', ['install', '--production', '--no-optional'], {
-            cwd: stagingDir,
-            env: childEnv,
-            timeout: NPM_INSTALL_TIMEOUT_MS,
-            shell: process.platform === 'win32',
-          });
-        }
+        await execFileAsync('npm', ['install', '--production', '--no-optional'], {
+          cwd: stagingDir,
+          env: childEnv,
+          timeout: NPM_INSTALL_TIMEOUT_MS,
+          shell: process.platform === 'win32',
+        });
       }
 
-      const guardPath = path.join(stagingDir, 'dist', 'native-deps-guard.cjs');
-      const useCapabilityGuard = process.platform === 'linux' && String(process.arch) === 'riscv64'
-        && await fs.access(guardPath).then(() => true).catch(() => false);
-      logger.info('checking native runtime capabilities', { node: nodeBin, useCapabilityGuard });
-      await execFileAsync(nodeBin, useCapabilityGuard ? [guardPath] : ['-e', "require('sqlite3')"], {
+      // The node that will actually run the new version (managed runtime when
+      // provisioning succeeded, otherwise this process). The probe require()s
+      // node:sqlite with no version bypass. Failure throws before current is
+      // written, so the previous version stays.
+      //
+      // Cross-version upgrade: a deployed updater from before this migration
+      // runs `require('sqlite3')` instead. The compat shim at compat/sqlite3/
+      // makes that probe succeed (exit 0) so old updaters can activate new
+      // versions. The shim is just `module.exports = {}`.
+      logger.info('checking node:sqlite runtime', { node: nodeBin });
+      await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,
-        // A staged version must not overwrite the active install's capability file.
-        env: useCapabilityGuard ? { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: path.join(stagingDir, '.native-probe') } : childEnv,
-        timeout: useCapabilityGuard ? 45_000 : 30_000,
+        env: childEnv,
+        timeout: 30_000,
       });
 
       // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
@@ -709,9 +702,8 @@ export class Updater {
         // the collector/updater restart (and any future launch) runs on it. Skipped
         // when we fell back to system node, preserving the existing pin. When the
         // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
-        // pointers back below: the activated version's node_modules are ABI-tied to the
-        // managed node, and leaving the pin on the old node would crash-loop the
-        // collector on mismatched native addons with no self-heal.
+        // pointers back below: leaving the pin on a different node would start the
+        // collector against the wrong runtime, with no self-heal.
         if (managedNodeBin) {
           await this.pinNodeRuntime(managedNodeBin);
         }
@@ -760,10 +752,6 @@ export class Updater {
    * in which case the caller falls back to the running node + npm install.
    */
   private managedNodePlatform(): { os: string; arch: string } | null {
-    if (process.platform === 'linux' && String(process.arch) === 'riscv64') {
-      logger.info('managed node: RISC-V uses system Node.js and local native builds');
-      return null;
-    }
     let os: string;
     switch (process.platform) {
       case 'darwin': os = 'darwin'; break;

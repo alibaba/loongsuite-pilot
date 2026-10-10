@@ -412,8 +412,9 @@ process_matches_installed_entry() {
         process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     fi
     process_name="${process_name##*/}"
+    # Node 23+ sets /proc/pid/comm to MainThread, so ucomm is no longer "node".
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
         *) return 1 ;;
     esac
 
@@ -456,7 +457,7 @@ process_matches_installed_entry() {
     local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
     local command_executable="${command_prefix##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -469,7 +470,7 @@ find_current_user_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$kind:$process_name" in
-            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            collector:node|collector:nodejs|collector:MainThread|updater:node|updater:nodejs|updater:MainThread|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
@@ -487,7 +488,7 @@ find_current_user_collector_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$process_name" in
-            node|nodejs) kind=collector ;;
+            node|nodejs|MainThread) kind=collector ;;
             bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
             *) continue ;;
         esac
@@ -647,7 +648,7 @@ legacy_monitor_process_matches() {
     process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     process_name="${process_name##*/}"
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) ;;
         *) return 1 ;;
     esac
 
@@ -672,7 +673,7 @@ legacy_monitor_process_matches() {
     local command_executable="${command_prefix%% *}"
     command_executable="${command_executable##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -700,15 +701,17 @@ updater_process_exists() {
     pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. Major >= 18 or >= 22 still accepts Node 20 and 22.12.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -1191,7 +1194,7 @@ start_collector_after_stop() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure collector "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }
@@ -1455,7 +1458,7 @@ cmd_restart_updater() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure updater "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }
@@ -1584,29 +1587,6 @@ timer = setTimeout(() => {
 ' "$port" "$effective_data_dir" >/dev/null 2>&1
 }
 
-print_native_capabilities() {
-    local report="$DATA_DIR/native-capabilities.json"
-    [ -f "$report" ] || return 0
-    echo "native_capabilities=$report"
-    local node_bin
-    node_bin=$(resolve_node false 2>/dev/null) || return 0
-    "$node_bin" -e '
-const fs = require("fs");
-const clean = value => String(value ?? "unknown").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500);
-try {
-  const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (report.schema !== 1 || typeof report.sqlite3?.available !== "boolean") throw new Error("invalid schema");
-  console.log("native_last_startup=" + clean(report.checked_at));
-  console.log("sqlite3=" + (report.sqlite3.available ? "available" : "unavailable (SQLite inputs disabled; Hook/JSONL collection remains available)"));
-  if (!report.sqlite3.available) {
-    console.log("sqlite3_reason=" + clean(report.sqlite3.reason));
-    console.log("native_recovery=" + clean(report.recovery));
-  }
-} catch {
-  console.log("native_capabilities_status=unreadable; inspect the diagnostic file and collector log");
-}
-' "$report" 2>/dev/null || true
-}
 
 cmd_status() {
     local ver_info=""
@@ -1637,7 +1617,6 @@ cmd_status() {
     else
         echo "   updater: stopped"
     fi
-    print_native_capabilities
     local interceptor_state
     interceptor_state=$(interceptor_embedded_status)
     if [ "$interceptor_state" = "stopped" ]; then
@@ -1661,7 +1640,6 @@ cmd_info() {
     echo "config=$CONFIG_FILE"
     echo "log=$LOG_FILE"
     echo "versions_dir=$VERSIONS_DIR"
-    print_native_capabilities
 
     if [ -f "$NODE_PIN_FILE" ]; then
         local pinned_node
@@ -2141,7 +2119,26 @@ _systemd_quote() {
     printf '"%s"' "$value"
 }
 
+# WorkingDirectory takes a literal path, unlike ExecStart/Environment: its
+# parser does not remove quotes or decode C escapes. Reject characters that
+# would split/continue a directive or be trimmed, then escape specifiers only.
+_systemd_working_directory() {
+    local value="$1"
+    case "$value" in
+        /*) ;;
+        *) echo "Invalid systemd working directory: an absolute path is required" >&2; return 1 ;;
+    esac
+    case "$value" in
+        *$'\n'*|*$'\r'*|*\\|*[[:space:]])
+            echo "Invalid systemd working directory: newline, trailing backslash or whitespace is not supported" >&2
+            return 1 ;;
+    esac
+    printf '%s' "${value//%/%%}"
+}
+
 _write_systemd_user_unit() {
+    local workdir
+    workdir=$(_systemd_working_directory "$CACHE_DIR") || return 1
     mkdir -p "$SYSTEMD_USER_UNIT_DIR"
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
 [Unit]
@@ -2151,7 +2148,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run
-WorkingDirectory=${CACHE_DIR//%/%%}
+WorkingDirectory=$workdir
 Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$CONFIG_FILE")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$DATA_DIR")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$CACHE_DIR")
@@ -2165,6 +2162,8 @@ UNITEOF
 }
 
 _write_systemd_user_updater_unit() {
+    local workdir
+    workdir=$(_systemd_working_directory "$CACHE_DIR") || return 1
     mkdir -p "$SYSTEMD_USER_UNIT_DIR"
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-updater.service" << UNITEOF
 [Unit]
@@ -2174,7 +2173,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
-WorkingDirectory=${CACHE_DIR//%/%%}
+WorkingDirectory=$workdir
 Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$CONFIG_FILE")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$DATA_DIR")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_CACHE_DIR=$CACHE_DIR")
@@ -2201,6 +2200,8 @@ _write_systemd_system_unit() {
         target_workdir="$CACHE_DIR"
         target_data="$DATA_DIR"
     fi
+    local workdir
+    workdir=$(_systemd_working_directory "$target_workdir") || return 1
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2216,7 +2217,7 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=$(_systemd_quote "$target_bin") run
-WorkingDirectory=${target_workdir//%/%%}
+WorkingDirectory=$workdir
 Environment=$(_systemd_quote "HOME=$target_home")
 Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$target_config")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$target_data")
@@ -2283,6 +2284,8 @@ _write_systemd_system_updater_unit() {
         target_workdir="$CACHE_DIR"
         target_data="$DATA_DIR"
     fi
+    local workdir
+    workdir=$(_systemd_working_directory "$target_workdir") || return 1
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2298,7 +2301,7 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=$(_systemd_quote "$target_bin") run-updater
-WorkingDirectory=${target_workdir//%/%%}
+WorkingDirectory=$workdir
 Environment=$(_systemd_quote "HOME=$target_home")
 Environment=$(_systemd_quote "AGENT_DATA_COLLECTION_CONFIG=$target_config")
 Environment=$(_systemd_quote "LOONGSUITE_PILOT_DATA_DIR=$target_data")
@@ -2693,14 +2696,14 @@ autostart_install_collector_only() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_unit
+            _write_systemd_user_unit || return 1
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
             enable_linger || true
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_unit "$target_user"
+            _write_systemd_system_unit "$target_user" || return 1
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
             echo "systemd-system" > "$INIT_TYPE_FILE"
@@ -2733,14 +2736,14 @@ autostart_install_updater_only() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_updater_unit
+            _write_systemd_user_updater_unit || return 1
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
             enable_linger || true
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_updater_unit "$target_user"
+            _write_systemd_system_updater_unit "$target_user" || return 1
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
             echo "systemd-system" > "$INIT_TYPE_FILE"
@@ -2779,9 +2782,9 @@ autostart_install() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_unit
+            _write_systemd_user_unit || return 1
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                _write_systemd_user_updater_unit
+                _write_systemd_user_updater_unit || return 1
             fi
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
@@ -2792,9 +2795,9 @@ autostart_install() {
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_unit "$target_user"
+            _write_systemd_system_unit "$target_user" || return 1
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                _write_systemd_system_updater_unit "$target_user"
+                _write_systemd_system_updater_unit "$target_user" || return 1
             fi
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null

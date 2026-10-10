@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { installRiscv64Dependencies } from '../install-riscv64-deps.mjs';
+import { runCommand } from './run-command.mjs';
 import { createFixtureProbe } from './installed-fixture.mjs';
 
 export function publicUpgradeEnvironment({artifacts, installer, env}) {
@@ -21,7 +21,7 @@ fs.appendFileSync(${JSON.stringify(path.join(artifacts,'installer-transport.log'
 
 export async function installationBoundaries({data,cache,cli,artifacts,options,env,command,waitHealthy}) {
   for(const key of ['installer','package-deps-bad'])assert.ok(options[key],`Boundaries require --${key}`);
-  const result={cases:[],injections:'Invalid archive/local dependency; simulated architecture response and stalled compiler subprocess'};
+  const result={cases:[],injections:'Invalid archive/local dependency; simulated architecture response and stalled acceptance subprocess'};
   const config=fs.readFileSync(path.join(data,'config.json'));
   const pin=fs.readFileSync(path.join(data,'node-bin'));
   const initial=await waitHealthy();result.initial=initial;
@@ -89,29 +89,23 @@ const r=cp.spawnSync(${JSON.stringify(process.execPath)},a,{stdio:'inherit'});pr
   await fixture.phase('after-same-version-install-failure');
   result.cases.push({label:'same-version-install-failure',...same,health:restored,original_payload_preserved:true});
 
-  const timeoutDir=path.join(artifacts,'compiler-timeout');fs.mkdirSync(timeoutDir);
-  fs.writeFileSync(path.join(timeoutDir,'package.json'),JSON.stringify({name:'riscv64-timeout-probe',version:'1.0.0'}));
+  const timeoutDir=path.join(artifacts,'subprocess-timeout');fs.mkdirSync(timeoutDir);
   const childPid=path.join(timeoutDir,'descendant.pid');
-  const npm=path.join(timeoutDir,'npm');
-  fs.writeFileSync(npm,`#!${process.execPath}
+  const subprocess=path.join(timeoutDir,'subprocess');
+  fs.writeFileSync(subprocess,`#!${process.execPath}
 const fs=require('node:fs'),cp=require('node:child_process');
-if(process.argv[2]==='install'){fs.writeFileSync('js-ready','yes');process.exit(0);}
 const child=cp.spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});
 fs.writeFileSync(${JSON.stringify(childPid)},String(child.pid));setInterval(()=>{},1000);
 `,{mode:0o755});
-  const timeout=await installRiscv64Dependencies({packageDir:timeoutDir,logDir:path.join(timeoutDir,'logs'),
-    nodeBin:process.execPath,npmBin:npm,budgetMs:12000});
-  assert.equal(timeout.status,'degraded');assert.equal(timeout.modules.sqlite3.build.timed_out,true);
-  assert.equal(fs.readFileSync(path.join(timeoutDir,'js-ready'),'utf8'),'yes');
+  const timeout=await runCommand(subprocess,['acceptance-timeout'],{cwd:timeoutDir,env,
+    timeoutMs:12000,logPath:path.join(timeoutDir,'timeout.log')});
+  assert.equal(timeout.timed_out,true);
   const descendant=Number(fs.readFileSync(childPid,'utf8'));
-  for(let i=0;i<20;i++) {
-    const file=`/proc/${descendant}/stat`;
-    if(!fs.existsSync(file)||fs.readFileSync(file,'utf8').split(' ')[2]==='Z')break;
-    await new Promise(resolve=>setTimeout(resolve,100));
-  }
-  const stat=`/proc/${descendant}/stat`;
-  assert.ok(!fs.existsSync(stat)||fs.readFileSync(stat,'utf8').split(' ')[2]==='Z','Timed-out compiler descendant survived');
-  result.cases.push({label:'compiler-timeout',simulated_compiler:true,report:timeout,descendant_reaped:true});
+  const running=()=>{try{return fs.readFileSync(`/proc/${descendant}/stat`,'utf8').split(' ')[2]!=='Z';}
+    catch(error){if(error.code==='ENOENT')return false;throw error;}};
+  for(let i=0;i<20&&running();i++)await new Promise(resolve=>setTimeout(resolve,100));
+  assert.equal(running(),false,'Timed-out subprocess descendant survived');
+  result.cases.push({label:'subprocess-timeout',simulated_subprocess:true,report:timeout,descendant_reaped:true});
   result.config_sha256=crypto.createHash('sha256').update(config).digest('hex');
   result.status='passed';
   return result;

@@ -42,6 +42,13 @@ def main():
     result = {'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
               'status': 'failed', 'work_dir': str(work), 'steps': [], 'live_model': False}
     result['source_commit'] = subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
+    patch = subprocess.check_output(['git','diff','HEAD','--binary'],cwd=ROOT)
+    (work / 'source.patch').write_bytes(patch)
+    result['source_patch_sha256'] = hashlib.sha256(patch).hexdigest()
+    merge_head = subprocess.run(['git','rev-parse','--verify','MERGE_HEAD'],cwd=ROOT,
+                                capture_output=True,text=True)
+    if merge_head.returncode == 0:
+        result['merge_parent'] = merge_head.stdout.strip()
     result['tracked_source_dirty'] = bool(subprocess.check_output(
         ['git','status','--porcelain','--untracked-files=no'],cwd=ROOT,text=True).strip())
     result['host_qemu'] = subprocess.check_output(['qemu-system-riscv64','--version'],text=True,timeout=10).strip()
@@ -88,6 +95,11 @@ def main():
         else:
             package = work / 'pilot.tar.gz'
             run('package', ['bash', 'deploy/package-opensource.sh', '--output', package], 600)
+        reader = work / 'node-sqlite-reader.mjs'
+        run('sqlite-reader-build', ['node','--input-type=module','-e',
+            "import { build } from 'esbuild'; await build({entryPoints:['src/utils/node-sqlite.ts'],outfile:process.argv[1],bundle:true,format:'esm',platform:'node',packages:'external'});",
+            reader], 60)
+        result['sqlite_reader_sha256'] = qemu.digest(reader)
         result['package_sha256'] = qemu.digest(package)
         run('upgrade-fixtures', ['python3', 'scripts/riscv64/make-upgrade-fixtures.py',
                                  '--base', package, '--output-dir', work / 'upgrade-fixtures'], 300)
@@ -109,6 +121,7 @@ def main():
         ssh('guest-directories', ['mkdir', '-p', f'{guest_home}/inputs', f'{guest_home}/runtimes', f'{guest_home}/driver', f'{guest_home}/evidence'])
         copy('copy-runtime', [qemu.asset_path(work, manifest['assets'][key]) for key in ('node22','node18')], f'{guest_home}/inputs/')
         # Stable guest filenames do not depend on the caller's package basename.
+        copy('copy-sqlite-reader', [reader], f'{guest_home}/evidence/node-sqlite-reader.mjs')
         copy('copy-package', [package], f'{guest_home}/inputs/pilot.tar.gz')
         copy('copy-fixtures', [work / 'upgrade-fixtures/pilot-riscv64-b.tar.gz', work / 'upgrade-fixtures/pilot-riscv64-bad.tar.gz',
                               work / 'upgrade-fixtures/pilot-riscv64-deps-bad.tar.gz',
@@ -145,7 +158,8 @@ bash driver/scripts/riscv64/bootstrap-guest.sh {shlex.quote(guest_home+'/evidenc
                              '--package-bad', f'{guest_home}/inputs/pilot-riscv64-bad.tar.gz',
                              '--package-deps-bad', f'{guest_home}/inputs/pilot-riscv64-deps-bad.tar.gz',
                              '--agent-entry', f'{guest_home}/qwen-code/package/cli-entry.js',
-                             '--agent-node', node22, '--node18', node18], 150*60)
+                             '--agent-node', node22, '--node18', node18,
+                             '--sqlite-reader', f'{guest_home}/evidence/node-sqlite-reader.mjs'], 150*60)
         result['status'] = 'passed'
     except Exception as error:
         result['error'] = str(error)
@@ -158,7 +172,7 @@ bash driver/scripts/riscv64/bootstrap-guest.sh {shlex.quote(guest_home+'/evidenc
                 ssh('stop-before-archive',['bash','-c',stop_script],180)
                 # Stop the collector before archiving its changing log/state files.
                 archive_script = ('import pathlib,subprocess,sys; base=pathlib.Path(sys.argv[1]); '
-                                  'names=[p for p in ["evidence","pilot-data/logs","pilot-data/native-capabilities.json"] if (base/p).exists()]; '
+                                  'names=[p for p in ["evidence","pilot-data/logs","pilot-data/daemon.fatal"] if (base/p).exists()]; '
                                   'sys.exit(subprocess.call(["tar","-czf","-","-C",str(base),*names]))')
                 ssh('collect-evidence', ['python3','-c',archive_script,guest_home],300,work/'guest-evidence.tar.gz')
             except Exception as error:

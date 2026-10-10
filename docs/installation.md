@@ -6,12 +6,12 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). On supported platforms the installer downloads a managed Node.js 22.22 runtime, so a preinstalled Node.js is not required. A system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough. Linux musl (Alpine) and Windows ARM64 have no managed runtime and must supply a Node.js that meets this floor, plus `npm`.
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
 
-Linux RISC-V64 requires a system `riscv64` Node/npm and a native build toolchain; use the tested Node 22 runtime for new deployments. A locked production dependency declares Node >=20, so Node 18 has only limited runtime compatibility evidence and fails installation with `engine-strict=true`. See the [RISC-V installation and verification guide](riscv64.md) for the exact scope, source builds, degraded capabilities and release status.
+Linux RISC-V64 requires system `riscv64` Node/npm with loadable `node:sqlite` (the same requirement above); the pinned guest uses Node 22.22.2. SQLite is provided by Node and zstd-napi has been removed, so no native-addon build is needed. See the [RISC-V installation and verification guide](riscv64.md) for rejection/recovery behavior, acceptance scope and release status.
 
 ## Install From Public Package On Linux Or macOS
 

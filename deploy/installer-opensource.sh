@@ -305,15 +305,18 @@ _node_is_app_bundle() {
     return 1
 }
 
+# node:sqlite is unflagged from 22.13 and 23.4. A major-version check accepts
+# Node 20 and 22.12, whose require('node:sqlite') throws, so install would
+# succeed and SQLite collection would not. The require is the check.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -369,8 +372,8 @@ managed_node_platform() {
         arm64|aarch64) arch="arm64" ;;
         x86_64|amd64) arch="x64" ;;
         riscv64)
-            _mn_msg "managed node: RISC-V 使用系统 Node.js，并在本机构建原生依赖" \
-                    "managed node: RISC-V uses system Node.js and builds native dependencies locally"
+            _mn_msg "managed node: RISC-V 使用能加载 node:sqlite 的系统 Node.js" \
+                    "managed node: RISC-V uses system Node.js with node:sqlite"
             return 1 ;;
         *)
             echo "managed node: unsupported architecture $(uname -m)" >&2
@@ -578,7 +581,12 @@ check_deps() {
 
     NODE_BIN=""
     if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
-        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        NODE_BIN=$(resolve_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" \
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        fi
     else
         NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
         if [ -z "$NODE_BIN" ]; then
@@ -588,15 +596,16 @@ check_deps() {
         fi
     fi
     if [ -z "$NODE_BIN" ]; then
-        msg "❌ 缺少依赖: node，请先安装后重试" \
-            "❌ Missing dependency: node — please install it first"
+        msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" \
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     fi
 
-    NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
-    if [ "$NODE_MAJOR" -lt 18 ]; then
-        msg "❌ 需要 Node.js >= 18，当前版本: $("$NODE_BIN" --version)" \
-            "❌ Requires Node.js >= 18, current: $("$NODE_BIN" --version)"
+    if ! _node_supports_sqlite "$NODE_BIN"; then
+        local node_ver
+        node_ver="$("$NODE_BIN" --version 2>/dev/null || echo unknown)"
+        msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
+            "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     fi
 
@@ -978,7 +987,7 @@ deploy_package() {
         old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]' || true)
         mkdir -p "$versions_dir" || return 1
         # Reinstalling the same version must preserve the active payload until
-        # dependencies and hooks are ready, including when a native build fails.
+        # dependencies and hooks are ready.
         if [ -e "$target" ] || [ -L "$target" ]; then
             target=$(mktemp -d "$versions_dir/${dir_name}_XXXXXXXX") || return 1
             dir_name="${target##*/}"
@@ -1012,16 +1021,9 @@ deploy_package() {
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
         local dependency_status=0
-        if [ "$("$NODE_BIN" -p 'process.platform + "/" + process.arch')" = "linux/riscv64" ] && \
-            [ -f "$PERMANENT_DIR/scripts/install-riscv64-deps.mjs" ]; then
-            "$NODE_BIN" "$PERMANENT_DIR/scripts/install-riscv64-deps.mjs" \
-                --package-dir "$PERMANENT_DIR" --log-dir "$DATA_DIR/logs/native-install" \
-                --npm-bin "$NPM_BIN" || dependency_status=$?
-        else
-            (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1) || dependency_status=$?
-        fi
+        (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1) || dependency_status=$?
         if [ "$dependency_status" -ne 0 ]; then
-            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+            msg "    ❌ JavaScript 依赖安装失败" "    ❌ JavaScript dependency installation failed"
             return 1
         fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
@@ -1330,7 +1332,12 @@ if (multimodalMode) {
 }
 
 if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
@@ -2120,6 +2127,32 @@ restore_pilot_after_deploy() {
 # ============================================================
 # CMD: install
 # ============================================================
+reject_multi_sls_config() {
+    local config_file="$DATA_DIR/config.json"
+    [ -f "$config_file" ] || return 0
+
+    local status
+    if "$NODE_BIN" -e '
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+' "$config_file"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 12 ]; then
+        msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" \
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually." >&2
+    else
+        msg "❌ 无法检查现有 config.json，请检查文件后重试" \
+            "❌ Cannot inspect existing config.json; check the file and retry." >&2
+    fi
+    return 1
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -2127,6 +2160,7 @@ cmd_install() {
 
     validate_install_user
     check_deps
+    reject_multi_sls_config
 
     # Migrate legacy layout if needed
     migrate_legacy_layout
@@ -2238,20 +2272,20 @@ cmd_upgrade() {
         # downgrade a working install to its older rollback target.
         msg "⚠️  部署失败，正在重新启动保留的旧版本..." \
             "⚠️  Deployment failed, restarting the preserved current version..."
-        local _rollback_ok=1
+        local _restart_ok=1
         if run_pilot_cli start; then
             PILOT_HELD_FOR_DEPLOY=0
         else
-            _rollback_ok=0
+            _restart_ok=0
         fi
-        if [ "$_rollback_ok" -eq 1 ]; then
-            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
-                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        if [ "$_restart_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已保留 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error); preserved v${old_ver:-unknown} and restarted the service"
         else
-            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
-                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
-            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
-                "   loongsuite-pilot rollback && loongsuite-pilot start"
+            msg "❌ 升级失败，保留版本的服务重启未成功，请检查日志后手动启动:" \
+                "❌ Upgrade failed; the preserved version could not restart. Inspect logs, then start it manually:"
+            msg "   loongsuite-pilot logs; loongsuite-pilot start" \
+                "   loongsuite-pilot logs; loongsuite-pilot start"
         fi
         exit 1
     fi

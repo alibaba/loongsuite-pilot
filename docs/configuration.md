@@ -81,16 +81,11 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, Pilot needs object storage plus a non-`none` `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
 
-Two storage shapes. **Explicit configuration takes precedence**: user-supplied fields are not overwritten by the flusher.
-
-1. **Use as written.** A complete `multimodal.storage` block (`sls` / `delegatedOss` / `oss`). Incomplete or invalid storage disables upload; it does not fall back.
-2. **Reuse the SLS flusher.** Missing fields are filled only in these two cases:
-   - **Reuse all.** Exactly one unconflicted SLS `apiKey` target. Omit `storage`, set `storage: { "type": "sls" }` / `{ "type": "delegatedOss" }`, or use an empty `target` to reuse it as a whole. `type` may be `sls` / `delegatedOss`; only `target.logstore` may be overridden.
-   - **Reuse project only.** Independent storage already has auth / endpoint / logstore and omits `project`. Fill it from a project-qualified multimodal endpoint, or from the unique same-region flusher project (typical: WebTracking). Auth remains the user-supplied value. AK/SK and WebTracking credentials are never copied into multimodal.
+Set `multimodal.storage` explicitly (`sls` / `delegatedOss` / `oss`). For SLS-backed storage, `target` needs an endpoint, project, and logstore. A project-qualified endpoint can supply the project. Only `auth.apiKey` may be reused: omit `auth` when `config.sls` has one unambiguous API Key value for the same endpoint, project, and logstore. A different destination, conflicting keys, or AK/WebTracking credentials cannot supply it. Explicit `auth` remains unchanged. Incomplete or invalid storage disables upload; it does not fall back.
 
 `type` is one of `sls`, `delegatedOss`, or `oss`. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
 
-Minimal reuse (Codex). The SLS flusher is the storage destination; `uploadMode` turns conversion on:
+Minimal API Key reuse (Codex). The storage target is explicit and matches the SLS flusher; `uploadMode` turns conversion on:
 
 ```json
 {
@@ -100,6 +95,16 @@ Minimal reuse (Codex). The SLS flusher is the storage destination; `uploadMode` 
     "project": "your-project",
     "logstore": "your-logstore",
     "apiKey": "your-sls-project-api-key"
+  },
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "your-logstore"
+      }
+    }
   },
   "agents": {
     "codex": {
@@ -111,20 +116,7 @@ Minimal reuse (Codex). The SLS flusher is the storage destination; `uploadMode` 
 }
 ```
 
-Logstore-only override:
-
-```json
-{
-  "multimodal": {
-    "storage": {
-      "type": "sls",
-      "target": { "logstore": "logstore-multimodal" }
-    }
-  }
-}
-```
-
-`auth` is one complete ApiKey or access-key set. If `mode` is omitted, Pilot infers it from that set.
+For a different logstore, set all three target fields and add a matching `config.sls` entry or provide explicit `auth`. When `auth` is present, it must contain one complete API Key or access-key set; Pilot infers the mode if omitted.
 
 ### `type: sls`
 
@@ -221,14 +213,14 @@ Writes directly to OSS. AK only.
 |---------|-------------|
 | `multimodal.storage.type` | `sls`, `delegatedOss`, or `oss`. |
 | `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
-| `multimodal.storage.target.project` | SLS project for `sls` / `delegatedOss`. May be omitted when exactly one project exists among flusher SLS targets in the same region. An explicit empty value disables upload. |
-| `multimodal.storage.target.logstore` | Logstore for multimodal objects. Required for independent `sls` / `delegatedOss`. On unique `apiKey` reuse, omit storage to use the flusher Logstore, or set only this field to override it. |
+| `multimodal.storage.target.project` | SLS project for `sls` / `delegatedOss`. Required unless the target endpoint is project-qualified. An explicit empty value disables upload. |
+| `multimodal.storage.target.logstore` | Required for `sls` / `delegatedOss`. Must match an SLS entry when reusing its API Key. |
 | `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. If omitted, inferred from the configured credentials. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.mode` | `ak` or `apiKey`. If omitted, inferred from explicit credentials or a matching SLS API Key. `type=oss` requires `ak`. |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
-| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. Must not be set together with access keys. |
+| `multimodal.storage.auth.apiKey` | Required for explicit `mode=apiKey`; may be omitted with the entire `auth` block when a matching `config.sls` API Key exists. Must not be set together with access keys. |
 
-If `multimodal.storage` is omitted and a unique SLS `apiKey` destination exists, that destination is reused. If storage is omitted without such a destination, or storage is present but invalid, text collection continues and images are not converted to `uri`.
+The reuse lookup reads `config.sls` only, not inner configuration or environment overrides. If storage is omitted or invalid, text collection continues and images are not converted to `uri`.
 
 ## Configuration Topics
 

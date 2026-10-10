@@ -31,6 +31,7 @@ export function classifyStartupCrash(breadcrumb: StartupCrashBreadcrumb): Startu
 function detectReason(message: string, full: string, phase: string): StartupCrashReason {
   if (
     full.includes('sqlite3')
+    || full.includes('node:sqlite')
     || full.includes('err_dlopen_failed')
     || full.includes('did not self-register')
     || /cannot find module\s+['"][^'"]*\.node['"]/.test(full)

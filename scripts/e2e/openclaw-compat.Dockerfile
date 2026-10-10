@@ -2,7 +2,8 @@ FROM node:22-bookworm
 ARG OPENCLAW_VERSION=2026.3.8
 RUN npm install --prefix /opt/openclaw openclaw@${OPENCLAW_VERSION} --no-audit --no-fund
 WORKDIR /candidate
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
+COPY compat ./compat
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY build.mjs tsconfig.json vitest.config.ts ./
 COPY src ./src

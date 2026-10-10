@@ -524,13 +524,8 @@ describe('Updater', () => {
       );
     });
 
-    it('uses the RISC-V native helper and staged capability guard before switching versions', async () => {
+    it('checks the actual node:sqlite runtime on RISC-V before switching versions', async () => {
       setupForDownload();
-      const priorAccess = mockFsAccess.getMockImplementation()!;
-      mockFsAccess.mockImplementation((p: string) => {
-        if (p.endsWith('/scripts/install-riscv64-deps.mjs') || p.endsWith('/dist/native-deps-guard.cjs')) return Promise.resolve();
-        return priorAccess(p);
-      });
       const originalArch = process.arch;
       const originalPlatform = process.platform;
       Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
@@ -538,16 +533,10 @@ describe('Updater', () => {
       try {
         const updater = new Updater(makeConfig(), tmpDir);
         await updater.check();
-        const helper = mockExecFile.mock.calls.find(([, args]) => args[0]?.endsWith('/scripts/install-riscv64-deps.mjs'));
-        expect(helper).toBeDefined();
-        expect(helper![0]).toBe(process.execPath);
-        expect(helper![1]).toContain('--package-dir');
-        expect(helper![1]).toContain(`${tmpDir}/logs/native-install`);
-        expect(helper![2].timeout).toBe(31 * 60_000);
-        const guard = mockExecFile.mock.calls.find(([, args]) => args[0]?.endsWith('/dist/native-deps-guard.cjs'));
-        expect(guard).toBeDefined();
-        expect(guard![2].env.LOONGSUITE_PILOT_DATA_DIR).toMatch(/\.candidate\/\.native-probe$/);
-        expect(mockExecFile.mock.calls.some(([command]) => command === 'npm')).toBe(false);
+        const probe = mockExecFile.mock.calls.find(([, args]) => args[0] === '-e' && args[1] === "require('node:sqlite')");
+        expect(probe).toBeDefined();
+        expect(probe![0]).toBe(process.execPath);
+        expect(mockExecFile.mock.calls.some(([command]) => command === 'npm')).toBe(true);
         expect(mockFsRename).toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.stringContaining('/current'));
       } finally {
         Object.defineProperty(process, 'arch', { configurable: true, value: originalArch });

@@ -59,7 +59,10 @@ def owned_pid(work):
     pidfile = work / 'guest' / 'qemu.pid'
     if not pidfile.exists():
         return None
-    pid = int(pidfile.read_text().strip())
+    try:
+        pid = int(pidfile.read_text().strip())
+    except FileNotFoundError:
+        return None
     try:
         cmd = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
     except FileNotFoundError:
@@ -159,9 +162,20 @@ def stop(work):
         print('Guest already stopped')
         return
     # SIGTERM is only sent after validating ownership, with a bounded wait.
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        (work / 'guest' / 'qemu.pid').unlink(missing_ok=True)
+        print('Guest stopped')
+        return
     for _ in range(60):
-        if not Path(f'/proc/{pid}').exists() or Path(f'/proc/{pid}/stat').read_text().split()[2] == 'Z':
+        try:
+            stat = Path(f'/proc/{pid}/stat').read_text()
+            # comm is parenthesized and may contain spaces; state follows it.
+            stopped = stat.rsplit(')', 1)[1].split()[0] == 'Z'
+        except FileNotFoundError:
+            stopped = True
+        if stopped:
             (work / 'guest' / 'qemu.pid').unlink(missing_ok=True)
             print('Guest stopped')
             return

@@ -27,7 +27,6 @@ import {
 } from '../pi-sdk/pi-sdk-agent-registry.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
-import { hasSqlite3 } from '../utils/sqlite3-runtime.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
@@ -983,7 +982,6 @@ export class Orchestrator extends EventEmitter {
    */
   private async registerAllInputs(): Promise<AgentDetectionEntry[]> {
     const entries: AgentDetectionEntry[] = [];
-    const sqliteAvailable = await hasSqlite3();
     const listenerCfg = this.config.listeners;
 
     // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
@@ -1021,7 +1019,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
         watchPaths: QoderCnSqliteInput.getWatchPaths(),
         isAvailable: QoderCnSqliteInput.checkAvailability,
-        enabled: () => sqliteAvailable && !qoderCnTraceEnabled() &&
+        enabled: () => !qoderCnTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cn-sqlite',
@@ -1110,7 +1108,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
         watchPaths: QoderWorkSqliteInput.getWatchPaths(),
         isAvailable: QoderWorkSqliteInput.checkAvailability,
-        enabled: () => sqliteAvailable && !qoderWorkTraceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-sqlite',
@@ -1200,7 +1198,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkCNSqliteInput, {
         watchPaths: [path.join(qoderWorkCNDataRoot, 'data')],
         isAvailable: () => fileExists(path.join(qoderWorkCNDataRoot, 'data', 'agents.db')),
-        enabled: () => sqliteAvailable && !qoderWorkCNTraceEnabled() &&
+        enabled: () => !qoderWorkCNTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-cn-sqlite',
@@ -1265,7 +1263,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
         watchPaths: QwenWorkCNSqliteInput.getWatchPaths(),
         isAvailable: QwenWorkCNSqliteInput.checkAvailability,
-        enabled: () => sqliteAvailable && !qwenWorkCNTraceEnabled() &&
+        enabled: () => !qwenWorkCNTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qwen-work-cn-sqlite',

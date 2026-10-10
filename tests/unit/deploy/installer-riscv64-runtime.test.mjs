@@ -5,7 +5,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const source = fs.readFileSync('deploy/installer-opensource.sh', 'utf8');
-const checkDeps = source.match(/check_deps\(\) \{[\s\S]*?\n\}/)[0];
+const checkDeps = source.match(/_node_supports_sqlite\(\) \{[\s\S]*?\n\}/)[0] + '\n'
+  + source.match(/check_deps\(\) \{[\s\S]*?\n\}/)[0];
 const detectLang = source.match(/detect_lang\(\) \{[\s\S]*?\n\}/)[0];
 let tmp;
 beforeEach(() => {
@@ -13,12 +14,12 @@ beforeEach(() => {
   fs.mkdirSync(path.join(tmp, 'data'));
   fs.mkdirSync(path.join(tmp, 'bin'));
   fs.writeFileSync(path.join(tmp, 'data/node-bin'), 'previous-working-node\n');
-  fs.writeFileSync(path.join(tmp, 'bin/node'), '#!/bin/sh\ncase "$1" in\n-e) echo 22;;\n-p) echo "$TEST_NODE_ARCH";;\n--version) echo v22.22.2;;\nesac\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(tmp, 'bin/node'), '#!/bin/sh\ncase "$1" in\n-e) [ "$TEST_SQLITE" != missing ] || exit 1; echo 22;;\n-p) echo "$TEST_NODE_ARCH";;\n--version) echo v22.22.2;;\nesac\n', { mode: 0o755 });
   fs.writeFileSync(path.join(tmp, 'bin/npm'), '#!/bin/sh\necho 10.9.7\n', { mode: 0o755 });
 });
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-function run(body, arch = 'riscv64') {
+function run(body, arch = 'riscv64', sqlite = 'available') {
   return spawnSync('bash', ['-c', `set -euo pipefail
 uname() { case "\${1:-}" in -m) echo riscv64;; *) echo Linux;; esac; }
 msg() { echo "$2"; }
@@ -27,7 +28,7 @@ run_npm() { "$TEST_ROOT/bin/npm" "$@"; }
 DATA_DIR="$TEST_ROOT/data"
 PREFER_SYSTEM_NODE=1
 ${body}`], { encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, TEST_ROOT: tmp, TEST_NODE_ARCH: arch, LOONGSUITE_PILOT_LANG: '',
+    env: { ...process.env, TEST_ROOT: tmp, TEST_NODE_ARCH: arch, TEST_SQLITE: sqlite, LOONGSUITE_PILOT_LANG: '',
       LANG: 'C', LANGUAGE: '', LC_ALL: '', LC_MESSAGES: '' } });
 }
 
@@ -47,5 +48,11 @@ describe.skipIf(process.platform === 'win32')('RISC-V installer runtime validati
     const result = run(`${checkDeps}\ncheck_deps`);
     expect(result.status).toBe(0);
     expect(fs.readFileSync(path.join(tmp, 'data/node-bin'), 'utf8').trim()).toBe(path.join(tmp, 'bin/node'));
+  });
+  it('rejects an unavailable builtin before changing the old runtime pin', () => {
+    const result=run(`${checkDeps}\ncheck_deps`, 'riscv64', 'missing');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('cannot load node:sqlite');
+    expect(fs.readFileSync(path.join(tmp,'data/node-bin'),'utf8')).toBe('previous-working-node\n');
   });
 });

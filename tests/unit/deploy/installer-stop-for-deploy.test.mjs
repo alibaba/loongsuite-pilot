@@ -116,7 +116,7 @@ describe('sh overlay install stops updater, not just the collector pid', () => {
       const fn = fnOf(read(file), 'deploy_package');
       const writeAt = fn.indexOf('mv -f "$current_file.tmp" "$current_file"');
       const postAt = fn.indexOf('scripts/postinstall.js');
-      const npmFailAt = fn.indexOf('Dependency installation failed');
+      const npmFailAt = fn.toLowerCase().indexOf('dependency installation failed');
       expect(writeAt, `${file}: current pointer write missing`).toBeGreaterThan(-1);
       expect(postAt, `${file}: postinstall missing`).toBeGreaterThan(-1);
       expect(npmFailAt, `${file}: npm failure path missing`).toBeGreaterThan(-1);

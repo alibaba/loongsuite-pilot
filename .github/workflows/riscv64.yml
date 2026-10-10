@@ -11,6 +11,7 @@ on:
       - 'scripts/**'
       - 'deploy/**'
       - 'assets/**'
+      - 'compat/**'
       - 'agents.d/**'
       - 'tests/**'
       - 'package*.json'
@@ -26,6 +27,7 @@ on:
       - 'scripts/**'
       - 'deploy/**'
       - 'assets/**'
+      - 'compat/**'
       - 'agents.d/**'
       - 'tests/**'
       - 'package*.json'
@@ -63,8 +65,9 @@ jobs:
         run: |
           mkdir -p e2e-artifacts/riscv64-host
           npm ci --ignore-scripts 2>&1 | tee e2e-artifacts/riscv64-host/dependencies.log
-          npm rebuild sqlite3 zstd-napi 2>&1 | tee e2e-artifacts/riscv64-host/native.log
+          node -e "require('node:sqlite')" 2>&1 | tee e2e-artifacts/riscv64-host/sqlite.log
           npm run typecheck 2>&1 | tee e2e-artifacts/riscv64-host/typecheck.log
+          npm run build 2>&1 | tee e2e-artifacts/riscv64-host/build.log
           npm test -- --maxWorkers=4 --minWorkers=1 2>&1 | tee e2e-artifacts/riscv64-host/tests.log
       - name: Fresh guest and installed acceptance
         run: python3 scripts/riscv64/fresh-run.py --work-dir e2e-artifacts/riscv64-fresh --cache-dir e2e-artifacts/riscv64-cache

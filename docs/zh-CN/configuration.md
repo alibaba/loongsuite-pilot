@@ -10,9 +10,16 @@ Pilot 按以下顺序解析配置：
 
 1. 环境变量。
 2. 配置文件，默认路径为 `~/.loongsuite-pilot/config.json`。
-3. 内置默认值。
+3. 集团版的托管默认配置 `~/.loongsuite-pilot/configs/inner/data_config.json`（仅适用于其支持的配置项）。
+4. 内置默认值。
 
 如需使用其他配置文件路径，可以设置 `AGENT_DATA_COLLECTION_CONFIG`。
+
+对多模态配置，用户的 `config.json` 始终优先于托管默认配置：
+
+- 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。
+- `agents` 按 Agent 名合并，用户字段覆盖托管默认值；其中 `multimodal` 子对象按字段浅合并。例如用户只改 `uploadMode`，可保留托管配置的 `allowedRootPaths`。
+- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 `enabled` 或 `captureMessageContent`。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
 
 ## 常用全局配置
 
@@ -81,16 +88,11 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。需要对象存储，以及目标 Agent 的 `agents.<id>.multimodal.uploadMode` 不为 `none`。本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-存储有两种写法。**显式配置优先**：已填写的字段以用户配置为准，不会被 flusher 覆盖。
-
-1. **直接用。** 完整填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。缺字段或类型无效则关闭上传，不回退。
-2. **复用 SLS flusher。** 仅在以下两种情况补齐缺省字段：
-   - **全部复用**：恰好一条无冲突的 SLS `apiKey` 目标。省略 `storage`、只写 `{ "type": "sls" }` / `{ "type": "delegatedOss" }`，或 `target: {}`，都是整段复用。`type` 可为 `sls` / `delegatedOss`；也可以只覆盖 `target.logstore`。
-   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`。可从 project-qualified 的 multimodal endpoint 提取，或复用同 region flusher 中唯一的 project（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
+必须显式填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。SLS 存储的 `target` 要有 endpoint、project 和 logstore；project-qualified endpoint 可以提供 project。只有 `auth.apiKey` 可以复用：省略 `auth` 时，`config.sls` 中必须有 endpoint、project、logstore 均相同且唯一无冲突的 API Key 值。其他目标、冲突 Key、AK 或 WebTracking 凭证都不能复用。显式 `auth` 保持原值。storage 缺字段或无效时关闭上传，不回退。
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
-最小复用（Codex）。SLS flusher 即存储目标，`uploadMode` 打开转换：
+最小 API Key 复用（Codex）。显式 storage target 与 SLS flusher 相同，`uploadMode` 打开转换：
 
 ```json
 {
@@ -100,6 +102,16 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
     "project": "your-project",
     "logstore": "your-logstore",
     "apiKey": "your-sls-project-api-key"
+  },
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "your-logstore"
+      }
+    }
   },
   "agents": {
     "codex": {
@@ -111,20 +123,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 }
 ```
 
-只覆盖 Logstore：
-
-```json
-{
-  "multimodal": {
-    "storage": {
-      "type": "sls",
-      "target": { "logstore": "logstore-multimodal" }
-    }
-  }
-}
-```
-
-`auth` 填写一套完整的 ApiKey 或 AK。未填 `mode` 时按这套凭证推断。
+使用不同 Logstore 时，填写完整的三个 target 字段，并在 `config.sls` 增加匹配条目，或显式填写 `auth`。填写 `auth` 时须包含一套完整的 API Key 或 AK；未填 `mode` 时按凭证推断。
 
 ### `type: sls`
 
@@ -221,14 +220,14 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 |--------|------|
 | `multimodal.storage.type` | `sls`、`delegatedOss` 或 `oss`。 |
 | `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
-| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。可省略：同 region 的 flusher SLS 目标里恰好一个 project 时复用。显式空值则关闭上传。 |
-| `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore。独立 `sls` / `delegatedOss` 必填。复用唯一 `apiKey` 时：省略 storage 即用 flusher 的 Logstore，或只写此字段覆盖。 |
+| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。必填，除非 target endpoint 自带 project。显式空值则关闭上传。 |
+| `multimodal.storage.target.logstore` | `sls` / `delegatedOss` 必填。复用 API Key 时须与某个 SLS 条目一致。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
-| `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。未填时按已填写的凭证推断。`type=oss` 必须是 `ak`。 |
+| `multimodal.storage.auth.mode` | `ak` 或 `apiKey`。未填时按显式凭证或匹配的 SLS API Key 推断。`type=oss` 必须是 `ak`。 |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
-| `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。不能与 AK 同时写。 |
+| `multimodal.storage.auth.apiKey` | 显式写 `mode=apiKey` 时必填；有匹配的 `config.sls` API Key 时可省略整个 `auth`。不能与 AK 同时写。 |
 
-省略 `multimodal.storage` 且存在唯一 SLS `apiKey` 目标时，复用该目标。没有可复用目标，或 storage 已写但无效时，文本采集照常，图片不会转成 `uri`。
+复用只查询 `config.sls`，不读取内部配置或环境变量覆盖。省略 storage 或 storage 无效时，文本采集照常，图片不会转成 `uri`。
 
 ## 配置主题
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import sqlite3 from 'sqlite3';
+import { execSql as runSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
 import { CollectionMethod, ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkSqliteInput } from '../../../src/inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
@@ -15,7 +15,7 @@ import { MockStateStore } from '../../helpers/mock-state-store.js';
  *   messages(id TEXT PK, sub_chat_id TEXT, sequence INTEGER, role TEXT,
  *            parts TEXT, updated_at INTEGER)   -- updated_at in unix seconds
  */
-describe('QoderWorkSqliteInput', () => {
+describe.skipIf(!hasNodeSqlite())('QoderWorkSqliteInput', () => {
   let tmpDir: string;
   let dbPath: string;
   let stateStore: MockStateStore;
@@ -421,25 +421,6 @@ async function insertMessage(
 }
 
 function execSql(dbPath: string, sql: string, params: unknown[] = []): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, (openErr) => {
-      if (openErr) {
-        reject(openErr);
-        return;
-      }
-      db.run(sql, params, (runErr: Error | null) => {
-        db.close((closeErr) => {
-          if (runErr) {
-            reject(runErr);
-            return;
-          }
-          if (closeErr) {
-            reject(closeErr);
-            return;
-          }
-          resolve();
-        });
-      });
-    });
-  });
+  runSql(dbPath, sql, params);
+  return Promise.resolve();
 }
