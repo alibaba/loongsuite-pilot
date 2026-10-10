@@ -34,6 +34,7 @@ type differences are called out in the notes.
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
+| GitHub Copilot | `copilot` | VS Code agent chat (Copilot agent host). Three fail-open wakeup Hooks in `~/.copilot/hooks/loongsuite-pilot.json` plus local `events.jsonl` polling. Captures the prompt, the model of every call, and tool calls and results. Token usage is reported once per session and model when the session closes gracefully; per-call tokens are not persisted by Copilot and are omitted. |
 
 The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
@@ -44,6 +45,62 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
+
+## GitHub Copilot Collection
+
+Pilot collects the GitHub Copilot agent chat in VS Code from the Copilot agent
+host's own transcript, `~/.copilot/session-state/<session-id>/events.jsonl`, and
+installs three fail-open wakeup Hooks in `~/.copilot/hooks/loongsuite-pilot.json`:
+`SessionStart`, `UserPromptSubmit`, and `Stop`. The Hooks only drop a structural
+wakeup file (session ID, event name, transcript path; never prompt text, tool
+input or results) so collection starts immediately. A periodic poll of the
+transcript directory is the guaranteed path and works even when the Hooks do not
+fire. `PreToolUse` and `PostToolUse` are intentionally not installed.
+
+What is collected:
+
+- The user prompt and the assistant reply, including reasoning text when present.
+- The model of every LLM call. `gen_ai.request.model` is the model selected in the
+  UI (for example `auto`) and `gen_ai.response.model` is the model that answered.
+- Tool calls and results, paired by `toolCallId`, including parallel calls and failures.
+  Tool output that is JSON becomes a native object; text that starts like JSON but is not valid
+  (for example a file viewed by line range, cut mid-file) is wrapped as
+  `{"type":"text","content":"..."}` without losing any character.
+- Turn boundaries. One user message is one turn; each model round inside it is a step.
+- Model failures. When a model call never answers (Copilot writes `session.error` and no
+  assistant message), the prompt is still emitted with an `llm.response` marked
+  `finish_reasons=["error"]`, `error.type` (Copilot's error type) and `error.message`, and the
+  turn ends there.
+
+What is not collected, and why:
+
+- **Per-call token usage.** Copilot marks `assistant.usage` as ephemeral and never
+  writes it to disk, so per-call tokens are omitted rather than estimated.
+- **Session cost** (`agent.copilot.usage.nano_aiu`, Copilot's own billing unit, and
+  `agent.copilot.usage.premium_requests`) is reported from the usage checkpoint that Copilot
+  writes after every interaction, so it is available even when the host is killed. Each entry
+  is the increment since the previous cost entry of the session, and a shutdown only adds what
+  the checkpoints had not covered. Sum these fields for the session cost. The
+  `agent.copilot.usage.model_nano_aiu` field on the token summaries is the per-model split of
+  that same cost; do not add it to `nano_aiu`.
+- **Session token totals** are available only when Copilot writes
+  `session.shutdown`, that is, when the host closes gracefully (for example quitting
+  VS Code; Reload Window does not close it). Pilot then emits one `event.name=other`
+  summary per model with `agent.copilot.usage.scope=session` and the input, output,
+  cache and reasoning token totals. If the host is killed or crashes, no totals are
+  reported for that session. The summary has no turn, so it reaches JSONL, SLS and
+  HTTP outputs but not OTLP trace export, which discards `other` events that carry
+  no input messages. Copilot repeats its cumulative totals at every shutdown,
+  including after a resumed session closes again, so each summary carries only the
+  increment since the previous summary of the same session (the first one is the
+  total so far). Summing the summaries of a session gives the correct total.
+- The Copilot system prompt (`system.message`) is never emitted.
+- History that predates installing Pilot is not replayed.
+
+Terminal `copilot`: not verified yet. Whether it fires the installed Hooks is
+untested, but polling collects any session written under
+`~/.copilot/session-state` (or `$COPILOT_HOME/session-state` when that variable is
+set for Pilot).
 
 ## Grok Build Collection And Lifecycle
 

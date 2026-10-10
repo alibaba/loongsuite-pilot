@@ -262,6 +262,7 @@ export { CodexTranscriptInput } from './inputs/codex-transcript/codex-transcript
 export { CodexAbortedTurnInput } from './inputs/codex-aborted-turn/codex-aborted-turn-input.js';
 export { PiCodingAgentLogInput } from './inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 export { WorkBuddyInput } from './inputs/workbuddy/workbuddy-input.js';
+export { CopilotInput } from './inputs/copilot/copilot-input.js';
 export { BaseFlusher } from './flushers/base-flusher.js';
 export { SlsFlusher } from './flushers/sls-flusher.js';
 export { JsonlFlusher } from './flushers/jsonl-flusher.js';

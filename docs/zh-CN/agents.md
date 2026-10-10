@@ -33,6 +33,7 @@
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
+| GitHub Copilot | `copilot` | VS Code 中的 Copilot Agent 对话（Copilot agent host）。在 `~/.copilot/hooks/loongsuite-pilot.json` 安装 3 个 fail-open 唤醒 Hook，并轮询本地 `events.jsonl`。采集 Prompt、每次调用的模型，以及工具调用与结果。Token 用量仅在会话正常关闭时按会话和模型汇总上报一次；Copilot 不落盘逐次调用的 Token，因此不上报。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。
@@ -42,6 +43,50 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## GitHub Copilot 采集
+
+Pilot 从 Copilot agent host 自己写的 transcript
+`~/.copilot/session-state/<session-id>/events.jsonl` 采集 VS Code 中的
+GitHub Copilot Agent 对话，并在 `~/.copilot/hooks/loongsuite-pilot.json`
+安装 3 个 fail-open 唤醒 Hook：`SessionStart`、`UserPromptSubmit` 和 `Stop`。
+Hook 只写入一个结构化唤醒文件（会话 ID、事件名、transcript 路径；不含
+Prompt、工具输入或结果），用于立即触发采集。对 transcript 目录的周期轮询是
+保底路径，即使 Hook 未触发也能工作。有意不安装 `PreToolUse` 和 `PostToolUse`。
+
+已采集：
+
+- 用户 Prompt 和助手回复（存在时包含推理文本）。
+- 每次 LLM 调用的模型。`gen_ai.request.model` 是界面上选择的模型（例如
+  `auto`），`gen_ai.response.model` 是实际应答的模型。
+- 按 `toolCallId` 配对的工具调用与结果，包括并行调用和失败。工具输出若是 JSON，则输出为
+  原生对象；以 JSON 形式开头但并非合法 JSON 的文本（例如按行区间查看、在文件中途被截断的
+  文件）会被包装为 `{"type":"text","content":"..."}`，不丢失任何字符。
+- Turn 边界：一条用户消息是一个 Turn，其内部每一轮模型调用是一个 Step。
+
+未采集及原因：
+
+- **逐次调用的 Token 用量。** Copilot 将 `assistant.usage` 标记为临时事件，
+  从不写入磁盘，因此不上报，也不做估算。
+- **会话成本**（`agent.copilot.usage.nano_aiu`，Copilot 自己的计费单位，以及
+  `agent.copilot.usage.premium_requests`）来自 Copilot 在每次交互后写入的用量 checkpoint，
+  因此即使 host 被杀也能获得。每条记录是自同一会话上一条成本记录以来的增量，关闭时只补充
+  checkpoint 尚未覆盖的部分。对这些字段求和即得会话成本。Token 汇总上的
+  `agent.copilot.usage.model_nano_aiu` 是同一成本按模型的拆分，切勿与 `nano_aiu` 相加。
+- **会话 Token 总量**只有在 Copilot 写入 `session.shutdown` 时才可用，即 host
+  正常关闭（例如退出 VS Code；Reload Window 不会关闭它）。此时 Pilot 为每个模型
+  上报一条 `event.name=other` 汇总，带 `agent.copilot.usage.scope=session`，
+  以及输入、输出、缓存和推理 Token 总量。host 被杀或崩溃时，该会话不上报总量。
+  该汇总不属于任何 Turn，因此会进入 JSONL、SLS 和 HTTP 输出，但不会进入 OTLP
+  Trace 导出（转换器会丢弃不含输入消息的 `other` 事件）。Copilot 在每次关闭时都会重复
+  其累计总量（包括恢复后再次关闭），因此每条汇总只携带自同一会话上一条汇总以来的
+  增量（第一条为截至当时的总量）；对同一会话的汇总求和即得到正确总量。
+- 不输出 Copilot 系统提示词（`system.message`）。
+- 不回放安装 Pilot 之前的历史。
+
+终端 `copilot`：尚未验证。它是否触发已安装的 Hook 未经测试，但轮询会采集
+`~/.copilot/session-state` 下写入的所有会话（为 Pilot 设置了 `$COPILOT_HOME`
+时则为 `$COPILOT_HOME/session-state`）。
 
 ## Grok Build 采集与生命周期
 

@@ -71,6 +71,13 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `host.ip` | string | Recommended | 主机 IP 或日志源 IP。 |
 | `service.name` | string | Recommended | 用于区分 Agent 实例或产品线的服务名。 |
 | `gen_ai.session.id` | string | 当 Agent 维护会话上下文时 Conditionally Required | 用户会话或对话 ID。 |
+| `agent.copilot.usage.scope` | string | GitHub Copilot 用量条目携带 | 取值 `session`。标记不属于任何 Turn 的 `other` 事件（不含 `gen_ai.turn.id` 和 `gen_ai.step.id`）。可能是成本条目（见 `agent.copilot.usage.source`）或某个模型的 Token 汇总，均由 Copilot 会话事件产生。 |
+| `agent.copilot.usage.source` | string | Copilot 成本条目携带 | `checkpoint`（Copilot 在每次交互后写入，即使 host 从未正常关闭也不会丢失）或 `shutdown`（仅补充 checkpoint 尚未覆盖的成本）。Token 汇总不带此字段。 |
+| `agent.copilot.usage.nano_aiu` | double | 数据源提供时推荐 | 会话成本，使用 Copilot 自己的计费单位（nano AI unit），为自同一会话上一条成本条目以来的增量。对同一会话求和即得会话成本。 |
+| `agent.copilot.usage.premium_requests` | double | 数据源提供时推荐 | 会话消耗的 premium request 数，与 `nano_aiu` 一样为增量。 |
+| `agent.copilot.usage.turn_id` | string | checkpoint 成本条目携带 | 刚结束的交互（Turn）；等于该交互事件的 `gen_ai.turn.id`，可据此把成本关联到 Turn。 |
+| `agent.copilot.usage.reasoning_tokens` | int | 数据源提供时推荐 | 某个模型的推理 Token 数，为自同一会话上一条汇总以来的增量，仅出现在 Token 汇总上。 |
+| `agent.copilot.usage.model_nano_aiu` | double | 数据源提供时推荐 | 按模型拆分的成本（增量）。它是 `nano_aiu` 所报告成本的明细，切勿与其相加。仅出现在 Token 汇总上。 |
 | `gen_ai.turn.id` | string | Recommended | 一次用户请求到 Agent 最终响应的轮次 ID。 |
 | `gen_ai.step.id` | string | Recommended | 一次 ReAct 循环或 Agent 中间步骤。 |
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
@@ -123,7 +130,16 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
+工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN、WorkBuddy 和 GitHub Copilot。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
+
+## GitHub Copilot 用量字段
+
+Copilot 的会话成本（`agent.copilot.usage.nano_aiu`、`premium_requests`、`source`、`scope`、`turn_id`）
+以及 Token 汇总上的按模型明细（`reasoning_tokens`、`model_nano_aiu`）没有对应的标准 `gen_ai.*` 字段。
+日志输出通常会丢弃 Agent 专属扩展属性（`agent.<agent>.<field>`），这些键与 OpenClaw session key 一样是例外：
+对于 `gen_ai.agent.type` 为 `copilot` 的事件，只有严格形如 `agent.copilot.usage.<field>` 的键会保留在
+JSONL、SLS 和 HTTP 输出中，其余 Agent 专属键仍会被丢弃。Token 数量和模型使用标准的
+`gen_ai.usage.*` 与 `gen_ai.*.model` 字段。
 
 ## System Instructions（系统提示词）
 

@@ -507,6 +507,39 @@ describe('AgentDefLoader', () => {
     }
   });
 
+  it('resolves COPILOT_HOME for Copilot detection and hook settings', async () => {
+    const previous = process.env.COPILOT_HOME;
+    const override = path.join(tmpDir, 'copilot-profile');
+    process.env.COPILOT_HOME = override;
+    try {
+      const shipped = JSON.parse(await fs.readFile(path.resolve('agents.d/copilot.json'), 'utf8'));
+      await fs.writeFile(path.join(builtinDir, 'copilot.json'), JSON.stringify(shipped));
+
+      const loaded = (await makeLoader().load()).find(d => d.id === 'copilot')!;
+
+      expect(loaded.detection.paths[0]).toBe(override);
+      expect(loaded.hook?.settingsPath).toBe(path.join(override, 'hooks', 'loongsuite-pilot.json'));
+    } finally {
+      if (previous === undefined) delete process.env.COPILOT_HOME;
+      else process.env.COPILOT_HOME = previous;
+    }
+  });
+
+  it('defaults $COPILOT_HOME to ~/.copilot', async () => {
+    const previous = process.env.COPILOT_HOME;
+    delete process.env.COPILOT_HOME;
+    try {
+      const shipped = JSON.parse(await fs.readFile(path.resolve('agents.d/copilot.json'), 'utf8'));
+      await fs.writeFile(path.join(builtinDir, 'copilot.json'), JSON.stringify(shipped));
+
+      const loaded = (await makeLoader().load()).find(d => d.id === 'copilot')!;
+
+      expect(loaded.detection.paths[0]).toBe(path.join(os.homedir(), '.copilot'));
+    } finally {
+      if (previous !== undefined) process.env.COPILOT_HOME = previous;
+    }
+  });
+
   it('defaults $GROK_HOME to ~/.grok', async () => {
     const previous = process.env.GROK_HOME;
     delete process.env.GROK_HOME;

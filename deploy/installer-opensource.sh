@@ -2337,6 +2337,7 @@ remove_hook_configs() {
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
+        "$HOME/.copilot/hooks/loongsuite-pilot.json"
     )
 
     local _has_node=0

@@ -19,6 +19,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'hermes': 'hermes',
   'wukong': 'wukong',
   'workbuddy': 'workbuddy',
+  'copilot': 'copilot',
   'dsh': 'dsh',
 };
 

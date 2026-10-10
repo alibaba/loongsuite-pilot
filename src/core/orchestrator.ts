@@ -68,6 +68,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { CopilotInput } from '../inputs/copilot/copilot-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -151,6 +152,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'copilot': 'copilot',
     'dsh-log': 'dsh',
   };
 
@@ -1649,6 +1651,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg.workbuddy?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+      }),
+    );
+
+    // --- GitHub Copilot (agent-host transcript polling + hook wakeups) ---
+    const copilotInput = new CopilotInput({
+      stateStore: this.stateStore,
+      wakeupDir: path.join(this.dataDir, 'state', 'copilot', 'wakeups'),
+      pollIntervalMs: listenerCfg.copilot?.pollInterval,
+    });
+    this.inputManager.registerInput(copilotInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(copilotInput, {
+        watchPaths: CopilotInput.getWatchPaths(),
+        isAvailable: CopilotInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.copilot) &&
+          this.agentControlManager.resolveEnabled(
+            'copilot',
+            listenerCfg.copilot?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.copilot?.pollInterval,
       }),
     );
 

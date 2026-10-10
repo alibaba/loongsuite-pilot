@@ -28,6 +28,7 @@ export enum ClientType {
   QoderCli = 'qoder-cli',
   CursorCli = 'cursor-cli',
   PiCodingAgent = 'pi-coding-agent',
+  Copilot = 'copilot',
 
   // Hook-based tools
   ClaudeCliHook = 'claude-code',
