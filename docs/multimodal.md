@@ -11,7 +11,7 @@ Multimodal conversion is separate from message content capture:
 - `captureMessageContent: false` strips full message and tool content (including `gen_ai.input.multimodal_metadata` and `gen_ai.output.multimodal_metadata`).
 - `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media becomes `uri` parts.
 
-Multimodal also needs object storage (a unique SLS `apiKey` flusher, or an explicit `config.multimodal.storage` block); see [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
+Multimodal also needs an explicit `config.multimodal.storage` block; a matching `config.sls` API Key can supply its auth. See [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 
 ## Current Scope
 
@@ -25,7 +25,7 @@ Multimodal also needs object storage (a unique SLS `apiKey` flusher, or an expli
 
 Both must be ready:
 
-1. Global object storage: set `multimodal.storage` explicitly, or reuse the SLS flusher under the conditions in [Configuration](configuration.md#multimodal-object-storage).
+1. Global object storage: set `multimodal.storage` explicitly; its auth can reuse a matching SLS API Key under the conditions in [Configuration](configuration.md#multimodal-object-storage).
 2. A non-`none` `uploadMode` on the target agent, and that agent must implement extraction.
 
 Example (Codex + Qoder IDE):
