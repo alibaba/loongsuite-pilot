@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
@@ -346,14 +347,50 @@ function redactRecordContent(record) {
   return redacted;
 }
 
+const childContexts = createSubagentContexts(resolveDataDir, writeError);
+
+function releasePendingChild(run, parent) {
+  if (run.pendingChildTimer) clearTimeout(run.pendingChildTimer);
+  const pending = run.pendingChildRecords || [];
+  run.pendingChildRecords = [];
+  run.pendingChildBytes = 0;
+  if (parent && !run.childUnlinked) run.parentContext = parent;
+  else run.childUnlinked = true;
+  for (const record of pending) persistRecord(run.parentContext ? stampSubagent(record, run.parentContext) : {
+    ...record, "agent.openclaw.subagent.collection": "parent_unresolved",
+  });
+}
+
 function writeRecord(record, captureContent = true) {
+  const run = runs.get(record["agent.openclaw.run_id"] || record["gen_ai.turn.id"]);
+  const safeRecord = captureContent ? record : redactRecordContent(record);
+  if (run?.parentContext) return persistRecord(stampSubagent(safeRecord, run.parentContext));
+  // sessions_spawn may start its child before returning the native runId. Hold
+  // that child's early records until the exact tool result supplies the join.
+  // Never guess from an active tool, timestamps or task text under concurrency.
+  if (isSessionKey(run?.sessionKey) && /:subagent:[^:]+$/.test(run.sessionKey) && !run.childUnlinked) {
+    run.pendingChildRecords ||= [];
+    run.pendingChildRecords.push(safeRecord);
+    run.pendingChildBytes = (run.pendingChildBytes || 0) + Buffer.byteLength(safeStringify(safeRecord));
+    if (!run.pendingChildTimer) {
+      run.pendingChildTimer = setTimeout(() => releasePendingChild(run), 30_000);
+      run.pendingChildTimer.unref?.();
+      run.onEvict = () => releasePendingChild(run);
+    }
+    if (run.pendingChildRecords.length >= 512 || run.pendingChildBytes >= 4 * 1024 * 1024) releasePendingChild(run);
+    return;
+  }
+  persistRecord(safeRecord);
+}
+
+function persistRecord(record) {
   try {
     if (!_logDirReady) {
       ensureDir(logDir());
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `openclaw-${todayStamp()}.jsonl`);
-    const persistedRecord = captureContent ? record : redactRecordContent(record);
+    const persistedRecord = record;
     appendPrivateFile(filePath, safeStringify(persistedRecord) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
@@ -439,6 +476,8 @@ function getRun(runId, event, ctx) {
     r = {
       runId,
       traceId: generateTraceId(),
+      parentContext: childContexts.read(runId),
+      toolSpanIds: new Map(),
       callSeq: 0,
       currentStepCallId: null,
       lastCallId: null,
@@ -1061,12 +1100,14 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   if (event?.toolCallId) {
+    if (!run.toolSpanIds.has(event.toolCallId)) setBounded(run.toolSpanIds, event.toolCallId, crypto.randomBytes(8).toString("hex"));
     if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
     setBounded(run.toolStartedAtNanos, event.toolCallId, common.time_unix_nano);
   }
   const record = {
     ...common,
     "event.name": "tool.call",
+    span_id: event?.toolCallId ? run.toolSpanIds.get(event.toolCallId) : undefined,
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,
@@ -1114,6 +1155,20 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     ? nextModelStartedAtNanos
     : observedBoundedCompletion;
   const result = event?.result;
+  if (event?.toolName === "sessions_spawn" && event?.toolCallId) {
+    const details = result?.details || result;
+    if (details?.status === "accepted" && typeof details.runId === "string" && run.toolSpanIds.has(event.toolCallId)) {
+      const parent = {
+        traceId: run.parentContext?.traceId || run.traceId,
+        parentSpanId: run.toolSpanIds.get(event.toolCallId),
+        sessionId: run.sessionId, turnId: run.turnId || run.runId,
+        toolCallId: event.toolCallId, userId: run.parentContext?.userId || run.userId || userId,
+      };
+      childContexts.write(details.runId, parent);
+      const child = runs.get(details.runId);
+      if (child) releasePendingChild(child, parent);
+    }
+  }
   const nestedError = result && typeof result === "object" ? result.error : undefined;
   const toolError = event?.error ?? nestedError;
   const isError = event?.error !== undefined || result?.isError === true || nestedError !== undefined;
@@ -1126,6 +1181,7 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     ...common,
     ...(completedAtNanos ? { time_unix_nano: completedAtNanos } : {}),
     "event.name": "tool.result",
+    span_id: event?.toolCallId ? run.toolSpanIds.get(event.toolCallId) : undefined,
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
     "gen_ai.tool.call.id": event?.toolCallId,
