@@ -4,6 +4,25 @@ English | [简体中文](zh-CN/agents.md)
 
 Use this guide to choose which AI coding agents Pilot should collect from and whether sensitive message content should be captured.
 
+## Hermes TTFT
+
+For Hermes OpenAI-compatible streaming chat completions, Pilot records
+`gen_ai.response.time_to_first_token` in nanoseconds, from `pre_api_request`
+to Hermes' first non-empty text, reasoning, or tool-name delta. Role-only and
+usage frames do not count. Timing does not require message-content capture.
+
+This uses Hermes' native `on_first_delta` callback (verified with Hermes 0.19.0).
+Older runtimes without that callback, other API modes, non-streaming responses,
+and requests without an observed first output omit TTFT. Total API duration is
+never used as a substitute. Restart the Hermes process after updating the plugin.
+
+## Hermes concurrent conversations
+
+Foreground conversations and background skill reviews can share a session. Pilot
+keeps their identity, input and model/tool calls separate by turn/task identity.
+Background reviews without a native sender ID retain the configured identity or
+hostname fallback; they do not inherit the last IM user in the session.
+
 ## Supported Agent IDs
 
 These IDs identify the supported integrations. Most can be used in installer
