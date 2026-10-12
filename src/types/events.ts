@@ -42,6 +42,8 @@ export interface AgentActivityEntry {
   observed_time_unix_nano?: string;
   'event.id': string;
   'user.id': string;
+  'user.name'?: string;
+  'user.email'?: string;
   'event.name': AgentEventName;
   trace_id?: string;
   span_id?: string;

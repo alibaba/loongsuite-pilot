@@ -8,6 +8,7 @@ import {
   assessStableEofCandidate,
   buildLlmBoundaries,
   buildEventsFromBoundaries,
+  extractUserIdentity,
   findIncrementalTurnEndLine,
   findTriggeredTurnWindow,
   hasQoderCnTerminalMarker,
@@ -186,6 +187,64 @@ describe('buildLlmBoundaries complete-response priority', () => {
       role: 'user',
       content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }],
     },
+  });
+
+  it('stamps Qoder IDE hook identity onto every event in the turn', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-07-30T00:59:59.000Z',
+        message: { role: 'user', content: 'read the file' },
+      },
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'a.txt' } },
+      ], 'tool_use'),
+      toolResult('2026-07-30T01:00:01.000Z', 'tool-a'),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'text', text: 'done' },
+      ], 'end_turn'),
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-07-30T00:59:58.500Z' },
+      { hookEvent: 'PreToolUse', ts: '2026-07-30T01:00:00.500Z' },
+      { hookEvent: 'PostToolUse', ts: '2026-07-30T01:00:01.500Z' },
+      { hookEvent: 'Stop', ts: '2026-07-30T01:00:03.000Z' },
+    ];
+    const identity = extractUserIdentity({
+      user: {
+        name: ' qoder-user ',
+        email: ' qoder-user@example.com ',
+        uid: 'not-exported',
+      },
+    });
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, rows),
+      rows,
+      rows,
+      'turn-identity',
+      'session-identity',
+      'qoder',
+      { userIdentity: identity },
+      undefined,
+    );
+
+    expect(new Set(records.map(record => record['event.name']))).toEqual(new Set([
+      'other',
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.result',
+    ]));
+    expect(records.every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
+    expect(records.some(record => Object.hasOwn(record, 'user.uid'))).toBe(false);
+  });
+
+  it('omits identity when the hook payload has no usable extra.user', () => {
+    expect(extractUserIdentity(undefined)).toBeUndefined();
+    expect(extractUserIdentity({ user: { name: ' ', email: 42 } })).toBeUndefined();
   });
 
   it('keeps thinking + text + multiple tool_use blocks as one response', () => {

@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process';
 import {
   parseArgs,
   parseStdinPayload,
+  readStdin,
   logDebug,
   getLineRangeInfo,
   appendRowsToHistory,
@@ -47,6 +48,36 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
   agentId: 'qoder',
   allowInvocationIdentity: true,
 });
+
+const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
+
+function nonEmptyIdentityValue(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= MAX_USER_IDENTITY_VALUE_LENGTH ? trimmed : undefined;
+}
+
+export function extractUserIdentity(extra) {
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
+  const user = extra.user;
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return undefined;
+  const name = nonEmptyIdentityValue(user.name);
+  const email = nonEmptyIdentityValue(user.email);
+  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+}
+
+async function readRetryUserIdentity() {
+  const value = await readStdin();
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    const name = nonEmptyIdentityValue(parsed?.name);
+    const email = nonEmptyIdentityValue(parsed?.email);
+    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // --- Per-transcript processing lock -----------------------------------------
 // Every Stop can create a detached retry. Serialize the complete read -> append
@@ -233,7 +264,11 @@ async function main() {
     const { agentId, logPrefix } = parseArgs();
     if (!transcriptPath || !sessionId) return;
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
-    const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+    const userIdentity = await readRetryUserIdentity();
+    const runtimeConfig = {
+      ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
+      ...(userIdentity ? { userIdentity } : {}),
+    };
 
     // Reserve the transcript before applying the flush delay. Earlier Stop
     // retries therefore retain commit order while later retries wait. The wait
@@ -247,7 +282,9 @@ async function main() {
     });
     if (!lockAcquired) {
       logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
-      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+      await spawnDelayedRetry(
+        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+      );
       return;
     }
     try {
@@ -344,7 +381,9 @@ async function main() {
       );
       if (committed === false) {
         logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
-        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+        await spawnDelayedRetry(
+          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+        );
       }
     } finally {
       releaseRetryLock(transcriptPath);
@@ -357,14 +396,18 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId, cwd } = payload;
+  const { transcriptPath, sessionId, cwd, extra } = payload;
+  const userIdentity = agentId === 'qoder' ? extractUserIdentity(extra) : undefined;
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   if (sessionId) {
     recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
   }
 
-  const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+  const runtimeConfig = {
+    ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
+    ...(userIdentity ? { userIdentity } : {}),
+  };
 
   // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
   // and the eventual processor input.
@@ -396,13 +439,14 @@ async function main() {
         if (lockedRows.length === 0) {
           updateLineRecord(agentId, transcriptPath, sessionId, lockedRange.endLine);
         } else {
-          spawnDelayedRetry(
+          await spawnDelayedRetry(
             agentId,
             transcriptPath,
             sessionId,
             logPrefix,
             cwd,
             lockedRange.endLine,
+            userIdentity,
           );
         }
       }
@@ -423,7 +467,7 @@ async function main() {
     // Do not suppress a spawn just because a retry currently owns the lock:
     // the new Stop may belong to a distinct queued Turn. The child waits, then
     // re-reads the cursor and either commits that Turn or proves it is a duplicate.
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     return;
   }
 
@@ -432,7 +476,7 @@ async function main() {
   // blocking the foreground hook or dropping it.
   if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
     logDebug(agentId, `Stop deferred: transcript lock held for ${transcriptPath}`);
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     return;
   }
   try {
@@ -454,14 +498,22 @@ async function main() {
     );
     if (committed === false) {
       logDebug(agentId, `Stop commit failed; rescheduling ${transcriptPath}`);
-      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+      await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     }
   } finally {
     releaseRetryLock(transcriptPath);
   }
 }
 
-function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine) {
+async function spawnDelayedRetry(
+  agentId,
+  transcriptPath,
+  sessionId,
+  logPrefix,
+  cwd,
+  triggerEndLine,
+  userIdentity,
+) {
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
   const spawnArgs = [
@@ -476,9 +528,16 @@ function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, t
   ];
   const child = spawn(nodebin, spawnArgs, {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['pipe', 'ignore', 'ignore'],
     env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
   });
+  if (child.stdin) {
+    await new Promise(resolve => {
+      const done = () => resolve();
+      child.stdin.once('error', done);
+      child.stdin.end(userIdentity ? JSON.stringify(userIdentity) : '', done);
+    });
+  }
   child.unref();
   logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
 }
@@ -1056,7 +1115,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       row => row.type === 'assistant' || isToolResult(row),
     );
     const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    return finalizeRecords(legacyRecords, cwd);
+    return finalizeRecords(legacyRecords, cwd, runtimeConfig?.userIdentity);
   }
 
   // For each LLM call boundary, produce events
@@ -1310,13 +1369,15 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  return finalizeRecords(records, cwd);
+  return finalizeRecords(records, cwd, runtimeConfig?.userIdentity);
 }
 
-function finalizeRecords(records, cwd) {
+function finalizeRecords(records, cwd, userIdentity) {
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
+    if (userIdentity?.name) record['user.name'] = userIdentity.name;
+    if (userIdentity?.email) record['user.email'] = userIdentity.email;
     Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
   }
   return records;

@@ -64,6 +64,8 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder IDE 当前提供工号形式的名称。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | Agent 账号邮箱。当前由 Qoder IDE Stop hook 提供；Qoder CLI 不提供。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |

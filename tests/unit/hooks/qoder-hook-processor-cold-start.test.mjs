@@ -68,7 +68,7 @@ function runProcessor(sessionId = 'session-old', extraEnv = {}) {
   });
 }
 
-function runRetry(triggerEndLine, sessionId = 'session-old') {
+function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity) {
   return spawnSync('node', [
     PROCESSOR,
     '--agent-id', 'qoder',
@@ -79,6 +79,7 @@ function runRetry(triggerEndLine, sessionId = 'session-old') {
     '--trigger-end-line', String(triggerEndLine),
     '--cwd', '/tmp/qoder-project',
   ], {
+    input: userIdentity ? JSON.stringify(userIdentity) : '',
     env: {
       ...process.env,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
@@ -353,11 +354,18 @@ describe('qoder-hook-processor cold-start recovery', () => {
 
     // The Stop hook snapshot ended immediately before Qoder appended its Stop
     // progress row, matching the production race from the attached user log.
-    const result = runRetry(rows.length - 1, 'ide-session');
+    const result = runRetry(rows.length - 1, 'ide-session', {
+      name: 'qoder-user',
+      email: 'qoder-user@example.com',
+    });
 
     expect(result.status).toBe(0);
     expect(userBoundaryPrompts(readHistory())).toEqual(['IDE prompt']);
     expect(readHistory().some(record => record['event.name'] === 'llm.response')).toBe(true);
+    expect(readHistory().every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
   });
 
   it('commits one copy when duplicate retries race on the same Stop window', async () => {

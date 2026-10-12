@@ -59,6 +59,10 @@ const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',
   'loongsuite.grok.timing.source',
 ] as const;
+const USER_IDENTITY_PASSTHROUGH_KEYS = [
+  'user.name',
+  'user.email',
+] as const;
 const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.compatibility',
   'agent.openclaw.timing.inferred',
@@ -1038,6 +1042,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+          ...USER_IDENTITY_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
           ...agentSpecificKeys,
           ...customKeys,
