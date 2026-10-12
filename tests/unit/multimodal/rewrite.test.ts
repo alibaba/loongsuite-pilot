@@ -5,6 +5,7 @@ import {
   isUriPart,
 } from '../../../src/multimodal/rewrite.js';
 import {
+  INPUT_MULTIMODAL_METADATA_DELTA_FIELD,
   INPUT_MULTIMODAL_METADATA_FIELD,
   OUTPUT_MULTIMODAL_METADATA_FIELD,
 } from '../../../src/multimodal/types.js';
@@ -82,6 +83,9 @@ describe('multimodal rewrite helpers', () => {
     expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
       { uri, mime_type: 'image/png', modality: 'image' },
     ]);
+    expect(entry[INPUT_MULTIMODAL_METADATA_DELTA_FIELD]).toEqual([
+      { uri, mime_type: 'image/png', modality: 'image' },
+    ]);
     expect(entry[OUTPUT_MULTIMODAL_METADATA_FIELD]).toBeUndefined();
   });
 
@@ -141,6 +145,28 @@ describe('multimodal rewrite helpers', () => {
     attachMultimodalMetadataForEntry(entry);
     expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
       { uri: 'oss://b/x.bin', mime_type: 'application/octet-stream' },
+    ]);
+    expect(entry[INPUT_MULTIMODAL_METADATA_DELTA_FIELD]).toBeUndefined();
+  });
+
+  it('keeps cumulative messages out of input metadata delta', () => {
+    const oldUri = 'oss://bucket/mm/old.png';
+    const deltaUri = 'oss://bucket/mm/delta.png';
+    const entry = baseEntry({
+      'gen_ai.input.messages': [
+        { role: 'user', parts: [{ type: 'uri', uri: oldUri, mime_type: 'image/png', modality: 'image' }] },
+      ],
+      'gen_ai.input.messages_delta': [
+        { role: 'user', parts: [{ type: 'uri', uri: deltaUri, mime_type: 'image/png', modality: 'image' }] },
+      ],
+    });
+    attachMultimodalMetadataForEntry(entry);
+    expect(entry[INPUT_MULTIMODAL_METADATA_DELTA_FIELD]).toEqual([
+      { uri: deltaUri, mime_type: 'image/png', modality: 'image' },
+    ]);
+    expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
+      { uri: deltaUri, mime_type: 'image/png', modality: 'image' },
+      { uri: oldUri, mime_type: 'image/png', modality: 'image' },
     ]);
   });
 });

@@ -97,6 +97,7 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
 | `gen_ai.input.multimodal_metadata` | json array | Opt-In | 输入与工具输出中 `uri` 多模态的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且这些位置含多模态时写入；`captureMessageContent: false` 时剥离。 |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | 本条事件 `messages_delta` 与 `tool.call.result` 中 `uri` 的摘要，条目形态与 `gen_ai.input.multimodal_metadata` 相同。不包含累计 `gen_ai.input.messages`；没有则不写；`captureMessageContent: false` 时剥离。 |
 | `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
 | `gen_ai.output.multimodal_metadata` | json array | Opt-In | 输出与工具调用中 `uri` 多模态的摘要，条目形态与输入摘要相同；这些位置没有多模态时不写。 |
 | `gen_ai.system_instructions` | json array | Opt-In | `llm.request` 上发送给模型的 system prompt，以 `text` parts 数组表示，可能包含敏感内容。 |

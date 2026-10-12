@@ -91,6 +91,7 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
 | `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media; stripped when `captureMessageContent` is false. |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | Summary of `uri` media on this event's `messages_delta` and `tool.call.result`. Same item shape as `gen_ai.input.multimodal_metadata`. Excludes cumulative `gen_ai.input.messages`; omitted when those surfaces have no media; stripped when `captureMessageContent` is false. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
 | `gen_ai.output.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on output and tool calls. Same item shape as the input summary; omitted when those surfaces have no media. |
 | `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |

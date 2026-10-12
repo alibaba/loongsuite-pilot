@@ -83,6 +83,7 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;
   'gen_ai.input.multimodal_metadata'?: JsonValue;
+  'gen_ai.input.multimodal_metadata_delta'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
   'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
