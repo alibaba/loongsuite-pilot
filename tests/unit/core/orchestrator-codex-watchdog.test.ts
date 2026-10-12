@@ -11,13 +11,6 @@ vi.mock('../../../src/core/build-constants.js', () => ({
   PROPRIETARY_BUILD: false,
 }));
 
-vi.mock('sqlite3', () => ({
-  default: {
-    Database: vi.fn(),
-    OPEN_READONLY: 1,
-  },
-}));
-
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import type { PluginCheckTarget } from '../../../src/core/hook-watchdog.js';
 

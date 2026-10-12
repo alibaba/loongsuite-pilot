@@ -60,6 +60,21 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
+/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
+export const SUPPORTED_INTERCEPTOR_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+] as const satisfies readonly MaskType[];
+
+export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
+
+export interface InterceptorConfig {
+  mode: MaskMode;
+  types: InterceptorType[];
+}
+
 export interface OtlpTraceRawConfig {
   /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
   spanEnrichers?: string[];
@@ -133,6 +148,8 @@ export interface AnalyticsConfig {
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Local interceptor rules. Same `{ mode, types }` shape as mask; types are a subset. */
+  interceptor: InterceptorConfig;
 }
 
 /**
@@ -156,24 +173,18 @@ export const MULTIMODAL_UPLOAD_MODES = [
   'none',
   'input',
   'output',
-  'tool',
-  'both',
+  'all',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
 /** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'both';
+  return mode === 'input' || mode === 'all';
 }
 
 /** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
-  return mode === 'output' || mode === 'both';
-}
-
-/** uploadMode covers tool results. */
-export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'tool' || mode === 'both';
+  return mode === 'output' || mode === 'all';
 }
 
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;

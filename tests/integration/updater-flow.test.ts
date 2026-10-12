@@ -125,6 +125,18 @@ describe('Updater integration (real filesystem)', () => {
       pid: process.pid,
       updatedAt: new Date().toISOString(),
     }));
+    const interceptorDir = path.join(testDir, 'interceptor');
+    await fs.mkdir(interceptorDir, { recursive: true });
+    await fs.writeFile(path.join(interceptorDir, 'runtime.json'), JSON.stringify({
+      service: 'loongsuite-pilot-interceptor',
+      status: 'ok',
+      pid: process.pid,
+      version,
+      daemon_port: 18791,
+      packageVersion: version,
+      ...(gitCommit ? { gitCommit } : {}),
+      updatedAt: new Date().toISOString(),
+    }));
   }
 
   async function readPointer(name: string): Promise<string | null> {
@@ -159,7 +171,7 @@ describe('Updater integration (real filesystem)', () => {
       if (
         cmd === process.execPath
         && args[0] === '-e'
-        && args[1] === "require('sqlite3')"
+        && args[1]?.includes("require('node:sqlite')")
         && opts?.sqliteHealthCheckFails
       ) {
         return Promise.reject(new Error('Could not locate the bindings file'));
@@ -208,9 +220,9 @@ describe('Updater integration (real filesystem)', () => {
     expect(await readPointer('previous')).toBeNull();
   });
 
-  // ─── sqlite3 health check failure → no activation ─────
+  // ─── node:sqlite health check failure → no activation ─────
 
-  it('does NOT update pointers or restart collector when sqlite3 health check fails', async () => {
+  it('does NOT update pointers or restart collector when the node:sqlite probe fails', async () => {
     const v1Dir = await createFakeVersion('1.0.1', 'aaa');
     await setCurrentPointer(v1Dir);
     await fs.writeFile(path.join(testDir, 'previous'), '1.0.0_old\n');
@@ -227,12 +239,17 @@ describe('Updater integration (real filesystem)', () => {
 
     expect(mockExecFile).toHaveBeenCalledWith(
       process.execPath,
-      ['-e', "require('sqlite3')"],
+      ['-e', "require('node:sqlite')"],
       expect.objectContaining({
         cwd: path.join(testDir, 'versions', '1.0.2_bbb.candidate'),
         env: expect.any(Object),
       }),
     );
+    const probe = mockExecFile.mock.calls.find(
+      ([, args]: [string, string[]]) => args?.[0] === '-e' && String(args?.[1]).includes('node:sqlite'),
+    )?.[1]?.[1];
+    expect(probe).toBe("require('node:sqlite')");
+    expect(String(probe)).not.toMatch(/process\.versions|m>=|M===/);
     expect(await readPointer('current')).toBe('1.0.1_aaa');
     expect(await readPointer('previous')).toBe('1.0.0_old');
     const restartCalls = mockExecFile.mock.calls.filter(

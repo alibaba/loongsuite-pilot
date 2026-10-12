@@ -10,6 +10,7 @@ const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.input.messages_delta',
   'gen_ai.input.multimodal_metadata',
   'gen_ai.output.messages',
+  'gen_ai.output.multimodal_metadata',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
   'gen_ai.system_instructions',

@@ -23,7 +23,7 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
   });
   afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
 
-  async function writeConfig(probe: unknown[], selected = 'openclaw,codex', explicit = false) {
+  async function writeConfig(probe: unknown[], selected = 'openclaw,codex', explicit = false, all = false) {
     const file = platform === 'shell' ? 'deploy/installer-opensource.sh' : 'deploy/installer-opensource.ps1';
     const installer = await fs.readFile(file, 'utf8');
     const cleanEnv = { PATH: process.env.PATH, HOME: root, USERPROFILE: root, SystemRoot: process.env.SystemRoot, TEMP: root };
@@ -33,7 +33,7 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
       const fn = installer.slice(start, end);
       writerOutput = execFileSync('bash', ['-c', `set -eo pipefail\nmsg() { :; }\n${fn}\nwrite_config`], {
         env: { ...cleanEnv, DATA_DIR: dataDir, NODE_BIN: process.execPath,
-          PROBE_RESULT: JSON.stringify(probe), SELECTED_AGENTS: selected, AGENT_SELECTION_EXPLICIT: explicit ? '1' : '0' },
+          PROBE_RESULT: JSON.stringify(probe), SELECTED_AGENTS: selected, AGENT_SELECTION_EXPLICIT: explicit ? '1' : '0', ALL_AGENTS: all ? '1' : '0' },
         timeout: 10000,
       }).toString();
     } else {
@@ -43,7 +43,8 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
       expect(end).toBeGreaterThan(start);
       const opts = path.join(root, 'opts.json');
       await fs.writeFile(opts, JSON.stringify({ configPath, dataDir, selectedAgents: selected,
-        probeResult: JSON.stringify(probe), agentSelectionExplicit: explicit ? '1' : '0' }));
+        probeResult: JSON.stringify(probe), agentSelectionExplicit: explicit ? '1' : '0',
+        allAgentsMode: all ? '1' : '' }));
       writerOutput = execFileSync(process.execPath, ['-e', installer.slice(start, end), opts], { env: cleanEnv, timeout: 10000 }).toString();
     }
     return JSON.parse(await fs.readFile(configPath, 'utf8'));
@@ -145,5 +146,21 @@ describe.each(['shell', 'powershell'])('%s OpenClaw installation state', platfor
   it('round-trips entry paths with spaces, Unicode and shell metacharacters as data', async () => {
     const entry = '/opt/test 空格/quote\'"$`/openclaw.mjs';
     expect((await writeConfig(probe(true, entry))).agents.openclaw.cliPath).toBe(entry);
+  });
+  it.each([false, true])('discovers even with explicit/all-agent selection (all=%s)', async all => {
+    const entry = '/app/openclaw.mjs';
+    const config = await writeConfig(probe(true, entry), all ? '' : 'openclaw', true, all);
+    expect(config.agents.openclaw.cliPath).toBe(entry);
+    expect(config.agents.openclaw.enabled).toBe(all ? undefined : true);
+    if (!all) expect(config.agents.codex.enabled).toBe(false);
+  });
+  it('all-agent mode removes enable gates but not existing metadata on probe failure', async () => {
+    await fs.writeFile(configPath, JSON.stringify({ agents: {
+      openclaw: { enabled: false, cliPath: '/keep/openclaw.mjs' },
+      codex: { enabled: false, captureMessageContent: false }, future: { enabled: false, custom: 'keep' },
+    } }));
+    expect((await writeConfig([], '', false, true)).agents).toEqual({
+      openclaw: { cliPath: '/keep/openclaw.mjs' }, codex: { captureMessageContent: false }, future: { custom: 'keep' },
+    });
   });
 });

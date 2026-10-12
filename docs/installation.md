@@ -6,7 +6,7 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). On supported platforms the installer downloads a managed Node.js 22.22 runtime, so a preinstalled Node.js is not required. A system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough. Linux musl (Alpine) and Windows ARM64 have no managed runtime and must supply a Node.js that meets this floor, plus `npm`.
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
@@ -71,6 +71,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
+| `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
@@ -84,6 +86,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
 | `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
+| `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
+| `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |

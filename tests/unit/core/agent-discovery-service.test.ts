@@ -386,4 +386,69 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
   });
+  it('coalesces concurrent refreshes and stops only after pending startup completes', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let available = true;
+    let startupComplete = false;
+    const entry = makeEntry({
+      isAvailable: async () => available,
+      start: vi.fn(async () => { entered(); await gate; startupComplete = true; }),
+      stop: vi.fn(async () => { expect(startupComplete).toBe(true); }),
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    const starting = svc.start();
+    await started;
+    const refreshes = Array.from({ length: 10 }, () => svc.refresh('concurrent-watch'));
+    available = false;
+    expect(entry.stop).not.toHaveBeenCalled();
+    release();
+    await Promise.all([starting, ...refreshes]);
+    expect(entry.start).toHaveBeenCalledOnce();
+    expect(entry.stop).toHaveBeenCalledOnce();
+    expect(svc.getStates()['test-agent']).toBe('idle');
+    await svc.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('shutdown drains in-flight startup without restoring running or poll timers', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entry = makeEntry({ start: vi.fn(async () => { entered(); await gate; }) });
+    const svc = new AgentDiscoveryService([entry]);
+    const events = vi.fn();
+    svc.on('agent:started', events);
+    const starting = svc.start();
+    await started;
+    const stopping = svc.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(svc.getStates()['test-agent']).toBe('idle');
+    expect(entry.stop).toHaveBeenCalledOnce();
+    expect(events).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await svc.refresh('late-watch');
+    expect(entry.start).toHaveBeenCalledOnce();
+  });
+
+  it('shutdown during availability lookup prevents a late start', async () => {
+    let entered!: () => void;
+    let release!: (value: boolean) => void;
+    const checking = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<boolean>(resolve => { release = resolve; });
+    const entry = makeEntry({ isAvailable: async () => { entered(); return gate; } });
+    const svc = new AgentDiscoveryService([entry]);
+    const starting = svc.start();
+    await checking;
+    const stopping = svc.stop();
+    release(true);
+    await Promise.all([starting, stopping]);
+    expect(entry.start).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
 });

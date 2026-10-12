@@ -84,7 +84,8 @@ describe('dashboard service lifecycle', () => {
     expect(processLookup).toContain('ps -U "$current_user_id" -o pid= -o ucomm=');
     expect(processLookup).toContain('find_current_user_processes collector');
     expect(processLookup).toContain('find_current_user_collector_processes()');
-    expect(processLookup).toContain('node:node|node:nodejs');
+    expect(processLookup).toContain('node:node|node:nodejs|node:MainThread');
+    expect(processLookup).toContain('node|nodejs|MainThread');
     expect(processLookup).toContain('[[ "$command_line" == *" $expected_suffix" ]]');
     expect(processLookup).toContain('process_matches_installed_entry "$pid" collector');
     expect(processLookup).toContain('mv -f "$pid_tmp" "$PID_FILE"');

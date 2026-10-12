@@ -122,7 +122,7 @@ describe('SLS resolver — config-driven', () => {
       expect(cfg.flushers.sls?.enabled).toBe(true);
     });
 
-    it('reads API Key from env over file', async () => {
+    it('uses the file API Key when an env value is present', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://cn-beijing-stg-share.log.aliyuncs.com',
@@ -130,14 +130,25 @@ describe('SLS resolver — config-driven', () => {
           logstore: 'shimu-test',
           apiKey: 'file-api-key',
         },
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-beijing-stg-share.log.aliyuncs.com',
+              project: 'api-key-project',
+              logstore: 'shimu-test',
+            },
+          },
+        },
       });
       vi.stubEnv('LOONGSUITE_SLS_API_KEY', 'env-api-key');
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
         mode: 'apiKey',
-        apiKey: 'env-api-key',
+        apiKey: 'file-api-key',
       });
+      expect(cfg.multimodal?.storage.auth).toEqual({ mode: 'apiKey', apiKey: 'file-api-key' });
     });
 
     it('reads user fields from env over file', async () => {

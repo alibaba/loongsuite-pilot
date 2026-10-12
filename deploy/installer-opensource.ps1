@@ -12,7 +12,8 @@
 #     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
 #     -SlsProject "my-project" `
 #     -SlsLogstore "my-logstore" `
-#     -SlsApiKey "your-api-key"
+#     -SlsApiKey "your-api-key" `
+#     -MultimodalMode all
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -54,9 +55,14 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [switch]$AllAgents,
+    [AllowEmptyString()]
+    [string]$MultimodalMode,
     [string]$MaskMode,
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
+    [string]$InterceptorMode,
+    [string]$InterceptorTypes,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -130,9 +136,46 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
     Write-Error "Unknown mask replacement mode: $MaskReplacementMode (use 'placeholder' or 'preview')"
     exit 1
 }
+if ($InterceptorMode) {
+    if ($InterceptorMode -notin @("all", "none", "custom")) {
+        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all', 'custom', or 'none')"
+        exit 1
+    }
+}
+if ($InterceptorMode -eq "custom" -and -not $InterceptorTypes) {
+    Write-Error "--InterceptorTypes is required when -InterceptorMode custom"
+    exit 1
+}
+if ($InterceptorTypes -and $InterceptorMode -ne "custom") {
+    Write-Error "-InterceptorTypes can only be used with -InterceptorMode custom"
+    exit 1
+}
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
+}
+if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode) {
+    Write-Error "-MultimodalMode requires 'none', 'input', 'output', or 'all'"
+    exit 1
+}
+$script:MultimodalMode = $MultimodalMode
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+$script:MultimodalSupportedAgents = "codex,qoder"
+if ($MultimodalMode) {
+    if ($MultimodalMode -notin @("none", "input", "output", "all")) {
+        Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
+        exit 1
+    }
+}
+if ($MultimodalMode -and $Command -ne "install") {
+    Write-Error "-MultimodalMode is only supported with install (got $Command)"
+    exit 1
+}
+if ($MultimodalMode -and $MultimodalMode -ne "none") {
+    if ($SlsEndpoint -notmatch '\S' -or $SlsProject -notmatch '\S' -or $SlsLogstore -notmatch '\S' -or $SlsApiKey -notmatch '\S') {
+        Write-Error "-MultimodalMode $MultimodalMode requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey"
+        exit 1
+    }
 }
 
 # ============================================================
@@ -183,15 +226,31 @@ function Test-CanPrompt {
 # ============================================================
 # Node.js resolution
 # ============================================================
+# node:sqlite is unflagged from 22.13 and 23.4. A major check accepts Node 20
+# and 22.12, whose require('node:sqlite') throws, so install succeeds and
+# SQLite collection does not. The require is the check.
+# Native stderr under EAP=Stop becomes a terminating error and hides $LASTEXITCODE.
+function Test-NodeSupportsSqlite {
+    param([string]$bin)
+    if (-not $bin -or -not (Test-Path -LiteralPath $bin)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 1
+    try {
+        $sqliteProbe = & $bin -e "require('node:sqlite')" 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } catch {
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return ($code -eq 0)
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge 18
-    } catch { return $false }
+    return (Test-NodeSupportsSqlite $bin)
 }
 
 function Resolve-Node {
@@ -735,7 +794,11 @@ function Check-Deps {
     $script:NODE_BIN = ""
     if ($PreferSystemNode) {
         $script:NODE_BIN = Resolve-Node
-        if (-not $script:NODE_BIN) { $script:NODE_BIN = Ensure-ManagedNode }
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" `
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            $script:NODE_BIN = Ensure-ManagedNode
+        }
     } else {
         $script:NODE_BIN = Ensure-ManagedNode
         if (-not $script:NODE_BIN) {
@@ -745,16 +808,26 @@ function Check-Deps {
         }
     }
     if (-not $script:NODE_BIN) {
-        Msg "❌ 缺少依赖: node，请先安装后重试" "❌ Missing dependency: node — please install it first"
+        Msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" `
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     }
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $nodeMajor = & $script:NODE_BIN -e "process.stdout.write(String(process.versions.node.split('.')[0]))"
-    $ErrorActionPreference = $prevEAP
-    if ([int]$nodeMajor -lt 18) {
-        $nodeVer = & $script:NODE_BIN --version
-        Msg "❌ 需要 Node.js >= 18，当前版本: $nodeVer" "❌ Requires Node.js >= 18, current: $nodeVer"
+    if (-not (Test-NodeSupportsSqlite $script:NODE_BIN)) {
+        $nodeVer = "unknown"
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $verOut = & $script:NODE_BIN --version 2>&1
+            $code = $LASTEXITCODE
+            if ($code -eq 0 -and $verOut) { $nodeVer = "$verOut".Trim() }
+        } catch {
+            $nodeVer = "unknown"
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        Msg "❌ 当前 Node.js 无法加载 node:sqlite（$nodeVer）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" `
+            "❌ This Node.js cannot load node:sqlite ($nodeVer). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     }
 
@@ -888,6 +961,21 @@ $script:SELECTED_AGENTS = $Agents
 $script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
 
 function Select-Agents {
+    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
+    # in config (other agent settings survive), so pilot auto-detects all
+    # agents at runtime -- including ones installed after this run.
+    if ($AllAgents) {
+        if ($script:SELECTED_AGENTS) {
+            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
+                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
+            $script:SELECTED_AGENTS = ""
+        }
+        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        Write-Host ""
+        return
+    }
+
     if ($script:SELECTED_AGENTS) {
         Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -1041,15 +1129,35 @@ function Confirm-ConfigOverwrite {
         maskMode = $MaskMode
         maskTypes = $MaskTypes
         maskReplacementMode = $MaskReplacementMode
+        interceptorMode = $InterceptorMode
+        interceptorTypes = $InterceptorTypes
+        multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $diffs = & $script:NODE_BIN -e @'
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all'
+  ? INTERCEPTOR_TYPE_SET.slice()
+  : interceptorModeFinal === 'custom'
+    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
+    : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -1067,15 +1175,22 @@ const checks = [
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
-  { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: coveredMaskMode },
+  { label: 'mask.types',        oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'interceptor.mode',  oldVal: (old.interceptor||{}).mode||'',  newVal: newVals.interceptorMode },
+  { label: 'interceptor.types', oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
+  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
 if (!changed.length) process.exit(0);
-for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
+for (const c of changed) {
+  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
+}
 '@ $configFile $jsonArg 2>$null
-    $ErrorActionPreference = $prevEAP
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
 
     if (-not $diffs) { return }
 
@@ -1336,10 +1451,15 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })
+        multimodalMode    = "$($script:MultimodalMode)"
+        multimodalSupportedAgents = "$($script:MultimodalSupportedAgents)"
         agentSelectionExplicit = "$($script:AGENT_SELECTION_EXPLICIT)"
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
+        interceptorMode   = "$InterceptorMode"
+        interceptorTypes  = "$InterceptorTypes"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
@@ -1352,8 +1472,13 @@ function Write-Config {
     # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
     $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
     Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $script:NODE_BIN -e @'
+    # Native node does not throw; read $LASTEXITCODE on the next line so a JSON
+    # or write failure cannot print "Config written" and keep installing.
+    $cfgExit = 1
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $script:NODE_BIN -e @'
 const fs = require('fs');
 let raw = fs.readFileSync(process.argv[1], 'utf-8');
 if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
@@ -1426,11 +1551,40 @@ if (opts.maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = opts.maskReplacementMode;
 }
-if (opts.selectedAgents) {
+if (opts.interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = opts.interceptorMode;
+  if (opts.interceptorMode === 'custom') {
+    config.interceptor.types = opts.interceptorTypes.split(',').map(t => t.trim()).filter(Boolean);
+  } else { delete config.interceptor.types; }
+}
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all'
+    ? INTERCEPTOR_TYPE_SET.slice()
+    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
+      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
+      : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
+const allAgents = JSON.parse(opts.probeResult || '[]');
+if (opts.allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(opts.probeResult || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1440,20 +1594,58 @@ if (opts.selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (opts.allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
+}
+if (opts.multimodalMode) {
+  config.agents = config.agents || {};
+  const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = opts.allAgentsMode === '1' && opts.multimodalMode !== 'none';
+  for (const id of supported) {
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
+    if (opts.multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? opts.multimodalMode : 'none' };
+  }
+}
+
+if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
-    $ErrorActionPreference = $prevEAP
-    Remove-PilotPathQuietly $cfgTmp
+        $cfgExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-PilotPathQuietly $cfgTmp
+    }
+    if ($cfgExit -ne 0) {
+        Msg "❌ 配置写入失败 (exit=$cfgExit)" "❌ Failed to write config (exit=$cfgExit)"
+        exit 1
+    }
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -1985,7 +2177,27 @@ try {
 # entries that may have been added to it. Stable script-name matching also
 # works when Pilot was installed with a custom data directory.
 function Remove-GrokBuildHookConfig {
-    $cfg = Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json"
+    $grokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $env:USERPROFILE ".grok" }
+    $cfg = Join-Path $grokHome "hooks\loongsuite-pilot.json"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if ($script:NODE_BIN -and (Test-Path -LiteralPath $stateFile)) {
+        $prevEAP = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $persisted = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["grok-build"]?.hookSettingsPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+'@ $stateFile 2>$null
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($persisted) { $cfg = [string]$persisted }
+    }
     if (-not (Test-Path -LiteralPath $cfg)) { return }
     if (-not $script:NODE_BIN) {
         Msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" `
@@ -2154,7 +2366,27 @@ function Remove-HermesPlugin {
 # Remove Pi Coding Agent extension injection
 # ============================================================
 function Remove-PiCodingAgentExtension {
-    $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
+    $piAgentDir = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $env:USERPROFILE ".pi\agent" }
+    $cfg = Join-Path $piAgentDir "settings.json"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if ($script:NODE_BIN -and (Test-Path -LiteralPath $stateFile)) {
+        $prevEAP = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $persisted = & $script:NODE_BIN -e @'
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+'@ $stateFile 2>$null
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($persisted) { $cfg = [string]$persisted }
+    }
     $short = $cfg.Replace($env:USERPROFILE, "~")
 
     if (-not $script:NODE_BIN) {
@@ -2513,6 +2745,40 @@ function Start-PilotAndWait {
 # ============================================================
 # CMD: install
 # ============================================================
+function Assert-SingleSlsConfig {
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path -LiteralPath $configFile)) { return }
+
+    $prevEAP = $ErrorActionPreference
+    $configExit = 1
+    $global:LASTEXITCODE = 1
+    $nodeOut = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        $nodeOut = & $script:NODE_BIN -e @'
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+'@ $configFile 2>&1
+        $configExit = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($configExit -eq 12) {
+        Msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" `
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually."
+        exit 1
+    }
+    if ($configExit -ne 0) {
+        $detail = (($nodeOut | Out-String).Trim())
+        Msg "❌ 无法检查现有 config.json，请检查文件后重试`n$detail" `
+            "❌ Cannot inspect existing config.json; check the file and retry.`n$detail"
+        exit 1
+    }
+}
+
 function Cmd-Install {
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
@@ -2521,6 +2787,7 @@ function Cmd-Install {
     Warn-ElevatedInstall
 
     Check-Deps
+    Assert-SingleSlsConfig
     Migrate-LegacyLayout
 
     $curVer = Get-InstalledVersion

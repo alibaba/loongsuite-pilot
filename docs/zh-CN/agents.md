@@ -32,14 +32,14 @@
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
-| DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。 |
-| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。 |
+| DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。检测路径遵循 DSH 官方的 `DSH_HOME`（默认 `~/.dsh`）。 |
+| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。检测路径和 Hook 配置遵循 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
-| Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
+| Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。检测路径和 `settings.json` 遵循 Pi 官方的 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
 | Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
@@ -62,10 +62,10 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 ## Grok Build 采集与生命周期
 
-Pilot 通过 `~/.grok` 检测 Grok Build，并在
-`~/.grok/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
+Pilot 通过 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）检测 Grok Build，并在
+`$GROK_HOME/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
 `stop`、`stop_failure`、`user_prompt_submit` 和 `session_end`。当前明确
-不安装、不采集 subagent Hook。
+不安装、不采集 subagent Hook。`GROK_WORKSPACE_DIR` 是工作区，不是 Agent home。
 
 每个已完成 turn 由 Grok 自身的三类 JSONL 数据融合生成：
 
@@ -73,7 +73,7 @@ Pilot 通过 `~/.grok` 检测 Grok Build，并在
   工具参数、工具结果和 system instruction。
 - session 目录下的 `updates.jsonl` 提供真实 prompt ID、turn 终态、
   取消或失败状态以及工具状态。
-- `~/.grok/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
+- `$GROK_HOME/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
   和成功状态。
 
 采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
@@ -88,10 +88,12 @@ Pilot 所有的 Grok Hook 条目，保留第三方 Hook。
 
 ## DeepSeek Harness 采集与生命周期
 
-Pilot 会为检测和部署解析同一个准确的 Harness home：已部署过的补丁路径
+Pilot 会为检测和部署解析同一个准确的 Harness home：检测路径遵循 DSH 官方的
+`DSH_HOME`（默认 `~/.dsh`）。已部署过的补丁路径
 用于后续修复和清理，其次依次检查本地 Agent 定义中显式设置的 `patchPath`、
 Pilot 服务进程的 `DSH_HOME`，以及 Linux 上唯一、同用户运行中 DSH 进程的
-`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。Pilot 不会扫描
+`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。`DSH_WORKSPACE_DIR`
+是工作区，不是 Harness home。Pilot 不会扫描
 临时目录或假定某个固定的非默认 home；若初次发现时同时存在多个不同的运行中
 home，会报告歧义而不会静默选择其中一个。
 
@@ -99,6 +101,8 @@ home，会报告歧义而不会静默选择其中一个。
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
+`AGENTTEAMS_WORKER_NAME` 和 `AGENTTEAMS_INSTANCE_ID` 要设在这个 DSH 进程上；
+插件在落盘时写入 Worker 标识，collector 之后不再读取自己的环境变量。
 
 插件将 append-only 原生事件写入
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
@@ -234,6 +238,18 @@ Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原�
 重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
 不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
 
+LLM 响应按模型调用关联 `before_message_write` 与 `model_call_ended`，兼容
+两者不同的到达顺序。结束事件缺失时，仍在下一次调用、运行结束、会话结束
+或缓存淘汰时输出已有响应，保留消息、用量和原始完成时间。
+
+首 Token 延迟通过观察 HTTP SSE 流获得：从请求发起到首个非空文本、推理或工具输出，以纳秒写入 `gen_ai.response.time_to_first_token`，并按 API 类型和 provider response ID 精确关联。支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages。
+
+对于公司版等使用受保护 Undici 传输的宿主，订阅 `undici:request:create` / `headers` / `bodyChunkReceived` 诊断事件，以请求对象隔离状态；普通 fetch 使用透传流观察。两路通过异步请求上下文去重，不按时间邻近匹配，也不替换宿主 provider、凭据或网络安全策略。
+
+OpenClaw 原生 `timeToFirstByteMs` 仅保留为 `agent.openclaw.time_to_first_byte_ms` 诊断字段，不作为 TTFT。非 SSE、未发出受支持诊断事件的自定义传输、缺少稳定响应 ID、ID 重复或超出解析/缓存边界时省略标准 TTFT；压缩的 Undici 原始字节不直接解析，只能由可观察的 fetch 解压后流补充。不能用首字节或总耗时替代。
+
+观察器不修改请求参数，不单独预读响应，不落盘消息内容；消息持久化与模型结束 Hook 合并时保留原始响应时间和 usage，并在缓存、输出两个阶段遵守内容采集配置。
+
 ## 安装时选择 Agent
 
 使用 `--agents` 跳过交互选择：
@@ -292,7 +308,7 @@ loongsuite-pilot restart
 |--------|------|
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
 | `captureMessageContent` | 设置为 `false` 可避免采集完整 Prompt、Completion、工具参数和工具结果，前提是对应集成支持该策略。 |
-| `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `tool` / `output` / `both` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
+| `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
 敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。

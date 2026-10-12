@@ -37,6 +37,8 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private _running = false;
+  private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
   /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
   private readonly ownershipWarned = new Set<string>();
@@ -52,24 +54,47 @@ export abstract class BaseInput extends EventEmitter {
     return this._running;
   }
 
-  async start(): Promise<void> {
-    if (this._running) return;
+  start(): Promise<void> {
+    // A restart must not create resources before the preceding stop has drained them.
+    if (this.stopPromise) return this.stopPromise.then(() => this.start());
+    if (this.startPromise) return this.startPromise;
+    if (this._running) return Promise.resolve();
     this._running = true;
-    this.logger.info('starting');
-
-    await this.onStart();
-    await this.runCycle();
-
-    this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
+    this.startPromise = this.startOnce().finally(() => { this.startPromise = null; });
+    return this.startPromise;
   }
 
-  async stop(): Promise<void> {
-    if (!this._running) return;
+  private async startOnce(): Promise<void> {
+    this.logger.info('starting');
+    try {
+      await this.onStart();
+      if (!this._running) return;
+      await this.runCycle();
+      if (!this._running) return;
+      this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
+    } catch (error) {
+      this._running = false;
+      // A concurrent stop owns cleanup after this startup settles.
+      if (!this.stopPromise) await this.onStop();
+      throw error;
+    }
+  }
+
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this._running && !this.startPromise) return Promise.resolve();
     this._running = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.stopPromise = this.stopOnce().finally(() => { this.stopPromise = null; });
+    return this.stopPromise;
+  }
+
+  private async stopOnce(): Promise<void> {
+    // onStart may still install a watcher after an await. Drain it before onStop.
+    await this.startPromise?.catch(() => undefined);
     await this.cyclePromise;
     await this.onStop();
     this.logger.info('stopped');

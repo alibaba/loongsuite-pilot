@@ -15,11 +15,14 @@ import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
+import { InterceptResultLinker } from '../../../src/core/intercept-result-linker.js';
+import { ToolVerdictStore } from '../../../src/interceptor/tool-verdict-store.js';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
+import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -511,6 +514,53 @@ describe('InputManager', () => {
     });
   });
 
+  describe('blocked prompt flush', () => {
+    it('applies user id, content policy, and mask before the shared flusher', async () => {
+      manager.setConfiguredUserId('configured-user');
+      manager.setMaskConfig({ mode: 'all', types: [] });
+      const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qoder',
+        event: 'UserPromptSubmit',
+        prompt: `token ${apiKey}`,
+        sessionId: 's1',
+        cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
+        raw: {},
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['user.id']).toBe('configured-user');
+      expect(dispatched['gen_ai.input.messages']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+      ]);
+      expect(dispatched['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched.trace_id).toBeUndefined();
+      expect(dispatched['gen_ai.turn.start']).toBeUndefined();
+    });
+
+    it('drops message content when the qoder capture policy is off', async () => {
+      manager.setAgentsConfig({
+        [ClientType.Qoder]: { captureMessageContent: false },
+      });
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qodercli',
+        event: 'UserPromptSubmit',
+        prompt: 'sk-1234567890abcdefghijklmnop',
+        raw: {},
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages');
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages_delta');
+      expect(JSON.stringify(dispatched)).not.toContain('sk-1234567890abcdefghijklmnop');
+    });
+  });
+
   describe('collector mask', () => {
     it('masks whitelisted content fields before dispatching to the flusher', async () => {
       const input = new StubInput('cursor-hook');
@@ -870,6 +920,46 @@ describe('InputManager', () => {
     });
   });
 
+
+  describe('interceptor result linking', () => {
+    it('joins tool.call and tool.result before invocation identity rewrite', async () => {
+      const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block');
+      manager.setInterceptResultLinker(new InterceptResultLinker(store, true));
+      manager.setConfiguredUserId('installer-user');
+      const input = new StubInput('qoder-tools');
+      manager.registerInput(input as any);
+
+      input.emit('entries', [
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'call',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.result',
+          'event.id': 'result',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'missing',
+          'gen_ai.session.id': 'native-session',
+        }),
+      ]);
+      await manager.stopAll();
+
+      const dispatched = flusher.batchCalls[0];
+      expect(dispatched[0]['gen_ai.guardrail.action']).toBe('allow');
+      expect(dispatched[0]['gen_ai.guardrail.triggered']).toBe(true);
+      expect(dispatched[1]['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched[2]['gen_ai.guardrail.action']).toBeUndefined();
+      expect(dispatched[2]['gen_ai.guardrail.triggered']).toBeUndefined();
+    });
+  });
 
   describe('no flusher warning', () => {
     it('drops entries when no flusher is set', async () => {

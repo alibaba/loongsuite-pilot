@@ -88,6 +88,79 @@ describe('BaseInput', () => {
     });
   });
 
+  it('drains startup resources before stop and never collects after cancelled startup', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let watcherOpen = false;
+    input.onStartFn = async () => { entered(); await gate; watcherOpen = true; };
+    input.onStopFn = async () => { watcherOpen = false; };
+    const collect = vi.fn(async () => []);
+    input.collectFn = collect;
+    const starting = input.start();
+    await started;
+    const stopping = input.stop();
+    expect(input.running).toBe(false);
+    release();
+    await Promise.all([starting, stopping]);
+    expect(watcherOpen).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it('does not install a timer when stopped during the first collection', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const collecting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    input.collectFn = vi.fn(async () => { entered(); await gate; return []; });
+    const starting = input.start();
+    await collecting;
+    const stopping = input.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(input.running).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(input.collectFn).toHaveBeenCalledOnce();
+  });
+
+  it('shares pending startup and waits for cleanup before restarting', async () => {
+    let releaseStart!: () => void;
+    const gate = new Promise<void>(resolve => { releaseStart = resolve; });
+    input.onStartFn = vi.fn(async () => { await gate; });
+    const starting = input.start();
+    const duplicate = input.start();
+    expect(duplicate).toBe(starting);
+    releaseStart();
+    await starting;
+    let releaseStop!: () => void;
+    const cleanup = new Promise<void>(resolve => { releaseStop = resolve; });
+    input.onStopFn = async () => { await cleanup; };
+    const stopping = input.stop();
+    const restarting = input.start();
+    await Promise.resolve();
+    expect(input.onStartFn).toHaveBeenCalledOnce();
+    releaseStop();
+    await Promise.all([stopping, restarting]);
+    expect(input.onStartFn).toHaveBeenCalledTimes(2);
+    expect(input.running).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('cleans failed startup and allows a later retry', async () => {
+    input.onStartFn = vi.fn().mockRejectedValueOnce(new Error('startup failed')).mockResolvedValue(undefined);
+    input.onStopFn = vi.fn(async () => {});
+    await expect(input.start()).rejects.toThrow('startup failed');
+    expect(input.running).toBe(false);
+    expect(input.onStopFn).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    await input.start();
+    expect(input.running).toBe(true);
+  });
+
   describe('polling cycle', () => {
     it('should run collect immediately on start', async () => {
       const collectSpy = vi.fn(async () => []);

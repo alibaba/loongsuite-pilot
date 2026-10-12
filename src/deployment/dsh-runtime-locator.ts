@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition, DeployedAgentRecord } from '../types/index.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { resolveDshHome } from './env-agent-dirs.js';
 
 const DSH_PATCH_FILENAME = 'cordis.patch.yml';
 const MAX_PROC_FILE_BYTES = 4 * 1024 * 1024;
@@ -79,9 +80,13 @@ export class DshRuntimeLocator {
     if (running) return running;
 
     // Preserve the existing standard-install contract. A detected command uses
-    // DSH's default home because no overriding home was discoverable.
+    // DSH's default home because no overriding home was discoverable from
+    // Pilot's environment or a unique running process. Defaulting DSH_HOME in
+    // the pilot-env step would skip that process discovery.
     if (await detectAgent(def.detection)) {
-      return this.targetFromHome(path.join(os.homedir(), '.dsh'), 'standard-detection');
+      const home = this.resolveHomeValue(resolveDshHome(this.env), this.cwd())
+        ?? path.join(os.homedir(), '.dsh');
+      return this.targetFromHome(home, 'standard-detection');
     }
 
     return null;

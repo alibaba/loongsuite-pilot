@@ -46,7 +46,7 @@ loongsuite-pilot agent register pi-sdk \
 `session.reload()` 重新加载 extensions。日常启动和使用 Agent 的方式不变。
 
 `agentDir` 必须是该自研 Agent 独享的目录：不能使用内置 PI CLI 的
-`~/.pi/agent`，不同自研 Agent 之间也不能共用。PI 会加载目录中配置的全部
+`PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`），不同自研 Agent 之间也不能共用。PI 会加载目录中配置的全部
 extensions；共用目录会导致重复采集以及 Agent 身份串标。该约束不改变自研
 Agent 原有的启动命令和 SDK 调用方式。
 
@@ -146,6 +146,12 @@ Hook 示例：
 `pluginInject.configKey` 可指定默认 `plugin` / `plugins` 之外的数组字段，
 例如 Pi Coding Agent 使用 `extensions`。目标 Agent 支持空设置文件时，可设置
 `pluginInject.createIfMissing`，在配置不存在时自动创建第一个候选 JSON 文件。
+
+字符串字段可以使用 `$PILOT_DIR`、`$PILOT_DATA`、`$HERMES_HOME` /
+`$HERMES_CLI`、`$PI_CODING_AGENT_DIR`、`$GROK_HOME`、`$DSH_HOME`。未设置或空白的
+Agent home 变量会展开为文档中的默认值（`~/.hermes`、`~/.pi/agent`、`~/.grok`、
+`~/.dsh`）。`GROK_WORKSPACE_DIR`、`DSH_WORKSPACE_DIR` 这类工作区变量不是 Agent
+home，不会被替换。
 
 > 新增 `plugin-inject` 类型 agent 时，请同时在卸载脚本（`deploy/installer-opensource.sh` / `.ps1`）中登记，确保卸载时移除其注入的 spec。此外 plugin-inject agent 在运行时会由 hook watchdog 自愈：若配置被其它工具覆盖，会自动重新注入 spec。
 

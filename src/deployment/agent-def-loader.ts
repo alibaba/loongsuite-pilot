@@ -5,6 +5,7 @@ import type { AgentDefinition } from '../types/index.js';
 import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome } from './env-agent-dirs.js';
 
 const logger = createLogger('AgentDefLoader');
 
@@ -170,11 +171,17 @@ export class AgentDefLoader {
   private resolveString(s: string): string {
     const hermesHome = process.env.HERMES_HOME || '~/.hermes';
     const hermesCli = this.resolveHermesCli(hermesHome);
+    const piCodingAgentDir = resolvePiCodingAgentDir();
+    const grokHome = resolveGrokHome();
+    const dshHome = resolveDshHome();
     let result = s
       .replace(/\$PILOT_DIR/g, this.pilotDir)
       .replace(/\$PILOT_DATA/g, this.dataDir)
       .replace(/\$HERMES_CLI/g, hermesCli)
-      .replace(/\$HERMES_HOME/g, hermesHome);
+      .replace(/\$HERMES_HOME/g, hermesHome)
+      .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)
+      .replace(/\$GROK_HOME/g, grokHome)
+      .replace(/\$DSH_HOME/g, dshHome);
 
     result = resolveHome(result);
 

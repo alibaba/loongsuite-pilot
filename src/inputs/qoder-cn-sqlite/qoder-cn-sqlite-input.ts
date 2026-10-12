@@ -1,8 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { ClientType } from '../../types/index.js';
+import { queryReadonly, SQLITE_SYNC_PAGE } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome } from '../../utils/fs-utils.js';
@@ -96,6 +96,7 @@ export class QoderCnSqliteInput extends BaseSqliteInput {
         AND token_info != ''
         AND json_valid(token_info)
       ORDER BY rowid ASC
+      LIMIT ${SQLITE_SYNC_PAGE}
     `;
 
     return queryReadonly<QoderCnTokenRow>(this.dbPath, sql, [lastRowId]);
@@ -153,45 +154,13 @@ function resolveQoderCnDbPath(dataRoot: string): string {
 }
 
 function readMaxEligibleRowId(dbPath: string): Promise<number> {
-  const sql = `
-    SELECT COALESCE(MAX(rowid), 0) AS maxRowId
-    FROM chat_message
-    WHERE token_info IS NOT NULL
-      AND token_info != ''
-      AND json_valid(token_info)
-  `;
+  // First start skips history. MAX(rowid) is the end of the table without
+  // running json_valid on every existing row; new rows are filtered in
+  // readNewRows. A per-row json_valid aggregate here is a synchronous full
+  // scan on the event loop.
+  const sql = `SELECT COALESCE(MAX(rowid), 0) AS maxRowId FROM chat_message`;
   return queryReadonly<{ maxRowId: number }>(dbPath, sql, [])
     .then(rows => rows[0]?.maxRowId ?? 0);
-}
-
-function queryReadonly<T>(
-  dbPath: string,
-  sql: string,
-  params: unknown[],
-): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    let db: sqlite3.Database;
-    db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) {
-        reject(openErr);
-        return;
-      }
-
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) {
-            reject(queryErr);
-            return;
-          }
-          if (closeErr) {
-            reject(closeErr);
-            return;
-          }
-          resolve(rows);
-        });
-      });
-    });
-  });
 }
 
 function parseTokenInfo(raw: string): QoderCnTokenInfo | null {

@@ -3,11 +3,11 @@
   "displayName": "Grok Build",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.grok"],
+    "paths": ["$GROK_HOME"],
     "commands": []
   },
   "hook": {
-    "settingsPath": "~/.grok/hooks/loongsuite-pilot.json",
+    "settingsPath": "$GROK_HOME/hooks/loongsuite-pilot.json",
     "events": ["stop", "stop_failure", "user_prompt_submit", "session_end"],
     "hookCommand": "$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh",
     "format": "nested",
