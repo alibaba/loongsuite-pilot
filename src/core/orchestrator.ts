@@ -279,6 +279,7 @@ export class Orchestrator extends EventEmitter {
           this.multimodalProcessor = processor;
           logger.info('multimodal processor enabled', {
             type: multimodalConfig.storage.type,
+            mode: multimodalConfig.storage.auth.mode,
             storageBasePath: eventBase.storageBasePath,
           });
         }

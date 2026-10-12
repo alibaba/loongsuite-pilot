@@ -940,8 +940,9 @@ describe('sls-client (presign)', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('keeps sls:// for anonymous type=sls without calling the authenticated probe', async () => {
-    const fetchMock = vi.fn();
+  it('keeps sls:// after a successful anonymous PutObject probe', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) =>
+      new Response('', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const result = await resolveMultimodalEventStorageBasePath({
       storage: {
@@ -957,7 +958,40 @@ describe('sls-client (presign)', () => {
     });
 
     expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain('/logstores/logstore/objects/_pilot/storage-probe');
+    expect(init?.method).toBe('PUT');
+    expect(new Headers(init?.headers).has('Authorization')).toBe(false);
+    expect(Buffer.from(init?.body as Buffer).toString('utf8')).toBe('probe');
+  });
+
+  it('disables anonymous type=sls on 401 without retrying', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      errorCode: 'Unauthorized',
+      errorMessage: 'Anonymous access is forbidden for this operation.',
+    }), { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveMultimodalEventStorageBasePath({
+      storage: {
+        type: 'sls',
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'anonymous' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('401');
+      expect(result.error).toContain('Anonymous access is forbidden');
+    }
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('disables type=sls when the Logstore has multimodal off', async () => {

@@ -443,6 +443,9 @@ function buildMultimodalOssStorage(
     throw new Error('multimodal.storage.target.storageBasePath must start with oss:// when type=oss');
   }
   const auth = buildMultimodalStorageAuth(raw.auth);
+  if (auth.mode === 'anonymous') {
+    throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+  }
   if (auth.mode !== 'ak') {
     throw new Error('multimodal.storage.type=oss requires auth.mode=ak');
   }

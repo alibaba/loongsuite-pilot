@@ -183,7 +183,7 @@ Anonymous PutObject (the target Logstore must have anonymous multimodal writes e
 }
 ```
 
-Anonymous mode must be explicit, accepts no credential fields, and is supported only by `type=sls`.
+Anonymous mode must be explicit, accepts no credential fields, and is supported only by `type=sls`. Anyone who can reach the Project endpoint can write objects anonymously, so use a dedicated Logstore.
 
 ### `type: delegatedOss`
 

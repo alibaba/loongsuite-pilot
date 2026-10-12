@@ -190,7 +190,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 }
 ```
 
-匿名模式必须显式声明，不接受任何凭证字段，且只支持 `type=sls`。
+匿名模式必须显式声明，不接受任何凭证字段，且只支持 `type=sls`。任何能访问该 Project endpoint 的调用方都可以匿名写入对象，因此应使用专用 Logstore。
 
 ### `type: delegatedOss`
 

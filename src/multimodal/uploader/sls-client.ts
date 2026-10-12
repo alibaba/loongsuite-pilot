@@ -470,7 +470,7 @@ async function slsHttpRequest(args: {
   }
 }
 
-/** SLS PutObject via AK Auth V1 or ApiKey Bearer. */
+/** SLS PutObject via AK Auth V1, ApiKey Bearer, or anonymous access. */
 export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResult> {
   try {
     const prepared = prepareSlsObjectTarget(params);
@@ -735,6 +735,38 @@ async function probeSlsMultimodalCapability(
   return { ok: false, error: result.error || 'sls multimodal probe failed', statusCode: result.statusCode };
 }
 
+/** Verify that anonymous PutObject is accepted before emitting SLS object URIs. */
+async function probeSlsAnonymousPutCapability(
+  params: SlsRequest,
+): Promise<SlsResult> {
+  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
+  const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
+    const last = await slsPutObject({
+      ...params,
+      mode: 'anonymous',
+      objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+      body: Buffer.from('probe'),
+      contentType: 'application/octet-stream',
+      timeoutMs,
+    });
+    if (last.ok) {
+      return { ok: true as const, value: last };
+    }
+    return {
+      ok: false as const,
+      retryable: last.retryable === true,
+      error: last.error,
+      statusCode: last.statusCode,
+    };
+  }, { signal: params.signal });
+  if (result.ok) return result.value;
+  return {
+    ok: false,
+    error: result.error || 'sls anonymous PutObject probe failed',
+    statusCode: result.statusCode,
+  };
+}
+
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
   mode: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
@@ -801,16 +833,20 @@ export async function resolveMultimodalEventStorageBasePath(
     }
     if (config.storage.type === 'sls') {
       const { target, auth } = config.storage;
-      if (auth.mode !== 'anonymous') {
-        const probe = await probeSlsMultimodalCapability({
+      const probe = auth.mode === 'anonymous'
+        ? await probeSlsAnonymousPutCapability({
+          endpoint: target.endpoint,
+          project: target.project,
+          logstore: target.logstore,
+        })
+        : await probeSlsMultimodalCapability({
           endpoint: target.endpoint,
           project: target.project,
           logstore: target.logstore,
           ...slsStorageAuthFields(auth),
         });
-        if (!probe.ok) {
-          return { ok: false, error: probe.error || 'sls multimodal probe failed' };
-        }
+      if (!probe.ok) {
+        return { ok: false, error: probe.error || 'sls multimodal probe failed' };
       }
     }
     return { ok: true, storageBasePath };
