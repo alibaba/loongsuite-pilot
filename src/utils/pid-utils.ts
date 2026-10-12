@@ -32,6 +32,14 @@ export const UPDATER_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
   'dist/updater/index.js',
 ];
 
+export const INTERCEPTOR_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
+  'interceptor-daemon.js',
+  '/bin/interceptor-daemon',
+  '\\bin\\interceptor-daemon',
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+run-interceptor(?:\s|$)/,
+  'dist/interceptor/daemon',
+];
+
 export function isPidFileRunning(pidFile: string): boolean {
   const pid = readPidFile(pidFile);
   return pid !== null && isProcessAlive(pid);

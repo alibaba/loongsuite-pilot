@@ -76,6 +76,8 @@ echo "==> Staging files..."
 cp -r dist     "$PKG_DIR/dist"
 cp -r assets   "$PKG_DIR/assets"
 cp -r scripts  "$PKG_DIR/scripts"
+# package.json depends on file:compat/sqlite3; npm install fails without it.
+cp -r compat   "$PKG_DIR/compat"
 
 # Agent definition files (declarative deployment configs)
 if [ -d agents.d ]; then

@@ -84,12 +84,16 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages'?: JsonValue;
   'gen_ai.input.multimodal_metadata'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  /** Host-observed guardrail verdict for this tool phase. */
+  'gen_ai.guardrail.triggered'?: boolean;
+  'gen_ai.guardrail.action'?: 'allow' | 'block';
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

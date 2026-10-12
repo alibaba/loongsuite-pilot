@@ -56,6 +56,9 @@ export class WorkspacePolicy {
   roots;
   blocked = new Set();
   fingerprint;
+  pendingMarkers = new Set();
+  nextRetryAt = 0;
+  nextWarningAt = 0;
   constructor(excluded = [], stateDirectory) {
     this.stateDirectory = stateDirectory;
     this.roots = validateExcludedWorkspaces(excluded).map(v => normalize(v));
@@ -69,9 +72,43 @@ export class WorkspacePolicy {
       return false;
     return this.roots.some(root => within(candidate, root) || within(real(candidate), real(root)));
   }
+  persistMarker(marker) {
+    try {
+      // One immutable marker per session; independent writers never overwrite
+      // other sessions' decisions. The marker contains no user content.
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, '', { mode: 0o600 });
+      this.pendingMarkers.delete(marker);
+    } catch {
+      this.pendingMarkers.add(marker);
+      const now = Date.now();
+      this.nextRetryAt = now + 5000;
+      if (now >= this.nextWarningAt) {
+        this.nextWarningAt = now + 60000;
+        try {
+          process.stderr.write('[workspace-privacy] Cannot persist session exclusions; blocked in this process, restart/other-process protection may be unavailable. Retrying on subsequent events.\n');
+        } catch { /* Diagnostics must not discard an otherwise valid batch. */ }
+      }
+    }
+  }
+  retryPendingMarkers() {
+    if (!this.pendingMarkers.size || Date.now() < this.nextRetryAt) return;
+    this.nextRetryAt = Date.now() + 5000;
+    // Bounded work without a background timer that would keep hook processes alive.
+    const batch = [];
+    for (const marker of this.pendingMarkers) {
+      batch.push(marker);
+      if (batch.length === 8) break;
+    }
+    for (const marker of batch) {
+      this.pendingMarkers.delete(marker);
+      this.persistMarker(marker);
+    }
+  }
   allows(record, fallbackAgent = '') {
     if (!this.roots.length)
       return true;
+    this.retryPendingMarkers();
     const agent = String(record['gen_ai.agent.type'] ?? fallbackAgent);
     const session = record['gen_ai.session.id'] ?? record.session_id ?? record.sessionId ?? record.conversation_id;
     const key = typeof session === 'string' && session ? this.hash(`${agent}\0${session}`) : undefined;
@@ -89,12 +126,7 @@ export class WorkspacePolicy {
       return true;
     if (key) {
       this.blocked.add(key);
-      if (marker) {
-        // One immutable marker per session: independent hook processes cannot
-        // overwrite one another's decisions. Contains no directory or session text.
-        fs.mkdirSync(path.dirname(marker), { recursive: true });
-        fs.writeFileSync(marker, '', { mode: 0o600 });
-      }
+      if (marker) this.persistMarker(marker);
     }
     return false;
   }

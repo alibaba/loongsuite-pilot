@@ -5,6 +5,9 @@
     "onStartup": true
   },
   "enabledByDefault": true,
+  "contracts": {
+    "agentToolResultMiddleware": ["openclaw"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {

@@ -38,6 +38,16 @@ export interface TrustTomlConfig {
   marker: string;
 }
 
+export interface InterceptorHookConfig {
+  hookCommand: string;
+  events: string[];
+  matcher?: string;
+  eventMatchers?: Record<string, string>;
+  timeout?: number | Record<string, number>;
+  insert?: 'head' | 'tail';
+  replaceHookCommands?: string[];
+}
+
 export interface AgentHookConfig {
   settingsPath: string;
   /**
@@ -120,6 +130,12 @@ export interface AgentHookConfig {
     name: string;
     tools: string[];
   };
+  /**
+   * Independent blocking hook, installed alongside the collection hook.
+   * Events, command, timeout, and insertion order are owned by this block
+   * so collection hookCommand stays a single string.
+   */
+  interceptor?: InterceptorHookConfig;
 }
 
 export interface PluginSourceConfig {

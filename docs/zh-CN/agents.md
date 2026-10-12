@@ -84,6 +84,8 @@ home，会报告歧义而不会静默选择其中一个。
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
+`AGENTTEAMS_WORKER_NAME` 和 `AGENTTEAMS_INSTANCE_ID` 要设在这个 DSH 进程上；
+插件在落盘时写入 Worker 标识，collector 之后不再读取自己的环境变量。
 
 插件将 append-only 原生事件写入
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
@@ -218,6 +220,18 @@ Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造�
 Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原生 Token、链路结构、worker、
 重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
 不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
+
+LLM 响应按模型调用关联 `before_message_write` 与 `model_call_ended`，兼容
+两者不同的到达顺序。结束事件缺失时，仍在下一次调用、运行结束、会话结束
+或缓存淘汰时输出已有响应，保留消息、用量和原始完成时间。
+
+首 Token 延迟通过观察 HTTP SSE 流获得：从请求发起到首个非空文本、推理或工具输出，以纳秒写入 `gen_ai.response.time_to_first_token`，并按 API 类型和 provider response ID 精确关联。支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages。
+
+对于公司版等使用受保护 Undici 传输的宿主，订阅 `undici:request:create` / `headers` / `bodyChunkReceived` 诊断事件，以请求对象隔离状态；普通 fetch 使用透传流观察。两路通过异步请求上下文去重，不按时间邻近匹配，也不替换宿主 provider、凭据或网络安全策略。
+
+OpenClaw 原生 `timeToFirstByteMs` 仅保留为 `agent.openclaw.time_to_first_byte_ms` 诊断字段，不作为 TTFT。非 SSE、未发出受支持诊断事件的自定义传输、缺少稳定响应 ID、ID 重复或超出解析/缓存边界时省略标准 TTFT；压缩的 Undici 原始字节不直接解析，只能由可观察的 fetch 解压后流补充。不能用首字节或总耗时替代。
+
+观察器不修改请求参数，不单独预读响应，不落盘消息内容；消息持久化与模型结束 Hook 合并时保留原始响应时间和 usage，并在缓存、输出两个阶段遵守内容采集配置。
 
 ## 安装时选择 Agent
 

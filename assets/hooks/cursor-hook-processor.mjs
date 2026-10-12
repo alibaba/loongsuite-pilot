@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { filterWorkspaceRecords } from './shared/workspace-privacy.mjs';
 import { decodePayload } from './shared/decode-payload.mjs';
 import {
   applyHookContentPolicy,
@@ -80,7 +81,10 @@ async function appendJsonl(filePath, record) {
   await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
 }
 
-async function appendBatchJsonl(filePath, records) {
+async function appendBatchJsonl(filePath, records, variant) {
+  // Throw on policy errors so the caller retains the journal for a later retry.
+  records = filterWorkspaceRecords(records, variant);
+  if (records.length === 0) return;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const content = records.map(r => JSON.stringify(r)).join('\n') + '\n';
   await fs.appendFile(filePath, content, 'utf-8');
@@ -581,7 +585,7 @@ async function main() {
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-        await appendBatchJsonl(historyFile, records);
+        await appendBatchJsonl(historyFile, records, variant);
       }
 
       compactJournal(allEvents, consumedConversationIds);
@@ -620,7 +624,7 @@ async function main() {
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records);
+          await appendBatchJsonl(historyFile, result.records, variant);
         }
 
         compactJournal(allEvents, result.consumedConversationIds);

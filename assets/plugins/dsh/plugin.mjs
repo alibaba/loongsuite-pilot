@@ -11,11 +11,15 @@
  * event stream to disk. Sensitive fields (API keys / credentials) are
  * filtered here so they never enter the JSONL, fixtures, or traces
  * (hard gate #5).
+ *
+ * Worker identity is captured here, inside the DSH process. The collector
+ * reads the JSONL later and does not see this process environment.
  */
 import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -51,6 +55,10 @@ function appendLine(file, obj) {
   appendFileSync(file, JSON.stringify(obj) + '\n');
   if (process.platform !== 'win32') chmodSync(file, 0o600);
 }
+function workerFields() {
+  const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: 'dsh' });
+  return Object.keys(resourceAttributes).length > 0 ? { resourceAttributes } : {};
+}
 
 export default function apply(ctx) {
   if (!collectionEnabled()) {
@@ -58,15 +66,18 @@ export default function apply(ctx) {
     return;
   }
   ensureDir(logDir());
+  const identity = workerFields();
   appendLine(path.join(logDir(), `dsh-${process.pid}.jsonl`), {
     type: `${AGENT}/loaded`,
     logDir: logDir(),
     time: Date.now(),
+    ...identity,
   });
   ctx.on('session/created', (s) => {
     if (!collectionEnabled()) return;
     appendLine(sessionFile(s.id), {
       type: 'session/created', sid: String(s.id), time: Date.now(),
+      ...identity,
     });
   });
   ctx.on('session/event', (s, e) => {
@@ -77,6 +88,7 @@ export default function apply(ctx) {
       time: e.time,
       type: e.type,
       data: redact(e.data),
+      ...identity,
     });
   });
   ctx.logger(AGENT).info('loongsuite-pilot-observability plugin loaded; logDir=%s', logDir());

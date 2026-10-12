@@ -81,6 +81,21 @@ describe('parseCheckpointKey', () => {
 });
 
 describe('FilePipeline', () => {
+  it('still delivers public rows when the exclusion marker directory cannot be written', async () => {
+    const markerDir = path.join(dataDir, 'marker-blocker');
+    fs.writeFileSync(markerDir, 'not a directory');
+    fs.writeFileSync(path.join(logDir, 'mixed.log'), [
+      JSON.stringify({ session_id: 'private', cwd: '/private-project', content: 'secret' }),
+      JSON.stringify({ session_id: 'public', cwd: '/public-project', content: 'retained-public' }),
+    ].join('\n') + '\n');
+    const pipeline = new FilePipeline({ config: makeConfig(), stateDir, failedLogDir: failedDir, dataDir,
+      workspacePolicy: new WorkspacePolicy(['/private-project'], markerDir) });
+    await pipeline.start();
+    await pipeline.stop();
+    expect(JSON.stringify(mockPostWebtracking.mock.calls)).toContain('retained-public');
+    expect(JSON.stringify(mockPostWebtracking.mock.calls)).not.toContain('secret');
+  });
+
   it('filters workspace JSON records before independent SLS delivery and advances their offsets', async () => {
     const logFile = path.join(logDir, 'privacy.log');
     fs.writeFileSync(logFile, [

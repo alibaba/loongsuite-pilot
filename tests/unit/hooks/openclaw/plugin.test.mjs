@@ -21,13 +21,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fakeStreamingFetch } from '../../../helpers/openclaw-stream.mjs';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
 } from '../../../../assets/hooks/shared/resource-context.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PATH = process.env.PILOT_OPENCLAW_TEST_PLUGIN
+  || path.resolve(__dirname, '../../../../assets/plugins/openclaw/plugin.mjs');
 const PLUGIN_PACKAGE_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/package.json');
 const OPENCLAW_AGENT_DEF_PATH = path.resolve(__dirname, '../../../../agents.d/openclaw.json');
 const FIXTURES = path.join(__dirname, 'fixtures');
@@ -41,10 +43,13 @@ let tmpDir;
 let pilotDataDir;
 let pluginLoadSequence = 0;
 let previousWorkerName;
+let observeStream;
 
 beforeEach(async () => {
   previousWorkerName = process.env.AGENTTEAMS_WORKER_NAME;
   delete process.env.AGENTTEAMS_WORKER_NAME;
+  globalThis[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
+  observeStream = fakeStreamingFetch();
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
   pilotDataDir = path.join(tmpDir, 'pilot-data');
   fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
@@ -60,6 +65,8 @@ afterEach(async () => {
   if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
   else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  globalThis[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
   await fs.promises.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -1184,10 +1191,16 @@ describe('OpenClaw plugin stateful pipeline', () => {
     // These hooks are synchronous in OpenClaw and must not return Promises.
     expect(returnA).toBeUndefined();
     expect(returnB).toBeUndefined();
+    for (const suffix of ['b', 'a']) {
+      handlers.model_call_ended({ runId: `run-${suffix}`, callId: `run-${suffix}:model:1`,
+        timeToFirstByteMs: suffix === 'a' ? 12 : 34 }, { runId: `run-${suffix}` });
+    }
     const records = readOutputRecords().filter((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(records).toHaveLength(2);
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-a');
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-b');
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.response.time_to_first_token']).toBeUndefined();
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
   it('redacts content before persistence while retaining token usage', async () => {
@@ -1297,6 +1310,130 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(nonAssistant.length).toBe(0);
   });
 
+  it.each(['end-first', 'message-first'])('joins accurate streamed timing in %s order by response ID', async (order) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'stream-run', sessionId: 'stream-session', sessionKey: 'agent:main:stream' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    await observeStream('response-stream', { delayMs: 50 });
+    const end = () => handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 5 }, ctx);
+    if (order === 'end-first') end();
+    handlers.before_message_write({ message: { role: 'assistant', api: 'openai-completions', responseId: 'response-stream', content: [{ type: 'text', text: 'answer' }], stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    end();
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ 'gen_ai.response.time_to_first_token': 50_000_000,
+      'agent.openclaw.time_to_first_byte_ms': 5, 'gen_ai.usage.input_tokens': 3 });
+  });
+
+  it.each(['end-first', 'message-first'])('joins %s metadata once and preserves the assistant observation timestamp', async (order) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'timing-order', sessionId: 'timing-session', sessionKey: 'agent:main:timing-order' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const end = () => handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12.5, durationMs: 100, outcome: 'error', error: 'synthetic error' }, ctx);
+    if (order === 'end-first') end();
+    now += 100;
+    const observed = `${now}000000`;
+    const message = { message: { role: 'assistant', content: [], stopReason: 'error', usage: { input: 5, output: 0 }, responseId: 'response-native' } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    now += 500;
+    end();
+    end();
+    handlers.llm_output({ ...ctx, usage: { input: 5, output: 0 } }, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ time_unix_nano: observed,
+      'agent.openclaw.time_to_first_byte_ms': 12.5, 'gen_ai.usage.input_tokens': 5,
+      'gen_ai.response.id': 'response-native', 'error.message': 'synthetic error',
+      'agent.openclaw.duration_ms': 100, 'agent.openclaw.call_id': 'native-1' });
+  });
+
+  it.each(['llm_output', 'agent_end', 'model_call_started'])('flushes message-only responses at %s without inventing timing or borrowing a late call', async (boundary) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'missing-end', sessionId: 'missing-session', sessionKey: 'agent:main:missing-end' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const message = { message: { role: 'assistant', content: [{ type: 'text', text: 'first' }], stopReason: 'stop', usage: { input: 3, output: 1 } } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers[boundary]({ ...ctx, callId: 'native-2', success: true }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 999 }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'unknown-native', timeToFirstByteMs: 999 }, ctx);
+    if (boundary === 'model_call_started') {
+      handlers.before_message_write({ message: { ...message.message, responseId: 'second' } }, { sessionKey: ctx.sessionKey });
+      handlers.model_call_ended({ ...ctx, callId: 'native-2', timeToFirstByteMs: 24 }, ctx);
+    }
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(boundary === 'model_call_started' ? 2 : 1);
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
+    if (responses[1]) expect(responses[1]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it.each(['session-id', 'session-key', 'eviction'])('flushes pending responses before %s cleanup', async (boundary) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'cleanup-run', sessionId: 'cleanup-session', sessionKey: 'agent:main:cleanup' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'saved' }], stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    // An unrelated session must remain pending throughout cleanup.
+    const other = { runId: 'other-run', sessionId: 'other-session', sessionKey: 'agent:main:other' };
+    handlers.model_call_started({ ...other, callId: 'other-call' }, other);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'other' }], stopReason: 'stop' } }, { sessionKey: other.sessionKey });
+    if (boundary === 'eviction') {
+      for (let i = 0; i < 199; i++) handlers.model_call_started({ runId: `new-${i}`, callId: `call-${i}` }, {});
+    } else {
+      const session = boundary === 'session-id' ? { sessionId: ctx.sessionId } : { sessionKey: ctx.sessionKey };
+      handlers.session_end({ ...session, reason: 'idle' }, session);
+      handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 999 }, ctx);
+    }
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ 'gen_ai.turn.id': ctx.runId, 'gen_ai.usage.input_tokens': 3 });
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it.each([true, false])('preserves privacy when content capture changes from %s while a response waits', async (capture) => {
+    const configPath = path.join(pilotDataDir, 'config.json');
+    const config = enabled => JSON.stringify({ agents: { openclaw: { captureMessageContent: enabled } } });
+    fs.writeFileSync(configPath, config(capture));
+    const handlers = registerPlugin(await loadPlugin());
+    await observeStream('private-response', { delayMs: 12 });
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const ctx = { runId: 'private-run', sessionId: 'private-session', sessionKey: 'agent:main:private' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1' }, ctx);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'private-sentinel' }], api: 'openai-completions', responseId: 'private-response', stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    fs.writeFileSync(configPath, config(!capture));
+    now += 6000;
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12 }, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBe(12_000_000);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
+  });
+
+  it.each([0, 12.5, undefined, null, -1, NaN, Infinity, '12'])('validates end-only native TTFT %s without fabricating usage', async (ttft) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'end-only', sessionId: 'end-session', sessionKey: 'agent:main:end-only' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1' }, ctx);
+    now += 100;
+    const endTime = `${now}000000`;
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: ttft, outcome: 'error' }, ctx);
+    now += 100;
+    handlers.agent_end({ ...ctx, success: false }, ctx);
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0].time_unix_nano).toBe(endTime);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
   it('timestamps completion when before_message_write fires, not when the assistant message was created', async () => {
     const plugin = await loadPlugin();
     const handlers = registerPlugin(plugin);
@@ -1342,4 +1479,62 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano)).toBe(5_000_000_000n);
     expect(response['agent.openclaw.duration_ms']).toBe(5_000);
   });
+});
+
+describe('subagent trace propagation', () => {
+  it('links an early asynchronous child to the exact spawn tool, preserving its own turn', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    const handlers = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await handlers.before_agent_run({ prompt: 'delegate', senderId: 'user-a' }, parent);
+    await handlers.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', params: {} }, parent);
+    const child = { runId: 'child-run', sessionId: 'child-session', sessionKey: 'agent:main:subagent:child-a' };
+    await handlers.before_agent_run({ prompt: 'child task' }, child);
+    await handlers.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } }, parent);
+    await handlers.llm_output({}, child);
+    const records = readOutputRecords();
+    const spawn = records.find(r => r['event.name'] === 'tool.call');
+    const children = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(spawn.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(children.every(r => r.trace_id === spawn.trace_id)).toBe(true);
+    expect(children.every(r => r.parent_span_id === spawn.span_id)).toBe(true);
+    expect(children.every(r => r['user.id'] === 'user-a')).toBe(true);
+    expect(children.every(r => r['gen_ai.session.id'] === 'child-session')).toBe(true);
+  });
+});
+
+it('keeps simultaneous spawns separate and recovers their identity after plugin restart with content off', async () => {
+  delete process.env.LOONGSUITE_USER_ID;
+  fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
+  const h = registerPlugin(await loadPlugin());
+  const parents = [0, 1].map(i => ({ runId: `p${i}`, sessionId: `ps${i}`, sessionKey: `agent:main:p${i}` }));
+  for (const [i, parent] of parents.entries()) {
+    await h.before_agent_run({ prompt: 'secret-task', senderId: `user-${i}` }, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', params: { task: 'secret-task' } }, parent);
+  }
+  // The second tool completes first; neither timing nor call id alone is a join.
+  for (const i of [1, 0]) await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', result: {
+    details: { status: 'accepted', runId: `c${i}`, childSessionKey: `agent:main:subagent:c${i}` },
+  } }, parents[i]);
+  const restarted = registerPlugin(await loadPlugin());
+  for (const i of [0, 1]) {
+    const child = { runId: `c${i}`, sessionId: `cs${i}`, sessionKey: `agent:main:subagent:c${i}` };
+    await restarted.before_agent_run({ prompt: 'secret-task' }, child);
+    await restarted.llm_output({}, child);
+  }
+  const rows = readOutputRecords();
+  const calls = rows.filter(r => r['event.name'] === 'tool.call');
+  expect(new Set(calls.map(r => r.span_id)).size).toBe(2);
+  for (const i of [0, 1]) {
+    const call = calls.find(r => r['gen_ai.turn.id'] === `p${i}`);
+    const child = rows.filter(r => r['gen_ai.turn.id'] === `c${i}`);
+    expect(child.length).toBeGreaterThan(0);
+    expect(child.every(r => r.trace_id === call.trace_id && r.parent_span_id === call.span_id && r['user.id'] === `user-${i}`)).toBe(true);
+  }
+  expect(JSON.stringify(rows)).not.toContain('secret-task');
+  const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
+  expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
 });

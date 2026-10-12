@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,7 +6,7 @@ import { WorkspacePolicy, validateExcludedWorkspaces } from '../../../src/core/w
 
 const dirs: string[] = [];
 function temp() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-policy-')); dirs.push(dir); return dir; }
-afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 const event = (session: string, cwd?: string) => ({ 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': session, ...(cwd ? { 'agent.codex.cwd': cwd } : {}) });
 
 describe('workspace exclusions', () => {
@@ -58,4 +58,39 @@ describe('workspace exclusions', () => {
     expect(() => validateExcludedWorkspaces([null])).toThrow();
     expect(validateExcludedWorkspaces(undefined)).toEqual([]);
   });
+});
+
+it('isolates marker write failures, retries after recovery, and does not drop public events', () => {
+  vi.useFakeTimers();
+  const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  const root = temp(); const state = path.join(root, 'blocked-state');
+  fs.writeFileSync(state, 'a pre-existing file prevents directory creation');
+  const policy = new WorkspacePolicy(['/private-project'], state);
+  const publicEntry = event('public', '/public-project');
+  expect(policy.filter([event('private', '/private-project'), publicEntry])).toEqual([publicEntry]);
+  expect(policy.allows(event('private'))).toBe(false);
+  expect(warning).toHaveBeenCalledOnce();
+  expect(String(warning.mock.calls[0][0])).not.toContain(root);
+  fs.unlinkSync(state);
+  vi.advanceTimersByTime(6000);
+  policy.filter([publicEntry]);
+  expect(new WorkspacePolicy(['/private-project'], state).allows(event('private'))).toBe(false);
+});
+
+it('shares identified sessions across file pipelines while isolating other agents and anonymous sources', () => {
+  const root = temp(); const policy = new WorkspacePolicy([root], path.join(temp(), 'markers'));
+  expect(policy.allows(event('same-session', root), 'file:first')).toBe(false);
+  expect(policy.allows(event('same-session'), 'file:second')).toBe(false);
+  expect(policy.allows({ ...event('same-session'), 'gen_ai.agent.type': 'cursor' }, 'file:second')).toBe(true);
+  expect(policy.allows({ session_id: 'same-session' }, 'file:second')).toBe(true);
+});
+
+// Collector configuration is intentionally a startup snapshot, not live reload.
+it('applies an edited rule list when the collector policy is recreated on restart', () => {
+  const rules = ['/first-private'];
+  const running = new WorkspacePolicy(rules);
+  rules.push('/new-private');
+  expect(running.allows(event('new', '/new-private'))).toBe(true);
+  const restarted = new WorkspacePolicy(rules);
+  expect(restarted.allows(event('new', '/new-private'))).toBe(false);
 });

@@ -1,0 +1,6 @@
+{
+  "name": "sqlite3",
+  "version": "0.0.0-compat-shim",
+  "description": "Compatibility shim so that a pre-node:sqlite updater's require('sqlite3') succeeds. Remove after all deployed updaters have upgraded past the native-addon probe.",
+  "main": "lib/sqlite3.js"
+}

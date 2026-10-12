@@ -153,11 +153,11 @@ describe('PII masking performance benchmark', () => {
     expect(maskedDenseMatches.match(/\[IDCARD_MASKED\]/g)).toHaveLength(250);
     expect(maskedDenseMatches.match(/\[PHONE_MASKED\]/g)).toHaveLength(250);
     expect(maskedDenseMatches.match(/\[EMAIL_MASKED\]/g)).toHaveLength(250);
-    expect(maskedDenseMatches.match(/\[IPADDRESS_MASKED\]/g)).toHaveLength(250);
-    expect(maskedDenseMatches.match(/\[BANKCARD_MASKED\]/g)).toHaveLength(250);
+    expect(maskedDenseMatches.match(/\[IP_ADDRESS_MASKED\]/g)).toHaveLength(250);
+    expect(maskedDenseMatches.match(/\[CREDIT_CARD_MASKED\]/g)).toHaveLength(250);
 
     const previewMixed = maskString(mixed, previewPlan);
     expect(previewMixed).toContain('[PHONE_MASKED]{138****8000}');
-    expect(previewMixed).toContain('[IPADDRESS_MASKED]{192.*.*.10}');
+    expect(previewMixed).toContain('[IP_ADDRESS_MASKED]{192.*.*.10}');
   });
 });

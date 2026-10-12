@@ -20,7 +20,8 @@ import {
   parseStdinPayload,
   logDebug,
   getLineRangeInfo,
-  readTranscriptLines,
+  readTranscriptSnapshotLines,
+  sliceTranscriptLines,
   appendRowsToHistory,
   updateLineRecord,
   loadHookRuntimeConfig,
@@ -44,11 +45,12 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
+  const snapshot = readTranscriptSnapshotLines(transcriptPath);
+  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
   if (!range) return;
 
   const { startLine, endLine, reason: rangeReason } = range;
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
+  const lines = sliceTranscriptLines(snapshot.allLines, startLine, endLine);
   logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
   if (!lines.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);

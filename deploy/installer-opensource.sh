@@ -80,6 +80,8 @@ EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
+INTERCEPTOR_MODE=""
+INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -167,6 +169,10 @@ while [[ $# -gt 0 ]]; do
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --mask-replacement-mode) MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
+        --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
+        --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
+        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
+        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -204,6 +210,22 @@ if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
 fi
 if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder" ] && [ "$MASK_REPLACEMENT_MODE" != "preview" ]; then
     echo "❌ Unknown mask replacement mode: $MASK_REPLACEMENT_MODE (use 'placeholder' or 'preview')" >&2
+    exit 1
+fi
+if [ -n "$INTERCEPTOR_MODE" ]; then
+    case "$INTERCEPTOR_MODE" in
+        all|none|custom) ;;
+        *)
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            exit 1 ;;
+    esac
+fi
+if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
+    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
+    exit 1
+fi
+if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
+    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
     exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
@@ -297,15 +319,18 @@ _node_is_app_bundle() {
     return 1
 }
 
+# node:sqlite is unflagged from 22.13 and 23.4. A major-version check accepts
+# Node 20 and 22.12, whose require('node:sqlite') throws, so install would
+# succeed and SQLite collection would not. The require is the check.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -566,7 +591,12 @@ check_deps() {
 
     NODE_BIN=""
     if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
-        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        NODE_BIN=$(resolve_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" \
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        fi
     else
         NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
         if [ -z "$NODE_BIN" ]; then
@@ -576,15 +606,16 @@ check_deps() {
         fi
     fi
     if [ -z "$NODE_BIN" ]; then
-        msg "❌ 缺少依赖: node，请先安装后重试" \
-            "❌ Missing dependency: node — please install it first"
+        msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" \
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     fi
 
-    NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
-    if [ "$NODE_MAJOR" -lt 18 ]; then
-        msg "❌ 需要 Node.js >= 18，当前版本: $("$NODE_BIN" --version)" \
-            "❌ Requires Node.js >= 18, current: $("$NODE_BIN" --version)"
+    if ! _node_supports_sqlite "$NODE_BIN"; then
+        local node_ver
+        node_ver="$("$NODE_BIN" --version 2>/dev/null || echo unknown)"
+        msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
+            "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     fi
 
@@ -844,6 +875,21 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all'
+  ? INTERCEPTOR_TYPE_SET.slice()
+  : interceptorModeFinal === 'custom'
+    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
+    : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -861,9 +907,11 @@ const checks = [
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
-  { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: coveredMaskMode },
+  { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
+  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
@@ -873,8 +921,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1169,6 +1217,8 @@ const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
+const interceptorMode = '${INTERCEPTOR_MODE}';
+const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1198,6 +1248,39 @@ if (maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = maskReplacementMode;
 }
+
+if (interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = interceptorMode;
+  if (interceptorMode === 'custom') {
+    config.interceptor.types = interceptorTypes
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+  } else {
+    delete config.interceptor.types;
+  }
+}
+
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all'
+    ? INTERCEPTOR_TYPE_SET.slice()
+    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
+      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
+      : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
 
 const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
 if (allAgentsMode === '1') {
@@ -1250,7 +1333,12 @@ if (multimodalMode) {
 }
 
 if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
@@ -2040,6 +2128,32 @@ restore_pilot_after_deploy() {
 # ============================================================
 # CMD: install
 # ============================================================
+reject_multi_sls_config() {
+    local config_file="$DATA_DIR/config.json"
+    [ -f "$config_file" ] || return 0
+
+    local status
+    if "$NODE_BIN" -e '
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+' "$config_file"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 12 ]; then
+        msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" \
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually." >&2
+    else
+        msg "❌ 无法检查现有 config.json，请检查文件后重试" \
+            "❌ Cannot inspect existing config.json; check the file and retry." >&2
+    fi
+    return 1
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -2047,6 +2161,7 @@ cmd_install() {
 
     validate_install_user
     check_deps
+    reject_multi_sls_config
 
     # Migrate legacy layout if needed
     migrate_legacy_layout

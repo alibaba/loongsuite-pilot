@@ -117,15 +117,15 @@ An empty or invalid value falls back to `placeholder`. In `placeholder` mode, Pi
 | `idCard`         | `[IDCARD_MASKED]`      |
 | `phone`          | `[PHONE_MASKED]`       |
 | `email`          | `[EMAIL_MASKED]`       |
-| `ipAddress`      | `[IPADDRESS_MASKED]`   |
-| `bankCard`       | `[BANKCARD_MASKED]`    |
+| `ipAddress`      | `[IP_ADDRESS_MASKED]`  |
+| `bankCard`       | `[CREDIT_CARD_MASKED]` |
 
 
 Preview examples:
 
 ```text
 [PHONE_MASKED]{138****1234}
-[IPADDRESS_MASKED]{192.*.*.10}
+[IP_ADDRESS_MASKED]{192.*.*.10}
 [DATABASEURL_MASKED]{mysql://user:****@db.example.com/orders}
 ```
 

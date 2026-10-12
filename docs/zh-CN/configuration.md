@@ -10,9 +10,16 @@ Pilot 按以下顺序解析配置：
 
 1. 环境变量。
 2. 配置文件，默认路径为 `~/.loongsuite-pilot/config.json`。
-3. 内置默认值。
+3. 集团版的托管默认配置 `~/.loongsuite-pilot/configs/inner/data_config.json`（仅适用于其支持的配置项）。
+4. 内置默认值。
 
 如需使用其他配置文件路径，可以设置 `AGENT_DATA_COLLECTION_CONFIG`。
+
+对多模态配置，用户的 `config.json` 始终优先于托管默认配置：
+
+- 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。
+- `agents` 按 Agent 名合并，用户字段覆盖托管默认值；其中 `multimodal` 子对象按字段浅合并。例如用户只改 `uploadMode`，可保留托管配置的 `allowedRootPaths`。
+- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 `enabled` 或 `captureMessageContent`。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
 
 ## 常用全局配置
 
@@ -24,7 +31,8 @@ Pilot 按以下顺序解析配置：
   "collectLog": true,
   "collectTrace": true,
   "dashboard": { "port": 8765 },
-  "serviceName": "my-agent-service"
+  "serviceName": "my-agent-service",
+  "interceptor": { "mode": "none" }
 }
 ```
 
@@ -38,6 +46,7 @@ Pilot 按以下顺序解析配置：
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
+| `interceptor` | 本地拦截。格式与 `mask` 相同（`mode` + `types`），`types` 为 mask 类型的密钥子集。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 
@@ -52,6 +61,8 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |
 
 ## SLS 密钥配置
 
@@ -77,16 +88,11 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 把 Agent 消息里的图片（内联 base64，或本地路径读入后编码）存到对象存储，事件里只留 `uri`。需要对象存储，以及目标 Agent 的 `agents.<id>.multimodal.uploadMode` 不为 `none`。本地读文件的范围是 `agents.<id>.multimodal.allowedRootPaths` 加上该 Agent 默认根。详见 [多模态采集](multimodal.md)。
 
-存储有两种写法。**显式配置优先**：已填写的字段以用户配置为准，不会被 flusher 覆盖。
-
-1. **直接用。** 完整填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。缺字段或类型无效则关闭上传，不回退。
-2. **复用 SLS flusher。** 仅在以下两种情况补齐缺省字段：
-   - **全部复用**：恰好一条无冲突的 SLS `apiKey` 目标。省略 `storage`、只写 `{ "type": "sls" }` / `{ "type": "delegatedOss" }`，或 `target: {}`，都是整段复用。`type` 可为 `sls` / `delegatedOss`；也可以只覆盖 `target.logstore`。
-   - **只复用 project**：独立 storage 已填写 auth / endpoint / logstore，仅缺 `project`。可从 project-qualified 的 multimodal endpoint 提取，或复用同 region flusher 中唯一的 project（常见于 WebTracking）。凭据仍使用用户配置。AK/SK、WebTracking 凭证不会拷贝到 multimodal。
+必须显式填写 `multimodal.storage`（`sls` / `delegatedOss` / `oss`）。SLS 存储的 `target` 要有 endpoint、project 和 logstore；project-qualified endpoint 可以提供 project。只有 `auth.apiKey` 可以复用：省略 `auth` 时，`config.sls` 中必须有 endpoint、project、logstore 均相同且唯一无冲突的 API Key 值。其他目标、冲突 Key、AK 或 WebTracking 凭证都不能复用。显式 `auth` 保持原值。storage 缺字段或无效时关闭上传，不回退。
 
 `type` 选一种：`sls`、`delegatedOss` 或 `oss`。`sls` / `delegatedOss` 不用手写存储前缀，Pilot 会按 `project` / `logstore` 使用 `sls://{project}/{logstore}`。
 
-最小复用（Codex）。SLS flusher 即存储目标，`uploadMode` 打开转换：
+最小 API Key 复用（Codex）。显式 storage target 与 SLS flusher 相同，`uploadMode` 打开转换：
 
 ```json
 {
@@ -96,6 +102,16 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
     "project": "your-project",
     "logstore": "your-logstore",
     "apiKey": "your-sls-project-api-key"
+  },
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "your-logstore"
+      }
+    }
   },
   "agents": {
     "codex": {
@@ -107,20 +123,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 }
 ```
 
-只覆盖 Logstore：
-
-```json
-{
-  "multimodal": {
-    "storage": {
-      "type": "sls",
-      "target": { "logstore": "logstore-multimodal" }
-    }
-  }
-}
-```
-
-`auth` 填写一套完整的 ApiKey 或 AK。未填 `mode` 时按这套凭证推断。
+使用不同 Logstore 时，填写完整的三个 target 字段，并在 `config.sls` 增加匹配条目，或显式填写 `auth`。填写 `auth` 时须包含一套完整的 API Key 或 AK；未填 `mode` 时按凭证推断。
 
 ### `type: sls`
 
@@ -217,14 +220,14 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 |--------|------|
 | `multimodal.storage.type` | `sls`、`delegatedOss` 或 `oss`。 |
 | `multimodal.storage.target.endpoint` | SLS 或 OSS 区域 Endpoint（OSS 不支持 accelerate）。 |
-| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。可省略：同 region 的 flusher SLS 目标里恰好一个 project 时复用。显式空值则关闭上传。 |
-| `multimodal.storage.target.logstore` | 存放多模态对象的 Logstore。独立 `sls` / `delegatedOss` 必填。复用唯一 `apiKey` 时：省略 storage 即用 flusher 的 Logstore，或只写此字段覆盖。 |
+| `multimodal.storage.target.project` | `sls` / `delegatedOss` 的 SLS Project。必填，除非 target endpoint 自带 project。显式空值则关闭上传。 |
+| `multimodal.storage.target.logstore` | `sls` / `delegatedOss` 必填。复用 API Key 时须与某个 SLS 条目一致。 |
 | `multimodal.storage.target.storageBasePath` | `oss` 必填，须以 `oss://` 开头，例如 `oss://bucket/prefix`。 |
-| `multimodal.storage.auth.mode` | 可选。`ak` 或 `apiKey`。未填时按已填写的凭证推断。`type=oss` 必须是 `ak`。 |
+| `multimodal.storage.auth.mode` | `ak` 或 `apiKey`。未填时按显式凭证或匹配的 SLS API Key 推断。`type=oss` 必须是 `ak`。 |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | `mode=ak` 时必填；STS 可加 `securityToken`。 |
-| `multimodal.storage.auth.apiKey` | `mode=apiKey` 时必填。不能与 AK 同时写。 |
+| `multimodal.storage.auth.apiKey` | 显式写 `mode=apiKey` 时必填；有匹配的 `config.sls` API Key 时可省略整个 `auth`。不能与 AK 同时写。 |
 
-省略 `multimodal.storage` 且存在唯一 SLS `apiKey` 目标时，复用该目标。没有可复用目标，或 storage 已写但无效时，文本采集照常，图片不会转成 `uri`。
+复用只查询 `config.sls`，不读取内部配置或环境变量覆盖。省略 storage 或 storage 无效时，文本采集照常，图片不会转成 `uri`。
 
 ## 配置主题
 
@@ -236,6 +239,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |
 | POST 到自定义 HTTP 接口 | [HTTP 输出](http-output.md) |
 | 脱敏 API Key、AccessKey、私钥、数据库 URL 和个人敏感信息 | [数据脱敏](masking.md) |
+| 本地拦截 Prompt / 工具调用中的密钥 | [本地拦截](interceptor.md) |
 
 ## 日志保留
 
@@ -288,12 +292,15 @@ loongsuite-pilot info
 安装时可排除 Agent 会话的本地工作目录。macOS/Linux 支持重复参数：
 
 ```bash
-bash installer.sh install \
+curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && \
+bash /tmp/loongsuite-pilot-installer.sh install \
   --exclude-workspace "/Users/alice/private" \
   --exclude-workspace "/Users/alice/company-secret"
 ```
 
-Windows 使用目录数组：
+从源码仓库安装时使用 `bash deploy/installer-opensource.sh install --exclude-workspace "/绝对路径/private"`。
+
+Windows 在仓库 `deploy` 目录下使用目录数组：
 
 ```powershell
 .\installer-opensource.ps1 install -ExcludeWorkspace "C:\private", "D:\company-secret"
@@ -309,12 +316,12 @@ Windows 使用目录数组：
 }
 ```
 
-将列表改为 `[]` 并重启可关闭过滤。此设置不使用环境变量覆盖。
+将列表改为 `[]` 并重启可关闭过滤。此设置不使用环境变量覆盖。修改后必须执行 `loongsuite-pilot restart` 才能保证所有采集路径使用新规则；Hook 可能在下一次调用时提前读取新配置，但运行中的 collector 不热加载，因此修改至重启之间不能视为新规则已全局生效。
 
 - workspace 指 Agent 明确提供的会话 `cwd`、`workspace.path` 或 IDE `workspace_roots`，不要求 Git 仓库。不会通过仓库远端地址、工具访问路径、日志存放位置或对话内容猜测目录。
 - 匹配目录本身及所有子目录，规范化 `..`、分隔符并解析符号链接；`/code/private-copy` 不会命中 `/code/private`。Windows 按不区分大小写的本地路径匹配。
 - 多根 workspace 任一命中就屏蔽整个会话的后续事件，包括对话、工具调用和 token 事件。未知目录正常采集；稍后识别命中时停止后续采集，已输出的数据不撤回。
-- 命中状态按 Agent 和原生会话 ID 保存。即使切回其他目录或 Pilot 重启，也不会恢复该会话。不同黑名单列表使用独立状态，恢复原列表会复用其屏蔽记录；没有会话 ID 时只能按当前事件判断。
-- 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
+- 命中状态按 Agent 和原生会话 ID 保存。即使切回其他目录或 Pilot 重启，也不会恢复该会话。不同黑名单列表使用独立状态，恢复原列表会复用其屏蔽记录；没有会话 ID 时只能按当前事件判断。状态目录不可写时仍在当前进程中屏蔽命中会话，正常会话继续采集，并输出不含目录信息的限频告警、在后续事件中重试；持久化成功前无法保证跨进程或重启后仍记住该会话。
+- 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口（`writeJsonlRecords` / `appendRowsToHistory`）及 Cursor 正式 history 的 stop、延迟响应路径也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
 
-这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，部分专用采集入口的本地中间文件也可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。
+这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，Cursor event journal、插件自行写入的原生/中间 JSONL 等文件可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。

@@ -5,28 +5,45 @@ import os from 'node:os';
 import path from 'node:path';
 import { WorkspacePolicy } from './workspace-policy.mjs';
 
-/** Shared hook writers filter before creating Pilot history files. */
+// Reuse the current policy so an in-process marker I/O failure cannot erase a
+// blocked session on the next write. Config edits still require collector restart.
+let cachedPolicy;
+let cachedPolicyKey;
+
+/** Errors are not successful exclusions: callers must keep their source cursor. */
 function loadPolicy() {
-  const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
-  let config;
-  try { config = JSON.parse(fs.readFileSync(process.env.AGENT_DATA_COLLECTION_CONFIG || path.join(dataDir, 'config.json'), 'utf8')); }
-  catch (error) {
-    if (error.code === 'ENOENT') return new WorkspacePolicy();
-    return null; // Invalid privacy configuration must not write new content.
+  try {
+    const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
+    const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG || path.join(dataDir, 'config.json');
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      config = {};
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('invalid config');
+    const configuredDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || config.dataDir || dataDir;
+    const stateDir = configuredDataDir.replace(/^~(?=[/\\]|$)/, os.homedir());
+    const policyKey = JSON.stringify([stateDir, config.privacy?.excludeWorkspaces]);
+    if (!cachedPolicy || cachedPolicyKey !== policyKey) {
+      const policy = new WorkspacePolicy(config.privacy?.excludeWorkspaces, path.join(stateDir, 'state', 'workspace-exclusions'));
+      cachedPolicy = policy;
+      cachedPolicyKey = policyKey;
+    }
+    return cachedPolicy;
+  } catch {
+    // Do not echo JSON input, paths or parser errors into hook logs.
+    throw new Error('Workspace privacy configuration could not be loaded; collection will retry without advancing its cursor');
   }
-  const configuredDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || config.dataDir || dataDir;
-  const stateDir = configuredDataDir.replace(/^~(?=[/\\]|$)/, os.homedir());
-  const policy = new WorkspacePolicy(config.privacy?.excludeWorkspaces, path.join(stateDir, 'state', 'workspace-exclusions'));
-  return policy;
 }
 
 export function filterWorkspaceRecords(records, agentId) {
-  return loadPolicy()?.filter(records, agentId) ?? [];
+  return loadPolicy().filter(records, agentId);
 }
 
 export function filterWorkspaceJsonLines(lines, agentId) {
   const policy = loadPolicy();
-  if (!policy) return [];
   if (!policy.enabled) return lines;
   const records = lines.map(line => {
     try {
