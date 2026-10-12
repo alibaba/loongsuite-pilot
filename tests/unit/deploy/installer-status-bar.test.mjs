@@ -21,7 +21,7 @@ const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-
 // Exercise the real parser and capture its expanded Node program, then execute
 // that program in-process against a temporary data dir. This tests shell-to-JS
 // value transport without requiring a second Node runtime or any installation.
-function runConfig(platform, args = [], existing, command = 'install') {
+function runConfig(platform, args = [], existing, command = 'install', probePadding = 0) {
   const root = mkdtempSync(resolve(tmpdir(), 'pilot-status-bar-config-'));
   const configPath = resolve(root, 'config.json');
   try {
@@ -34,11 +34,13 @@ function runConfig(platform, args = [], existing, command = 'install') {
       result = spawnSync('bash', ['-c', `${shellPrelude}
 msg() { :; }
 capture_node() {
+  # Match the real writer's stdin consumption so printf cannot fail with SIGPIPE.
+  cat > /dev/null
   printf '%s' "$2" > "$PILOT_TEST_JS"
   printf '%s' "$LP_ENABLE_STATUS_BAR_APP" > "$PILOT_TEST_STATUS_BAR"
 }
 NODE_BIN=capture_node
-PROBE_RESULT='[]'
+PROBE_RESULT="$(printf '%${probePadding}s' '')[]"
 ${shellWriter}
 write_config`, 'installer-test', command, '--data-dir', root, ...args], {
         encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath },
@@ -76,6 +78,12 @@ Write-Config`);
 }
 
 describe('installer menu bar startup option', () => {
+  it('drains probe input larger than the pipe buffer in the Bash test stub', () => {
+    const result = runConfig('bash', ['--enable-status-bar-app', 'false'], undefined, 'install', 1024 * 1024);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.config.enableStatusBarApp).toBe(false);
+  });
+
   for (const platform of ['bash', 'powershell-js']) {
     describe(platform, () => {
       it('leaves the runtime default unchanged on a fresh install when omitted', () => {
