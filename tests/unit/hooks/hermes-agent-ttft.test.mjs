@@ -292,8 +292,9 @@ else:
 end("test")
 flush("test")
 `);
-    expect(responses).toHaveLength(1);
-    expect(responses[0]).not.toHaveProperty(TTFT);
+    // The priming request in missing-pre is recovered by process-exit flush.
+    expect(responses).toHaveLength(scenario === 'missing-pre' ? 2 : 1);
+    for (const response of responses) expect(response).not.toHaveProperty(TTFT);
     expect(extra.result).toEqual(scenario === 'old-signature'
       ? 'old-result' : { values: ['preserved'], response: 'native-result' });
   });
@@ -388,7 +389,8 @@ end("again")
 flush("again")
 `);
     expect(extra.same_wrapper).toBe(true);
-    expect(responses.map(response => response[TTFT])).toEqual([50, 80]);
+    // The early request had no bridge and is recovered only at process exit.
+    expect(responses.map(response => response[TTFT])).toEqual([50, 80, undefined]);
   });
 
   it('uses the rediscovered plugin request context without wrapping the native method again', () => {

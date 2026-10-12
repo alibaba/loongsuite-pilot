@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import functools
 import hashlib
@@ -493,6 +494,8 @@ def _session(session_id: str) -> Dict[str, Any]:
             "model": None,
             "platform": None,
             "turns": {},
+            "turn_count": 0,
+            "finalize_requested": False,
         }
         _SESSIONS[session_id] = state
         while len(_SESSIONS) > MAX_SESSIONS:
@@ -576,6 +579,8 @@ def _remember_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[st
         turn["task_id"] = task_id
     turn["model"] = payload.get("model") or state.get("model")
     turn["platform"] = payload.get("platform") or state.get("platform")
+    if turn["fallback_turn_id"] not in state["turns"]:
+        state["turn_count"] = min(2, state["turn_count"] + 1)
     state["turns"][turn["fallback_turn_id"]] = turn
     while len(state["turns"]) > MAX_ACTIVE_TURNS:
         oldest = next(iter(state["turns"].values()))
@@ -586,6 +591,10 @@ def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, 
     state["turns"].pop(turn["fallback_turn_id"], None)
     if any(api.get("post_ns") is not None for api in turn["apis"]):
         _write_records(_build_records(turn, state, payload))
+    if state["finalize_requested"] and not state["turns"]:
+        session_id = turn["session_id"]
+        if _SESSIONS.get(session_id) is state:
+            _SESSIONS.pop(session_id, None)
 
 
 def _turn_id(turn: Dict[str, Any]) -> str:
@@ -1311,7 +1320,26 @@ def _handle_on_session_end(now_ns: int, payload: Dict[str, Any]) -> None:
     state = _SESSIONS.get(session_id)
     if state is None:
         return
-    turn = _find_turn(state, payload)
+    # Finish hooks must not adopt another invocation via _find_turn's legacy
+    # same-thread fallback, including after the original turn was flushed.
+    identifiers = {
+        key: payload[key]
+        for key in ("turn_id", "task_id")
+        if isinstance(payload.get(key), str) and payload[key]
+    }
+    if identifiers:
+        matches = [
+            turn for turn in state["turns"].values()
+            if all(turn["observer_turn_id" if key == "turn_id" else key] == value
+                   for key, value in identifiers.items())
+        ]
+        turn = matches[0] if len(matches) == 1 else None
+    elif state["turn_count"] == 1:
+        # Preserve the original single-turn error fallback without treating a
+        # surviving background turn as evidence of ownership.
+        turn = _find_turn(state, payload)
+    else:
+        turn = None
     if turn is None or not any(api.get("post_ns") is not None for api in turn["apis"]):
         return
     _flush_turn(state, turn, payload)
@@ -1321,7 +1349,14 @@ def _handle_on_session_finalize(now_ns: int, payload: Dict[str, Any]) -> None:
     _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if isinstance(session_id, str) and session_id:
-        _SESSIONS.pop(session_id, None)
+        state = _SESSIONS.get(session_id)
+        if state is not None:
+            # A foreground finalize can precede background post_tool/post_llm.
+            # Keep its history-bearing completion path; abandoned turns remain
+            # bounded by MAX_ACTIVE_TURNS and MAX_SESSIONS.
+            state["finalize_requested"] = True
+            if not state["turns"]:
+                _SESSIONS.pop(session_id, None)
 
 
 _HANDLERS: Dict[str, Callable[[int, Dict[str, Any]], None]] = {
@@ -1359,3 +1394,18 @@ def register(ctx: Any) -> None:
             ctx.register_hook(hook_name, _safe_callback(hook_name))
         except Exception:
             continue
+
+
+@atexit.register
+def _flush_at_exit() -> None:
+    """Best effort for abandoned turns once normal completion is no longer possible."""
+    with _STATE_LOCK:
+        for state in list(_SESSIONS.values()):
+            for turn in list(state["turns"].values()):
+                try:
+                    # _flush_turn emits only APIs with a completion timestamp;
+                    # missing history and unfinished tools cannot be recovered.
+                    _flush_turn(state, turn, {})
+                except Exception as error:
+                    _report_internal_error("process exit flush", error)
+        _SESSIONS.clear()
