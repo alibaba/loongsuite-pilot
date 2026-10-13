@@ -251,6 +251,51 @@ describe('SlsUploader', () => {
     expect(put).toHaveBeenCalledTimes(3);
   });
 
+  it('warns once when delegatedOss XML failures differ only by RequestId', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const put = vi.spyOn(slsClient, 'slsPutViaPresignedHttp');
+    put.mockImplementation(async () => ({
+      ok: false,
+      statusCode: 403,
+      retryable: false,
+      error: `403 <?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>The bucket you access does not belong to you.</Message>
+  <RequestId>req-${put.mock.calls.length}</RequestId>
+  <HostId>user-bucket.oss-cn-hangzhou.aliyuncs.com</HostId>
+</Error>`,
+    }));
+    const uploader = new SlsUploader({
+      ...sls,
+      type: 'delegatedOss',
+    }, 'sls://proj/logstore', {
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    });
+    const item = (targetPath: string) => ({
+      targetPath,
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    });
+    for (let i = 0; i < 50; i++) {
+      expect(await uploader.upload(item(`20260101/a${i}.png`))).toBe(false);
+    }
+    const failed = () => mockWarn.mock.calls.filter(call => call[0] === 'sls upload failed');
+    expect(failed()).toHaveLength(1);
+
+    put.mockResolvedValueOnce({
+      ok: false,
+      statusCode: 403,
+      retryable: false,
+      error: `403 <Error><Code>InvalidObjectState</Code><Message>frozen</Message><RequestId>other</RequestId></Error>`,
+    });
+    expect(await uploader.upload(item('20260101/b.png'))).toBe(false);
+    expect(failed()).toHaveLength(2);
+  });
+
   it('uploads anonymously without forwarding credentials', async () => {
     const put = vi.spyOn(slsClient, 'slsPutObject').mockResolvedValue({
       ok: true,

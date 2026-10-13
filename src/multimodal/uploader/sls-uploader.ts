@@ -18,7 +18,12 @@ import {
 const logger = createLogger('SlsUploader');
 const UPLOAD_FAILURE_WARN_INTERVAL_MS = 60_000;
 
-/** Same status can carry a different server reason. Ignore request ids so repeats still collapse. */
+function xmlTag(xml: string, tag: string): string {
+  const match = xml.match(new RegExp(`<${tag}>([^<]*)</${tag}>`, 'i'));
+  return match?.[1]?.trim() ?? '';
+}
+
+/** Stable error identity: SLS errorCode/errorMessage, or OSS Code/Message. */
 function stableFailureReason(error: unknown): string {
   if (typeof error !== 'string' || !error) return '';
   const jsonStart = error.indexOf('{');
@@ -29,10 +34,13 @@ function stableFailureReason(error: unknown): string {
       const message = typeof parsed.errorMessage === 'string' ? parsed.errorMessage : '';
       if (code || message) return `${code}\0${message}`;
     } catch {
-      // Response body is not JSON; the raw text is the reason.
+      // Body is not JSON.
     }
   }
-  return error;
+  const code = xmlTag(error, 'Code');
+  const message = xmlTag(error, 'Message');
+  if (code || message) return `${code}\0${message}`;
+  return '';
 }
 
 /** SLS-backed uploader (fail-open). sls=PutObject; delegatedOss=presign then raw PUT. */
@@ -41,7 +49,7 @@ export class SlsUploader implements Uploader {
   private readonly logstore: string;
   private expectedOrigin?: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
-  private readonly failureWarnAt = new Map<string, number>();
+  private readonly failureWarnAt = new LruMap<number>(MULTIMODAL_LRU_LIMIT);
   private readonly abort = new AbortController();
   private closed = false;
 

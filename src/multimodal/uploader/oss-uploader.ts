@@ -15,7 +15,7 @@ export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
-  private readonly failureWarnAt = new Map<string, number>();
+  private readonly failureWarnAt = new LruMap<number>(MULTIMODAL_LRU_LIMIT);
   private readonly abort = new AbortController();
   private closed = false;
 
