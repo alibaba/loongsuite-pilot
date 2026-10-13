@@ -13,11 +13,11 @@ import {
 import type {
   BlobToUriParams,
   PathToUriOptions,
+  StorageBaseResult,
   Uploader,
   UriConvertMeta,
   UriResult,
 } from './types.js';
-import { SlsUploader } from './uploader/sls-uploader.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
@@ -94,6 +94,7 @@ export class MultimodalProcessor {
   private shuttingDown = false;
   private uploader: Uploader;
   private storageBasePath = '';
+  private readonly resolveStorageBase?: () => Promise<StorageBaseResult>;
   private sniffTimer: ReturnType<typeof setTimeout> | undefined;
   private sniffFailureCount = 0;
   /** path→uri cache keyed by path + event day + mtime + size. */
@@ -102,11 +103,12 @@ export class MultimodalProcessor {
   private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
 
   constructor(
-    storageBasePath: string,
+    storageBasePath: string | undefined,
     uploader: Uploader,
+    resolveStorageBase?: () => Promise<StorageBaseResult>,
   ) {
     const base = (storageBasePath ?? '').trim().replace(/\/+$/, '');
-    if (!base) {
+    if (!base && !resolveStorageBase) {
       throw new Error('multimodal storageBasePath is required');
     }
     if (!uploader) {
@@ -114,12 +116,8 @@ export class MultimodalProcessor {
     }
     this.storageBasePath = base;
     this.uploader = uploader;
-  }
-
-  /** Learn the delegatedOss bucket, then emit oss:// URIs. */
-  retryDelegatedOss(): void {
-    this.storageBasePath = '';
-    this.scheduleDelegatedOssSniff();
+    this.resolveStorageBase = resolveStorageBase;
+    if (!base) this.scheduleDelegatedOssSniff();
   }
 
   /** Local image path → uri. */
@@ -345,6 +343,8 @@ export class MultimodalProcessor {
       },
       data: bytes,
       expectedSize: size,
+    }, {
+      onStorageBaseInvalidated: () => this.noteOriginMismatch(),
     }).then(() => undefined, () => undefined);
     this.pending.add(uploadPromise);
     void uploadPromise.finally(() => {
@@ -388,30 +388,37 @@ export class MultimodalProcessor {
     }
   }
 
+  /** Re-learn the delegatedOss bucket after the presign origin changes. */
+  private noteOriginMismatch(): void {
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    this.storageBasePath = '';
+    this.pathUriCache.clear();
+    this.scheduleDelegatedOssSniff();
+  }
+
   private scheduleDelegatedOssSniff(): void {
-    if (this.shuttingDown || this.storageBasePath) return;
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    if (this.storageBasePath) return;
     const exponent = Math.min(this.sniffFailureCount, 6);
     const delayMs = Math.min(DELEGATED_OSS_RETRY_BASE_MS * (2 ** exponent), DELEGATED_OSS_RETRY_MAX_MS);
     this.sniffFailureCount += 1;
     this.sniffTimer = setTimeout(() => {
-      this.sniffTimer = undefined;
       void this.sniffDelegatedOss();
     }, delayMs);
   }
 
   private async sniffDelegatedOss(): Promise<void> {
-    if (!(this.uploader instanceof SlsUploader)) {
-      logger.error('delegatedOss retry requires SlsUploader');
-      return;
-    }
-    const sniffed = await this.uploader.discoverDelegatedOssBucket();
-    if (this.shuttingDown || this.storageBasePath) return;
+    if (!this.resolveStorageBase) return;
+    const sniffed = await this.resolveStorageBase();
+    this.sniffTimer = undefined;
+    if (this.shuttingDown) return;
     if (!sniffed.ok) {
       logger.warn('delegatedOss storage sniff failed; retrying', { error: sniffed.error });
       this.scheduleDelegatedOssSniff();
       return;
     }
     this.storageBasePath = sniffed.storageBasePath;
+    this.sniffFailureCount = 0;
     logger.info('multimodal processor enabled', {
       type: 'delegatedOss',
       storageBasePath: sniffed.storageBasePath,

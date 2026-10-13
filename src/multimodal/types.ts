@@ -18,8 +18,17 @@ export interface UploadItem {
   expectedSize: number;
 }
 
+export interface UploadOptions {
+  skipIfExists?: boolean;
+  onStorageBaseInvalidated?: () => void;
+}
+
+export type StorageBaseResult =
+  | { ok: true; storageBasePath: string }
+  | { ok: false; error: string };
+
 export interface Uploader {
-  upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean>;
+  upload(item: UploadItem, opts?: UploadOptions): Promise<boolean>;
   shutdown(): Promise<void>;
 }
 

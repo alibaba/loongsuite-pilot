@@ -7,7 +7,6 @@ import {
   normalizeSlsEndpoint,
   slsProjectHost,
   resolveSlsObjectAuth,
-  resolveMultimodalEventStorageBasePath,
   bindPresignedPutUrl,
   slsGeneratePresignedUrl,
   slsPutObject,
@@ -919,29 +918,6 @@ describe('sls-client (presign)', () => {
     if (!forbidden.ok) expect(forbidden.error).toMatch(/403/);
   });
 
-  it.each([
-    { mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk' },
-    { mode: 'apiKey' as const, apiKey: 'edge-key' },
-    { mode: 'anonymous' as const },
-  ])('returns sls:// for type=sls $mode without a startup request', async (auth) => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth,
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
   it('retries delegatedOss sniff on timeout then succeeds', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
@@ -963,31 +939,6 @@ describe('sls-client (presign)', () => {
       origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('resolves oss:// for delegatedOss via one presign', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-    }), { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'delegatedOss',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result).toEqual({
-      ok: true,
-      storageBasePath: 'oss://user-bucket/proj/logstore',
-      origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
-    });
-    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('accepts delegatedOss when SLS uses an official -internal endpoint', async () => {

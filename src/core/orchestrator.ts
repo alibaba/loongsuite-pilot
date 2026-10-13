@@ -75,10 +75,10 @@ import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import {
   anyAgentMultimodalEnabled,
+  createDelegatedOssUploader,
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
-  resolveMultimodalEventStorageBasePath,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -267,32 +267,40 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
-        if (eventBase.ok) {
-          const uploader = createUploader(multimodalConfig, {
-            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
-          });
-          const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
-          this.inputManager.setMultimodalProcessor(processor);
-          this.multimodalProcessor = processor;
+        let processor: MultimodalProcessor;
+        if (multimodalConfig.storage.type === 'delegatedOss') {
+          const runtime = createDelegatedOssUploader(
+            multimodalConfig.storage,
+            multimodalConfig.storageBasePath,
+          );
+          const eventBase = await runtime.resolveStorageBase();
+          processor = new MultimodalProcessor(
+            eventBase.ok ? eventBase.storageBasePath : undefined,
+            runtime.uploader,
+            runtime.resolveStorageBase,
+          );
+          if (eventBase.ok) {
+            logger.info('multimodal processor enabled', {
+              type: multimodalConfig.storage.type,
+              mode: multimodalConfig.storage.auth.mode,
+              storageBasePath: eventBase.storageBasePath,
+            });
+          } else {
+            logger.warn('multimodal processor waiting for delegatedOss bucket', {
+              error: eventBase.error,
+            });
+          }
+        } else {
+          const uploader = createUploader(multimodalConfig);
+          processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
           logger.info('multimodal processor enabled', {
             type: multimodalConfig.storage.type,
             mode: multimodalConfig.storage.auth.mode,
-            storageBasePath: eventBase.storageBasePath,
+            storageBasePath: multimodalConfig.storageBasePath,
           });
-        } else if (multimodalConfig.storage.type === 'delegatedOss') {
-          const uploader = createUploader(multimodalConfig);
-          const placeholder = (multimodalConfig.storageBasePath ?? '').trim() || 'pending';
-          const processor = new MultimodalProcessor(placeholder, uploader);
-          processor.retryDelegatedOss();
-          this.inputManager.setMultimodalProcessor(processor);
-          this.multimodalProcessor = processor;
-          logger.warn('multimodal processor waiting for delegatedOss bucket', {
-            error: eventBase.error,
-          });
-        } else {
-          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
         }
+        this.inputManager.setMultimodalProcessor(processor);
+        this.multimodalProcessor = processor;
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }

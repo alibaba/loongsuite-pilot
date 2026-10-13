@@ -85,12 +85,14 @@ describe('OssUploader', () => {
   it('warns once per status and error per minute', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    vi.spyOn(ossClient, 'ossPutObject').mockResolvedValue({
+    let request = 0;
+    vi.spyOn(ossClient, 'ossPutObject').mockImplementation(async () => ({
       ok: false,
       statusCode: 403,
+      requestId: `oss-req-403-${request++}`,
       error: 'oss putObject status 403',
       retryable: false,
-    });
+    }));
     const uploader = new OssUploader(ossStorage());
     const item = (targetPath: string) => ({
       targetPath,
@@ -104,6 +106,7 @@ describe('OssUploader', () => {
     }
     const failed = () => mockWarn.mock.calls.filter(call => call[0] === 'oss upload failed');
     expect(failed()).toHaveLength(1);
+    expect(failed()[0]?.[1]).toMatchObject({ requestId: 'oss-req-403-0' });
 
     vi.setSystemTime(new Date('2026-01-01T00:01:01Z'));
     expect(await uploader.upload(item('20260101/b.png'))).toBe(false);

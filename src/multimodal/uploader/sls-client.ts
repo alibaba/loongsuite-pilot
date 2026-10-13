@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { MultimodalRuntimeConfig, MultimodalStorageAuth } from '../types.js';
+import type { MultimodalStorageAuth } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
 import { normalizeOssEndpoint } from '../resolve.js';
 import { DEFAULT_MULTIMODAL_RETRY, withRetries } from './retry.js';
@@ -787,25 +787,4 @@ export async function sniffSlsHttpEventStorageBasePath(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/** Event URI prefix. delegatedOss learns the bucket from a presign. */
-export async function resolveMultimodalEventStorageBasePath(
-  config: MultimodalRuntimeConfig,
-): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
-  if (config.storage.type === 'delegatedOss') {
-    const { target, auth } = config.storage;
-    return sniffSlsHttpEventStorageBasePath({
-      endpoint: target.endpoint,
-      project: target.project,
-      logstore: target.logstore,
-      ...slsStorageAuthFields(auth),
-      timeoutMs: SLS_STARTUP_TIMEOUT_MS,
-    });
-  }
-  const storageBasePath = (config.storageBasePath ?? '').trim();
-  if (!storageBasePath) {
-    return { ok: false, error: 'multimodal storageBasePath is required' };
-  }
-  return { ok: true, storageBasePath };
 }

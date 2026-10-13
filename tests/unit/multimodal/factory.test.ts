@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createUploader } from '../../../src/multimodal/uploader/factory.js';
+import { createDelegatedOssUploader, createUploader } from '../../../src/multimodal/uploader/factory.js';
 import { OssUploader } from '../../../src/multimodal/uploader/oss-uploader.js';
 import { SlsUploader } from '../../../src/multimodal/uploader/sls-uploader.js';
 
@@ -73,6 +73,20 @@ describe('createUploader', () => {
       storageBasePath: 'sls://proj/logstore',
     });
     expect(uploader).toBeInstanceOf(SlsUploader);
+  });
+
+  it('exposes storage discovery only for delegatedOss', () => {
+    const runtime = createDelegatedOssUploader({
+      type: 'delegatedOss',
+      target: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+      },
+      auth: slsAuth,
+    }, 'sls://proj/logstore');
+    expect(runtime.uploader).toBeInstanceOf(SlsUploader);
+    expect(runtime.resolveStorageBase).toEqual(expect.any(Function));
   });
 
   it('creates SlsUploader for apiKey mode', () => {

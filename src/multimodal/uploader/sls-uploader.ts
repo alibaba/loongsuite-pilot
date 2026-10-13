@@ -1,5 +1,11 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalStorage, UploadItem, Uploader } from '../types.js';
+import type {
+  MultimodalStorage,
+  StorageBaseResult,
+  UploadItem,
+  UploadOptions,
+  Uploader,
+} from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import {
   DEFAULT_MULTIMODAL_RETRY,
@@ -76,11 +82,14 @@ export class SlsUploader implements Uploader {
     if (!trimmed) {
       throw new Error('delegatedOss requires expectedPresignOrigin');
     }
+    if (this.expectedOrigin && this.expectedOrigin !== trimmed) {
+      this.successKeys.clear();
+    }
     this.expectedOrigin = trimmed;
   }
 
   /** Presign to learn the delegatedOss bucket and event URI prefix. */
-  async discoverDelegatedOssBucket(): Promise<{ ok: true; storageBasePath: string } | { ok: false; error: string }> {
+  async discoverDelegatedOssBucket(): Promise<StorageBaseResult> {
     if (this.storage.type !== 'delegatedOss') {
       return { ok: false, error: 'delegatedOss bucket discovery requires delegatedOss storage' };
     }
@@ -105,7 +114,7 @@ export class SlsUploader implements Uploader {
     }
   }
 
-  async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
+  async upload(item: UploadItem, opts?: UploadOptions): Promise<boolean> {
     try {
       if (this.closed) {
         logger.warn('sls upload skipped: uploader closed');
@@ -138,13 +147,16 @@ export class SlsUploader implements Uploader {
           retryable: put.retryable !== false,
           error: put.error,
           statusCode: put.statusCode,
+          requestId: put.requestId,
         };
       }, { signal: this.abort.signal });
 
       if (!result.ok) {
+        if (result.error === 'presign url origin mismatch') opts?.onStorageBaseInvalidated?.();
         this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
+          requestId: result.requestId,
           size: item.expectedSize,
           targetPath: item.targetPath,
         });

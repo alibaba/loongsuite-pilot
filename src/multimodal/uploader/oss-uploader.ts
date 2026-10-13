@@ -1,5 +1,5 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalStorage, UploadItem, Uploader } from '../types.js';
+import type { MultimodalStorage, UploadItem, UploadOptions, Uploader } from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import { ossPutObject, parseOssStorageBasePath } from './oss-client.js';
 import {
@@ -27,7 +27,7 @@ export class OssUploader implements Uploader {
     this.prefix = parsed.prefix;
   }
 
-  async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
+  async upload(item: UploadItem, opts?: UploadOptions): Promise<boolean> {
     try {
       if (this.closed) {
         logger.warn('oss upload skipped: uploader closed');
@@ -74,6 +74,7 @@ export class OssUploader implements Uploader {
           retryable: put.retryable !== false,
           error: put.error,
           statusCode: put.statusCode,
+          requestId: put.requestId,
         };
       }, { signal: this.abort.signal });
 
@@ -81,6 +82,7 @@ export class OssUploader implements Uploader {
         this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
+          requestId: result.requestId,
           size: item.expectedSize,
         });
         return false;
