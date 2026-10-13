@@ -9,10 +9,11 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   parseArgs,
   parseStdinPayload,
@@ -24,6 +25,7 @@ import {
   loadHookRuntimeConfig,
   getErrorLogFile,
   HOOKS_DIR,
+  LOONGSUITE_PILOT_DATA_DIR,
   LOONGSUITE_PILOT_LOGS_BASE_DIR,
 } from './shared/hook-processor-base.mjs';
 import {
@@ -50,6 +52,14 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
 });
 
 const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
+const QODER_HOME = path.join(os.homedir(), '.qoder');
+const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
+const QODER_CLI_IDENTITY_CACHE_FILE = path.join(
+  LOONGSUITE_PILOT_DATA_DIR,
+  'state',
+  'hooks',
+  'qoder-cli-user-identity.json',
+);
 
 function nonEmptyIdentityValue(value) {
   if (typeof value !== 'string') return undefined;
@@ -64,6 +74,97 @@ export function extractUserIdentity(extra) {
   const name = nonEmptyIdentityValue(user.name);
   const email = nonEmptyIdentityValue(user.email);
   return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+}
+
+async function resolveQoderCliUserIdentity() {
+  const authPath = path.join(QODER_HOME, '.auth', 'user');
+  let authStat;
+  try {
+    authStat = fs.statSync(authPath);
+    if (!authStat.isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  let cached;
+  try {
+    cached = JSON.parse(fs.readFileSync(QODER_CLI_IDENTITY_CACHE_FILE, 'utf-8'));
+  } catch {
+    cached = undefined;
+  }
+  if (
+    cached?.schemaVersion === 1
+    && cached.authPath === authPath
+    && cached.mtimeMs === authStat.mtimeMs
+    && cached.size === authStat.size
+  ) {
+    if (cached.loggedIn === false) return undefined;
+    const name = nonEmptyIdentityValue(cached.name);
+    const email = nonEmptyIdentityValue(cached.email);
+    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  }
+
+  let executable;
+  try {
+    const cliDir = path.join(QODER_HOME, 'bin', 'qodercli');
+    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
+    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
+    executable = path.join(
+      cliDir,
+      `qodercli-${version}${process.platform === 'win32' ? '.exe' : ''}`,
+    );
+    fs.accessSync(executable, fs.constants.X_OK);
+    if (!fs.statSync(executable).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const status = await new Promise(resolve => {
+    execFile(executable, ['status', '--output', 'json'], {
+      encoding: 'utf-8',
+      timeout: QODER_CLI_STATUS_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+    }, (error, stdout) => {
+      if (error) return resolve(undefined);
+      try {
+        const parsed = JSON.parse(String(stdout || '').trim());
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return resolve(undefined);
+        if (parsed.logged_in === false) return resolve({ loggedIn: false });
+        if (parsed.logged_in !== true) return resolve(undefined);
+        const name = nonEmptyIdentityValue(parsed.username);
+        const email = nonEmptyIdentityValue(parsed.email);
+        resolve(name || email
+          ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
+          : undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  });
+  if (!status) return undefined;
+
+  const temporary = `${QODER_CLI_IDENTITY_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(QODER_CLI_IDENTITY_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(temporary, JSON.stringify({
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      loggedIn: status.loggedIn,
+      ...(status.name ? { name: status.name } : {}),
+      ...(status.email ? { email: status.email } : {}),
+    }), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(temporary, QODER_CLI_IDENTITY_CACHE_FILE);
+  } catch {
+    try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
+  }
+  if (!status.loggedIn) return undefined;
+  return {
+    ...(status.name ? { name: status.name } : {}),
+    ...(status.email ? { email: status.email } : {}),
+  };
 }
 
 async function readRetryUserIdentity() {
@@ -397,21 +498,24 @@ async function main() {
   if (!payload) return;
 
   const { transcriptPath, sessionId, cwd, extra } = payload;
-  const userIdentity = agentId === 'qoder' ? extractUserIdentity(extra) : undefined;
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   if (sessionId) {
     recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
   }
 
+  // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
+  // and the eventual processor input.
+  const snapshot = readTranscriptSnapshot(transcriptPath);
+  const cliTranscript = agentId === 'qoder'
+    && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
+  const userIdentity = cliTranscript
+    ? await resolveQoderCliUserIdentity()
+    : (agentId === 'qoder' ? extractUserIdentity(extra) : undefined);
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),
   };
-
-  // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
-  // and the eventual processor input.
-  const snapshot = readTranscriptSnapshot(transcriptPath);
   const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
   if (!range) return;
 

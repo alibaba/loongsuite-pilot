@@ -55,20 +55,27 @@ function lastPrompt(index) {
   return { type: 'last-prompt', sessionId: 'session-old', lastPrompt: `prompt ${index}` };
 }
 
-function runProcessor(sessionId = 'session-old', extraEnv = {}) {
+function runProcessor(sessionId = 'session-old', extraEnv = {}, payload = {}) {
   return spawnSync('node', [PROCESSOR, '--agent-id', 'qoder', '--log-prefix', 'qoder'], {
     input: JSON.stringify({
       session_id: sessionId,
       transcript_path: transcriptPath,
       cwd: '/tmp/qoder-project',
+      ...payload,
     }),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
+    env: {
+      ...process.env,
+      HOME: dataDir,
+      USERPROFILE: dataDir,
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      ...extraEnv,
+    },
     encoding: 'utf-8',
     timeout: 30_000,
   });
 }
 
-function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity) {
+function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity, extraEnv = {}) {
   return spawnSync('node', [
     PROCESSOR,
     '--agent-id', 'qoder',
@@ -82,9 +89,12 @@ function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity) {
     input: userIdentity ? JSON.stringify(userIdentity) : '',
     env: {
       ...process.env,
+      HOME: dataDir,
+      USERPROFILE: dataDir,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
       HOOK_RETRY_DELAY: '0',
       HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
+      ...extraEnv,
     },
     encoding: 'utf-8',
     timeout: 30_000,
@@ -105,6 +115,8 @@ function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay =
     ], {
       env: {
         ...process.env,
+        HOME: dataDir,
+        USERPROFILE: dataDir,
         LOONGSUITE_PILOT_DATA_DIR: dataDir,
         HOOK_RETRY_DELAY: retryDelay,
         HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
@@ -132,6 +144,52 @@ function readHistory() {
     .flatMap(file => fs.readFileSync(path.join(historyDir, file), 'utf-8').split('\n'))
     .filter(Boolean)
     .map(line => JSON.parse(line));
+}
+
+function installFakeQoderCli(root) {
+  const cliDir = path.join(root, 'bin', 'qodercli');
+  fs.mkdirSync(cliDir, { recursive: true });
+  fs.mkdirSync(path.join(root, '.auth'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'projects', 'workspace'), { recursive: true });
+  fs.writeFileSync(path.join(cliDir, 'version.txt'), '1.0.0\n');
+  const executable = path.join(cliDir, 'qodercli-1.0.0');
+  fs.writeFileSync(executable, `#!/bin/sh
+count=0
+if [ -f "$QODER_FAKE_COUNTER" ]; then count=$(cat "$QODER_FAKE_COUNTER"); fi
+count=$((count + 1))
+printf '%s\\n' "$count" > "$QODER_FAKE_COUNTER"
+mode=$(cat "$QODER_FAKE_MODE")
+case "$mode" in
+  fail) exit 1 ;;
+  bad) printf 'not-json'; exit 0 ;;
+  slow) sleep 4; printf '%s\\n' '{"logged_in":true,"username":"slow","email":"slow@example.com"}'; exit 0 ;;
+esac
+case "$mode" in
+  switched) printf '%s\\n' '{"logged_in":true,"username":"other","email":"other@example.com"}' ;;
+  logged-out) printf '%s\\n' '{"logged_in":false,"username":"old","email":"old@example.com"}' ;;
+  *) printf '%s\\n' '{"logged_in":true,"username":" cli-user ","email":" cli@example.com "}' ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  const counter = path.join(root, 'counter.txt');
+  const mode = path.join(root, 'mode.txt');
+  fs.writeFileSync(path.join(root, '.auth', 'user'), 'auth-a', { mode: 0o600 });
+  fs.writeFileSync(path.join(root, '.qoder-app-status.json'), JSON.stringify({
+    name: 'ide-status-user',
+    email: 'ide-status@example.com',
+  }));
+  fs.writeFileSync(mode, 'ok');
+  return {
+    transcript: path.join(root, 'projects', 'workspace', 'session.jsonl'),
+    counter,
+    mode,
+    auth: path.join(root, '.auth', 'user'),
+    env: { QODER_FAKE_COUNTER: counter, QODER_FAKE_MODE: mode },
+  };
+}
+
+function readCounter(file) {
+  return fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf-8')) : 0;
 }
 
 function userBoundaryPrompts(records) {
@@ -530,5 +588,136 @@ describe('qoder-hook-processor cold-start recovery', () => {
         expect(VALID_FINISH_REASONS).toContain(message.finish_reason);
       }
     }
+  });
+
+  it('stamps CLI status identity and reuses it while the auth file is unchanged', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'cli prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const first = runProcessor('session-old', fake.env);
+    expect(first.status).toBe(0);
+    expect(readHistory().every(record =>
+      record['user.name'] === 'cli-user' && record['user.email'] === 'cli@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(1);
+
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(2, 'second cli prompt'),
+      lastPrompt(2),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const before = readHistory().length;
+    const second = runProcessor('session-old', fake.env);
+    expect(second.status).toBe(0);
+    expect(readHistory().slice(before).every(record =>
+      record['user.name'] === 'cli-user' && record['user.email'] === 'cli@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(1);
+  });
+
+  it('refreshes CLI identity when the auth fingerprint changes', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'cli prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+
+    fs.writeFileSync(fake.mode, 'switched');
+    fs.writeFileSync(fake.auth, 'auth-b-changed');
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(2, 'switched prompt'),
+      lastPrompt(2),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const before = readHistory().length;
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readHistory().slice(before).every(record =>
+      record['user.name'] === 'other' && record['user.email'] === 'other@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(2);
+  });
+
+  it('omits CLI identity on logout, invalid output, and timeout without failing the hook', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(fake.mode, 'logged-out');
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'logged out prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(2, 'still logged out'),
+      lastPrompt(2),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readCounter(fake.counter)).toBe(1);
+
+    fs.writeFileSync(fake.mode, 'bad');
+    fs.writeFileSync(fake.auth, 'auth-invalid');
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(3, 'invalid status prompt'),
+      lastPrompt(3),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readCounter(fake.counter)).toBe(2);
+
+    fs.writeFileSync(fake.mode, 'slow');
+    fs.writeFileSync(fake.auth, 'auth-slow');
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(4, 'slow status prompt'),
+      lastPrompt(4),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const startedAt = Date.now();
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    expect(readHistory().some(record =>
+      record['user.name'] === 'slow' || record['user.email'] === 'slow@example.com',
+    )).toBe(false);
+    expect(readCounter(fake.counter)).toBe(3);
+  });
+
+  it('keeps IDE hook identity and does not query the CLI', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'IDE prompt').map(row => {
+        const { entrypoint, ...ideRow } = row;
+        return ideRow;
+      }),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runProcessor('ide-session', fake.env, {
+      extra: { user: { name: ' ide-user ', email: ' ide@example.com ' } },
+    });
+    expect(result.status).toBe(0);
+    expect(readHistory().every(record =>
+      record['user.name'] === 'ide-user' && record['user.email'] === 'ide@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(0);
+  });
+
+  it('preserves the Stop-time CLI identity through a detached retry', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    const rows = [...turnRows(1, 'retry prompt'), lastPrompt(1)];
+    fs.writeFileSync(transcriptPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runRetry(rows.length, 'session-old', {
+      name: 'retry-user',
+      email: 'retry@example.com',
+    }, fake.env);
+    expect(result.status).toBe(0);
+    expect(readHistory().every(record =>
+      record['user.name'] === 'retry-user' && record['user.email'] === 'retry@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(0);
   });
 });
