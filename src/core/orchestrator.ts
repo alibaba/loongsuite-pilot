@@ -268,9 +268,7 @@ export class Orchestrator extends EventEmitter {
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
         const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
-        if (!eventBase.ok) {
-          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
-        } else {
+        if (eventBase.ok) {
           const uploader = createUploader(multimodalConfig, {
             ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
           });
@@ -282,6 +280,18 @@ export class Orchestrator extends EventEmitter {
             mode: multimodalConfig.storage.auth.mode,
             storageBasePath: eventBase.storageBasePath,
           });
+        } else if (multimodalConfig.storage.type === 'delegatedOss') {
+          const uploader = createUploader(multimodalConfig);
+          const placeholder = (multimodalConfig.storageBasePath ?? '').trim() || 'pending';
+          const processor = new MultimodalProcessor(placeholder, uploader);
+          processor.retryDelegatedOss();
+          this.inputManager.setMultimodalProcessor(processor);
+          this.multimodalProcessor = processor;
+          logger.warn('multimodal processor waiting for delegatedOss bucket', {
+            error: eventBase.error,
+          });
+        } else {
+          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
         }
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });

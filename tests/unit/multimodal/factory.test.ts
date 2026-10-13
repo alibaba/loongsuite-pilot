@@ -59,8 +59,8 @@ describe('createUploader', () => {
     expect(uploader).toBeInstanceOf(SlsUploader);
   });
 
-  it('throws when delegatedOss is missing expectedPresignOrigin', () => {
-    expect(() => createUploader({
+  it('creates SlsUploader for delegatedOss before the presign origin is known', () => {
+    const uploader = createUploader({
       storage: {
         type: 'delegatedOss',
         target: {
@@ -71,7 +71,8 @@ describe('createUploader', () => {
         auth: slsAuth,
       },
       storageBasePath: 'sls://proj/logstore',
-    })).toThrow(/requires expectedPresignOrigin/);
+    });
+    expect(uploader).toBeInstanceOf(SlsUploader);
   });
 
   it('creates SlsUploader for apiKey mode', () => {

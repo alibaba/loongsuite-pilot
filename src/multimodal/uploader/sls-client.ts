@@ -706,11 +706,11 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
   return undefined;
 }
 
-/** Startup sniff. Shorter than upload timeout so a hung call does not stall start. */
+/** Timeout for the delegatedOss bucket presign. */
 const SLS_STARTUP_TIMEOUT_MS = 5_000;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
 
-/** Deterministic capability/auth errors fail closed; timeout/429/5xx use upload retry. */
+/** Presign the delegatedOss probe object. */
 async function probeSlsMultimodalCapability(
   params: SlsRequest,
 ): Promise<SlsPresignResult> {
@@ -730,41 +730,9 @@ async function probeSlsMultimodalCapability(
       error: last.error,
       statusCode: last.statusCode,
     };
-  });
-  if (result.ok) return result.value;
-  return { ok: false, error: result.error || 'sls multimodal probe failed', statusCode: result.statusCode };
-}
-
-/** Verify that anonymous PutObject is accepted before emitting SLS object URIs. */
-async function probeSlsAnonymousPutCapability(
-  params: SlsRequest,
-): Promise<SlsResult> {
-  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
-  const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
-    const last = await slsPutObject({
-      ...params,
-      mode: 'anonymous',
-      objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
-      body: Buffer.from('probe'),
-      contentType: 'application/octet-stream',
-      timeoutMs,
-    });
-    if (last.ok) {
-      return { ok: true as const, value: last };
-    }
-    return {
-      ok: false as const,
-      retryable: last.retryable === true,
-      error: last.error,
-      statusCode: last.statusCode,
-    };
   }, { signal: params.signal });
   if (result.ok) return result.value;
-  return {
-    ok: false,
-    error: result.error || 'sls anonymous PutObject probe failed',
-    statusCode: result.statusCode,
-  };
+  return { ok: false, error: result.error || 'sls multimodal probe failed', statusCode: result.statusCode };
 }
 
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
@@ -788,7 +756,7 @@ export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
   };
 }
 
-/** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
+/** Learn the delegatedOss bucket from a presign URL. */
 export async function sniffSlsHttpEventStorageBasePath(
   params: SlsRequest,
 ): Promise<{ ok: true; storageBasePath: string; origin: string } | { ok: false; error: string }> {
@@ -822,44 +790,23 @@ export async function sniffSlsHttpEventStorageBasePath(
   }
 }
 
-/** Event URI prefix for Processor. */
+/** Event URI prefix. delegatedOss learns the bucket from a presign. */
 export async function resolveMultimodalEventStorageBasePath(
   config: MultimodalRuntimeConfig,
 ): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
-  if (config.storage.type !== 'delegatedOss') {
-    const storageBasePath = (config.storageBasePath ?? '').trim();
-    if (!storageBasePath) {
-      return { ok: false, error: 'multimodal storageBasePath is required' };
-    }
-    if (config.storage.type === 'sls') {
-      const { target, auth } = config.storage;
-      const probe = auth.mode === 'anonymous'
-        ? await probeSlsAnonymousPutCapability({
-          endpoint: target.endpoint,
-          project: target.project,
-          logstore: target.logstore,
-        })
-        : await probeSlsMultimodalCapability({
-          endpoint: target.endpoint,
-          project: target.project,
-          logstore: target.logstore,
-          ...slsStorageAuthFields(auth),
-        });
-      if (!probe.ok) {
-        return { ok: false, error: probe.error || 'sls multimodal probe failed' };
-      }
-    }
-    return { ok: true, storageBasePath };
+  if (config.storage.type === 'delegatedOss') {
+    const { target, auth } = config.storage;
+    return sniffSlsHttpEventStorageBasePath({
+      endpoint: target.endpoint,
+      project: target.project,
+      logstore: target.logstore,
+      ...slsStorageAuthFields(auth),
+      timeoutMs: SLS_STARTUP_TIMEOUT_MS,
+    });
   }
-
-  const { target, auth } = config.storage;
-  const sniffed = await sniffSlsHttpEventStorageBasePath({
-    endpoint: target.endpoint,
-    project: target.project,
-    logstore: target.logstore,
-    ...slsStorageAuthFields(auth),
-    timeoutMs: SLS_STARTUP_TIMEOUT_MS,
-  });
-  if (!sniffed.ok) return sniffed;
-  return sniffed;
+  const storageBasePath = (config.storageBasePath ?? '').trim();
+  if (!storageBasePath) {
+    return { ok: false, error: 'multimodal storageBasePath is required' };
+  }
+  return { ok: true, storageBasePath };
 }

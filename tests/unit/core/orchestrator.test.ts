@@ -726,6 +726,7 @@ describe('Orchestrator', () => {
       MockMultimodalProcessor.mockImplementation((base: string) => ({
         storageBasePath: base,
         shutdown: vi.fn().mockResolvedValue(undefined),
+        retryDelegatedOss: vi.fn(),
       }));
       setProcessor = vi.spyOn(InputManager.prototype, 'setMultimodalProcessor');
     });
@@ -734,7 +735,7 @@ describe('Orchestrator', () => {
       setProcessor.mockRestore();
     });
 
-    it('does not install a processor when event-base resolution fails', async () => {
+    it('leaves delegatedOss retrying inside the processor when the startup sniff fails', async () => {
       mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
         ok: false,
         error: 'presign failed',
@@ -747,13 +748,14 @@ describe('Orchestrator', () => {
       await orch.start();
 
       expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
-      expect(mockCreateUploader).not.toHaveBeenCalled();
-      expect(MockMultimodalProcessor).not.toHaveBeenCalled();
-      expect(setProcessor).not.toHaveBeenCalled();
+      expect(mockCreateUploader).toHaveBeenCalledWith(delegatedOss);
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith('sls://proj/logstore', fakeUploader);
+      const installed = setProcessor.mock.calls[0]?.[0] as { retryDelegatedOss: ReturnType<typeof vi.fn> };
+      expect(installed.retryDelegatedOss).toHaveBeenCalledOnce();
       await orch.stop();
     });
 
-    it('installs a processor when event-base resolution succeeds', async () => {
+    it('installs a processor when the delegatedOss sniff succeeds', async () => {
       mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
         ok: true,
         storageBasePath: 'oss://user-bucket/proj/logstore',
@@ -766,7 +768,6 @@ describe('Orchestrator', () => {
 
       await orch.start();
 
-      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
       expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
         storage: expect.objectContaining({ type: 'delegatedOss' }),
       }), {
@@ -777,9 +778,6 @@ describe('Orchestrator', () => {
         fakeUploader,
       );
       expect(setProcessor).toHaveBeenCalledTimes(1);
-      expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
-        storageBasePath: 'oss://user-bucket/proj/logstore',
-      });
       await orch.stop();
     });
   });

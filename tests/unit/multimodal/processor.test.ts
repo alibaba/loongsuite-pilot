@@ -4,6 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MultimodalProcessor, withDeadline } from '../../../src/multimodal/processor.js';
+import { SlsUploader } from '../../../src/multimodal/uploader/sls-uploader.js';
+import * as slsClient from '../../../src/multimodal/uploader/sls-client.js';
 import { mergeAllowedRootPaths } from '../../../src/multimodal/resolve.js';
 import { yyyymmddLocal } from '../../../src/multimodal/resolve.js';
 import {
@@ -617,6 +619,63 @@ describe('MultimodalProcessor.pathToUri', () => {
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
     await processor.shutdown(100);
     expect(await processor.pathToUri(file, undefined, TMP_ALLOW)).toBeNull();
+  });
+
+  it('retries a missed delegatedOss sniff until the bucket is known', async () => {
+    vi.useFakeTimers();
+    const put = vi.spyOn(slsClient, 'slsPutViaPresignedHttp').mockResolvedValue({
+      ok: true,
+      statusCode: 200,
+      requestId: 'r',
+    });
+    const sniff = vi.spyOn(slsClient, 'sniffSlsHttpEventStorageBasePath')
+      .mockResolvedValueOnce({ ok: false, error: '403' })
+      .mockResolvedValue({
+        ok: true,
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+      });
+    const delegatedOss = {
+      storage: {
+        type: 'delegatedOss' as const,
+        target: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'proj',
+          logstore: 'logstore',
+        },
+        auth: { mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk' },
+      },
+      storageBasePath: 'sls://proj/logstore',
+    };
+    const processor = new MultimodalProcessor(
+      delegatedOss.storageBasePath,
+      new SlsUploader(delegatedOss.storage, delegatedOss.storageBasePath),
+    );
+    processor.retryDelegatedOss();
+    expect(sniff).not.toHaveBeenCalled();
+    expect(processor.blobToUri({ content: 'aaaa', mime_type: 'image/png' })).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sniff).toHaveBeenCalledOnce();
+    expect(processor.blobToUri({ content: 'aaaa', mime_type: 'image/png' })).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sniff).toHaveBeenCalledTimes(2);
+    expect(processor.blobToUri({
+      content: Buffer.from('png').toString('base64'),
+      mime_type: 'image/png',
+    })?.uri).toBe(
+      `oss://user-bucket/proj/logstore/${yyyymmddLocal(new Date())}/${createHash('sha256').update(Buffer.from('png')).digest('hex')}.png`,
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sniff).toHaveBeenCalledTimes(2);
+    expect(put).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      expectedOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    }));
+    await processor.shutdown();
+    vi.useRealTimers();
   });
 });
 

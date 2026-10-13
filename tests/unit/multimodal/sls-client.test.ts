@@ -919,10 +919,12 @@ describe('sls-client (presign)', () => {
     if (!forbidden.ok) expect(forbidden.error).toMatch(/403/);
   });
 
-  it('keeps sls:// for type=sls after a successful capability probe', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-    }), { status: 200 }));
+  it.each([
+    { mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk' },
+    { mode: 'apiKey' as const, apiKey: 'edge-key' },
+    { mode: 'anonymous' as const },
+  ])('returns sls:// for type=sls $mode without a startup request', async (auth) => {
+    const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const result = await resolveMultimodalEventStorageBasePath({
       storage: {
@@ -932,154 +934,12 @@ describe('sls-client (presign)', () => {
           project: 'proj',
           logstore: 'logstore',
         },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        auth,
       },
       storageBasePath: 'sls://proj/logstore',
     });
     expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('keeps sls:// after a successful anonymous PutObject probe', async () => {
-    const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) =>
-      new Response('', { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'anonymous' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-
-    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(String(url)).toContain('/logstores/logstore/objects/_pilot/storage-probe');
-    expect(init?.method).toBe('PUT');
-    expect(new Headers(init?.headers).has('Authorization')).toBe(false);
-    expect(Buffer.from(init?.body as Buffer).toString('utf8')).toBe('probe');
-  });
-
-  it('disables anonymous type=sls on 401 without retrying', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      errorCode: 'Unauthorized',
-      errorMessage: 'Anonymous access is forbidden for this operation.',
-    }), { status: 401 }));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'anonymous' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain('401');
-      expect(result.error).toContain('Anonymous access is forbidden');
-    }
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('disables type=sls when the Logstore has multimodal off', async () => {
-    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
-      errorCode: 'ParameterInvalid',
-      errorMessage: 'LogStore multimodal is not enabled. Please enable multimodal configuration first.',
-    }), { status: 400 }));
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'multimodal_test_disable',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/multimodal_test_disable',
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toMatch(/LogStore multimodal is not enabled/);
-    }
-  });
-
-  it('retries type=sls probe on timeout then succeeds', async () => {
-    const fetchMock = vi.fn()
-      .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-      }), { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('retries type=sls probe on 429 then succeeds', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response('429 busy', { status: 429 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
-      }), { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result).toEqual({ ok: true, storageBasePath: 'sls://proj/logstore' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('retries type=sls probe on 5xx then gives up', async () => {
-    const fetchMock = vi.fn(async () => new Response('500 down', { status: 500 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
-    });
-    expect(result.ok).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('retries delegatedOss sniff on timeout then succeeds', async () => {
@@ -1089,17 +949,13 @@ describe('sls-client (presign)', () => {
         url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
       }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'delegatedOss',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
+    const result = await sniffSlsHttpEventStorageBasePath({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'proj',
+      logstore: 'logstore',
+      mode: 'ak',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
     });
     expect(result).toEqual({
       ok: true,
@@ -1109,32 +965,11 @@ describe('sls-client (presign)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('does not retry type=sls probe on a capability 400', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      errorCode: 'ParameterInvalid',
-      errorMessage: 'LogStore multimodal is not enabled. Please enable multimodal configuration first.',
-    }), { status: 400 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'sls',
-        target: {
-          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'multimodal_test_disable',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/multimodal_test_disable',
-    });
-    expect(result.ok).toBe(false);
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
   it('resolves oss:// for delegatedOss via one presign', async () => {
-    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
     }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
     const result = await resolveMultimodalEventStorageBasePath({
       storage: {
         type: 'delegatedOss',
@@ -1152,23 +987,20 @@ describe('sls-client (presign)', () => {
       storageBasePath: 'oss://user-bucket/proj/logstore',
       origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
     });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('accepts delegatedOss when SLS uses an official -internal endpoint', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
       url: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com/proj/logstore/k?sig=1',
     }), { status: 200 }));
-    const result = await resolveMultimodalEventStorageBasePath({
-      storage: {
-        type: 'delegatedOss',
-        target: {
-          endpoint: 'https://cn-hangzhou-internal.log.aliyuncs.com',
-          project: 'proj',
-          logstore: 'logstore',
-        },
-        auth: { mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
-      },
-      storageBasePath: 'sls://proj/logstore',
+    const result = await sniffSlsHttpEventStorageBasePath({
+      endpoint: 'https://cn-hangzhou-internal.log.aliyuncs.com',
+      project: 'proj',
+      logstore: 'logstore',
+      mode: 'ak',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
     });
     expect(result).toEqual({
       ok: true,

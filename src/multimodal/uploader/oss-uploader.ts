@@ -9,11 +9,13 @@ import {
 } from './retry.js';
 
 const logger = createLogger('OssUploader');
+const UPLOAD_FAILURE_WARN_INTERVAL_MS = 60_000;
 
 export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private readonly failureWarnAt = new Map<string, number>();
   private readonly abort = new AbortController();
   private closed = false;
 
@@ -76,7 +78,7 @@ export class OssUploader implements Uploader {
       }, { signal: this.abort.signal });
 
       if (!result.ok) {
-        logger.warn('oss upload failed', {
+        this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
           size: item.expectedSize,
@@ -98,9 +100,19 @@ export class OssUploader implements Uploader {
       });
       return true;
     } catch (err) {
-      logger.warn('oss upload failed', { error: String(err), size: item.expectedSize });
+      this.warnUploadFailure(undefined, { error: String(err), size: item.expectedSize });
       return false;
     }
+  }
+
+  private warnUploadFailure(statusCode: number | undefined, fields: Record<string, unknown>): void {
+    const reason = typeof fields.error === 'string' ? fields.error : '';
+    const key = `${statusCode ?? 'none'}\0${reason}`;
+    const now = Date.now();
+    const previous = this.failureWarnAt.get(key) ?? 0;
+    if (now - previous < UPLOAD_FAILURE_WARN_INTERVAL_MS) return;
+    this.failureWarnAt.set(key, now);
+    logger.warn('oss upload failed', fields);
   }
 
   async shutdown(): Promise<void> {
