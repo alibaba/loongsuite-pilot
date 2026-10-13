@@ -1,7 +1,7 @@
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import {
   multimodalUploadIncludesInput,
-  multimodalUploadIncludesTool,
+  multimodalUploadIncludesOutput,
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
@@ -25,6 +25,10 @@ const AT_IMAGE_RE = new RegExp(
   `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
   'gi',
 );
+const FILE_CITATION_IMAGE_RE = new RegExp(
+  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+  'gi',
+);
 const READ_IMAGE_RE = new RegExp(`Read image:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
 const IMAGE_FILE_RE = new RegExp(`Image file:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
 const IMAGE_GEN_PATH_RE = new RegExp(
@@ -36,6 +40,7 @@ const SIZE_SUFFIX_RE = /\s+\(\d+(?:\.\d+)?\s*[KMGT]?B\)\s*$/i;
 interface EnrichStats {
   inputUri: number;
   toolUri: number;
+  outputUri: number;
   skipped: number;
 }
 
@@ -46,9 +51,10 @@ export interface EnrichCliMultimodalOptions {
 
 /**
  * CLI-only multimodal enrichment. Mutates entries in place.
- * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`, and
- * `@path`, then unique-resolve. Tool: Read/ImageGen.
- * No output surface (CLI assistant text does not embed images). Fail-open.
+ * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`,
+ * `@path`, and `文件：<image path>`, then unique-resolve.
+ * Tool result: Read/ImageGen. Tool call: Read `file_path` (output mode).
+ * Assistant finals do not embed images. Fail-open.
  */
 export async function enrichCliMultimodal(
   entries: AgentActivityEntry[],
@@ -71,13 +77,14 @@ async function enrichCliMultimodalInner(
   if (opts.uploadMode === 'none') return;
 
   const touched = new Set<AgentActivityEntry>();
-  const stats: EnrichStats = { inputUri: 0, toolUri: 0, skipped: 0 };
+  const stats: EnrichStats = { inputUri: 0, toolUri: 0, outputUri: 0, skipped: 0 };
 
   if (multimodalUploadIncludesInput(opts.uploadMode)) {
     await enrichInputImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesTool(opts.uploadMode)) {
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
+  }
+  if (multimodalUploadIncludesOutput(opts.uploadMode)) {
+    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
   }
 
   for (const entry of touched) {
@@ -88,7 +95,7 @@ async function enrichCliMultimodalInner(
     }
   }
 
-  if (stats.inputUri > 0 || stats.toolUri > 0 || stats.skipped > 0) {
+  if (stats.inputUri > 0 || stats.toolUri > 0 || stats.outputUri > 0 || stats.skipped > 0) {
     logger.info('qoder cli multimodal enrich', {
       uploadMode: opts.uploadMode,
       sessionId: sessionIdOf(entries),
@@ -148,6 +155,36 @@ async function enrichToolResultImages(
       ...uriParts,
     ] as unknown as JsonValue;
     stats.toolUri += uriParts.length;
+    touched.add(entry);
+  }
+}
+
+async function enrichToolCallImages(
+  entries: AgentActivityEntry[],
+  pathToUri: PathToUriFn,
+  touched: Set<AgentActivityEntry>,
+  stats: EnrichStats,
+): Promise<void> {
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'tool.call') continue;
+    if (entry['gen_ai.tool.name'] !== 'Read') continue;
+    const raw = entry['gen_ai.tool.call.arguments'];
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (Array.isArray(raw)) continue;
+
+    const cwd = cwdOf(entry);
+    const paths = extractToolCallImagePaths(raw, cwd);
+    if (paths.length === 0) continue;
+
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    if (uriParts.length === 0) continue;
+
+    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    entry['gen_ai.tool.call.arguments'] = [
+      { type: 'text', content: original },
+      ...uriParts,
+    ] as unknown as JsonValue;
+    stats.outputUri += uriParts.length;
     touched.add(entry);
   }
 }
@@ -224,6 +261,7 @@ export function extractInputImagePaths(
     ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
+    ...matchAll(FILE_CITATION_IMAGE_RE, text),
   ], raw => resolveImagePath(raw, cwd));
 }
 
@@ -248,6 +286,25 @@ export function extractToolImagePaths(text: string, cwd?: string): string[] {
     ...matchAll(IMAGE_FILE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
   ], raw => resolveImagePath(raw, cwd));
+}
+
+export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
+  let record: Record<string, unknown> | null = null;
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    record = args as Record<string, unknown>;
+  } else if (typeof args === 'string' && args) {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        record = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // hook writes JSON.stringify; ignore non-JSON argument strings
+    }
+  }
+  const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
+  if (!filePath) return [];
+  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
 }
 
 function stripSizeSuffix(raw: string): string {

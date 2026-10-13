@@ -392,6 +392,11 @@ describe('MultimodalProcessor.pathToUri', () => {
     const holdReads = new Promise<void>(resolve => {
       releaseReads = resolve;
     });
+    let readsStarted = 0;
+    let notifyBothReadsStarted!: () => void;
+    const bothReadsStarted = new Promise<void>(resolve => {
+      notifyBothReadsStarted = resolve;
+    });
     vi.doMock('../../../src/multimodal/types.js', async (importOriginal) => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/types.js')>();
       return { ...actual, MAX_MULTIMODAL_PATH_INFLIGHT: 2 };
@@ -405,6 +410,7 @@ describe('MultimodalProcessor.pathToUri', () => {
           maxBytes?: number,
           allowedRootPaths?: string[],
         ) => {
+          if (++readsStarted === 2) notifyBothReadsStarted();
           await holdReads;
           return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
         },
@@ -419,16 +425,17 @@ describe('MultimodalProcessor.pathToUri', () => {
       const f3 = writeTempPng('inflight-3.png', 'three');
       const uploader = new FakeUploader();
       const processor = new ProcessorWithTinyPathBudget(STORAGE_BASE, uploader);
+      const opts = { ...TMP_ALLOW, deadlineMs: 0 };
 
-      const first = processor.pathToUri(f1, EVENT_TIME_MS, TMP_ALLOW);
-      const second = processor.pathToUri(f2, EVENT_TIME_MS, TMP_ALLOW);
-      // Fill the two slots before the third distinct path is admitted.
-      await Promise.resolve();
-      const overflow = await processor.pathToUri(f3, EVENT_TIME_MS, TMP_ALLOW);
+      const first = processor.pathToUri(f1, EVENT_TIME_MS, opts);
+      const second = processor.pathToUri(f2, EVENT_TIME_MS, opts);
+      // Wait until both reads occupy the two slots before testing overflow.
+      await bothReadsStarted;
+      const overflow = await processor.pathToUri(f3, EVENT_TIME_MS, opts);
       expect(overflow).toBeNull();
 
       // Same path as an in-flight read still coalesces (does not consume a new slot).
-      const coalesced = processor.pathToUri(f1, EVENT_TIME_MS, TMP_ALLOW);
+      const coalesced = processor.pathToUri(f1, EVENT_TIME_MS, opts);
 
       releaseReads();
       const [a, b, c] = await Promise.all([first, second, coalesced]);

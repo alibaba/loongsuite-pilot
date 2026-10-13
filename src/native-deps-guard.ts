@@ -1,23 +1,18 @@
-// native-deps-guard — fail loudly and early when the payload's native modules
-// cannot load on this container's libc.
+// native-deps-guard — fail loudly when this Node cannot provide node:sqlite.
 //
-// Why this exists: the daemon's module graph imports sqlite3 unconditionally at
-// startup (orchestrator.ts → the qoder-*-sqlite inputs), so on a container whose
-// libc cannot load the prebuilt addon — most commonly musl/Alpine, where no
-// glibc-linked .node can be dlopen'd at all, but also a glibc older than the
-// addon's own requirement — the daemon crashes
-// during module load. That crash used to be invisible twice over: it happens
-// before initFileLogging() runs, and the spawners redirected daemon stderr to
-// /dev/null. The user saw "no telemetry" and nothing else.
+// SQLite reads go through the builtin. It is unflagged from Node 22.13 and
+// 23.4 (added in 22.5 behind --experimental-sqlite). The managed runtime is
+// 22.22.x and already includes it. A load failure means this process is not
+// a usable Pilot runtime: Node 18/20, 22.0–22.12, and 23.0–23.3 cannot load
+// the builtin without a flag, and a damaged 22.22 build cannot either.
+// There is no degrade path — continuing would report a healthy collector
+// whose SQLite reads then fail. Install and upgrade must pick a node that
+// passes the same require(), or refuse and keep the previous version.
 //
-// build.mjs prepends `import './native-deps-guard.cjs'` to the daemon bundle, so
-// this runs before any of that graph loads and turns the silent crash into an
-// actionable diagnostic with a non-zero exit.
-//
-// Deliberately checks ONLY what the startup graph actually loads: sqlite3.
-// zstd-napi also ships in the payload but nothing in src/ imports it, so a
-// broken zstd-napi must not stop the daemon. Keep this list in sync with the
-// daemon's real top-level native imports, not with package.json.
+// build.mjs prepends `import './native-deps-guard.cjs'` so this runs first
+// and turns the failure into a thrown error plus a daemon.fatal marker. The
+// throw is what collector-daemon.js's import().catch uses to write
+// last-startup-crash.json; process.exit here would skip that breadcrumb.
 //
 // Never import this from the daemon itself — it must run before the daemon's
 // imports execute, which is only possible from a separately loaded module.
@@ -26,6 +21,34 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { resolveDataDir } from './utils/data-dir.js';
+
+// esbuild emits this file as CJS (`packages: 'external'`), so this stays a
+// runtime require of the Node builtin. typeof guards the ESM test runner,
+// where an undeclared require must not throw before the call.
+function loadBuiltin(id: string): unknown {
+  if (typeof require !== 'function') {
+    throw new Error(`cannot load ${id}`);
+  }
+  return require(id);
+}
+
+export type SqliteGuardDecision = 'ok' | 'fatal';
+
+/**
+ * True when node:sqlite is part of the binary without --experimental-sqlite.
+ * That starts at 22.13.0, 23.4.0, and every major after 23. The guard does
+ * not trust this predicate alone: a failed require() is fatal on every version.
+ */
+export function sqliteBuiltinExpected(version: string): boolean {
+  const [major = 0, minor = 0] = version.split('.').map(Number);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
+  return major > 23 || (major === 23 && minor >= 4) || (major === 22 && minor >= 13);
+}
+
+/** A failed require('node:sqlite') is fatal. A successful load is ok. */
+export function decideSqliteGuard(loadError: unknown): SqliteGuardDecision {
+  return loadError ? 'fatal' : 'ok';
+}
 
 /** Best-effort libc identification for the diagnostic; never throws. */
 function libcInfo(): string {
@@ -94,28 +117,44 @@ function fail(moduleName: string, err: unknown): never {
     `[pilot]   loader said: ${firstLine}`,
     `[pilot]   system libc: ${libcInfo()}`,
     '[pilot]',
-    '[pilot] The sqlite3 in this payload is the upstream prebuilt binary, which',
-    '[pilot] needs only a very old glibc (~2.4), and the process printing this',
-    '[pilot] is already running a working node. A load failure here typically',
-    "[pilot] means this container's libc is musl-based (Alpine), where glibc-linked",
-    '[pilot] addons cannot load — or the payload on the shared volume is corrupted.',
+    '[pilot] node:sqlite ships unflagged from Node.js 22.13 and 23.4.',
+    '[pilot] Node.js 18/20 and 22.0-22.12 / 23.0-23.3 cannot load it.',
+    '[pilot] On 22.13+ a load failure means this Node was built without',
+    '[pilot] SQLite, or the binary is damaged.',
     '[pilot]',
     '[pilot] Impact: the collector cannot start. Hooks already installed keep',
     '[pilot] writing events to local files, but nothing will ship them.',
-    '[pilot] Fix: run the agent container on a glibc base image (Debian/Ubuntu/',
-    '[pilot] Alibaba Cloud Linux), not musl/Alpine, and ensure the payload was',
-    '[pilot] built with a working node + native addon pairing.',
+    '[pilot] Fix: use the installer managed Node.js runtime, or any Node.js',
+    '[pilot] build that includes the node:sqlite module.',
   ];
   try {
     process.stderr.write(lines.join('\n') + '\n');
   } catch { /* last-ditch: there is nowhere else to write */ }
   writeFatalMarker(firstLine);
-  process.exit(1);
+  // Throw, do not process.exit. The daemon banner import is inside
+  // collector-daemon.js's import().catch, which writes last-startup-crash.json
+  // from this error before exiting. The message must contain "node:sqlite" so
+  // classifyStartupCrash marks it native_module_missing.
+  throw new Error(`node:sqlite cannot be loaded: ${firstLine}`);
 }
 
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  require('sqlite3');
-} catch (err) {
-  fail('sqlite3', err);
+function probeNodeSqlite(): unknown {
+  try {
+    loadBuiltin('node:sqlite');
+    return null;
+  } catch (err) {
+    return err;
+  }
+}
+
+export function runSqliteGuard(loadError: unknown): void {
+  if (decideSqliteGuard(loadError) === 'fatal') fail('node:sqlite', loadError);
+}
+
+// Top-level on purpose: the daemon banner imports this module, and the check
+// has to run then. Vitest imports this file for the pure helpers; skipping
+// the side effect there keeps a Node 18/20 test worker from exiting before
+// those assertions. The spawned CJS (VITEST unset) is the production check.
+if (process.env.VITEST !== 'true') {
+  runSqliteGuard(probeNodeSqlite());
 }

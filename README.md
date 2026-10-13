@@ -7,7 +7,7 @@
 [![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
 [![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
 
 **English** | [简体中文](README.zh-CN.md)
@@ -107,7 +107,7 @@ Agent definitions live in `agents.d/`. You can add new agents without changing t
 
 Prerequisites:
 
-- Node.js 18 or later
+- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). The installer downloads a managed Node.js 22.22 runtime on supported platforms; a system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough.
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
@@ -218,7 +218,9 @@ the port, run the shortcut install command again. See [Dashboard shortcut](docs/
 
 macOS menu bar app:
 
-On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+To disable automatic menu bar startup during installation, append `--enable-status-bar-app false` to the install command. This persists `enableStatusBarApp` in `config.json` before the collector starts. Omit the option to preserve the existing setting, or pass `true` to enable it. See the [installation guide](docs/installation.md#start-or-stop-the-macos-menu-bar-app).
+
+On macOS, Pilot runs a menu bar app after installation by default. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
 
 If you quit the menu bar app, reopen it without restarting collection:
 

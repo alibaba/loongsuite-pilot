@@ -698,6 +698,65 @@ describe('CodexTranscriptInput', () => {
     expect(internals.transcriptMetaCacheBytes).toBeLessThanOrEqual(internals.transcriptMetaCacheMaxBytes);
   });
 
+  it('keeps discovery scans from refreshing or evicting the active metadata working set', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-activity-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const writeMeta = (name: string, threadId: string) => writeTranscriptNamed(
+      sessionDir,
+      name,
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: threadId,
+        model_provider: 'openai',
+      }) + '\n',
+      { bootstrapFork: false },
+    );
+    const [coldPath, hotPath, candidatePath] = await Promise.all([
+      writeMeta('rollout-cache-slot-a.jsonl', 'session-0001'),
+      writeMeta('rollout-cache-slot-b.jsonl', 'session-0002'),
+      writeMeta('rollout-cache-slot-c.jsonl', 'session-0003'),
+    ]);
+    const internals = input as unknown as {
+      transcriptMetaCacheMaxEntries: number;
+      transcriptMetaCacheByPath: Map<string, unknown>;
+      indexDiscoveredTranscriptOwners(
+        files: Array<{ filePath: string; baselineOnStart: boolean }>,
+      ): Promise<void>;
+      loadTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        runtime: InputRuntimeAccumulator,
+        cacheAccess?: 'discovery' | 'active',
+      ): Promise<CodexTranscriptMeta | null>;
+    };
+    const load = async (filePath: string, cacheAccess: 'discovery' | 'active') => {
+      const stat = await fs.stat(filePath);
+      return internals.loadTranscriptOwnerMeta(
+        filePath,
+        stat.ino,
+        stat.size,
+        0,
+        new InputRuntimeAccumulator(),
+        cacheAccess,
+      );
+    };
+
+    await load(coldPath, 'active');
+    await load(hotPath, 'active');
+    internals.transcriptMetaCacheMaxEntries = 2;
+
+    await internals.indexDiscoveredTranscriptOwners([
+      { filePath: coldPath, baselineOnStart: true },
+      { filePath: candidatePath, baselineOnStart: true },
+    ]);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([coldPath, hotPath]);
+
+    await processTranscriptOnce(input, candidatePath);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([hotPath, candidatePath]);
+  });
+
   it('moves the metadata cache when incremental scanning finds the owning session_meta', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-offset-'));
     tempDirs.push(root);
@@ -4695,7 +4754,8 @@ describe('Codex transcript multimodal extraction', () => {
     const outputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'output' });
     expect(userParts(outputMode!).some((p: any) => p.type === 'uri')).toBe(false);
     const outputToolOut = outputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(true);
+    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    expect(JSON.stringify(outputMode)).not.toContain(png);
 
     const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'all' });
     expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });

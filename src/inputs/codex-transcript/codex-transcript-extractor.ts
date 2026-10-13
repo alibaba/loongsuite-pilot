@@ -2,7 +2,6 @@ import * as path from 'node:path';
 import { MAX_MULTIMODAL_PARTS, type BlobToUriFn, type UriPart } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
-  multimodalUploadIncludesTool,
   type JsonValue,
   type MultimodalUploadMode,
 } from '../../types/index.js';
@@ -503,7 +502,7 @@ function extractCodexTurn(
     const toolOutput = transcriptToolOutput(
       itemType,
       payload,
-      multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
+      multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
       timestamp,
       source.startOffset,
     );

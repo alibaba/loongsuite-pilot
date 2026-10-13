@@ -45,22 +45,19 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  // The guard must run BEFORE this bundle's module graph loads: the graph
-  // imports sqlite3 at top level (orchestrator.ts → qoder-*-sqlite inputs), so
-  // on a libc that cannot load the addon the bundle dies mid-import, before any
-  // logging exists, and the spawners used to drop that stderr. A static import
-  // in the banner is evaluated first by Node, so the guard's check — and its
-  // readable FATAL diagnostic — precede the crash it replaces. See
-  // src/native-deps-guard.ts.
+  // The guard must run BEFORE this bundle's module graph loads. SQLite reads
+  // use node:sqlite; if that builtin cannot load on an unflagged Node
+  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
+  // exists. A static
+  // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
   banner: { js: "import './native-deps-guard.cjs';" },
   define: commonDefine,
   plugins: commonPlugins,
 });
 
 // Loaded by the banner above, before the daemon graph. Must keep
-// `packages: 'external'`: its require('sqlite3') has to resolve against the
-// payload's node_modules at runtime — bundling it would try to inline a native
-// addon and defeat the check.
+// `packages: 'external'`: require('node:sqlite') has to hit the runtime Node,
+// not a bundler rewrite.
 await build({
   entryPoints: ['src/native-deps-guard.ts'],
   outfile: 'dist/native-deps-guard.cjs',
@@ -123,6 +120,33 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+await build({
+  entryPoints: ['src/interceptor/cli.ts'],
+  outfile: 'dist/interceptor/cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+await build({
+  entryPoints: ['src/interceptor/daemon.ts'],
+  outfile: 'dist/interceptor/daemon.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  minifySyntax: true,
   define: commonDefine,
   plugins: commonPlugins,
 });

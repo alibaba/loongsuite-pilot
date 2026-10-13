@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -33,7 +33,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerSh).toContain("(allSupported || selected.has(id)) ? multimodalMode : 'none'");
     expect(installerSh).not.toContain('listed.has');
     expect(installerSh).toContain("if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey)");
-    expect(installerSh).toContain('storage: { type: \'sls\' }');
+    expect(installerSh).toContain('target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore }');
     expect(installerSh).toContain("label: 'multimodal.storage.type'");
     expect(installerSh).toContain('"multimodalMode":"%s"');
   });
@@ -58,7 +58,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain("(allSupported || selected.has(id)) ? opts.multimodalMode : 'none'");
     expect(installerPs1).not.toContain('listed.has');
     expect(installerPs1).toContain("if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey)");
-    expect(installerPs1).toContain('storage: { type: \'sls\' }');
+    expect(installerPs1).toContain('target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore }');
     expect(installerPs1).toContain("label: 'multimodal.storage.type'");
     expect(installerPs1).toContain('multimodalMode = $script:MultimodalMode');
   });
@@ -126,6 +126,70 @@ function slsFlagArgs(platform, sls) {
     ? ['--sls-endpoint', sls.endpoint, '--sls-project', sls.project, '--sls-logstore', sls.logstore, '--sls-api-key', sls.apiKey]
     : ['-SlsEndpoint', sls.endpoint, '-SlsProject', sls.project, '-SlsLogstore', sls.logstore, '-SlsApiKey', sls.apiKey];
 }
+
+function runSlsArrayGuard(platform, existing) {
+  const root = mkdtempSync(resolve(tmpdir(), 'pilot-sls-guard-'));
+  const configPath = resolve(root, 'config.json');
+  const scriptPath = resolve(root, platform === 'bash' ? 'guard.sh' : 'guard.ps1');
+  try {
+    writeFileSync(configPath, JSON.stringify(existing));
+    if (platform === 'bash') {
+      const guard = installerSh.slice(
+        installerSh.indexOf('reject_multi_sls_config() {'),
+        installerSh.indexOf('cmd_install() {'),
+      );
+      writeFileSync(scriptPath, `set -e\nmsg() { printf '%s\\n' "$2"; }\n${guard}\nreject_multi_sls_config\nprintf 'continued\\n'\n`);
+      return spawnSync('bash', [scriptPath], {
+        encoding: 'utf8',
+        env: { ...process.env, DATA_DIR: root, NODE_BIN: process.execPath },
+      });
+    }
+    const guard = installerPs1.slice(
+      installerPs1.indexOf('function Assert-SingleSlsConfig {'),
+      installerPs1.indexOf('function Cmd-Install {'),
+    );
+    writeFileSync(scriptPath, `$DataDir = $env:LP_TEST_DATA_DIR\n$script:NODE_BIN = $env:LP_TEST_NODE_BIN\nfunction Msg { param($zh, $en) Write-Output $en }\n${guard}\nAssert-SingleSlsConfig\nWrite-Output 'continued'\n`);
+    return spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+      encoding: 'utf8',
+      env: { ...process.env, LP_TEST_DATA_DIR: root, LP_TEST_NODE_BIN: process.execPath },
+    });
+  } finally {
+    if (existsSync(scriptPath)) unlinkSync(scriptPath);
+    if (existsSync(configPath)) unlinkSync(configPath);
+    rmdirSync(root);
+  }
+}
+
+describe('installer refuses an existing SLS flusher array', () => {
+  for (const platform of ['bash', 'powershell']) {
+    it.runIf(platform === 'bash' || hasPowerShell)(`${platform} rejects before continuing`, () => {
+      const result = runSlsArrayGuard(platform, {
+        sls: [
+          { endpoint: 'https://a.log.aliyuncs.com', project: 'p1', logstore: 'l1', apiKey: 'key-1' },
+          { endpoint: 'https://b.log.aliyuncs.com', project: 'p2', logstore: 'l2', apiKey: 'key-2' },
+        ],
+      });
+      expect(result.status, result.stderr).toBe(1);
+      expect(parseOutput(result)).toContain('Multiple SLS flushers found');
+      expect(parseOutput(result)).not.toContain('continued');
+    });
+
+    it.runIf(platform === 'bash' || hasPowerShell)(`${platform} permits a single SLS object`, () => {
+      const result = runSlsArrayGuard(platform, { sls: { project: 'p1', logstore: 'l1' } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(parseOutput(result)).toContain('continued');
+    });
+  }
+
+  it('checks before migration, stopping services, or package download', () => {
+    const shellInstall = installerSh.slice(installerSh.indexOf('cmd_install() {'));
+    const psInstall = installerPs1.slice(installerPs1.indexOf('function Cmd-Install {'));
+    expect(shellInstall.indexOf('reject_multi_sls_config')).toBeLessThan(shellInstall.indexOf('migrate_legacy_layout'));
+    expect(shellInstall.indexOf('reject_multi_sls_config')).toBeLessThan(shellInstall.indexOf('stop_pilot_for_deploy'));
+    expect(psInstall.indexOf('Assert-SingleSlsConfig')).toBeLessThan(psInstall.indexOf('Migrate-LegacyLayout'));
+    expect(psInstall.indexOf('Assert-SingleSlsConfig')).toBeLessThan(psInstall.indexOf('Stop-PilotService'));
+  });
+});
 
 describe('installer multimodal four-tuple parse gate', () => {
   const blanks = ['endpoint', 'project', 'logstore', 'apiKey'];
@@ -370,7 +434,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.agents.cursor).toEqual({ enabled: false });
       });
 
-      it('writes type-only sls storage when mode is on and the SLS four-tuple is complete', () => {
+      it('writes sls type and target when mode is on and the SLS four-tuple is complete', () => {
         const result = runWriteConfig(platform, 'all', {
           ...enabledAgents,
           multimodal: { extra: true },
@@ -380,7 +444,14 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          storage: { type: 'sls' },
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+          },
         });
       });
 
@@ -394,7 +465,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.multimodal).toBeUndefined();
       });
 
-      it('replaces existing storage with type-only sls when mode is on and the four-tuple is complete', () => {
+      it('replaces existing storage with sls type and target when mode is on and the four-tuple is complete', () => {
         const result = runWriteConfig(platform, 'input', {
           ...enabledAgents,
           multimodal: {
@@ -411,7 +482,14 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.multimodal).toEqual({
-          storage: { type: 'sls' },
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: completeSls.endpoint,
+              project: completeSls.project,
+              logstore: completeSls.logstore,
+            },
+          },
         });
       });
 
