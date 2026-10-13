@@ -18,6 +18,7 @@ import {
   ensureDir,
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { cleanupCodexHooks, isPilotCodexCommand } from './codex-hook-cleanup.js';
 import { createLogger } from '../utils/logger.js';
 import {
   CODEX_HOOK_EVENT_KEYS,
@@ -355,6 +356,19 @@ export class HookStrategy implements DeployStrategy {
     // firing, since current events don't cover them.
     const retiredHookDefs = this.buildRetiredHookDefinitions(def);
     const hookDefs = [...this.buildHookDefinitions(def), ...retiredHookDefs];
+    if (def.id === 'codex' && def.hook?.trustToml) {
+      try {
+        cleanupCodexHooks(
+          resolveHome(def.hook.settingsPath),
+          resolveHome(def.hook.trustToml.configPath),
+          command => isPilotCodexCommand(command) || hookDefs.some(hook => hook.hookCommand === command),
+        );
+        return true;
+      } catch {
+        logger.warn('Codex hook/trust cleanup failed; preserving configuration');
+        return false;
+      }
+    }
     let ownedTrustKeys: string[] = [];
     if (def.hook?.trustToml) {
       try {

@@ -92,6 +92,24 @@ function writeDuplicateTrust(): { currentKey: string; retiredKey: string; thirdP
 }
 
 describe('Codex deploy trust reconciliation', () => {
+  test('undeploy moves third-party trust with its handler instead of leaving positional state behind', async () => {
+    const thirdParty = { type: 'command', command: '/third-party/stop' };
+    fs.writeFileSync(hooksPath, JSON.stringify({ hooks: { Stop: [
+      { hooks: [{ type: 'command', command: `${hookCommand} stop` }] },
+      { hooks: [thirdParty] },
+    ] } }));
+    const oldKey = `${hooksPath}:stop:1:0`;
+    const newKey = `${hooksPath}:stop:0:0`;
+    fs.writeFileSync(configPath, `[hooks.state.${JSON.stringify(newKey)}]\ntrusted_hash = "pilot"\n`
+      + `[hooks.state.${JSON.stringify(oldKey)}]\ntrusted_hash = "existing-third-party"\nenabled = false\n`);
+    const strategy = new HookStrategy(new HookManager(path.join(tmpDir, 'pilot-hooks'), path.join(tmpDir, 'logs')));
+    expect(await strategy.undeploy(codexDefinition())).toBe(true);
+    expect((parseToml(fs.readFileSync(configPath, 'utf8')) as any).hooks.state).toEqual({
+      [newKey]: { trusted_hash: 'existing-third-party', enabled: false },
+    });
+    expect(JSON.parse(fs.readFileSync(hooksPath, 'utf8')).hooks.Stop).toEqual([{ hooks: [thirdParty] }]);
+  });
+
   test('repairs duplicate retired and current trust before removing the retired hook', async () => {
     writeInstalledHooks();
     const { currentKey, retiredKey, thirdParty } = writeDuplicateTrust();

@@ -2108,6 +2108,39 @@ gc_old_versions() {
 # ============================================================
 # Remove hook entries injected into tool config files
 # ============================================================
+remove_codex_hook_config() {
+    local cfg="$HOME/.codex/hooks.json"
+    [ -f "$cfg" ] || return 0
+    # No matching command means no positional edits are needed, including on
+    # older installations that do not yet carry the transactional helper.
+    grep -qi 'codex-loongsuite-pilot-hook' "$cfg" || return 0
+    local package_dir="$PERMANENT_DIR"
+    local current_file="$HOME/.loongsuite-pilot/current"
+    if [ -f "$current_file" ]; then
+        local current_version
+        current_version=$(tr -d '\r\n' < "$current_file")
+        case "$current_version" in
+            ''|*/*|*\\*|.|..) echo 'Invalid Pilot version pointer' >&2; return 1 ;;
+        esac
+        package_dir="$HOME/.loongsuite-pilot/versions/$current_version"
+    fi
+    local helper="$package_dir/dist/codex-hook-cleanup.cjs"
+    if [ ! -f "$helper" ]; then
+        echo 'Codex cleanup helper missing; upgrade Pilot before uninstalling. Installation assets preserved.' >&2
+        return 1
+    fi
+    local node_bin=""
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || return 1; fi
+    "$node_bin" "$helper" "$cfg" "$HOME/.codex/config.toml"
+}
+
 remove_hook_configs() {
     local HOOK_MARKER=".loongsuite-pilot"
     local configs=(
@@ -2118,7 +2151,6 @@ remove_hook_configs() {
         "$HOME/.qoderworkcn/settings.json"
         "$HOME/.qwenworkcn/settings.json"
         "$HOME/.claude/settings.json"
-        "$HOME/.codex/hooks.json"
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
@@ -2856,6 +2888,8 @@ cmd_uninstall() {
 
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    # Fail before deleting assets if hooks/trust cannot be changed together.
+    remove_codex_hook_config || return 1
     remove_hook_configs
     remove_grok_build_hook_config
     remove_qodercli_token_intercept

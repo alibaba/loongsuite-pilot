@@ -245,6 +245,8 @@ loongsuite-pilot dashboard shortcut uninstall
 
 ## 卸载
 
+Codex 清理会同步迁移剩余 Hook 的位置型信任记录，保留原有 hash 和启用状态，不会重新授予第三方信任。若旧安装包缺少清理工具，或配置无法安全解析，卸载会停止并保留安装文件；请先升级 Pilot 或修复配置，再重试卸载。
+
 卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。
 
 Linux/macOS 保留数据：

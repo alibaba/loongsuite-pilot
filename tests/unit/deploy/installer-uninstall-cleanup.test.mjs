@@ -428,10 +428,9 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(cleanup).toContain('.codex\\hooks.json');
     expect(cleanup).toContain('codex-loongsuite-pilot-hook');
     expect(cleanup).not.toContain('otel-codex-hook');
-    expect(cleanup).toContain('Pilot Codex nested hook command is still present');
-    expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
-    expect(cleanup).toContain('$null -eq $entry');
-    expect(cleanup).toContain('$verifyEventProperties');
+    expect(cleanup).toContain('dist\\codex-hook-cleanup.cjs');
+    expect(cleanup).toContain('& $script:NODE_BIN $helper $configPath $trustPath');
+    expect(cleanup).toContain('if ($LASTEXITCODE -ne 0)');
   });
 
   it('keeps Codex cleanup separate from the generic hook cleaner', () => {
@@ -447,7 +446,7 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall).toContain('Remove-CodexHookConfig');
   });
 
-  it('does not modify the shared Codex trust config during uninstall', () => {
+  it('does not restore broad marker-based trust deletion', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(ps1).not.toContain('function Remove-CodexTrustState');
     expect(uninstall).not.toContain('Remove-CodexTrustState');
@@ -478,10 +477,13 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     }
   });
 
-  it('continues uninstall when dedicated Codex cleanup fails', () => {
+  it('preserves assets if dedicated Codex cleanup fails on either platform', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
-    expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+    expect(uninstall).not.toContain('Codex hook cleanup failed; continuing uninstall');
+    expect(uninstall.indexOf('Remove-CodexHookConfig')).toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(sh).toContain('remove_codex_hook_config || return 1');
+    const generic = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+    expect(generic).not.toContain('$HOME/.codex/hooks.json');
   });
 });
 
