@@ -2421,7 +2421,8 @@ export class CodexTranscriptInput extends BaseInput {
     return (params) => {
       const meta = this.transcriptMetaByPath.get(transcriptPath);
       if (!this.workspacePolicy.allows({
-        'gen_ai.session.id': meta?.rootSessionId ?? sessionIdFromTranscriptPath(transcriptPath),
+        // Match the event session identity, including child rollout threads.
+        'gen_ai.session.id': meta?.threadId ?? sessionIdFromTranscriptPath(transcriptPath),
         cwd,
       }, this.agentType)) return null;
       if (!this.multimodalProcessor) return null;
