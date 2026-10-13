@@ -448,7 +448,6 @@ async function slsHttpRequest(args: {
     }
     const error = `${resp.status} ${text || `${body.length}b`}`;
     const retryable = resp.status === 408 || resp.status === 429 || resp.status >= 500;
-    logger.warn('sls request non-200', { statusCode: resp.status, requestId, error, method: args.method });
     return {
       ok: false,
       statusCode: resp.status,

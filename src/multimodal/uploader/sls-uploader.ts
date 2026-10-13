@@ -12,6 +12,7 @@ import {
   slsStorageAuthFields,
   sniffSlsHttpEventStorageBasePath,
   tryParseSlsStorageBasePath,
+  type SlsResult,
 } from './sls-client.js';
 
 const logger = createLogger('SlsUploader');
@@ -182,7 +183,7 @@ export class SlsUploader implements Uploader {
     this.successKeys.clear();
   }
 
-  private writeObject(objectKey: string, item: UploadItem) {
+  private writeObject(objectKey: string, item: UploadItem): Promise<SlsResult> {
     const auth = this.storage.auth;
     const params = {
       endpoint: this.storage.target.endpoint,
