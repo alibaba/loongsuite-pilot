@@ -44,9 +44,9 @@ export class TurnBoundaryProcessor {
         updatedAt: now,
       };
 
-      // Inspect the complete batch before filling anything. Producers such as
-      // WorkBuddy place their existing start marker on llm.request rather than
-      // the first record; a single-pass fill would create a duplicate marker.
+      // Inspect the complete batch before filling anything. Producers may put
+      // an explicit start marker after the first record; a single-pass fill
+      // would create a duplicate marker.
       if (turnEntries.some(entry => hasOwnBoundary(entry, 'gen_ai.turn.start'))) {
         tracked.started = true;
       }
