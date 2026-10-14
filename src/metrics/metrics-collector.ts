@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
-import { resolveLocalIp } from '../utils/network-utils.js';
+import { LOCAL_IP } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
@@ -442,7 +442,6 @@ export class MetricsCollector {
   private readonly instanceId: string;
   private readonly runId: string;
   private readonly hostname: string;
-  private readonly localIp: string;
   private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
@@ -488,7 +487,6 @@ export class MetricsCollector {
       ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
-    this.localIp = resolveLocalIp();
     this.hostname = os.hostname();
     // Stable install identity: restart- and IP-invariant, independently derivable
     // by any process on the host. Includes dataDir so multiple installs on one
@@ -549,7 +547,7 @@ export class MetricsCollector {
       version: this.version,
       os_detail: `${os.type()}; ${os.release()}; ${os.arch()}`,
       hostname: os.hostname(),
-      ip: this.localIp,
+      ip: LOCAL_IP,
       instance_id: this.instanceId,
       run_id: this.runId,
       user_id: this.userId,
@@ -600,7 +598,7 @@ export class MetricsCollector {
     const windowMs = Math.max(0, now - (this.l2LastCollectTime || this.startTimestamp * 1000));
     const identity = {
       hostname: os.hostname(),
-      ip: this.localIp,
+      ip: LOCAL_IP,
       instance_id: this.instanceId,
       run_id: this.runId,
       user_id: this.userId,

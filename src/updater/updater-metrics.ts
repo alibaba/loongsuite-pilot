@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveLocalIp } from '../utils/network-utils.js';
+import { LOCAL_IP } from '../utils/network-utils.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { checkProcessLiveness, COLLECTOR_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
@@ -78,7 +78,7 @@ export class UpdaterMetrics {
     this.collectorLiveness = opts.collectorLiveness
       ?? ((pidFile: string) => checkProcessLiveness(pidFile, COLLECTOR_PROCESS_PATTERNS));
     this.userId = opts.userId;
-    this.ip = resolveLocalIp();
+    this.ip = LOCAL_IP;
   }
 
   async start(): Promise<void> {

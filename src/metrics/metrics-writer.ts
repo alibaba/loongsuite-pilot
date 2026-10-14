@@ -4,6 +4,7 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
+import { refreshLocalIp } from '../utils/network-utils.js';
 import { DISK_USAGE_STALE_MS, DiskUsageSampler } from './disk-usage-sampler.js';
 import type { DiskUsageSnapshot } from './disk-usage-sampler.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
@@ -99,10 +100,10 @@ export class MetricsWriter {
     await ensureDir(this.logsDir);
     this.diskUsageSampler.start();
 
-    this.dataflowTimer = setInterval(
-      () => void this.writeDataflow(),
-      DATAFLOW_INTERVAL_MS,
-    );
+    this.dataflowTimer = setInterval(() => {
+      refreshLocalIp();
+      void this.writeDataflow();
+    }, DATAFLOW_INTERVAL_MS);
     this.dataflowTimer.unref();
 
     if (this.alarmManager) {
