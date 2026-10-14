@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   parseArgs,
   parseStdinPayload,
@@ -54,6 +54,7 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
 const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
 const QODER_HOME = path.join(os.homedir(), '.qoder');
 const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
+const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
 const QODER_CLI_IDENTITY_CACHE_FILE = path.join(
   LOONGSUITE_PILOT_DATA_DIR,
   'state',
@@ -98,10 +99,15 @@ async function resolveQoderCliUserIdentity() {
     && cached.mtimeMs === authStat.mtimeMs
     && cached.size === authStat.size
   ) {
-    if (cached.loggedIn === false) return undefined;
-    const name = nonEmptyIdentityValue(cached.name);
-    const email = nonEmptyIdentityValue(cached.email);
-    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    if (Number.isFinite(cached.failedUntil)) {
+      if (Date.now() < cached.failedUntil) return undefined;
+    } else if (cached.loggedIn === false) {
+      return undefined;
+    } else {
+      const name = nonEmptyIdentityValue(cached.name);
+      const email = nonEmptyIdentityValue(cached.email);
+      return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    }
   }
 
   let executable;
@@ -119,14 +125,27 @@ async function resolveQoderCliUserIdentity() {
     return undefined;
   }
 
-  const status = await new Promise(resolve => {
-    execFile(executable, ['status', '--output', 'json'], {
-      encoding: 'utf-8',
-      timeout: QODER_CLI_STATUS_TIMEOUT_MS,
-      maxBuffer: 64 * 1024,
-      windowsHide: true,
-    }, (error, stdout) => {
-      if (error) return resolve(undefined);
+  const timedOut = Symbol();
+  const child = spawn(executable, ['status', '--output', 'json'], {
+    windowsHide: true,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  let stdout = '';
+  let timer;
+  const output = new Promise(resolve => {
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('error', () => {});
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length <= 64 * 1024) return;
+      try { child.stdout?.destroy(); } catch { /* ignore */ }
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      resolve(undefined);
+    });
+    child.on('error', () => resolve(undefined));
+    child.on('close', (code) => {
+      if (code !== 0) return resolve(undefined);
       try {
         const parsed = JSON.parse(String(stdout || '').trim());
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return resolve(undefined);
@@ -142,12 +161,25 @@ async function resolveQoderCliUserIdentity() {
       }
     });
   });
-  if (!status) return undefined;
+  const status = await Promise.race([
+    output,
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve(timedOut), QODER_CLI_STATUS_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (status === timedOut) {
+    try { child.stdout?.destroy(); } catch { /* ignore */ }
+    if (child.pid && process.platform !== 'win32') {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+    } else {
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+    }
+  }
 
   const temporary = `${QODER_CLI_IDENTITY_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(QODER_CLI_IDENTITY_CACHE_FILE), { recursive: true });
-    fs.writeFileSync(temporary, JSON.stringify({
+    fs.writeFileSync(temporary, JSON.stringify(status && status !== timedOut ? {
       schemaVersion: 1,
       authPath,
       mtimeMs: authStat.mtimeMs,
@@ -155,12 +187,18 @@ async function resolveQoderCliUserIdentity() {
       loggedIn: status.loggedIn,
       ...(status.name ? { name: status.name } : {}),
       ...(status.email ? { email: status.email } : {}),
+    } : {
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      failedUntil: Date.now() + QODER_CLI_STATUS_FAILURE_TTL_MS,
     }), { encoding: 'utf-8', mode: 0o600 });
     fs.renameSync(temporary, QODER_CLI_IDENTITY_CACHE_FILE);
   } catch {
     try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
   }
-  if (!status.loggedIn) return undefined;
+  if (!status || status === timedOut || !status.loggedIn) return undefined;
   return {
     ...(status.name ? { name: status.name } : {}),
     ...(status.email ? { email: status.email } : {}),

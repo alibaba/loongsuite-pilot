@@ -163,6 +163,7 @@ case "$mode" in
   fail) exit 1 ;;
   bad) printf 'not-json'; exit 0 ;;
   slow) sleep 4; printf '%s\\n' '{"logged_in":true,"username":"slow","email":"slow@example.com"}'; exit 0 ;;
+  ignore-term) trap '' TERM; sleep 30; exit 0 ;;
 esac
 case "$mode" in
   switched) printf '%s\\n' '{"logged_in":true,"username":"other","email":"other@example.com"}' ;;
@@ -681,6 +682,50 @@ describe('qoder-hook-processor cold-start recovery', () => {
       record['user.name'] === 'slow' || record['user.email'] === 'slow@example.com',
     )).toBe(false);
     expect(readCounter(fake.counter)).toBe(3);
+  });
+
+  it('returns the Stop hook within the status timeout when qodercli ignores SIGTERM', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(fake.mode, 'ignore-term');
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'hung status prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const startedAt = Date.now();
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(6_000);
+    expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
+    expect(readCounter(fake.counter)).toBe(1);
+
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(2, 'same auth after timeout'),
+      lastPrompt(2),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readCounter(fake.counter)).toBe(1);
+  });
+
+  it('does not query the CLI again while a failed status is cached for the same auth file', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(fake.mode, 'bad');
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'invalid status prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readCounter(fake.counter)).toBe(1);
+    expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
+
+    fs.appendFileSync(transcriptPath, [
+      ...turnRows(2, 'same auth after invalid status'),
+      lastPrompt(2),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(readCounter(fake.counter)).toBe(1);
   });
 
   it('keeps IDE hook identity and does not query the CLI', () => {
