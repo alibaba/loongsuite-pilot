@@ -844,6 +844,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // V2 step completion (including a failed/retried model request) is not
+    // execution completion. Preserve V1's existing finish-reason behavior.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'
+      && entry['agent.opencode.collection'] === 'v2') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwen-code-cli'
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;

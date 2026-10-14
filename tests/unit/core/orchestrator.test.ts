@@ -309,7 +309,7 @@ describe('Orchestrator', () => {
         expect(escapedTargets).toEqual([]);
         expect(writes).toContain(configPath);
         expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugin).toEqual([
-          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode/plugin.mjs`,
+          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode`,
         ]);
       } finally {
         try { await orch?.stop(); }
