@@ -26,8 +26,10 @@ import {
   LOONGSUITE_PILOT_LOGS_BASE_DIR,
 } from './shared/hook-processor-base.mjs';
 import {
+  applyHookContentPolicy,
   buildQoderHookRecord,
   inferProviderName,
+  sanitizeObject,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
@@ -636,7 +638,7 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
   // turn and nests them under the parent tool.call span.
   let subagentRecords = [];
   if (sessionId) {
-    subagentRecords = collectSubagentRecordsForTurn(records, transcriptPath, sessionId, cwd);
+    subagentRecords = collectSubagentRecordsForTurn(records, transcriptPath, sessionId, cwd, runtimeConfig);
     if (subagentRecords.length > 0) {
       records.push(...subagentRecords);
       // Maintain time order so the converter processes events deterministically.
@@ -1677,6 +1679,14 @@ function buildUserMessageParts(userText, contentEvents, agentType) {
 // QoderCLI subagent invocation tool names (both Anthropic and Qoder-native spellings).
 const SUBAGENT_TOOL_NAMES = new Set(['Agent', 'agent', 'Task', 'task']);
 
+// Outcome of collecting one subagent, stamped on the parent Agent tool.call
+// record so a reader of the TOOL span can tell a complete child trace from a
+// prefix. Same convention as qwen-code-cli's COLLECTION_KEY: `agent.` is a
+// canonical prefix, so the field survives normalization and reaches the span
+// through the flusher's hierarchy passthrough list; the value is a string so
+// each outcome reads for itself instead of as a bare flag.
+const SUBAGENT_COLLECTION_KEY = 'agent.qoder.subagent.collection';
+
 /**
  * Resolve a subagent's transcript file from its task descriptor.
  *
@@ -1749,10 +1759,13 @@ function loadSubagentTasks(sessionDir) {
  * QoderCLI subagent transcripts use the same line types as the main transcript
  * (type=user / type=assistant) but are stored in a separate per-agent file.
  *
- * Returns { calls, toolResults, firstUserPrompt } where:
+ * Returns { calls, toolResults, firstUserPrompt, tailTruncated } where:
  *   calls: [{ id, model, ts, endTs, stopReason, parts, toolUses }]
- *   toolResults: Map<tool_use_id, { ts, content }>
+ *   toolResults: Map<tool_use_id, { ts, content, isError }>
  *   firstUserPrompt: string | null
+ *   tailTruncated: true when the LAST line failed to parse — a child killed
+ *     mid-write leaves a half-written final row, while any earlier row that
+ *     fails is an isolated corrupt event, not a missing tail.
  */
 function parseSubagentTranscript(file) {
   const content = fs.readFileSync(file, 'utf-8');
@@ -1761,10 +1774,14 @@ function parseSubagentTranscript(file) {
   const callById = new Map();
   const toolResults = new Map();
   let firstUserPrompt = null;
+  let tailTruncated = false;
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     let d;
-    try { d = JSON.parse(line); } catch { continue; }
+    try { d = JSON.parse(line); } catch {
+      if (index === lines.length - 1) tailTruncated = true;
+      continue;
+    }
     const msg = d.message || {};
     const ts = d.timestamp || new Date().toISOString();
 
@@ -1781,7 +1798,7 @@ function parseSubagentTranscript(file) {
             else if (Array.isArray(b.content)) {
               text = b.content.filter(x => x && x.type === 'text').map(x => x.text).join('\n');
             }
-            toolResults.set(b.tool_use_id, { ts, content: text });
+            toolResults.set(b.tool_use_id, { ts, content: text, isError: b.is_error === true });
           }
         }
       }
@@ -1811,7 +1828,7 @@ function parseSubagentTranscript(file) {
       }
     }
   }
-  return { calls, toolResults, firstUserPrompt };
+  return { calls, toolResults, firstUserPrompt, tailTruncated };
 }
 
 /**
@@ -1821,8 +1838,13 @@ function parseSubagentTranscript(file) {
  *
  * Uses the same field shapes (raw objects/arrays, not pre-stringified) as
  * buildEventsFromBoundaries so the JSONL serialisation path is identical.
+ *
+ * Content policy is applied on the way out: the parent path gets it from
+ * buildQoderHookRecord, but child records are assembled here, so without this
+ * the subagent transcript would export prompt / reasoning / tool payloads even
+ * when `agents.qoder.captureMessageContent` is turned off.
  */
-function buildSubagentRecords(task, turnContext, parsed) {
+function buildSubagentRecords(task, turnContext, parsed, runtimeConfig) {
   const records = [];
   const base = {
     'gen_ai.turn.id': turnContext.turnId,
@@ -1893,8 +1915,14 @@ function buildSubagentRecords(task, turnContext, parsed) {
     });
 
     // llm.response
-    const finishReasons = [call.stopReason === 'tool_use' ? 'tool_call'
-      : (call.stopReason || 'end_turn')];
+    // Same enum gate as the parent path: qodercli writes Anthropic-native
+    // stop_reason values (stop_sequence / refusal / model_context_window_exceeded,
+    // and future ones) that sit outside VALID_FINISH_REASONS, and validate-trace.mjs
+    // raises an *error* for those. A missing stop_reason keeps the `end_turn`
+    // default; an unmappable one drops the field instead of being coerced, because
+    // the validator only warns when it is absent while a wrong terminal value would
+    // close the turn buffer early. The raw value always stays on agent.stop_reason.
+    const finishReason = call.stopReason ? normalizeFinishReason(call.stopReason) : 'end_turn';
     records.push({
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
@@ -1902,11 +1930,11 @@ function buildSubagentRecords(task, turnContext, parsed) {
       'gen_ai.request.model': call.model,
       'gen_ai.response.model': call.model,
       'gen_ai.response.id': call.id,
-      'gen_ai.response.finish_reasons': finishReasons,
+      ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
       'gen_ai.output.messages': [{
         role: 'assistant',
         parts: call.parts,
-        finish_reason: finishReasons[0],
+        ...(finishReason ? { finish_reason: finishReason } : {}),
       }],
       'agent.stop_reason': call.stopReason || 'end_turn',
       time_unix_nano: `${callEndMs}000000`,
@@ -1940,7 +1968,11 @@ function buildSubagentRecords(task, turnContext, parsed) {
           'gen_ai.tool.call.id': t.id,
           'gen_ai.tool.call.exec.id': t.id,
           'gen_ai.tool.call.result': res.content ?? '',
-          'tool.result.status': 'success',
+          // qodercli's tool_result contract carries is_error. `failure` is the
+          // canonical spelling inferQoderToolResultStatus uses; hard-coding
+          // success here would make a failed subagent command read as a healthy
+          // TOOL span.
+          'tool.result.status': res.isError ? 'failure' : 'success',
           'gen_ai.tool.call.duration': Math.max(0, resMs - callEndMs),
           time_unix_nano: `${resMs}000000`,
           observed_time_unix_nano: observedTs,
@@ -1954,7 +1986,9 @@ function buildSubagentRecords(task, turnContext, parsed) {
     if (call.toolUses.length === 0) prevBoundaryMs = callEndMs;
   });
 
-  return records;
+  return records
+    .map(record => sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || null)
+    .filter(record => record !== null);
 }
 
 /**
@@ -1964,8 +1998,14 @@ function buildSubagentRecords(task, turnContext, parsed) {
  * parent turn batch.
  *
  * Fail-open: any individual subagent error is logged and skipped.
+ *
+ * `runtimeConfig` is required, not optional: child records carry the same
+ * content fields as parent records (prompt, reasoning, tool arguments, tool
+ * results), so they must pass through the very policy the parent path applies
+ * inside `buildQoderHookRecord`. Passing `undefined` here would silently export
+ * subagent content even with `agents.qoder.captureMessageContent: false`.
  */
-export function collectSubagentRecordsForTurn(turnRecords, transcriptPath, sessionId, cwd) {
+export function collectSubagentRecordsForTurn(turnRecords, transcriptPath, sessionId, cwd, runtimeConfig) {
   const sessionDir = transcriptPath.replace(/\.jsonl$/, '');
   const tasks = loadSubagentTasks(sessionDir);
   if (tasks.length === 0) return [];
@@ -2008,6 +2048,7 @@ export function collectSubagentRecordsForTurn(turnRecords, transcriptPath, sessi
     const childFile = resolveSubagentTranscriptPath(transcriptPath, task);
     if (!childFile || !fs.existsSync(childFile)) {
       logDebug('qoder', `Subagent transcript not found for agentId=${task.agentId}`);
+      parentCall[SUBAGENT_COLLECTION_KEY] = 'transcript_missing';
       continue;
     }
 
@@ -2016,17 +2057,36 @@ export function collectSubagentRecordsForTurn(turnRecords, transcriptPath, sessi
       parsed = parseSubagentTranscript(childFile);
     } catch (e) {
       logDebug('qoder', `Subagent transcript parse failed: ${e.message}`);
+      parentCall[SUBAGENT_COLLECTION_KEY] = 'parse_failed';
       continue;
     }
-    if (parsed.calls.length === 0) continue;
+    if (parsed.calls.length === 0) {
+      parentCall[SUBAGENT_COLLECTION_KEY] = 'no_llm_calls';
+      continue;
+    }
 
-    const childRecords = buildSubagentRecords(task, turnContext, parsed);
+    const childRecords = buildSubagentRecords(task, turnContext, parsed, runtimeConfig);
     // Apply resource / span attribute patches so subagent records carry the
     // same invocation identity as parent records.
     for (const record of childRecords) {
       Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
     }
     allSubagentRecords.push(...childRecords);
+    // A half-written last row means the exported child trace is a prefix, not
+    // the whole run. The prefix is still worth far more than nothing (that is
+    // the point of this feature), and the parent transcript is the guard that
+    // decides whether a re-collection can happen: with no `last-prompt` marker
+    // the whole Stop is deferred and retried, children re-read from disk. So
+    // the prefix is only final when the parent transcript was already complete
+    // — which is exactly when this batch commits — hence an explicit outcome on
+    // the parent span instead of dropping the child.
+    parentCall[SUBAGENT_COLLECTION_KEY] = parsed.tailTruncated ? 'incomplete' : 'collected';
+    if (parsed.tailTruncated) {
+      logDebug('qoder',
+        `Subagent agentId=${task.agentId.slice(-8)} tail line unparsable: `
+        + `exported ${parsed.calls.length} recovered call(s) as a prefix`,
+      );
+    }
     logDebug('qoder',
       `Subagent agentId=${task.agentId.slice(-8)} callId=${callId.slice(-8)} ` +
       `records=${childRecords.length}`,

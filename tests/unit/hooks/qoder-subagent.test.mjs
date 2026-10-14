@@ -432,3 +432,196 @@ describe('qoder-hook-processor subagent trace collection', () => {
     expect([...stepsA].filter(s => stepsB.has(s))).toHaveLength(0);
   });
 });
+
+/**
+ * Child records are assembled by buildSubagentRecords, not by the parent's
+ * buildQoderHookRecord, so every contract the parent path gets for free —
+ * content privacy, the finish-reason enum, tool status — has to be pinned for
+ * children separately. A fixture can only show one shape, so the writers below
+ * build the transcript each case needs.
+ */
+describe('qoder-hook-processor subagent record contracts', () => {
+  const BASH_CALL_ID = 'fc_bash000000000000000000000000000000000000000000000000000001';
+  const CONTENT_FIELDS = [
+    'gen_ai.input.messages_delta',
+    'gen_ai.output.messages',
+    'gen_ai.tool.call.arguments',
+    'gen_ai.tool.call.result',
+  ];
+
+  /**
+   * One processor run per test: the hook keeps read-offset state under the
+   * data dir, so a second run over the same transcript yields nothing.
+   */
+  function runAndReadHistory(result) {
+    expect(result.status, result.stderr).toBe(0);
+    return readHistory();
+  }
+
+  function installTask(callId, taskId, agentId) {
+    const subagentsDir = path.join(sessionDir, 'subagents');
+    fs.mkdirSync(subagentsDir, { recursive: true });
+    const base = JSON.parse(fs.readFileSync(
+      path.join(FIXTURES, 'subagent-session', 'subagents', 'task-atask7c21d0e5b4f9a3c1.json'),
+      'utf-8',
+    ));
+    fs.writeFileSync(path.join(subagentsDir, `task-${taskId}.json`), JSON.stringify({
+      ...base, taskId, agentId, parentToolUseId: callId,
+      transcriptPath: path.join(subagentsDir, `agent-${agentId}.jsonl`),
+    }));
+    return subagentsDir;
+  }
+
+  /** One ReAct step: model answer closing with `stopReason`, no tool call. */
+  function writeSingleCallChild(callId, agentId, stopReason) {
+    const subagentsDir = installTask(callId, `task-${agentId}`, agentId);
+    fs.writeFileSync(path.join(subagentsDir, `agent-${agentId}.jsonl`), [
+      {
+        type: 'user', uuid: 'c-user', timestamp: '2026-09-22T10:00:04.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: { role: 'user', content: 'run echo hello' },
+      },
+      {
+        type: 'assistant', uuid: 'c-asst', timestamp: '2026-09-22T10:00:05.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: {
+          id: 'resp_child_single', role: 'assistant', model: 'Qwen3.8-Flash',
+          stop_reason: stopReason, content: [{ type: 'text', text: 'hello' }],
+        },
+      },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  }
+
+  /** One tool call whose result carries `isError`, then a closing answer. */
+  function writeToolChild(callId, agentId, isError) {
+    const subagentsDir = installTask(callId, `task-${agentId}`, agentId);
+    fs.writeFileSync(path.join(subagentsDir, `agent-${agentId}.jsonl`), [
+      {
+        type: 'user', uuid: 'c-user', timestamp: '2026-09-22T10:00:04.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: { role: 'user', content: 'run echo hello' },
+      },
+      {
+        type: 'assistant', uuid: 'c-asst-1', timestamp: '2026-09-22T10:00:05.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: {
+          id: 'resp_child_tool', role: 'assistant', model: 'Qwen3.8-Flash', stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: BASH_CALL_ID, name: 'Bash', input: { command: 'echo hello' } }],
+        },
+      },
+      {
+        type: 'user', uuid: 'c-result', timestamp: '2026-09-22T10:00:06.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result', tool_use_id: BASH_CALL_ID,
+            content: isError ? 'command not found: echoo' : 'hello',
+            ...(isError ? { is_error: true } : {}),
+          }],
+        },
+      },
+      {
+        type: 'assistant', uuid: 'c-asst-2', timestamp: '2026-09-22T10:00:07.000Z',
+        sessionId: 'subagent-session', agentId, parent_tool_use_id: callId,
+        message: {
+          id: 'resp_child_final', role: 'assistant', model: 'Qwen3.8-Flash', stop_reason: 'end_turn',
+          content: [{ type: 'text', text: isError ? 'the command failed' : 'printed hello' }],
+        },
+      },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  }
+
+  it('exports subagent message content while the policy allows it', () => {
+    writeParentTranscript([{ prompt: 'delegate the echo task', calls: [AGENT_CALL_A] }]);
+    copySubagentTranscript();
+    const children = subagentRecordsOf(runAndReadHistory(runProcessor()));
+    expect(children.some(r => r['event.name'] === 'llm.response' && r['gen_ai.output.messages'] !== undefined))
+      .toBe(true);
+  });
+
+  it('honours captureMessageContent=false for subagent records', () => {
+    writeParentTranscript([{ prompt: 'delegate the echo task', calls: [AGENT_CALL_A] }]);
+    copySubagentTranscript();
+    const configFile = path.join(dataDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ agents: { qoder: { captureMessageContent: false } } }));
+    const children = subagentRecordsOf(runAndReadHistory(
+      runProcessor('subagent-session', { AGENT_DATA_COLLECTION_CONFIG: configFile }),
+    ));
+    expect(children.length).toBeGreaterThan(0);
+    for (const record of children) {
+      for (const field of CONTENT_FIELDS) {
+        expect(record[field], `${field} must not reach the export`).toBeUndefined();
+      }
+    }
+    // Privacy strips content, not the topology the trace exists to show.
+    expect(children[0]['gen_ai.agent.id']).toBe(SUBAGENT_ID);
+    expect(children[0]['gen_ai.subagent.parent_tool_call.id']).toBe(AGENT_CALL_A);
+  });
+
+  it('keeps subagent finish reasons inside the enum and the raw value alongside', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    writeSingleCallChild(AGENT_CALL_A, SUBAGENT_ID, 'tool_use');
+    const [response] = subagentRecordsOf(runAndReadHistory(runProcessor()))
+      .filter(r => r['event.name'] === 'llm.response');
+    expect(response).toBeDefined();
+    // An alias maps; validate-trace.mjs errors on anything else.
+    expect(response['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    expect(response['agent.stop_reason']).toBe('tool_use');
+  });
+
+  it('drops an unknown subagent stop reason instead of coercing it to a terminal one', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    writeSingleCallChild(AGENT_CALL_A, SUBAGENT_ID, 'pause_turn');
+    const [response] = subagentRecordsOf(runAndReadHistory(runProcessor()))
+      .filter(r => r['event.name'] === 'llm.response');
+    expect(response).toBeDefined();
+    // Coercing to `stop` would read as terminal and flush the turn buffer early.
+    expect(response['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(response['agent.stop_reason']).toBe('pause_turn');
+  });
+
+  it('carries a failed subagent tool result as failure', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    writeToolChild(AGENT_CALL_A, SUBAGENT_ID, true);
+    const records = subagentRecordsOf(runAndReadHistory(runProcessor()));
+    const failed = records.find(r => r['event.name'] === 'tool.result');
+    expect(failed).toBeDefined();
+    // 'failure' is what normalizeToolResultStatus maps onto and what
+    // otlp-trace-flusher marks the span with; 'error' would be silently dropped.
+    expect(failed['tool.result.status']).toBe('failure');
+    expect(failed['gen_ai.tool.call.id']).toBe(BASH_CALL_ID);
+  });
+
+  it('keeps a successful subagent tool result as success', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    writeToolChild(AGENT_CALL_A, SUBAGENT_ID, false);
+    const ok = subagentRecordsOf(runAndReadHistory(runProcessor()))
+      .find(r => r['event.name'] === 'tool.result');
+    expect(ok).toBeDefined();
+    expect(ok['tool.result.status']).toBe('success');
+  });
+
+  it('exports a half-written subagent transcript as a prefix and says so on the parent call', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    copySubagentTranscript();
+    const childFile = path.join(sessionDir, 'subagents', `agent-${SUBAGENT_ID}.jsonl`);
+    // qodercli can be mid-write when Stop fires: the last row is truncated
+    // JSON. Everything before it is still the real child run.
+    fs.appendFileSync(childFile, '\n{"type":"assistant","uuid":"77777777-7777-4777-8777-77777777777","timestamp":"2026');
+
+    const records = runAndReadHistory(runProcessor());
+    const children = subagentRecordsOf(records);
+    expect(children.length, 'a prefix still beats no child trace').toBeGreaterThan(0);
+    const parent = parentAgentCalls(records).find(r => r['gen_ai.tool.call.id'] === AGENT_CALL_A);
+    expect(parent['agent.qoder.subagent.collection']).toBe('incomplete');
+  });
+
+  it('marks a fully collected subagent on the parent call', () => {
+    writeParentTranscript([{ prompt: 'delegate', calls: [AGENT_CALL_A] }]);
+    copySubagentTranscript();
+    const records = runAndReadHistory(runProcessor());
+    const parent = parentAgentCalls(records).find(r => r['gen_ai.tool.call.id'] === AGENT_CALL_A);
+    expect(parent['agent.qoder.subagent.collection']).toBe('collected');
+  });
+});

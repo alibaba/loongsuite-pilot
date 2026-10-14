@@ -423,6 +423,7 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'agent.qwen-code-cli.subagent.collection',
   'agent.qwen-code-cli.subagent.status',
   'agent.qwen-code-cli.timing.source',
+  'agent.qoder.subagent.collection',
 ];
 
 function estimateSpanSize(span: ReadableSpan): number {
