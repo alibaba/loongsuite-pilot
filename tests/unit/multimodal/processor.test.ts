@@ -709,6 +709,8 @@ describe('MultimodalProcessor.pathToUri', () => {
   it('relearns the delegatedOss bucket and rate-limits repeated origin mismatches', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    let monotonicNow = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow);
     const put = vi.spyOn(slsClient, 'slsPutViaPresignedHttp')
       .mockResolvedValueOnce({ ok: true, statusCode: 200, requestId: 'a' })
       .mockResolvedValueOnce({
@@ -773,14 +775,84 @@ describe('MultimodalProcessor.pathToUri', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sniff).toHaveBeenCalledOnce();
 
-    await vi.advanceTimersByTimeAsync(59_000);
+    monotonicNow = 59_999;
     expect(uriFor('five')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(uriFor('still-cooling')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    expect(sniff).toHaveBeenCalledOnce();
+
+    monotonicNow = 60_000;
+    expect(uriFor('six')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
     await vi.advanceTimersByTimeAsync(0);
     expect(uriFor('pending-again')).toBeUndefined();
     await vi.advanceTimersByTimeAsync(999);
     expect(sniff).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
     expect(sniff).toHaveBeenCalledTimes(2);
+
+    await processor.shutdown();
+    vi.useRealTimers();
+  });
+
+  it('rediscovery cooldown ignores a backward system clock jump', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:10:00Z'));
+    let monotonicNow = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow);
+    const put = vi.spyOn(slsClient, 'slsPutViaPresignedHttp')
+      .mockResolvedValue({
+        ok: false,
+        error: slsClient.PRESIGN_ORIGIN_MISMATCH_ERROR,
+        retryable: false,
+      });
+    const sniff = vi.spyOn(slsClient, 'sniffSlsHttpEventStorageBasePath').mockResolvedValue({
+      ok: true,
+      storageBasePath: 'oss://bucket-b/proj/logstore',
+      origin: 'https://bucket-b.oss-cn-hangzhou.aliyuncs.com',
+    });
+    const storage = {
+      type: 'delegatedOss' as const,
+      target: {
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj',
+        logstore: 'logstore',
+      },
+      auth: { mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk' },
+    };
+    const uploader = new SlsUploader(storage, 'sls://proj/logstore', {
+      expectedPresignOrigin: 'https://bucket-a.oss-cn-hangzhou.aliyuncs.com',
+    });
+    const processor = new MultimodalProcessor(
+      'oss://bucket-a/proj/logstore',
+      uploader,
+      () => uploader.discoverDelegatedOssBucket(),
+    );
+    const uriFor = (content: string) => processor.blobToUri({
+      content: Buffer.from(content).toString('base64'),
+      mime_type: 'image/png',
+    })?.uri;
+
+    expect(uriFor('one')).toMatch(/^oss:\/\/bucket-a\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(put).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sniff).toHaveBeenCalledOnce();
+    expect(uriFor('learned')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    monotonicNow = 59_999;
+    expect(uriFor('during-rollback')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sniff).toHaveBeenCalledOnce();
+    expect(uriFor('still-known')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+
+    monotonicNow = 60_000;
+    expect(uriFor('cooled')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(uriFor('pending')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sniff).toHaveBeenCalledTimes(2);
+    expect(uriFor('again')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
 
     await processor.shutdown();
     vi.useRealTimers();

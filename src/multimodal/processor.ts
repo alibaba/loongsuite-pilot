@@ -393,7 +393,7 @@ export class MultimodalProcessor {
   /** Re-learn the delegatedOss bucket after the presign origin changes. */
   private noteOriginMismatch(): void {
     if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
-    const now = Date.now();
+    const now = performance.now();
     if (
       this.lastMismatchRediscoveryAt !== undefined
       && now - this.lastMismatchRediscoveryAt < DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS
