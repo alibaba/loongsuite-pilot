@@ -1,7 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
-import { isDeepStrictEqual } from 'node:util';
 
 export const CODEX_HOOK_EVENT_KEYS: Record<string, string> = {
   PreToolUse: 'pre_tool_use',
@@ -218,7 +217,7 @@ function trustSectionKey(header: string): string | undefined {
   // Only a table declaration, never an assignment or an array of tables.
   if (!/^\s*\[(?!\[)/.test(header)) return undefined;
   try {
-    const parsed = parseToml(header.trim());
+    const parsed = parseToml(header);
     const hooks = asTable(parsed.hooks);
     const state = asTable(hooks?.state);
     if (!state || Object.keys(parsed).length !== 1 || Object.keys(hooks!).length !== 1) {
@@ -358,51 +357,6 @@ function validateConfig(content: string): void {
 function writeValidatedConfig(configPath: string, content: string): void {
   validateConfig(content);
   fs.writeFileSync(configPath, content, 'utf-8');
-}
-
-/** Move existing trust, never grant trust. Keys are resolved from the pre-edit hooks.json. */
-export function remapCodexTrust(content: string, moves: ReadonlyMap<string, string | null>): string {
-  validateConfig(content);
-  const expected = parseToml(content, { integersAsBigInt: true });
-  const state = asTable(asTable(expected.hooks)?.state);
-  if (!state) return content;
-  const original = { ...state };
-  for (const [from, to] of moves) {
-    if (from !== to) delete state[from];
-  }
-  for (const [from, to] of moves) {
-    if (to !== null && from !== to && Object.hasOwn(original, from)) {
-      if (Object.hasOwn(state, to)) throw new Error('Ambiguous Codex trust destination; files left unchanged');
-      state[to] = original[from];
-    }
-  }
-  const lines = content.split('\n');
-  const keep = lines.map(() => true);
-  for (const { key, start, end } of trustSectionRanges(content)) {
-    if (!moves.has(key)) continue;
-    const target = moves.get(key)!;
-    if (target === key) continue;
-    if (target === null) keep.fill(false, start, end);
-    else lines[start] = `[hooks.state.${encodeTomlBasicString(target)}]`;
-  }
-  let result = lines.filter((_, i) => keep[i]).join('\n');
-  if (result && content.endsWith('\n') && !result.endsWith('\n')) result += '\n';
-  validateConfig(result);
-  // Refuse unfamiliar TOML layouts (inline/nested tables) instead of silently
-  // leaving positional state behind or deleting unrelated fields.
-  const pruneEmptyState = (document: Record<string, unknown>) => {
-    const hooks = asTable(document.hooks);
-    const entries = asTable(hooks?.state);
-    if (hooks && entries && Object.keys(entries).length === 0) {
-      delete hooks.state;
-      if (Object.keys(hooks).length === 0) delete document.hooks;
-    }
-    return document;
-  };
-  if (!isDeepStrictEqual(pruneEmptyState(parseToml(result, { integersAsBigInt: true })), pruneEmptyState(expected))) {
-    throw new Error('Unsupported Codex trust layout; files left unchanged');
-  }
-  return result;
 }
 
 function appendCanonicalTrustSections(

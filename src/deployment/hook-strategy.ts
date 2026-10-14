@@ -18,7 +18,6 @@ import {
   ensureDir,
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
-import { cleanupCodexHooks, isPilotCodexCommand } from './codex-hook-cleanup.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
@@ -367,19 +366,6 @@ export class HookStrategy implements DeployStrategy {
       ...this.buildHookDefinitions(def),
       ...retiredHookDefs,
     ];
-    if (def.id === 'codex' && def.hook?.trustToml) {
-      try {
-        cleanupCodexHooks(
-          resolveHome(def.hook.settingsPath),
-          resolveHome(def.hook.trustToml.configPath),
-          command => isPilotCodexCommand(command) || hookDefs.some(hook => hook.hookCommand === command),
-        );
-        return true;
-      } catch {
-        logger.warn('Codex hook/trust cleanup failed; preserving configuration');
-        return false;
-      }
-    }
     let ownedTrustKeys: string[] = [];
     if (def.hook?.trustToml) {
       try {

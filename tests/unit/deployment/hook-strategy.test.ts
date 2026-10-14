@@ -1,12 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
-import { cleanupCodexHooks } from '../../../src/deployment/codex-hook-cleanup.js';
-
-vi.mock('../../../src/deployment/codex-hook-cleanup.js', () => ({
-  cleanupCodexHooks: vi.fn(),
-  isPilotCodexCommand: vi.fn(() => false),
-}));
 
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
@@ -1040,7 +1034,7 @@ describe('HookStrategy', () => {
       expect(result).toBe(false);
     });
 
-    it('uses shared positional hook/trust cleanup for Codex undeploy', async () => {
+    it('removes only exact Codex trust keys resolved before uninstall', async () => {
       vi.mocked(readJsonFile).mockResolvedValue({
         hooks: {
           Stop: [
@@ -1069,11 +1063,12 @@ describe('HookStrategy', () => {
       const result = await strategy.undeploy(def);
 
       expect(result).toBe(true);
-      expect(cleanupCodexHooks).toHaveBeenCalledWith(
-        '/home/.codex/hooks.json', '/home/.codex/config.toml', expect.any(Function),
+      expect(removeTrustBlock).toHaveBeenCalledWith(
+        '/home/.codex/config.toml',
+        'otel-codex-hook',
+        ['/home/.codex/hooks.json:stop:1:0'],
       );
-      expect(removeTrustBlock).not.toHaveBeenCalled();
-      expect(mockHookManager.uninstallHook).not.toHaveBeenCalled();
+      expect(mockHookManager.uninstallHook).toHaveBeenCalledOnce();
     });
   });
 

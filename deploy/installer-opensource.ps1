@@ -2657,7 +2657,7 @@ try {
 }
 
 # ============================================================
-# Remove legacy OTel plugin assets owned by Pilot
+# Remove legacy Claude OTel plugin
 # ============================================================
 function Remove-OtelPlugin {
     $OTEL_CLAUDE_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.claude"
@@ -2975,35 +2975,137 @@ fs.writeFileSync(process.argv[2], content);
 function Test-IsPilotCodexHookCommand {
     param([object]$Command)
     if ($null -eq $Command) { return $false }
-    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook)'
+    return ([string]$Command) -match '(?i)(?:^|[\/\\"''\s])codex-loongsuite-pilot-hook\.(?:mjs|sh|ps1)(?:["''\s]|$)'
 }
 
 function Remove-CodexHookConfig {
     $configPath = Join-Path $env:USERPROFILE ".codex\hooks.json"
     if (-not (Test-Path -LiteralPath $configPath)) { return }
-    $raw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
-    if ($raw -notmatch 'codex-loongsuite-pilot-hook') { return }
 
-    $packageDir = $script:PERMANENT_DIR
-    $currentFile = Join-Path $CACHE_DIR "current"
-    if (Test-Path -LiteralPath $currentFile) {
-        $currentVersion = (Get-Content -LiteralPath $currentFile -Raw).Trim()
-        if (-not $currentVersion -or $currentVersion -match '[/\\]' -or $currentVersion -in @('.', '..')) {
-            throw "Invalid Pilot version pointer"
+    try {
+        # Get-Content -Encoding UTF8 handles both BOM and no-BOM files and is CLM-safe,
+        # unlike [System.IO.File]::ReadAllText.
+        $raw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
+        $data = $raw | ConvertFrom-Json
+        if (-not $data.hooks -or
+            $null -eq $data.hooks.PSObject -or
+            $null -eq $data.hooks.PSObject.Properties) {
+            return
         }
-        $packageDir = Join-Path (Join-Path $CACHE_DIR "versions") $currentVersion
-    }
-    $helper = Join-Path $packageDir "dist\codex-hook-cleanup.cjs"
-    if (-not (Test-Path -LiteralPath $helper)) {
-        throw "Codex cleanup helper missing; upgrade Pilot before uninstalling. Installation assets preserved."
-    }
-    if (-not $script:NODE_BIN) {
-        throw "No usable Node.js; Codex hook/trust cleanup cannot proceed. Installation assets preserved."
-    }
-    $trustPath = Join-Path $env:USERPROFILE ".codex\config.toml"
-    & $script:NODE_BIN $helper $configPath $trustPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Codex hook/trust cleanup failed; installation assets preserved."
+
+        $changed = $false
+        $eventProperties = @(
+            $data.hooks.PSObject.Properties |
+                Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Name) }
+        )
+        if ($eventProperties.Count -eq 0) { return }
+
+        foreach ($eventProperty in $eventProperties) {
+            $eventName = $eventProperty.Name
+            $entries = @($eventProperty.Value)
+            $keptEntries = @()
+
+            foreach ($entry in $entries) {
+                # Preserve malformed or extension-owned null/scalar entries. They
+                # are not Pilot commands and uninstall must not fail on them.
+                if ($null -eq $entry -or $null -eq $entry.PSObject) {
+                    $keptEntries += ,$entry
+                    continue
+                }
+
+                $commandProperty = $entry.PSObject.Properties["command"]
+                $directCommand = if ($commandProperty) { $commandProperty.Value } else { $null }
+                if (Test-IsPilotCodexHookCommand $directCommand) {
+                    $changed = $true
+                    continue
+                }
+
+                $nestedProperty = $entry.PSObject.Properties["hooks"]
+                if ($nestedProperty -and $null -ne $nestedProperty.Value) {
+                    $nestedHooks = @($nestedProperty.Value)
+                    $keptNestedHooks = @(
+                        $nestedHooks | Where-Object {
+                            if ($null -eq $_ -or $null -eq $_.PSObject) {
+                                return $true
+                            }
+                            $nestedCommandProperty = $_.PSObject.Properties["command"]
+                            $nestedCommand = if ($nestedCommandProperty) {
+                                $nestedCommandProperty.Value
+                            } else {
+                                $null
+                            }
+                            -not (Test-IsPilotCodexHookCommand $nestedCommand)
+                        }
+                    )
+                    if ($keptNestedHooks.Count -ne $nestedHooks.Count) {
+                        $changed = $true
+                        $entry.hooks = @($keptNestedHooks)
+                    }
+                    if ($nestedHooks.Count -gt 0 -and $keptNestedHooks.Count -eq 0) {
+                        continue
+                    }
+                }
+
+                $keptEntries += ,$entry
+            }
+
+            if ($keptEntries.Count -eq 0) {
+                $data.hooks.PSObject.Properties.Remove($eventName)
+            } else {
+                $data.hooks.$eventName = @($keptEntries)
+            }
+        }
+
+        if ($changed) {
+            $updated = ($data | ConvertTo-Json -Depth 100) + "`r`n"
+            Write-FileUtf8NoBom -Path $configPath -Content $updated
+        }
+
+        # Do not report success until the resulting config is independently
+        # checked for both direct and nested Pilot commands.
+        $verifyData = (
+            Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json
+        )
+        if ($verifyData.hooks) {
+            $verifyEventProperties = @(
+                $verifyData.hooks.PSObject.Properties |
+                    Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Name) }
+            )
+            foreach ($eventProperty in $verifyEventProperties) {
+                foreach ($entry in @($eventProperty.Value)) {
+                    if ($null -eq $entry -or $null -eq $entry.PSObject) { continue }
+
+                    $commandProperty = $entry.PSObject.Properties["command"]
+                    $directCommand = if ($commandProperty) { $commandProperty.Value } else { $null }
+                    if (Test-IsPilotCodexHookCommand $directCommand) {
+                        throw "Pilot Codex hook command is still present"
+                    }
+
+                    $nestedProperty = $entry.PSObject.Properties["hooks"]
+                    $nestedHooks = if ($nestedProperty) { @($nestedProperty.Value) } else { @() }
+                    foreach ($nestedHook in $nestedHooks) {
+                        if ($null -eq $nestedHook -or $null -eq $nestedHook.PSObject) { continue }
+                        $nestedCommandProperty = $nestedHook.PSObject.Properties["command"]
+                        $nestedCommand = if ($nestedCommandProperty) {
+                            $nestedCommandProperty.Value
+                        } else {
+                            $null
+                        }
+                        if (Test-IsPilotCodexHookCommand $nestedCommand) {
+                            throw "Pilot Codex nested hook command is still present"
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($changed) {
+            Msg "    ✅ 已清理: ~\.codex\hooks.json" `
+                "    ✅ Cleaned: ~\.codex\hooks.json"
+        }
+    } catch {
+        throw "Failed to clean Pilot hooks from $configPath`: $($_.Exception.Message)"
     }
 }
 
@@ -3457,9 +3559,13 @@ function Cmd-Uninstall {
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    # Preserve installation assets when the hook/trust transaction cannot finish.
-    Remove-CodexHookConfig
     Remove-HookConfigs
+    try {
+        Remove-CodexHookConfig
+    } catch {
+        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
     Write-Host ""
 
     Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."

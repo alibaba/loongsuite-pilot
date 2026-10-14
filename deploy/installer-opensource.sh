@@ -1787,7 +1787,7 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Remove legacy OTel plugin assets owned by Pilot
+# Remove legacy Claude OTel plugin
 # ============================================================
 remove_otel_plugin() {
     local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
@@ -1870,6 +1870,7 @@ try {
                 "    ✅ Plugin files removed (sessions/ preserved)"
         fi
     fi
+
 
 }
 
@@ -2246,39 +2247,6 @@ gc_old_versions() {
 # ============================================================
 # Remove hook entries injected into tool config files
 # ============================================================
-remove_codex_hook_config() {
-    local cfg="$HOME/.codex/hooks.json"
-    [ -f "$cfg" ] || return 0
-    # No matching command means no positional edits are needed, including on
-    # older installations that do not yet carry the transactional helper.
-    grep -qi 'codex-loongsuite-pilot-hook' "$cfg" || return 0
-    local package_dir="$PERMANENT_DIR"
-    local current_file="$HOME/.loongsuite-pilot/current"
-    if [ -f "$current_file" ]; then
-        local current_version
-        current_version=$(tr -d '\r\n' < "$current_file")
-        case "$current_version" in
-            ''|*/*|*\\*|.|..) echo 'Invalid Pilot version pointer' >&2; return 1 ;;
-        esac
-        package_dir="$HOME/.loongsuite-pilot/versions/$current_version"
-    fi
-    local helper="$package_dir/dist/codex-hook-cleanup.cjs"
-    if [ ! -f "$helper" ]; then
-        echo 'Codex cleanup helper missing; upgrade Pilot before uninstalling. Installation assets preserved.' >&2
-        return 1
-    fi
-    local node_bin=""
-    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
-        if [ -f "$pin_file" ]; then
-            local pinned
-            pinned=$(tr -d '\r\n' < "$pin_file")
-            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
-        fi
-    done
-    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || return 1; fi
-    "$node_bin" "$helper" "$cfg" "$HOME/.codex/config.toml"
-}
-
 remove_hook_configs() {
     local HOOK_MARKER=".loongsuite-pilot"
     local configs=(
@@ -2289,6 +2257,7 @@ remove_hook_configs() {
         "$HOME/.qoderworkcn/settings.json"
         "$HOME/.qwenworkcn/settings.json"
         "$HOME/.claude/settings.json"
+        "$HOME/.codex/hooks.json"
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
@@ -2317,9 +2286,21 @@ try {
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
+  const isCodex = cfg.endsWith('/.codex/hooks.json');
+  const isPilotCodex = c => typeof c === 'string' && c.includes(marker)
+    && new RegExp('(^|[ /])codex-loongsuite-pilot-hook[.](sh|mjs|ps1)([^A-Za-z0-9_.-]|$)', 'i').test(c);
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
-    const filtered = entries.filter(e => {
+    const candidates = isCodex ? entries.flatMap(e => {
+      if (!e || typeof e !== 'object') return [e];
+      if (isPilotCodex(e.command)) { changed = true; return []; }
+      if (!Array.isArray(e.hooks)) return [e];
+      const nested = e.hooks.filter(h => !isPilotCodex(h && h.command));
+      if (nested.length === e.hooks.length) return [e];
+      changed = true;
+      return nested.length ? [{ ...e, hooks: nested }] : [];
+    }) : entries;
+    const filtered = isCodex ? candidates : candidates.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
       const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
@@ -3026,8 +3007,6 @@ cmd_uninstall() {
 
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    # Fail before deleting assets if hooks/trust cannot be changed together.
-    remove_codex_hook_config || return 1
     remove_hook_configs
     remove_grok_build_hook_config
     remove_qodercli_token_intercept
@@ -3036,7 +3015,7 @@ cmd_uninstall() {
     remove_claude_code_fetch_intercept
     echo ""
 
-    # Remove legacy OTel plugin assets owned by Pilot
+    # Remove OTel Claude plugin
     msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     remove_otel_plugin
     echo ""

@@ -28,13 +28,6 @@ const internalStubPlugin = {
 
 const commonPlugins = [internalStubPlugin];
 
-// The uninstaller must work without node_modules or the collector's native deps.
-await build({
-  entryPoints: ['src/cli/codex-hook-cleanup.ts'],
-  outfile: 'dist/codex-hook-cleanup.cjs',
-  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
-});
-
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
