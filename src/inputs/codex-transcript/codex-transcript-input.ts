@@ -652,6 +652,8 @@ export class CodexTranscriptInput extends BaseInput {
             recoveryCheckpoint,
             nextScanOffset,
             terminalTurnId !== null,
+            undefined,
+            reliableCandidate?.parentThreadId,
           );
           if (
             terminalTurnId
@@ -802,6 +804,7 @@ export class CodexTranscriptInput extends BaseInput {
     endOffset: number,
     terminal: boolean,
     inferredTerminalStatus?: 'interrupted',
+    attachmentParentThreadId?: string,
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -854,7 +857,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn, filePath),
+      this.partialTurnOptions(activeTurn, filePath, attachmentParentThreadId),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
@@ -884,7 +887,7 @@ export class CodexTranscriptInput extends BaseInput {
     const committedTurn = closedStepCount === turn.steps.length
       ? turn
       : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
-    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta);
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId);
     const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
@@ -999,6 +1002,7 @@ export class CodexTranscriptInput extends BaseInput {
     filePath: string,
     activeTurn: CodexActiveTranscriptTurn,
     meta: ReturnType<typeof extractCodexTranscriptMeta>,
+    attachmentParentThreadId?: string,
   ): Promise<CodexTranscriptInputContext | undefined> {
     const context = activeTurn.inputContext;
     if (!context || context.delta) return context;
@@ -1016,7 +1020,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn, filePath),
+      this.partialTurnOptions(activeTurn, filePath, attachmentParentThreadId),
     );
     const lastStep = previous?.steps.at(-1);
     if (!lastStep) {
@@ -1474,6 +1478,7 @@ export class CodexTranscriptInput extends BaseInput {
           terminalEndOffset,
           true,
           capturedMatches ? undefined : 'interrupted',
+          pending.parentThreadId,
         );
         if (recovered.kind === 'unparseable') {
           degradedToolCallIds.push(item.child.parentToolCallId);
@@ -2387,7 +2392,11 @@ export class CodexTranscriptInput extends BaseInput {
     this.stateStore.set(this.id, { ...current, extra });
   }
 
-  private partialTurnOptions(activeTurn: CodexActiveTranscriptTurn, filePath: string): {
+  private partialTurnOptions(
+    activeTurn: CodexActiveTranscriptTurn,
+    filePath: string,
+    attachmentParentThreadId?: string,
+  ): {
     startedAtMs?: number;
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
@@ -2406,7 +2415,7 @@ export class CodexTranscriptInput extends BaseInput {
         ? { lastCumulativeTokenTotal: activeTurn.lastCumulativeTokenTotal }
         : {}),
       ...(this.includeMultimodal && this.multimodalProcessor
-        ? { blobToUri: this.blobToUri(filePath, activeTurn.cwd), uploadMode: this.multimodalUploadMode }
+        ? { blobToUri: this.blobToUri(filePath, activeTurn.cwd, attachmentParentThreadId), uploadMode: this.multimodalUploadMode }
         : {}),
       ...(activeTurn.model ? { model: activeTurn.model } : {}),
       ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
@@ -2417,13 +2426,18 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   /** blob→uri with per-transcript replay cache. */
-  private blobToUri(transcriptPath: string, cwd?: string): BlobToUriFn {
+  private blobToUri(transcriptPath: string, cwd?: string, attachmentParentThreadId?: string): BlobToUriFn {
     return (params) => {
       const meta = this.transcriptMetaByPath.get(transcriptPath);
       if (!this.workspacePolicy.allows({
         // Match the event session identity, including child rollout threads.
         'gen_ai.session.id': meta?.threadId ?? sessionIdFromTranscriptPath(transcriptPath),
         cwd,
+      }, this.agentType)) return null;
+      // Linked recovery uploads before rewriteSubagentEntries assigns the parent
+      // session. Check that destination too, before upload or replay-cache reuse.
+      if (attachmentParentThreadId && !this.workspacePolicy.allows({
+        'gen_ai.session.id': attachmentParentThreadId,
       }, this.agentType)) return null;
       if (!this.multimodalProcessor) return null;
       const cacheKey = params.reuseKey ? `${transcriptPath}\0${params.reuseKey}` : undefined;

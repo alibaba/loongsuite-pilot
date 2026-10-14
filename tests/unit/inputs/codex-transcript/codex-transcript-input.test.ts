@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
+import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
@@ -4841,5 +4842,84 @@ describe('Codex transcript multimodal extraction', () => {
     expect(userParts(second!)[1]).toEqual(userParts(first!)[1]);
     expect(decodeCount).toBe(1);
     expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
+  });
+});
+
+// Exercise real rollout discovery, reliable linking, recovery and event rewriting.
+describe('workspace privacy during Codex subagent fusion', () => {
+  it.each([
+    ['captured child, blocked parent', true, true, false],
+    ['forced child, blocked parent', false, true, false],
+    ['captured child, public parent', true, false, false],
+    ['forced child, public parent', false, false, false],
+    ['captured child, blocked child', true, false, true],
+    ['forced child, blocked child', false, false, true],
+  ] as const)('%s checks privacy before attachment upload', async (_name, childTerminal, blockedParent, blockedChild) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fusion-privacy-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const upload = vi.fn().mockReturnValue({ uri: 'oss://test/child-image', mimeType: 'image/png', modality: 'image' });
+    const input = new CodexTranscriptInput({
+      stateStore, sessionDir, wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'), pollIntervalMs: 10,
+      multimodal: { enabled: true, uploadMode: 'all', processor: { blobToUri: upload } as any },
+    });
+    const policy = new WorkspacePolicy(['/private-project']);
+    input.setWorkspacePolicy(policy);
+    const parentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    if (blockedParent) {
+      // A prior text-only turn has already excluded the parent session.
+      expect(policy.allows({ 'gen_ai.session.id': parentId, cwd: '/private-project' }, input.agentType)).toBe(false);
+    }
+    const raw: AgentActivityEntry[] = [];
+    const output: AgentActivityEntry[] = [];
+    input.on('entries', batch => {
+      raw.push(...batch);
+      // InputManager applies this same policy after the fusion rewrites session IDs.
+      output.push(...policy.filter(batch, input.agentType));
+    });
+    await input.start();
+    try {
+      const parentText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+      const parentLines = parentText.trimEnd().split('\n');
+      const terminal = parentLines.pop()!;
+      const parentPath = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentLines.join('\n') + '\n');
+      await waitFor(() => input.getSubagentLinkSnapshot().detectedSpawns === 4);
+      const childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+      const childRecords = childText.trimEnd().split('\n').map(line => JSON.parse(line));
+      for (const item of childRecords) {
+        if (item.type === 'turn_context' && item.payload.turn_id === 'child-turn-1') {
+          item.payload.cwd = blockedChild ? '/private-project' : '/public-project';
+        }
+        if (item.type === 'response_item' && item.payload.role === 'user'
+          && item.payload.content?.some((part: any) => part.text === 'synthetic child task')) {
+          item.payload.content.push({ type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' });
+        }
+      }
+      if (!childTerminal) childRecords.pop();
+      const childPath = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childRecords.map(item => JSON.stringify(item)).join('\n') + '\n');
+      await waitFor(() => {
+        const checkpoint = transcriptCheckpoint(stateStore, childPath);
+        return childTerminal ? Boolean(checkpoint?.pendingSubagent)
+          : Boolean(checkpoint?.activeTurn && checkpoint.scanOffset > checkpoint.activeTurn.startOffset);
+      });
+      const uploadsBeforeParentTerminal = upload.mock.calls.length;
+      expect(responsesForTurn(raw, 'child-turn-1')).toHaveLength(0);
+      await fs.appendFile(parentPath, terminal + '\n', 'utf8');
+      await waitFor(() => responsesForTurn(raw, 'child-turn-1').length === 1);
+      const fusedChild = raw.filter(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1');
+      expect(fusedChild.length).toBeGreaterThan(0);
+      expect(fusedChild.every(entry => entry['gen_ai.session.id'] === parentId && entry['gen_ai.agent.scope'] === 'subagent')).toBe(true);
+      if (blockedParent || blockedChild) {
+        expect(uploadsBeforeParentTerminal).toBe(0);
+        expect(upload).not.toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(false);
+      } else {
+        expect(upload).toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(true);
+      }
+    } finally { await input.stop(); }
   });
 });
