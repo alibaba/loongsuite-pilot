@@ -63,7 +63,7 @@ describe('resolveAgentSystem', () => {
     const expectedKeys = [
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
-      'cursor', 'cursor-hook', 'grok-build',
+      'cursor', 'cursor-hook', 'cursor-cli', 'grok-build',
       'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes', 'dsh',
     ];
     for (const key of expectedKeys) {
