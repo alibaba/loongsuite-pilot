@@ -191,6 +191,7 @@ describe('managed_node_platform mapping', () => {
     ['Linux', 'x86_64', 'linux x64'],
     ['Linux', 'aarch64', 'linux arm64'],
     ['MINGW64_NT-10.0', 'x86_64', 'win x64'],
+    ['MINGW64_NT-10.0', 'aarch64', 'win arm64'],
   ];
   for (const [os, arch, expected] of cases) {
     it(`maps ${os}/${arch} -> ${expected}`, () => {
@@ -198,12 +199,6 @@ describe('managed_node_platform mapping', () => {
       expect(out.trim()).toBe(expected);
     });
   }
-
-  it('rejects win-arm64 (no managed artifact)', () => {
-    const res = runBashFail('managed_node_platform', { env: { FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'aarch64' } });
-    expect(res.failed).toBe(true);
-    expect(res.err).toMatch(/win-arm64/);
-  });
 
   it('rejects unsupported architecture', () => {
     const res = runBashFail('managed_node_platform', { env: { FAKE_OS: 'Linux', FAKE_ARCH: 'riscv64' } });
