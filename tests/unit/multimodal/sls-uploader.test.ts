@@ -254,6 +254,45 @@ describe('SlsUploader', () => {
     expect(put).toHaveBeenCalledTimes(3);
   });
 
+  it('logs distinct local errors without a status code', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    vi.spyOn(slsClient, 'slsPutViaPresignedHttp')
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'fetch failed',
+        retryable: false,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: slsClient.PRESIGN_ORIGIN_MISMATCH_ERROR,
+        retryable: false,
+      });
+    const uploader = new SlsUploader({
+      ...sls,
+      type: 'delegatedOss',
+    }, 'sls://proj/logstore', {
+      expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
+    });
+    const item = (targetPath: string) => ({
+      targetPath,
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    });
+
+    expect(await uploader.upload(item('20260101/a.png'))).toBe(false);
+    expect(await uploader.upload(item('20260101/b.png'))).toBe(false);
+
+    const failed = mockWarn.mock.calls.filter(call => call[0] === 'sls upload failed');
+    expect(failed).toHaveLength(2);
+    expect(failed.map(call => call[1]?.error)).toEqual([
+      'fetch failed',
+      slsClient.PRESIGN_ORIGIN_MISMATCH_ERROR,
+    ]);
+  });
+
   it('warns once when delegatedOss XML failures differ only by RequestId', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));

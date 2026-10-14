@@ -32,6 +32,7 @@ import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 const logger = createLogger('MultimodalProcessor');
 const DELEGATED_OSS_RETRY_BASE_MS = 1_000;
 const DELEGATED_OSS_RETRY_MAX_MS = 60_000;
+const DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS = 60_000;
 
 /** Race a promise; timeout does not cancel the underlying work. */
 export async function withDeadline<T>(
@@ -97,6 +98,7 @@ export class MultimodalProcessor {
   private readonly resolveStorageBase?: () => Promise<StorageBaseResult>;
   private sniffTimer: ReturnType<typeof setTimeout> | undefined;
   private sniffFailureCount = 0;
+  private lastMismatchRediscoveryAt: number | undefined;
   /** path→uri cache keyed by path + event day + mtime + size. */
   private readonly pathUriCache = new LruMap<PathUriCacheEntry>(MULTIMODAL_LRU_LIMIT);
   /** In-flight path reads. */
@@ -391,6 +393,12 @@ export class MultimodalProcessor {
   /** Re-learn the delegatedOss bucket after the presign origin changes. */
   private noteOriginMismatch(): void {
     if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    const now = Date.now();
+    if (
+      this.lastMismatchRediscoveryAt !== undefined
+      && now - this.lastMismatchRediscoveryAt < DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS
+    ) return;
+    this.lastMismatchRediscoveryAt = now;
     this.storageBasePath = '';
     this.pathUriCache.clear();
     this.scheduleDelegatedOssSniff();
@@ -409,8 +417,14 @@ export class MultimodalProcessor {
 
   private async sniffDelegatedOss(): Promise<void> {
     if (!this.resolveStorageBase) return;
-    const sniffed = await this.resolveStorageBase();
-    this.sniffTimer = undefined;
+    let sniffed: StorageBaseResult;
+    try {
+      sniffed = await this.resolveStorageBase();
+    } catch (err) {
+      sniffed = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      this.sniffTimer = undefined;
+    }
     if (this.shuttingDown) return;
     if (!sniffed.ok) {
       logger.warn('delegatedOss storage sniff failed; retrying', { error: sniffed.error });

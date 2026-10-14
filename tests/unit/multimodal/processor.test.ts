@@ -679,12 +679,43 @@ describe('MultimodalProcessor.pathToUri', () => {
     vi.useRealTimers();
   });
 
-  it('relearns the delegatedOss bucket after the presign origin changes', async () => {
+  it('retries when the injected storage resolver rejects', async () => {
+    vi.useFakeTimers();
+    const resolveStorageBase = vi.fn()
+      .mockRejectedValueOnce(new Error('resolver failed'))
+      .mockResolvedValue({
+        ok: true,
+        storageBasePath: 'oss://user-bucket/proj/logstore',
+      });
+    const processor = new MultimodalProcessor(
+      undefined,
+      new FakeUploader(),
+      resolveStorageBase,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolveStorageBase).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(resolveStorageBase).toHaveBeenCalledTimes(2);
+    expect(processor.blobToUri({
+      content: Buffer.from('png').toString('base64'),
+      mime_type: 'image/png',
+    })?.uri).toMatch(/^oss:\/\/user-bucket\/proj\/logstore\//);
+
+    await processor.shutdown();
+    vi.useRealTimers();
+  });
+
+  it('relearns the delegatedOss bucket and rate-limits repeated origin mismatches', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     const put = vi.spyOn(slsClient, 'slsPutViaPresignedHttp')
       .mockResolvedValueOnce({ ok: true, statusCode: 200, requestId: 'a' })
-      .mockResolvedValueOnce({ ok: false, error: 'presign url origin mismatch', retryable: false })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: slsClient.PRESIGN_ORIGIN_MISMATCH_ERROR,
+        retryable: false,
+      })
       .mockResolvedValue({ ok: true, statusCode: 200, requestId: 'b' });
     const sniff = vi.spyOn(slsClient, 'sniffSlsHttpEventStorageBasePath').mockResolvedValue({
       ok: true,
@@ -732,6 +763,25 @@ describe('MultimodalProcessor.pathToUri', () => {
     expect(put).toHaveBeenLastCalledWith(expect.objectContaining({
       expectedOrigin: 'https://bucket-b.oss-cn-hangzhou.aliyuncs.com',
     }));
+
+    put.mockResolvedValue({
+      ok: false,
+      error: slsClient.PRESIGN_ORIGIN_MISMATCH_ERROR,
+      retryable: false,
+    });
+    expect(uriFor('four')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sniff).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(uriFor('five')).toMatch(/^oss:\/\/bucket-b\/proj\/logstore\//);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(uriFor('pending-again')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sniff).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sniff).toHaveBeenCalledTimes(2);
+
     await processor.shutdown();
     vi.useRealTimers();
   });

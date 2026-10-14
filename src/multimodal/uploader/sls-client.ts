@@ -50,6 +50,8 @@ export interface SlsResult {
   retryable?: boolean;
 }
 
+export const PRESIGN_ORIGIN_MISMATCH_ERROR = 'presign url origin mismatch';
+
 export interface SlsObjectTarget extends SlsRequest {
   objectKey: string;
   timeoutMs: number;
@@ -625,7 +627,7 @@ export function bindPresignedPutUrl(
     return { ok: false, error: 'presign url origin is required', retryable: false };
   }
   if (parsed.origin !== target.expectedOrigin) {
-    return { ok: false, error: 'presign url origin mismatch', retryable: false };
+    return { ok: false, error: PRESIGN_ORIGIN_MISMATCH_ERROR, retryable: false };
   }
   const objectPath = presignObjectPath(parsed.pathname);
   const expectedPath = `${target.project}/${target.logstore}/${target.objectKey}`;

@@ -13,6 +13,7 @@ import {
   withRetries,
 } from './retry.js';
 import {
+  PRESIGN_ORIGIN_MISMATCH_ERROR,
   slsPutObject,
   slsPutViaPresignedHttp,
   slsStorageAuthFields,
@@ -152,7 +153,7 @@ export class SlsUploader implements Uploader {
       }, { signal: this.abort.signal });
 
       if (!result.ok) {
-        if (result.error === 'presign url origin mismatch') opts?.onStorageBaseInvalidated?.();
+        if (result.error === PRESIGN_ORIGIN_MISMATCH_ERROR) opts?.onStorageBaseInvalidated?.();
         this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
@@ -185,7 +186,9 @@ export class SlsUploader implements Uploader {
   }
 
   private warnUploadFailure(statusCode: number | undefined, fields: Record<string, unknown>): void {
-    const key = `${statusCode ?? 'none'}\0${stableFailureReason(fields.error)}`;
+    const error = typeof fields.error === 'string' ? fields.error : '';
+    const reason = statusCode === undefined ? error.slice(0, 200) : stableFailureReason(error);
+    const key = `${statusCode ?? 'none'}\0${reason}`;
     const now = Date.now();
     const previous = this.failureWarnAt.get(key) ?? 0;
     if (now - previous < UPLOAD_FAILURE_WARN_INTERVAL_MS) return;
