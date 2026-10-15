@@ -16,9 +16,10 @@ vi.mock('../../../src/utils/logger.js', () => ({
 
 vi.mock('../../../src/deployment/detect-utils.js', () => ({
   detectAgent: vi.fn(),
+  commandExists: vi.fn(),
 }));
 
-import { detectAgent } from '../../../src/deployment/detect-utils.js';
+import { commandExists, detectAgent } from '../../../src/deployment/detect-utils.js';
 
 const MARKER_FILE = '.loongsuite-pilot-managed.json';
 
@@ -82,6 +83,19 @@ describe('DirectoryPluginStrategy', () => {
 
     await expect(strategy.detect(def)).resolves.toBe(false);
     expect(detectAgent).toHaveBeenCalledWith(def.detection);
+    expect(commandExists).not.toHaveBeenCalled();
+  });
+
+  it('requires the exact activation CLI even when the Hermes directory exists', async () => {
+    vi.mocked(detectAgent).mockResolvedValue(true);
+    vi.mocked(commandExists).mockResolvedValue(false);
+    const def = withActivation(makeDef());
+
+    await expect(strategy.detect(def)).resolves.toBe(false);
+    expect(commandExists).toHaveBeenCalledWith('/opt/hermes/bin/hermes', { fresh: true });
+
+    vi.mocked(commandExists).mockResolvedValue(true);
+    await expect(strategy.detect(def)).resolves.toBe(true);
   });
 
   it('copies a plugin directory and writes its ownership marker', async () => {

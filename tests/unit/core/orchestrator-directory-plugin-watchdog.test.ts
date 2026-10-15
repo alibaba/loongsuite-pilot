@@ -11,17 +11,12 @@ vi.mock('../../../src/core/build-constants.js', () => ({
   PROPRIETARY_BUILD: false,
 }));
 
-vi.mock('../../../src/deployment/detect-utils.js', () => ({
-  detectAgent: vi.fn(),
-}));
-
 vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/utils/fs-utils.js')>();
   return { ...actual, directoryExists: vi.fn() };
 });
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
-import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import { directoryExists } from '../../../src/utils/fs-utils.js';
 
 const DATA_DIR = '/tmp/orch-directory-plugin-test';
@@ -57,6 +52,7 @@ function buildTargets(orchestrator: Orchestrator) {
   return (orchestrator as unknown as {
     buildDirectoryPluginInterceptTargets: () => Array<{
       id: string;
+      guardFailedRepairs?: boolean;
       enabled?: () => boolean;
       precondition: () => Promise<boolean>;
       check: () => Promise<boolean>;
@@ -69,12 +65,14 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
   let getDefinitions: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
+  let isAgentDetected: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     getDefinitions = vi.fn().mockReturnValue([directoryPluginDef()]);
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
+    isAgentDetected = vi.fn();
   });
 
   it('builds watchdog targets only for configured directory plugins', () => {
@@ -93,11 +91,13 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
       getDefinitions,
       needsRedeploy,
       deploySingle,
+      isAgentDetected,
     }));
 
     expect(targets.map(target => target.id)).toEqual([
       'directory-plugin:hermes-agent',
     ]);
+    expect(targets[0].guardFailedRepairs).toBe(true);
   });
 
   it('disables self-healing when Hermes is disabled by agent control', () => {
@@ -105,6 +105,7 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
       getDefinitions,
       needsRedeploy,
       deploySingle,
+      isAgentDetected,
     }, false));
 
     expect(target.enabled?.()).toBe(false);
@@ -112,7 +113,7 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
 
   it('checks source, detection, health, and repair through DeploymentManager', async () => {
     vi.mocked(directoryExists).mockResolvedValue(true);
-    vi.mocked(detectAgent).mockResolvedValue(true);
+    isAgentDetected.mockResolvedValue(true);
     needsRedeploy.mockResolvedValue(true);
     deploySingle.mockResolvedValue({
       success: true,
@@ -123,6 +124,7 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
       getDefinitions,
       needsRedeploy,
       deploySingle,
+      isAgentDetected,
     }));
 
     expect(target.enabled?.()).toBe(true);
@@ -132,5 +134,23 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
     expect(deploySingle).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'hermes-agent' }),
     );
+    expect(isAgentDetected).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'hermes-agent' }),
+    );
+  });
+
+  it('skips repair when the activation CLI is unavailable', async () => {
+    vi.mocked(directoryExists).mockResolvedValue(true);
+    isAgentDetected.mockResolvedValue(false);
+    const [target] = buildTargets(makeOrchestrator({
+      getDefinitions,
+      needsRedeploy,
+      deploySingle,
+      isAgentDetected,
+    }));
+
+    await expect(target.precondition()).resolves.toBe(false);
+    expect(needsRedeploy).not.toHaveBeenCalled();
+    expect(deploySingle).not.toHaveBeenCalled();
   });
 });
