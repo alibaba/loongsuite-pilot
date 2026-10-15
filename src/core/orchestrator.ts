@@ -94,7 +94,7 @@ import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../sta
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { LOCAL_IP } from '../utils/network-utils.js';
+import { LOCAL_IP, refreshLocalIp } from '../utils/network-utils.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -211,6 +211,8 @@ export class Orchestrator extends EventEmitter {
       path.join(this.dataDir, 'agent-control.json'),
     );
     await this.agentControlManager.load();
+
+    await refreshLocalIp();
 
     // 3. Build flushers
     this.globalAttributesProvider = new GlobalAttributesProvider(

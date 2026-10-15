@@ -101,8 +101,9 @@ export class MetricsWriter {
     this.diskUsageSampler.start();
 
     this.dataflowTimer = setInterval(() => {
-      refreshLocalIp();
-      void this.writeDataflow();
+      void refreshLocalIp().then(() => {
+        if (this.dataflowTimer) return this.writeDataflow();
+      });
     }, DATAFLOW_INTERVAL_MS);
     this.dataflowTimer.unref();
 
