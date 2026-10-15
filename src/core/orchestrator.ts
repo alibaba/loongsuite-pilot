@@ -21,7 +21,6 @@ import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
-import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
   isPiSdkRegistryBusyError,
@@ -82,7 +81,7 @@ import {
   MultimodalProcessor,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
-import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
+import { HookWatchdog, restoreHookWrapper, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -632,6 +631,7 @@ export class Orchestrator extends EventEmitter {
   private buildHookWatchdogTargets(): PluginCheckTarget[] {
     const defs = this.deploymentManager.getDefinitions();
     const targets: PluginCheckTarget[] = [];
+    const pilotDir = this.resolvePilotDir();
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
@@ -639,18 +639,34 @@ export class Orchestrator extends EventEmitter {
       // Its exact config and asset checks run through a dedicated intercept target.
       if (def.id === 'grok-build') continue;
 
-      const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
+      const hookScript = def.hook.hookCommand.match(/^(.+?\.(?:sh|ps1))(?:\s|$)/i)?.[1];
+      const scriptName = path.basename(hookScript ?? def.hook.hookCommand.split(' ')[0]);
+      const wrapperSourcePath = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const wrapperTargetPath = path.join(this.dataDir, 'hooks', scriptName);
+      const wrapperAsset = hookScript
+        && path.resolve(hookScript) === path.resolve(wrapperTargetPath)
+        ? {
+            sourcePath: wrapperSourcePath,
+            targetPath: wrapperTargetPath,
+            isApplicable: () => this.resolvePilotDir() === pilotDir,
+          }
+        : undefined;
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
+        ...(wrapperAsset ? { wrapperAsset } : {}),
         // Runtime gate: a user who has turned this agent off (config.agents[id]
         // .enabled === false) must never have its hook re-injected. Evaluated on
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
-        repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        repairFn: async () => {
+          if (wrapperAsset?.isApplicable()) await restoreHookWrapper(wrapperAsset);
+          const result = await this.deploymentManager.deploySingle(def);
+          return result.success;
+        },
         ...(def.id === 'codex' && def.hook.trustToml ? {
           changeWatchPath: resolveHome(def.hook.trustToml.configPath),
           // Reuse the deployment strategy's exact hook/trust inspection. The
@@ -762,13 +778,18 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `directory-plugin:${def.id}`,
+        guardFailedRepairs: true,
+        repairInputsFingerprint: () => this.deploymentManager.directoryPluginRepairInputsFingerprint(def),
         enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () =>
           (await directoryExists(def.directoryPlugin!.sourceDir))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before directory plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }

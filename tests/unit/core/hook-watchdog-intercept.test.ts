@@ -122,7 +122,7 @@ describe('HookWatchdog intercept targets', () => {
     expect(result.repaired).toBe(0);
   });
 
-  it('does not apply cooldown or daily budget after repair throws', async () => {
+  it('does not budget transient repair failures by default', async () => {
     const repair = vi.fn().mockRejectedValue(new Error('transient target disappeared'));
     const target = makeTarget({
       check: vi.fn().mockResolvedValue(false),
@@ -136,6 +136,62 @@ describe('HookWatchdog intercept targets', () => {
     expect(first.repaired).toBe(0);
     expect(second.repaired).toBe(0);
     expect(repair).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops ENOENT directory-plugin retries until repair inputs change', async () => {
+    let fingerprint = 'source-v1|cli-v1';
+    const repair = vi.fn().mockRejectedValue(new Error('spawn hermes ENOENT'));
+    const target = makeTarget({
+      id: 'directory-plugin:hermes-agent',
+      guardFailedRepairs: true,
+      repairInputsFingerprint: async () => fingerprint,
+      check: vi.fn().mockResolvedValue(false),
+      repair,
+    });
+    const wd = new HookWatchdog({ ...defaultConfig, repairCooldownMs: 0 }, [], [target]);
+    for (let i = 0; i < 5; i++) await wd.runCheck();
+    expect(repair).toHaveBeenCalledTimes(1);
+    (wd as any).dailyRepairResetDate = '1970-01-01';
+    await wd.runCheck();
+    expect(repair).toHaveBeenCalledTimes(1);
+    fingerprint = 'source-v1|cli-v2';
+    await wd.runCheck();
+    expect(repair).toHaveBeenCalledTimes(2);
+    fingerprint = 'source-v2|cli-v2';
+    await wd.runCheck();
+    expect(repair).toHaveBeenCalledTimes(3);
+  });
+
+  it('backs off transient failures and retries after the activation service recovers', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const repair = vi.fn()
+      .mockRejectedValueOnce(new Error('activation temporarily failed'))
+      .mockRejectedValueOnce(new Error('activation temporarily failed'))
+      .mockResolvedValue(undefined);
+    const target = makeTarget({
+      id: 'directory-plugin:hermes-agent',
+      guardFailedRepairs: true,
+      repairInputsFingerprint: async () => 'same-source|same-cli',
+      check: vi.fn().mockResolvedValue(false),
+      repair,
+    });
+    const wd = new HookWatchdog({ ...defaultConfig, repairCooldownMs: 0 }, [], [target]);
+    try {
+      await wd.runCheck();
+      await wd.runCheck();
+      expect(repair).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(now + 60_001);
+      await wd.runCheck();
+      expect(repair).toHaveBeenCalledTimes(2);
+      clock.mockReturnValue(now + 180_002);
+      await wd.runCheck();
+      expect(repair).toHaveBeenCalledTimes(3);
+      expect(logger.warn.mock.calls.filter(([event]) => event === 'intercept-watchdog.daily-limit'))
+        .toHaveLength(0);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('handles multiple intercept targets independently', async () => {
