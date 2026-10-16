@@ -230,7 +230,7 @@ async function postWebtrackingChunk(
 ): Promise<void> {
   const body = {
     __topic__: opts?.topic ?? '',
-    __source__: opts?.source ?? '',
+    ...(opts?.source ? { __source__: opts.source } : {}),
     __logs__: logs,
     __tags__: opts?.tags ?? ({} as Record<string, string>),
   };
