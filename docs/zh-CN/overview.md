@@ -43,6 +43,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+| GitHub Copilot | Hook 唤醒 + 本地 transcript 轮询 | Yes | Yes | 按会话汇总（仅日志输出） | Yes |
 
 OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定。
 
