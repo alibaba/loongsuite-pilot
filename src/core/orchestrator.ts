@@ -94,7 +94,7 @@ import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../sta
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { LOCAL_IP, refreshLocalIp } from '../utils/network-utils.js';
+import { resolveLocalIp } from '../utils/network-utils.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -212,8 +212,6 @@ export class Orchestrator extends EventEmitter {
     );
     await this.agentControlManager.load();
 
-    await refreshLocalIp();
-
     // 3. Build flushers
     this.globalAttributesProvider = new GlobalAttributesProvider(
       this.config.globalSpanAttributes ?? {},
@@ -223,7 +221,7 @@ export class Orchestrator extends EventEmitter {
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
-    this.alarmManager = new AlarmManager({ ip: LOCAL_IP, version, userId: this.config.userId });
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
