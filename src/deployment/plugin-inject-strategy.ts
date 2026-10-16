@@ -310,7 +310,11 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private normalizeSpecForComparison(spec: string): string {
-    return process.platform === 'win32' ? spec.replace(/\\/g, '/') : spec;
+    // Users often write the injected path with a leading `~/` (e.g. in a
+    // dotfiles-managed settings file). Expand it so the entry is recognized
+    // as the already-injected plugin instead of being duplicated.
+    const expanded = resolveHome(spec);
+    return process.platform === 'win32' ? expanded.replace(/\\/g, '/') : expanded;
   }
 
   private flatArrayInject(
@@ -332,13 +336,27 @@ export class PluginInjectStrategy implements DeployStrategy {
       });
     }
 
-    const before = (json[pluginKey] as unknown[]).length;
-    json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-      (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
-    );
-    let mutated = (json[pluginKey] as unknown[]).length < before;
+    const entries = json[pluginKey] as unknown[];
+    const before = entries.length;
+    const kept: unknown[] = [];
+    let hasEquivalent = false;
+    for (const entry of entries) {
+      if (this.matchesSpec(entry, resolvedSpec, config.pluginId)) {
+        // An equivalent entry already references the plugin (possibly in a
+        // user-preferred spelling such as `~/...`). Keep the first one
+        // verbatim and drop later duplicates instead of rewriting it to the
+        // resolved spec.
+        if (hasEquivalent) continue;
+        hasEquivalent = true;
+        kept.push(entry);
+      } else {
+        kept.push(entry);
+      }
+    }
+    json[pluginKey] = kept;
+    let mutated = kept.length !== before;
 
-    if (!(json[pluginKey] as unknown[]).some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId))) {
+    if (!hasEquivalent) {
       (json[pluginKey] as unknown[]).push(resolvedSpec);
       mutated = true;
     }
