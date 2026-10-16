@@ -337,7 +337,6 @@ export class SlsFlusher extends BaseFlusher {
         timestamp: now,
         content: l.content,
       })),
-      source: '',
       topic: endpoint.kind,
       tags: this.buildAkTags(endpoint, agentType),
     };
@@ -420,7 +419,6 @@ export class SlsFlusher extends BaseFlusher {
         timestamp: now,
         content: l.content,
       })),
-      source: '',
       topic: endpoint.kind,
       tags: this.buildAkTags(endpoint, agentType),
     };
@@ -519,7 +517,6 @@ export class SlsFlusher extends BaseFlusher {
     const agentType = logs[0]?.agentType;
     const body = {
       __topic__: endpoint.kind ?? '',
-      __source__: '',
       __logs__: logs.map(l => l.content),
       __tags__: this.buildWebtrackingTags(endpoint, agentType),
     };
@@ -647,7 +644,6 @@ export class SlsFlusher extends BaseFlusher {
           const client = this.getAkClient(endpoint);
           await client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-            source: '',
             topic,
             tags: this.buildAkTags(endpoint),
           });
@@ -663,7 +659,6 @@ export class SlsFlusher extends BaseFlusher {
             },
             {
               logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-              source: '',
               topic,
               tags: this.buildAkTags(endpoint),
             },
@@ -679,7 +674,6 @@ export class SlsFlusher extends BaseFlusher {
             [content],
             {
               topic,
-              source: '',
               tags: { __hostname__: HOSTNAME },
               userAgent: this.userAgent,
             },

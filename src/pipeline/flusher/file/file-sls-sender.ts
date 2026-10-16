@@ -100,7 +100,6 @@ export class FileSlsSender {
             tasks.map((t) =>
               postWebtracking(this.transportConfig, t.batch, {
                 topic: this.configName,
-                source: '',
                 tags: { __path__: filePath },
                 userAgent: this.userAgent,
               }).then(() => ({ ok: true as const })),
