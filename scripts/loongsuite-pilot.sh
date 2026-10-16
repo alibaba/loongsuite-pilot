@@ -321,15 +321,22 @@ sync_bootstrap_scripts() {
 sync_installed_scripts_from_version() {
     local version_dir="$1"
     local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+    # Open-source packages strip updater-daemon.js (see deploy/package-opensource.sh).
+    # Match sync_bootstrap_scripts / installer-opensource: require collector + CLI only.
+    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
         return 1
     fi
 
     mkdir -p "$BOOTSTRAP_DIR"
     cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
     mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
-    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
+        mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+    else
+        # Drop a stale proprietary updater so it cannot be paired with this collector.
+        rm -f "$BOOTSTRAP_DIR/updater-daemon.js"
+    fi
 
     mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
     cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
