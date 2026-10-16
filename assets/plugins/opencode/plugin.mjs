@@ -299,7 +299,7 @@ function clearSession(sessionID) {
 // Record builder helpers
 // ---------------------------------------------------------------------------
 
-function buildCommonFields(sessionID, session, userId) {
+function buildCommonFields(sessionID, session, userId, cwd = agentCwd) {
   const turn = session.currentTurn;
   return {
     time_unix_nano: nowNanos(),
@@ -311,7 +311,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
-    ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
+    ...(cwd ? { [`agent.${AGENT_TYPE}.cwd`]: cwd } : {}),
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_BASE_FIELD_PATCH,
     ...RESOURCE_ATTRIBUTE_FIELDS,
@@ -954,6 +954,18 @@ function safe(fn) {
 
 export default {
   id: "loongsuite-pilot-opencode",
+
+  // Lazy-load V2 so V1 keeps its existing hooks and does not resolve V2 APIs.
+  setup: async (ctx) => {
+    const { setupV2 } = await import("./v2.mjs");
+    const cfg = loadPilotConfig();
+    const userId = resolveUserId(cfg);
+    return setupV2(ctx, {
+      writeRecord, writeError, inferProviderName, recordUpstreamEnvOnce,
+      captureMessageContent: cfg.agents?.opencode?.captureMessageContent !== false,
+      common: (sessionID, session) => buildCommonFields(sessionID, session, userId, ctx.location.directory),
+    });
+  },
 
   server: async (input, _options) => {
     ensureDir(logDir());

@@ -1,0 +1,6 @@
+{
+  "name": "loongsuite-pilot-opencode",
+  "private": true,
+  "type": "module",
+  "main": "index.js"
+}

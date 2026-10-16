@@ -191,6 +191,22 @@ describe('uninstall cleans hook configs for all hook agents', () => {
 });
 
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes V1/V2 references from both keys while preserving unrelated plugins', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end);
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-uninstall-'));
+    try {
+      const config = join(root, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: ['file:///pilot/plugins/opencode/plugin.mjs', 'third-party'], plugins: [{ package: 'file:///pilot/plugins/opencode' }, '/other/plugins/opencode-extra'] }));
+      const result = spawnSync(process.execPath, ['-e', script, config], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['third-party'], plugins: ['/other/plugins/opencode-extra'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('sh defines remove_opencode_plugin', () => {
     expect(sh).toMatch(/remove_opencode_plugin\(\)\s*\{/);
   });
