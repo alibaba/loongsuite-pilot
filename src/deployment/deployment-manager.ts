@@ -237,6 +237,10 @@ export class DeploymentManager {
     });
   }
 
+  directoryPluginRepairInputsFingerprint(def: AgentDefinition): Promise<string> {
+    return this.directoryPluginStrategy.repairInputsFingerprint(def);
+  }
+
   async stopWorkers(): Promise<void> {
     for (const def of this.definitions) {
       if (def.deployMode !== 'plugin-probe' || !def.pluginProbe) continue;
