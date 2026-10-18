@@ -383,6 +383,13 @@ function serializeValue(value: JsonValue): string {
 
 export function normalizeEventName(value: unknown): AgentEventName {
   switch (value) {
+    case 'gen_ai.model.request':
+    case 'gen_ai.model.response':
+    case 'gen_ai.tool.call':
+    case 'gen_ai.tool.result':
+    case 'gen_ai.agent.invoke':
+    case 'gen_ai.agent.result':
+      return value;
     case 'llm.request':
     case 'llm_call_input':
       return 'llm.request';

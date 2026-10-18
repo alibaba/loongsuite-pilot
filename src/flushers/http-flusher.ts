@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
 import { serialiseLogEntry } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, HttpFlusherConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -25,6 +25,7 @@ export class HttpFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
+    if (entry['gen_ai.agent.type'] === 'codex') return this.sendBatch([entry]);
     const serialized = serialiseLogEntry(entry);
     this.buffer.push(serialized);
 
@@ -34,11 +35,22 @@ export class HttpFlusher extends BaseFlusher {
   }
 
   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+    const codex: Record<string, string>[] = [];
     for (const entry of entries) {
-      this.buffer.push(serialiseLogEntry(entry));
+      const serialized = serialiseLogEntry(entry);
+      if (entry['gen_ai.agent.type'] === 'codex') codex.push(serialized);
+      else this.buffer.push(serialized);
     }
     if (this.buffer.length >= this.config.batchMaxSize) {
       await this.flush();
+    }
+    if (codex.length) {
+      try {
+        await this.postBatch(codex);
+      } catch (error) {
+        logger.error('Codex batch send failed', { count: codex.length, error: String(error) });
+        throw new CodexOutputDurabilityError('HTTP');
+      }
     }
   }
 
@@ -47,13 +59,7 @@ export class HttpFlusher extends BaseFlusher {
 
     const batch = this.buffer.splice(0);
     try {
-      await axios.post(this.config.url, { entries: batch }, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...this.config.headers,
-        },
-        timeout: this.config.requestTimeoutMs,
-      });
+      await this.postBatch(batch);
       logger.debug('batch sent', { count: batch.length });
     } catch (err) {
       logger.error('batch send failed, re-queuing', {
@@ -62,6 +68,13 @@ export class HttpFlusher extends BaseFlusher {
       });
       this.buffer.unshift(...batch);
     }
+  }
+
+  private postBatch(entries: Record<string, string>[]): Promise<unknown> {
+    return axios.post(this.config.url, { entries }, {
+      headers: { 'Content-Type': 'application/json', ...this.config.headers },
+      timeout: this.config.requestTimeoutMs,
+    });
   }
 
   async shutdown(): Promise<void> {

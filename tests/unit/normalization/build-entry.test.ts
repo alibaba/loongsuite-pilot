@@ -9,6 +9,16 @@ vi.mock('uuid', () => ({
 import { v4 as mockUuidV4 } from 'uuid';
 
 describe('buildAgentActivityEntry', () => {
+  it.each(['llm.request', 'llm.response', 'tool.call', 'tool.result'] as const)(
+    'keeps the historical name %s without adding a standard-name copy', eventName => {
+      const entry = buildAgentActivityEntry({
+        'event.name': eventName,
+        'gen_ai.agent.type': ClientType.CodexCliHook,
+      });
+      expect(entry['event.name']).toBe(eventName);
+    },
+  );
+
   let nowSpy: MockInstance<[], number>;
 
   beforeEach(() => {

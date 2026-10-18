@@ -1,7 +1,7 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
 import { Agent as UndiciAgent } from 'undici';
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
@@ -202,6 +202,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
+    if (entry['gen_ai.agent.type'] === 'codex') return this.sendCodexBatch([entry]);
     const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
     serialized.version = this.pilotVersion;
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
@@ -215,9 +216,44 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+    const codex: AgentActivityEntry[] = [];
     for (const entry of entries) {
-      await this.send(entry);
+      if (entry['gen_ai.agent.type'] === 'codex') codex.push(entry);
+      else await this.send(entry);
     }
+    if (codex.length) await this.sendCodexBatch(codex);
+  }
+
+  private async sendCodexBatch(entries: AgentActivityEntry[]): Promise<void> {
+    const serialized = entries.map(entry => ({
+      ...serialiseLogEntry(entry, { dropAgentScopedFields: true }), version: this.pilotVersion,
+    }));
+    let failed = false;
+    await this.runWithConcurrency(this.config.endpoints.map(endpoint => async () => {
+      const logs = serialized.map(content => this.createQueuedLog(endpoint,
+        endpoint.redact ? redactCodeGenerationFields(content) : content, 'codex'));
+      const counter = this.endpointCounters.get(endpoint.name);
+      const startMs = Date.now();
+      try {
+        const outcome = await this.flushEndpoint(endpoint, logs);
+        if (counter) {
+          counter.outEntries += outcome.sentEntries;
+          counter.outBytes += outcome.sentBytes;
+          counter.outFailed += outcome.failedEntries;
+          counter.totalDelayMs += Date.now() - startMs;
+          if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
+        }
+        if (outcome.failedEntries > 0) failed = true;
+      } catch (error) {
+        failed = true;
+        if (counter) {
+          counter.outFailed += logs.length;
+          counter.totalDelayMs += Date.now() - startMs;
+        }
+        logger.error('SLS endpoint flush failed', { endpoint: endpoint.name, error: String(error) });
+      }
+    }), this.resolvedFlushConcurrency);
+    if (failed) throw new CodexOutputDurabilityError('SLS');
   }
 
   async flush(): Promise<void> {
@@ -701,9 +737,16 @@ export class SlsFlusher extends BaseFlusher {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    const byteSize = Buffer.byteLength(JSON.stringify(content));
-    bucket.push({ content, endpoint, agentType, byteSize });
+    bucket.push(this.createQueuedLog(endpoint, content, agentType));
 
+    const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
+    if (bucket.length >= maxSize) {
+      void this.flush();
+    }
+  }
+
+  private createQueuedLog(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): QueuedLog {
+    const byteSize = Buffer.byteLength(JSON.stringify(content));
     const counter = this.endpointCounters.get(endpoint.name);
     if (counter) {
       counter.inEntries++;
@@ -711,10 +754,7 @@ export class SlsFlusher extends BaseFlusher {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 
-    const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
-    if (bucket.length >= maxSize) {
-      void this.flush();
-    }
+    return { content, endpoint, agentType, byteSize };
   }
 
   private sleep(ms: number): Promise<void> {

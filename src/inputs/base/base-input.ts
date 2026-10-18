@@ -41,6 +41,9 @@ export abstract class BaseInput extends EventEmitter {
   protected workspacePolicy = new WorkspacePolicy();
 
   setWorkspacePolicy(policy: WorkspacePolicy): void { this.workspacePolicy = policy; }
+
+  /** InputManager uses this for the Codex trace journal's durable acceptance. */
+  holdCheckpointUntil(promise: Promise<void>): void { this.stateStore.holdSaveUntil(promise); }
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;

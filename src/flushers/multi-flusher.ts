@@ -34,6 +34,9 @@ export class MultiFlusher extends BaseFlusher {
         });
       }
     }
+    const durableFailure = results.find(result => result.status === 'rejected'
+      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
+    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
@@ -49,6 +52,9 @@ export class MultiFlusher extends BaseFlusher {
         });
       }
     }
+    const durableFailure = results.find(result => result.status === 'rejected'
+      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
+    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
   async flush(): Promise<void> {

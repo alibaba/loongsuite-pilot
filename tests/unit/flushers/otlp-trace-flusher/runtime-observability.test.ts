@@ -59,7 +59,7 @@ describe('Trace runtime scalar snapshots', () => {
 
   it('accounts bytes before a same-batch successor can remove the previous buffer', async () => {
     const flusher = createFlusher();
-    await flusher.sendBatch([entry('first'), ...Array.from({ length: 64 }, () => entry('next'))],
+    await flusher.sendBatch([entry('first', 'claude-code'), ...Array.from({ length: 64 }, () => entry('next', 'claude-code'))],
       [123, ...Array(64).fill(10)]);
     expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
       removed_buffers_total: 1, removed_logical_bytes_total: 123,
@@ -91,14 +91,26 @@ describe('Trace runtime scalar snapshots', () => {
     const conversion = new Promise<void>(resolve => { finish = resolve; });
     vi.spyOn(flusher as any, 'convertAndExport').mockReturnValue(conversion);
     try {
-      await flusher.send(entry('first'), 12);
-      await flusher.send(entry('next'), 34);
+      await flusher.send(entry('first', 'claude-code'), 12);
+      await flusher.send(entry('next', 'claude-code'), 34);
       expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
         pending_buffers: 1, pending_logical_bytes: 34, removed_logical_bytes_total: 12,
       });
     } finally { finish(); }
     await flusher.flush();
     expect(flusher.getTraceRuntimeSnapshot()[0].pending_buffers).toBe(0);
+  });
+
+  it('keeps concurrent Codex native turns until their own terminal evidence', async () => {
+    const flusher = createFlusher();
+    await flusher.send(entry('first'), 12);
+    await flusher.send(entry('next'), 34);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
+      pending_buffers: 2, pending_logical_bytes: 46, removed_buffers_total: 0,
+    });
+    await flusher.send({ ...entry('first'), 'gen_ai.turn.end': true,
+      'agent.codex.turn_status': 'completed' }, 0);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({ pending_buffers: 1, pending_logical_bytes: 34 });
   });
 
   it('keeps counters cumulative across idle reports and preserves existing buffer eviction', async () => {

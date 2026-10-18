@@ -203,13 +203,61 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   });
 
   it('reports bad event.name enum values', () => {
-    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'gen_ai.model.request' })]);
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'invalid.event.name' })]);
     const diagnostic = runValidator({ _JV_LOG_DIR: tmpDir });
     expect(diagnostic.code).toBe(0);
     expect(diagnostic.out).toContain('bad_event_name=1');
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(1);
     expect(r.out).toContain('bad_event_name=1');
+  });
+
+  it('accepts all six standard names and pairs standard/short model and tool records', () => {
+    const aliases = {
+      'llm.request': 'gen_ai.model.request',
+      'llm.response': 'gen_ai.model.response',
+      'tool.call': 'gen_ai.tool.call',
+      'tool.result': 'gen_ai.tool.result',
+    };
+    const entries = validMultiToolGraph().map((entry, index) => ({
+      ...entry,
+      // Deliberately mix spellings inside the second model and tool pairs.
+      'event.name': [4, 6].includes(index) ? entry['event.name'] : aliases[entry['event.name']],
+    }));
+    entries.push(...['gen_ai.agent.invoke', 'gen_ai.agent.result'].map((name, index) =>
+      graphEntry(`delegation-${index}`, name, {
+        'gen_ai.agent.invocation.id': 'invocation-1',
+        'gen_ai.tool.call.id': 'call-a',
+      })));
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('bad_event_name=0');
+    expect(result.out).toContain('model_pair_error=0');
+    expect(result.out).toContain('tool_pair_error=0');
+    expect(result.out).toContain('gen_ai.agent.invoke count=1');
+    expect(result.out).toContain('gen_ai.agent.result count=1');
+  });
+
+  it('rejects duplicate model facts written under both standard and short names', () => {
+    const entries = validMultiToolGraph();
+    entries.push({ ...entries[0], 'event.id': 'duplicate-standard-request',
+      'event.name': 'gen_ai.model.request', 'gen_ai.turn.start': undefined });
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('bad_event_name=0');
+    expect(result.out).toContain('model_pair_error=1');
+  });
+
+  it('requires the same tool fields for standard tool names', () => {
+    const entries = validMultiToolGraph();
+    entries[2]['event.name'] = 'gen_ai.tool.call';
+    delete entries[2]['gen_ai.tool.name'];
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('missing_required=1');
   });
 
   it('accepts agent.input as a valid event name', () => {

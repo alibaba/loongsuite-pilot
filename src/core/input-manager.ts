@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { ClientType } from '../types/index.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import type {
   AgentActivityEntry,
@@ -184,12 +185,13 @@ export class InputManager extends EventEmitter {
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
-      const next = previous
+      const handling = previous
         .catch(() => undefined)
-        .then(() => this.handleEntries(input.id, entries))
-        .catch(err => {
-          logger.error('entry handling failed', { inputId: input.id, error: String(err) });
-        });
+        .then(() => this.handleEntries(input.id, entries));
+      if (input.agentType === ClientType.CodexCliHook) input.holdCheckpointUntil(handling);
+      const next = handling.catch(err => {
+        logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+      });
       this.entryQueues.set(input.id, next);
       void next.finally(() => {
         if (this.entryQueues.get(input.id) === next) this.entryQueues.delete(input.id);
@@ -458,6 +460,11 @@ export class InputManager extends EventEmitter {
     }
   }
 
+  /** Recheck retained output against current privacy rules without rewriting its identity. */
+  prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
+  }
+
   private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
     const policyAppliedEntries = entries.map(entry =>
       applyAgentContentPolicy(entry, this.agentsConfig),
@@ -496,6 +503,7 @@ export class InputManager extends EventEmitter {
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) throw err;
     }
   }
 }

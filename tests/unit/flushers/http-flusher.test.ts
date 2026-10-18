@@ -41,6 +41,32 @@ describe('HttpFlusher', () => {
   });
 
   describe('buffer and auto-flush (T018)', () => {
+    it('posts one Codex batch immediately and waits for network ACK below the buffer threshold', async () => {
+      let acknowledge!: () => void;
+      mockAxiosPost.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const entries = [1, 2].map(index => buildTestEntry({ 'event.id': `codex-${index}`, 'gen_ai.agent.type': 'codex' }));
+      let accepted = false;
+      const sending = flusher.sendBatch(entries).then(() => { accepted = true; });
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+      expect(mockAxiosPost.mock.calls[0][1].entries).toHaveLength(2);
+      expect(accepted).toBe(false);
+      acknowledge();
+      await sending;
+      await flusher.flush();
+      expect(accepted).toBe(true);
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+    });
+
+    it('rejects Codex single-entry failure without re-queuing it alongside ordinary entries', async () => {
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary-queued' }));
+      mockAxiosPost.mockRejectedValueOnce(new Error('synthetic HTTP failure'));
+      await expect(flusher.send(buildTestEntry({ 'event.id': 'codex-failed', 'gen_ai.agent.type': 'codex' })))
+        .rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockAxiosPost.mock.calls[0][1].entries.map((entry: Record<string, string>) => entry['event.id'])).toEqual(['codex-failed']);
+      await flusher.flush();
+      expect(mockAxiosPost.mock.calls[1][1].entries.map((entry: Record<string, string>) => entry['event.id'])).toEqual(['ordinary-queued']);
+    });
+
     it('buffers entries until batchMaxSize is reached', async () => {
       for (let i = 0; i < 4; i++) {
         await flusher.send(buildTestEntry());

@@ -212,6 +212,23 @@ export class Orchestrator extends EventEmitter {
     );
     await this.agentControlManager.load();
 
+    // Journal replay during flusher startup must use the current privacy rules.
+    this.inputManager = new InputManager();
+    this.inputManager.setConfiguredUserId(this.config.userId);
+    const workspacePolicy = new WorkspacePolicy(
+      this.config.privacy?.excludeWorkspaces,
+      path.join(this.dataDir, 'state', 'workspace-exclusions'),
+    );
+    this.inputManager.setWorkspacePolicy(workspacePolicy);
+    this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
+
     // 3. Build flushers
     this.globalAttributesProvider = new GlobalAttributesProvider(
       this.config.globalSpanAttributes ?? {},
@@ -223,23 +240,8 @@ export class Orchestrator extends EventEmitter {
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
-    this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
-    this.inputManager.setConfiguredUserId(this.config.userId);
-    const workspacePolicy = new WorkspacePolicy(
-      this.config.privacy?.excludeWorkspaces,
-      path.join(this.dataDir, 'state', 'workspace-exclusions'),
-    );
-    this.inputManager.setWorkspacePolicy(workspacePolicy);
-    this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(
-      this.config.mask ?? {
-        mode: 'none',
-        types: [],
-        replacementMode: 'placeholder',
-      },
-    );
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
     const interceptorConfig = await loadInterceptorConfig();
@@ -855,13 +857,20 @@ export class Orchestrator extends EventEmitter {
       const otlpTraceCfg = buildOtlpTraceConfig(this.config);
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
+        const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
+          undefined,
+          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns')),
+          entries => this.inputManager!.prepareRestoredEntries(entries),
         );
+        await r.start();
         flushers.push(r);
       }
     } catch (err) {
+      // Losing a retained Codex turn is not a malformed-config fallback.
+      if ((err as Error)?.name === 'CodexTurnJournalError') throw err;
       // Never let a malformed trace config take down the other flushers.
       logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }

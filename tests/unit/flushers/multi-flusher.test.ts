@@ -63,6 +63,18 @@ describe('MultiFlusher', () => {
     });
   });
 
+  it.each([
+    ['send', 'CodexTurnJournalError'], ['sendBatch', 'CodexTurnJournalError'],
+    ['send', 'CodexOutputDurabilityError'], ['sendBatch', 'CodexOutputDurabilityError'],
+  ] as const)('propagates %s %s after all outputs settle', async (method, name) => {
+    const failure = Object.assign(new Error('durable output failed'), { name });
+    vi.spyOn(f1, method).mockRejectedValue(failure);
+    const entry = buildTestEntry();
+    const sending = method === 'send' ? multi.send(entry) : multi.sendBatch([entry]);
+    await expect(sending).rejects.toBe(failure);
+    expect(method === 'send' ? f2.sendCalls : f2.batchCalls).toHaveLength(1);
+  });
+
   describe('sendRaw forwarding (T023)', () => {
     it('forwards sendRaw to all child flushers', async () => {
       await multi.sendRaw('topic-x', { data: 'payload' });

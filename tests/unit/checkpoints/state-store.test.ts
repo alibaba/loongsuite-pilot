@@ -150,6 +150,71 @@ describe('StateStore', () => {
     });
   });
 
+  describe('durable output holds', () => {
+    it('blocks shared checkpoint saves until every output hold is accepted', async () => {
+      let acceptCodex!: () => void;
+      let acceptLater!: () => void;
+      store.holdSaveUntil(new Promise<void>(resolve => { acceptCodex = resolve; }));
+      store.setOffset('codex', 10);
+      store.setOffset('other-input', 20);
+      const saving = store.save();
+      await Promise.resolve();
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      store.holdSaveUntil(new Promise<void>(resolve => { acceptLater = resolve; }));
+      store.setOffset('codex', 30);
+      acceptCodex();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      acceptLater();
+      await saving;
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+        codex: { lastOffset: 30 }, 'other-input': { lastOffset: 20 },
+      });
+      await store.save();
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('retains a rejected hold so subsequent shared saves keep the last durable cursor', async () => {
+      store.setOffset('codex', 1);
+      await store.save();
+      const failure = Object.assign(new Error('journal unavailable'), { name: 'CodexTurnJournalError' });
+      store.holdSaveUntil(Promise.reject(failure));
+      store.setOffset('codex', 2);
+      store.setOffset('other-input', 3);
+      await expect(store.save()).rejects.toBe(failure);
+      await expect(store.save()).rejects.toBe(failure);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('honors a new hold before the next revision of an active write', async () => {
+      const actual = await vi.importActual<typeof import('../../../src/utils/fs-utils.js')>('../../../src/utils/fs-utils.js');
+      let releaseWrite!: () => void;
+      let startedWrite!: () => void;
+      const writing = new Promise<void>(resolve => { startedWrite = resolve; });
+      const release = new Promise<void>(resolve => { releaseWrite = resolve; });
+      vi.mocked(writeJsonFile).mockImplementationOnce(async (...args) => {
+        startedWrite();
+        await release;
+        await actual.writeJsonFile(...args);
+      });
+      store.setOffset('codex', 1);
+      const saving = store.save();
+      await writing;
+      let accept!: () => void;
+      store.holdSaveUntil(new Promise<void>(resolve => { accept = resolve; }));
+      store.setOffset('codex', 2);
+      releaseWrite();
+      await vi.waitFor(() => expect(writeJsonFile).toHaveBeenCalledTimes(1));
+      expect((vi.mocked(writeJsonFile).mock.calls[0]![1] as any).codex.lastOffset).toBe(1);
+      accept();
+      await saving;
+      expect(writeJsonFile).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8')).codex.lastOffset).toBe(2);
+    });
+  });
+
   describe('concurrent saves', () => {
     it('serializes saves and persists mutations made during an active write', async () => {
       await store.load();

@@ -1,6 +1,14 @@
 import type { AgentActivityEntry } from '../types/index.js';
 import type { TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 
+/** A Codex cursor must not advance until its configured log output accepts the batch. */
+export class CodexOutputDurabilityError extends Error {
+  constructor(output: string) {
+    super(`${output} did not acknowledge Codex events`);
+    this.name = 'CodexOutputDurabilityError';
+  }
+}
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).

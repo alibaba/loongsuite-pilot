@@ -16,6 +16,10 @@ boundary.
 | `llm.response` | One LLM response, including text, reasoning, tool-call intent, finish reason, token usage, and cost when available. |
 | `tool.call` | An actual tool execution started by the agent. |
 | `tool.result` | The result returned by a tool execution. |
+| `gen_ai.model.request` / `gen_ai.model.response` | Standard model event names; accepted alongside the legacy short names and preserved in logs. |
+| `gen_ai.tool.call` / `gen_ai.tool.result` | Standard tool event names; accepted alongside the legacy short names and preserved in logs. |
+| `gen_ai.agent.invoke` | One logical delegation to another Agent; one event per work item in a batch. |
+| `gen_ai.agent.result` | An observed Agent result or failed dispatch. Tool acceptance alone is not Agent completion. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
 | `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
@@ -40,6 +44,17 @@ The four core `event.name` values map to GenAI audit events as follows:
 | `llm.response` | `gen_ai.model.response` |
 | `tool.call` | `gen_ai.tool.call` |
 | `tool.result` | `gen_ai.tool.result` |
+
+All six standard names are recognized without falling back to `other`. Existing
+short-name output is preserved, without automatically duplicating events under
+both names. The trace boundary adapts model/tool names and excludes Agent audit
+events from span construction to avoid duplicate spans, steps and usage.
+
+Codex children retain their own session/turn/step identities. Parent invoke/result
+events carry `gen_ai.agent.invocation.id`; the corresponding child work carries
+the equal `gen_ai.agent.parent.invocation.id`. New work in a reused session gets
+a new invocation; nested delegations retain both incoming and outgoing IDs.
+See the [subagent data model](zh-CN/subagent-data-model.md).
 
 ## Field Reference
 
@@ -72,6 +87,10 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
 | `gen_ai.agent.type` | string | Required | Agent product type, such as `claude-code`, `codex`, `cursor`, `qoder`, or `qoder-work`. |
 | `gen_ai.agent.id` | string | Recommended | Unique runtime instance ID for the agent. |
+| `gen_ai.agent.parent.id` | string | Recommended when known | Upstream Agent identity for this work; does not replace invocation correlation. |
+| `gen_ai.agent.peer.id` | string | Recommended when known | Direct peer in an invoke/result event. |
+| `gen_ai.agent.invocation.id` | string | Required on delegation events | Stable outgoing work ID, unique per delegated work item. |
+| `gen_ai.agent.parent.invocation.id` | string | Required on confirmed incoming work | Upstream delegation accepted by this event/turn, not a permanent session property. |
 | `gen_ai.agent.name` | string | Recommended | Human-readable agent instance name. |
 | `gen_ai.provider.name` | string | Required | Model provider name. See [Provider Names](#provider-names). |
 | `gen_ai.request.id` | string | Recommended | Client-side request ID used to correlate with gateway or provider logs. |

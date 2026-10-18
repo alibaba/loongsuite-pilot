@@ -82,6 +82,63 @@ describe('SlsFlusher', () => {
   });
 
   describe('send and flush — multi endpoint routing (T012)', () => {
+    it('waits for a single network acknowledgement per Codex endpoint below the buffer threshold', async () => {
+      let acknowledge!: () => void;
+      mockPostLogStoreLogs.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const entries = [1, 2, 3].map(index => buildTestEntry({
+        'event.id': `codex-${index}`, 'gen_ai.agent.type': 'codex',
+      }));
+      let accepted = false;
+      const sending = flusher.sendBatch(entries).then(() => { accepted = true; });
+      await Promise.resolve();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(mockPostLogStoreLogs.mock.calls[0][2].logs).toHaveLength(3);
+      expect(accepted).toBe(false);
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 0 });
+      acknowledge();
+      await sending;
+      await flusher.flush();
+      expect(accepted).toBe(true);
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 3, outFailed: 0 });
+    });
+
+    it('rejects Codex output failure after every endpoint settles without sending ordinary queued entries', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        retry: { retryMaxAttempts: 1 },
+        endpoints: [
+          { name: 'good', endpoint: 'https://example.invalid', project: 'p', logstore: 'good', kind: 'agentActivity', mode: 'ak' },
+          { name: 'bad', endpoint: 'https://example.invalid', project: 'p', logstore: 'bad', kind: 'agentTelemetry', mode: 'ak', redact: true },
+        ],
+      }), '/tmp/data');
+      mockPostLogStoreLogs.mockImplementation(async (_project, logstore) => {
+        if (logstore === 'bad') throw new Error('synthetic transport failure');
+      });
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary-queued' }));
+      await expect(flusher.sendBatch([buildTestEntry({
+        'event.id': 'codex-failed', 'gen_ai.agent.type': 'codex',
+        'gen_ai.tool.call.arguments': { prompt: 'body' },
+      })])).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(mockPostLogStoreLogs.mock.calls.every(call => call[2].logs[0].content['event.id'] === 'codex-failed')).toBe(true);
+      expect(mockPostLogStoreLogs.mock.calls.find(call => call[1] === 'bad')![2].logs[0].content)
+        .not.toHaveProperty('gen_ai.tool.call.arguments');
+      expect(flusher.getEndpointCounters().get('good')).toMatchObject({ inEntries: 2, outEntries: 1, outFailed: 0 });
+      expect(flusher.getEndpointCounters().get('bad')).toMatchObject({ inEntries: 2, outEntries: 0, outFailed: 1 });
+      expect(mockFailureWrite).toHaveBeenCalledOnce();
+      mockPostLogStoreLogs.mockResolvedValue(undefined);
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      expect(mockPostLogStoreLogs.mock.calls.slice(2).every(call => call[2].logs[0].content['event.id'] === 'ordinary-queued')).toBe(true);
+    });
+
+    it('also waits for Codex single-entry output and does not retain a second timer copy', async () => {
+      await flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
+
     it('enqueues per endpoint and flushes grouped by project/logstore', async () => {
       const entry = buildTestEntry();
       await flusher.send(entry);
