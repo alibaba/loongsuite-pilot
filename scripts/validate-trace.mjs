@@ -192,6 +192,7 @@ function skipped(id, reason) { return { id, status: 'skipped', detail: reason ||
 function hasExternalDelegationParent(span, spanMap) {
   return span._kind === 'AGENT' &&
     /^[0-9a-f]{16}$/.test(span.parentSpanId || '') &&
+    !/^0+$/.test(span.parentSpanId) &&
     !spanMap.has(span.parentSpanId) &&
     Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
       span.attributes?.['gen_ai.subagent.parent_tool_call.id']);

@@ -553,11 +553,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private journalRestore?: Promise<void>;
   private restoringJournal = false;
 
-  // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
-  // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
+  // 批量调用计数：大于 0 时 send() 中 Signal A（finish_reason=stop）只标记
+  // completed，不立即 flush；最后一个批量调用完成 append 后统一 flush。
+  // 同时覆盖 journal 恢复的嵌套调用和不同 Input 的并发调用。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
-  private _deferSignalA = false;
+  private batchDepth = 0;
 
   constructor(
     cfg: OtlpTraceFlusherConfig,
@@ -689,7 +690,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     if (!this.restoringJournal) {
       await this.start();
-      if (!this._deferSignalA) await this.persistCodexEntries([entry]);
+      if (this.batchDepth === 0) await this.persistCodexEntries([entry]);
     }
     // Audit delegation/result records describe an existing tool/work boundary.
     // They must not create, close or reopen a model turn buffer.
@@ -739,26 +740,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.triggerFlush(buf, false);
     }
 
-    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
-    // case where neither Signal A, same-session successor, nor idle timeout ever
-    // fires for many turns), flush oldest incomplete buffers to bound memory.
-    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
-      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
-      const candidates = [...this.turnBuffers.values()]
-        .filter((b) => !b.completed)
-        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
-        .slice(0, overflow);
-      for (const b of candidates) {
-        if (b.agentType === 'codex' && this.codexJournal && !b.completed) {
-          // The durable prefix can be rehydrated when this native turn resumes.
-          this.turnBuffers.delete(b.key);
-          this.recordBufferRemoval(b);
-          continue;
-        }
-        b.completed = true;
-        this.triggerFlush(b, false);
-      }
-    }
+    // Preparation has already checked/restored this prefix. Do not evict it
+    // before appending the continuation, or evict a later turn in this batch.
+    if (this.batchDepth === 0) this.trimTurnBuffers(key);
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -792,34 +776,57 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
     // OpenClaw has a dedicated run-level terminal hook because each ReAct
     // model call carries its own finish reason.
-    // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
+    // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
       buf.completed = true;
-      if (!this._deferSignalA) {
+      if (this.batchDepth === 0) {
         this.triggerFlush(buf);
       }
     }
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
-    if (!this.restoringJournal) {
-      await this.start();
-      await this.persistCodexEntries(entries);
-    }
+    if (!this.restoringJournal) await this.start();
     const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
     // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
     // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
-    this._deferSignalA = true;
+    this.batchDepth++;
     try {
+      // Journal preparation can replay an evicted prefix through sendBatch().
+      // Keep the outer batch protected across that nested preparation as well.
+      if (!this.restoringJournal) await this.persistCodexEntries(entries);
       for (let i = 0; i < entries.length; i++) {
         await this.send(entries[i], sizes?.[i]);
       }
     } finally {
-      this._deferSignalA = false;
+      this.batchDepth--;
     }
     // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
-    await this.flushCompleted();
+    if (this.batchDepth === 0) {
+      await this.flushCompleted();
+      // Another Input may begin a batch while completed exports are awaited.
+      if (this.batchDepth === 0) this.trimTurnBuffers();
+    }
+  }
+
+  private trimTurnBuffers(incomingKey?: string): void {
+    if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
+    const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+    const candidates = [...this.turnBuffers.values()]
+      .filter((buf) => !buf.completed && buf.key !== incomingKey)
+      .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+      .slice(0, overflow);
+    for (const buf of candidates) {
+      if (buf.agentType === 'codex' && this.codexJournal) {
+        // The durable prefix can be rehydrated when this native turn resumes.
+        this.turnBuffers.delete(buf.key);
+        this.recordBufferRemoval(buf);
+      } else {
+        buf.completed = true;
+        this.triggerFlush(buf, false);
+      }
+    }
   }
 
   async flush(): Promise<void> {

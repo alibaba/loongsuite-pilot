@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const standardNames = [
   'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call',
@@ -34,7 +35,7 @@ describe('standard event validation scripts', () => {
     const original = events.map(entry => JSON.stringify(entry)).join('\n') + '\n';
     writeFileSync(file, original);
     const result = spawnSync(process.execPath, [
-      new URL('../../../scripts/field-coverage.mjs', import.meta.url).pathname,
+      fileURLToPath(new URL('../../../scripts/field-coverage.mjs', import.meta.url)),
       '--agents', 'codex', '--date', '2026-10-16', '--format', 'json',
     ], { encoding: 'utf8', env: { ...process.env, HOME: testHome, USERPROFILE: testHome } });
     expect(result.status, result.stderr).toBe(0);

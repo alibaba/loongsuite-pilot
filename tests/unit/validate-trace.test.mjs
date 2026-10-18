@@ -220,6 +220,16 @@ describe('delegated trace validation scopes', () => {
       .toContainEqual(expect.objectContaining({ id: 'structure.agent_under_entry', status: 'error' }));
   });
 
+  test('rejects an all-zero external delegation parent span ID', () => {
+    const fixture = delegatedTrace();
+    fixture.delegated.agent.parentSpanId = '0000000000000000';
+    const checks = checkTrace([fixture.delegated.agent, fixture.delegated.step, fixture.delegated.llm]);
+    for (const id of ['structure.single_entry', 'structure.agent_under_entry']) {
+      expect(checks).toContainEqual(expect.objectContaining({ id, status: 'error' }));
+    }
+    expect(checks).not.toContainEqual(expect.objectContaining({ id: 'structure.external_parent_context' }));
+  });
+
   test.each(['gen_ai.session.id', 'gen_ai.turn.id'])(
     'rejects %s corruption inside a child execution', (key) => {
       const fixture = delegatedTrace();
