@@ -281,6 +281,34 @@ describe('CodexSubagentLinker', () => {
     expect(linker.serialize().spawns[0].childThreadId).toBe('accepted-child');
   });
 
+  it.each(['explicit', 'path', 'bound'])('projects the known child nickname through %s lookup and restore', kind => {
+    const linker = new CodexSubagentLinker();
+    linker.registerSpawns([spawn({ parentToolCallId: 'named-child', taskName: 'named',
+      ...(kind === 'explicit' ? { childThreadId: 'child' } : {}),
+      ...(kind === 'bound' ? { resolvedChildThreadId: 'child' } : {}),
+    })]);
+    linker.registerChild({ ...childMeta({ threadId: 'child', agentPath: '/root/named' }), agentNickname: 'Newton' });
+    const work = linker.getDelegationsForParent('parent-thread')[0];
+    expect(work).toMatchObject({ childThreadId: 'child', agentNickname: 'Newton' });
+    expect(linker.serialize().spawns[0].agentNickname).toBeUndefined();
+    const restored = new CodexSubagentLinker();
+    restored.restore(JSON.parse(JSON.stringify(linker.serialize())));
+    expect(restored.getDelegationsForParent('parent-thread')[0]).toMatchObject({
+      childThreadId: 'child', agentNickname: 'Newton', invocationId: work.invocationId,
+    });
+  });
+
+  it('does not guess a nickname from an ambiguous child path', () => {
+    const linker = new CodexSubagentLinker();
+    linker.registerSpawns([spawn({ parentToolCallId: 'ambiguous-name', taskName: 'named' })]);
+    for (const [threadId, agentNickname] of [['first-child', 'Newton'], ['second-child', 'Curie']]) {
+      linker.registerChild({ ...childMeta({ threadId, agentPath: '/root/named' }), agentNickname });
+    }
+    const work = linker.getDelegationsForParent('parent-thread')[0];
+    expect(work.childThreadId).toBeUndefined();
+    expect(work.agentNickname).toBeUndefined();
+  });
+
   it('records each batch work separately while sharing its real tool span', () => {
     const turn = turnWithSpawn();
     turn.steps[0].tools[0].input = { agents: [

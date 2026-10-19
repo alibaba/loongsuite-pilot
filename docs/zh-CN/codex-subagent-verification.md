@@ -16,6 +16,10 @@ invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCall
 
 `FINAL_ANSWER` 是 Codex 内部结果交付消息类型，解析成标准 `gen_ai.agent.result` 前仍需唯一 invocation 关联与去重。工具受理、子本地完成、父实际收到结果不是同一边界。暂时无法关联的 FINAL_ANSWER 保存文件范围，后续只重试结果审计，不重复模型/工具日志。
 
+## Agent 名称
+
+子侧 `gen_ai.agent.name` 表示当前执行者；父侧 `gen_ai.agent.invoke/result` 的 `gen_ai.agent.peer.name` 表示目标子 Agent 的真实名称（如 `Newton`）。名称来自派发回执 `nickname` 或可靠关联的子会话 `agent_nickname`，沿用现有工作/子会话状态支持复用与重启。嵌套调用分别保留当前名称和目标名称，不用 task path 猜名称；无可靠名称则省略。名称晚到不重发已输出的 invoke，也不延迟首次委派事件。此补充只填已有标准字段，不增加加密状态或任务属性。
+
 ## 委派内容字段
 
 | 事件 | 内容字段 | 内容语义 |

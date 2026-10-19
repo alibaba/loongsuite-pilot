@@ -1446,9 +1446,10 @@ describe('CodexTranscriptInput', () => {
     await processTranscriptOnce(first.input, parentPath);
     const creation = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!;
     expect(creation['gen_ai.agent.peer.id']).toBeUndefined();
+    expect(creation['gen_ai.agent.peer.name']).toBeUndefined();
     const childLines = simpleCompletedTurn(child, 'first-child', 'first work', 'done', 20, 3, '2026-08-07T03:10:10.000Z');
     childLines[0] = record('2026-08-07T03:10:09.000Z', 'session_meta', { id: child, session_id: parent, thread_source: 'subagent',
-      source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/known-child' } } } });
+      source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/known-child', agent_nickname: 'Newton' } } } });
     const childPath = await writeTranscriptNamed(first.sessionDir, 'rollout-peer-child.jsonl', childLines.join('\n') + '\n');
     await processTranscriptOnce(first.input, childPath);
     expect(responsesForTurn(first.entries, 'first-child')[0]!['gen_ai.agent.parent.invocation.id']).toBe(creation['gen_ai.agent.invocation.id']);
@@ -1459,7 +1460,7 @@ describe('CodexTranscriptInput', () => {
     const all = restart ? [...first.entries, ...active.entries] : active.entries;
     const invokes = all.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
     expect(invokes).toHaveLength(2);
-    expect(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'reuse-child')).toMatchObject({ 'gen_ai.agent.peer.id': child });
+    expect(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'reuse-child')).toMatchObject({ 'gen_ai.agent.peer.id': child, 'gen_ai.agent.peer.name': 'Newton' });
     expect(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'create-child')!['gen_ai.agent.peer.id']).toBeUndefined();
     const count = active.entries.length;
     await processTranscriptOnce(active.input, parentPath);
@@ -1491,7 +1492,7 @@ describe('CodexTranscriptInput', () => {
         }),
         record(new Date(base + 3_200).toISOString(), 'response_item', {
           type: 'function_call_output', call_id: callId,
-          output: JSON.stringify({ agent_id: target, nickname: 'ReuseChild' }),
+          output: JSON.stringify({ agent_id: target, nickname: target === grandchildId ? 'Euler' : 'Newton' }),
         }),
       );
       return lines;
@@ -1499,7 +1500,7 @@ describe('CodexTranscriptInput', () => {
     const childMeta = (id: string, parent: string, depth: number, timestamp: string): string =>
       record(timestamp, 'session_meta', {
         id, session_id: parentId, timestamp, thread_source: 'subagent', model_provider: 'openai',
-        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth } } },
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth, agent_nickname: id === childId ? 'Newton' : 'Euler' } } },
       });
 
     const parentTranscript = await writeTranscriptNamed(sessionDir, 'rollout-parent-reuse.jsonl', dispatchedTurn(
@@ -1538,6 +1539,10 @@ describe('CodexTranscriptInput', () => {
     const nestedInvoke = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
       && entry['gen_ai.tool.call.id'] === 'nested-spawn')!;
     expect(secondInvoke['gen_ai.agent.invocation.id']).not.toBe(firstInvoke['gen_ai.agent.invocation.id']);
+    expect(firstInvoke['gen_ai.agent.peer.name']).toBe('Newton');
+    expect(secondInvoke['gen_ai.agent.peer.name']).toBe('Newton');
+    expect(nestedInvoke['gen_ai.agent.peer.name']).toBe('Euler');
+    expect(nestedInvoke['gen_ai.agent.name']).toBe('Newton');
     expect(responsesForTurn(entries, 'child-second')[0]).toMatchObject({
       'gen_ai.session.id': childId,
       'gen_ai.turn.id': `${childId}:child-second`,

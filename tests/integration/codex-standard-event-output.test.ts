@@ -35,6 +35,7 @@ const relationFields = {
   'gen_ai.agent.id': 'child-agent',
   'gen_ai.agent.parent.id': 'parent-agent',
   'gen_ai.agent.peer.id': 'grandchild-agent',
+  'gen_ai.agent.peer.name': 'Grandchild',
   'gen_ai.agent.invocation.id': 'outgoing-work',
   'gen_ai.agent.parent.invocation.id': 'incoming-work',
   'gen_ai.tool.call.id': 'native-tool-call',
@@ -65,7 +66,7 @@ async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[
     ['response_item', { type: 'function_call', call_id: 'spawn-batch', name: 'spawn_agent',
       arguments: JSON.stringify({ agents: [{ message: 'task A' }, { prompt: 'task B' }] }) }],
     ['response_item', { type: 'function_call_output', call_id: 'spawn-batch',
-      output: JSON.stringify({ agents: [{ agent_id: 'child-A' }, { agent_id: 'child-B' }] }) }],
+      output: JSON.stringify({ agents: [{ agent_id: 'child-A', nickname: 'Newton' }, { agent_id: 'child-B', nickname: 'Curie' }] }) }],
     ['response_item', { type: 'function_call', call_id: 'wait-batch', name: 'wait',
       arguments: JSON.stringify({ ids: ['child-A', 'child-B'] }) }],
     ['response_item', { type: 'function_call_output', call_id: 'wait-batch',
@@ -87,6 +88,7 @@ async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[
   expect(audit.slice(2).map(entry => entry['gen_ai.output.messages'])).toEqual(['result A', 'result B'].map(content => [
     { role: 'assistant', parts: [{ type: 'text', content }] },
   ]));
+  expect(audit.map(entry => entry['gen_ai.agent.peer.name'])).toEqual(['Newton', 'Curie', 'Newton', 'Curie']);
   for (const entry of audit) expect(entry).not.toHaveProperty('gen_ai.tool.call.arguments');
   return audit;
 }

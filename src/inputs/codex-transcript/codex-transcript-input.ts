@@ -3139,6 +3139,7 @@ function appendCodexInvocations(
         'event.id': crypto.createHash('sha256').update(`${work.invocationId}\0invoke`).digest('hex').slice(0, 32),
         'gen_ai.agent.invocation.id': work.invocationId,
         ...(work.childThreadId ? { 'gen_ai.agent.peer.id': work.childThreadId } : {}),
+        ...(work.agentNickname ? { 'gen_ai.agent.peer.name': work.agentNickname } : {}),
         ...(message ? { 'gen_ai.input.messages': [message] } : {}),
       };
       delete invoke['gen_ai.tool.call.arguments'];
@@ -3190,6 +3191,7 @@ function appendCodexAgentResults(
       'event.id': crypto.createHash('sha256').update(`${receivingSession}\0${key}\0${work.invocationId}`).digest('hex').slice(0, 32),
       'gen_ai.agent.invocation.id': work.invocationId,
       ...(work.childThreadId ? { 'gen_ai.agent.peer.id': work.childThreadId } : {}),
+      ...(work.agentNickname ? { 'gen_ai.agent.peer.name': work.agentNickname } : {}),
       'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: typeof value === 'string' ? value : JSON.stringify(value) }] }],
     };
     delete result['gen_ai.input.messages'];

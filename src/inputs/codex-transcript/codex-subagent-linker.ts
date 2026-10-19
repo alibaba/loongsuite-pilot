@@ -171,6 +171,7 @@ export class CodexSubagentLinker {
           ...resultFacts.map(result => result.childTurnId),
         ])],
         ...(!spawn.agentPath && knownChild?.agentPath ? { agentPath: knownChild.agentPath } : {}),
+        ...(!spawn.agentNickname && knownChild?.agentNickname ? { agentNickname: knownChild.agentNickname } : {}),
         ...(results?.size ? {
         resultFingerprints: [...new Set(resultFacts.map(result => result.fingerprint))],
       } : {}) };
@@ -181,7 +182,10 @@ export class CodexSubagentLinker {
         && this.creationsByParentPath.get(parentPathKey(spawn.parentThreadId, path))?.size !== 1) return copy;
       const children = path ? this.childrenByParentPath.get(parentPathKey(spawn.parentThreadId, path)) : undefined;
       const child = children?.size === 1 ? children.values().next().value : undefined;
-      return { ...copy, ...(child ? { childThreadId: child.childThreadId } : {}) };
+      return { ...copy, ...(child ? {
+        childThreadId: child.childThreadId,
+        ...(!spawn.agentNickname && child.agentNickname ? { agentNickname: child.agentNickname } : {}),
+      } : {}) };
     });
   }
 
