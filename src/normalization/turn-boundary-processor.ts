@@ -93,6 +93,12 @@ export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
   if (entry['gen_ai.turn.end'] === true) return true;
 
   const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? ''));
+  if (agentType === 'hermes' && entry['agent.hermes.collection'] === 'realtime-v1') {
+    // An individual API stop/error is not the end of a retry/tool turn. The
+    // incremental producer owns the explicit lifecycle marker, even when the
+    // response and marker arrive in different input batches.
+    return false;
+  }
   if (agentType === 'codex') {
     const status = entry['agent.codex.turn_status'];
     return status === 'completed' || status === 'interrupted';
