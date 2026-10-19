@@ -98,6 +98,12 @@ describe('PII masking performance benchmark', () => {
       () =>
         '11010519491231002X 13800138000 user@example.com 192.168.1.10 4111111111111111',
     ).join('\n');
+    const secretLike = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/+_==';
+    const unanchoredSecretLike = Array.from({ length: 1_000 }, () => secretLike).join(' ');
+    const anchoredAccessKeySecrets = Array.from(
+      { length: 300 },
+      () => `AKIA1234567890ABCDEF:${secretLike}`,
+    ).join('\n');
 
     const results = [
       benchmark('legacy-rules:plain', plain, 100, value =>
@@ -130,6 +136,12 @@ describe('PII masking performance benchmark', () => {
       benchmark('all-preview:dense-matches', denseMatches, 20, value =>
         maskString(value, previewPlan),
       ),
+      benchmark('all-rules:unanchored-secret-like', unanchoredSecretLike, 100, value =>
+        maskString(value, allPlan),
+      ),
+      benchmark('all-rules:anchored-access-key-secrets', anchoredAccessKeySecrets, 50, value =>
+        maskString(value, allPlan),
+      ),
     ];
 
     console.info(`[pii-mask-perf] ${JSON.stringify(results)}`);
@@ -143,6 +155,8 @@ describe('PII masking performance benchmark', () => {
     expect(results[7].p95Ms).toBeLessThan(50);
     expect(results[8].p95Ms).toBeLessThan(50);
     expect(results[9].p95Ms).toBeLessThan(100);
+    expect(results[10].p95Ms).toBeLessThan(50);
+    expect(results[11].p95Ms).toBeLessThan(50);
     expect(maskString(mixed, allPlan)).not.toContain('11010519491231002X');
     expect(maskString(mixed, allPlan)).not.toContain('13800138000');
     expect(maskString(mixed, allPlan)).not.toContain('user@example.com');
@@ -159,5 +173,10 @@ describe('PII masking performance benchmark', () => {
     const previewMixed = maskString(mixed, previewPlan);
     expect(previewMixed).toContain('[PHONE_MASKED]{138****8000}');
     expect(previewMixed).toContain('[IP_ADDRESS_MASKED]{192.*.*.10}');
+
+    expect(maskString(unanchoredSecretLike, allPlan)).toBe(unanchoredSecretLike);
+    const maskedAnchoredAccessKeySecrets = maskString(anchoredAccessKeySecrets, allPlan);
+    expect(maskedAnchoredAccessKeySecrets.match(/\[ACCESSKEY_SECRET_MASKED\]/g)).toHaveLength(300);
+    expect(maskedAnchoredAccessKeySecrets).not.toContain(secretLike);
   });
 });
