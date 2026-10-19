@@ -1,5 +1,45 @@
 # Hermes / OpenClaw 请求上下文写出验证（2026-10-19）
 
+## Review 从这四处开始
+
+PR 首个提交共 14 个文件：**4 个生产文件、7 个测试文件、3 个文档文件**。
+生产变更约 200 行，其余主要是回归和说明。建议先按下表看生产代码，再看相应测试。
+
+| 顺序 | 文件 | 改了什么 / Review 重点 |
+|---|---|---|
+| 1 | `assets/plugins/openclaw/plugin.mjs` | 每次模型调用分配一个 SpanID，存在该调用的状态里；请求、响应取同一个 ID。检查同一调用 ID 不变、不同调用 ID 不混用。 |
+| 2 | `assets/plugins/hermes-agent/loongsuite-pilot/__init__.py` | 在 `pre_api_request` 写请求，完成后写响应/工具结果；结束时只补缺失事件。重点看 `_api_ids`、`_emit_request`、`_write_new_records`、`_flush_turn`：ID 稳定、没有未来响应字段、不会重复追加。 |
+| 3 | `src/normalization/turn-boundary-processor.ts` | 收到一次模型的 stop/error 时，先不替整轮问答补结束标记；等待插件自己的结束记录。检查请求、响应、结束记录分不同批次时仍正确。 |
+| 4 | `src/flushers/otlp-trace-flusher.ts` | 同样等待显式结束记录再拼完整 trace，避免重试、工具和同会话交错回合被提前截断。旧版插件继续使用旧规则。 |
+
+一轮问答可能包含“模型调用 → 工具 → 再次模型调用”。因此需要同时区分**一次调用完成**
+和**整轮问答结束**，后两个文件分别负责归一化边界和 trace 聚合，必须保持一致。
+
+Hermes 文件较长还包含新版 TTFT 的两个适配、旧 hook 的内容补齐、sender 继承、写失败重试。
+TTFT 可最后单独 review `_install_first_delta_observer` / `_stream_api_for_agent`：
+保留原回调，使用明确身份匹配当前请求，存在歧义时不猜。
+
+### 本地怎样测试
+
+在仓库根目录、Node 22 环境中执行以下专项测试；无需模型密钥或 ARMS 凭证：
+
+```sh
+npm test -- \
+  tests/unit/hooks/hermes-agent-realtime.test.mjs \
+  tests/unit/hooks/hermes-agent-ttft.test.mjs \
+  tests/unit/hooks/openclaw/plugin.test.mjs \
+  tests/unit/normalization/turn-boundary-processor.test.ts \
+  tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts
+```
+
+验收看四件事：请求未完成时，另一个进程已读到当前请求的 ID；同一请求的响应 ID 不变；
+同一轮第二次调用有自己的 ID；重试或回合结束后没有重复事件/重复结束标记。
+这些专项还覆盖首请求没有旧文件、漏 hook、写失败、并发回合、TTFT 上下文丢失等情况。
+
+真实测试再增加三步：运行真实 Agent 做文本和工具调用；在每次 HTTP 发送前独立读文件并
+记录匹配的 traceparent；完成后按精确 TraceID 从 CMS 读回并对照 LLM/TOOL SpanID、token、TTFT。
+“最终文件里有记录”只证明最终写出了；“上报返回成功”只证明请求被接收，均不能代替这三步。
+
 ## 结论与范围
 
 客户需要在每次 LLM / 工具出站请求发送前取得其 trace 上下文，以关联成本。
@@ -32,14 +72,18 @@ Pilot 基线：`ff5256e0`，直接基于 `alibaba/loongsuite-pilot`。
 | 新版 Hermes-Agent | 官方仓库 `5fc490e2b34123212d73ef316086f939567a725a`，显示 `2026.9.24` | 真实 gateway/CLI、工具、会话恢复及云端读回通过 |
 | OpenClaw v2026.6.5 | 官方 npm `openclaw@2026.6.5` | 真实 Gateway RPC、文本/工具调用及云端读回通过 |
 | OpenClaw v2026.6.10 | 官方 npm `openclaw@2026.6.10` | 真实 Gateway RPC、文本/工具调用及云端读回通过 |
-| OpenClaw 2026.10.5 | 官方 npm 包已下载 | 本机启动遭 `SIGKILL`，未通过真实网关验收；不能宣称最新版通过 |
+| OpenClaw 2026.10.5 | 官方 npm `openclaw@2026.10.5`，显示 `1b58cb9` | 改名运行后，真实 Gateway RPC、文本/工具调用及云端读回通过 |
 
 collector 和旧版 OpenClaw 使用 Pilot 管理的 Node `22.22.2`。OpenClaw 2026.10.5
 要求 Node `>=24.16.0 <25 || >=26.1.0`，分别尝试本机 Node `26.12.0` 和另行下载的
 `24.16.0`，均在插件运行前被终止；清理环境变量、关闭 compile cache 的尝试仍失败。
-这只是本机启动限制，尚不能归因为 Pilot 兼容缺陷，也不能据此确认其兼容性。
-安装最新包时还遇到 koffi 原生构建缺少 CMake；后续隔离安装了构建工具并尝试重建，
-Node 进程仍被终止。需在能正常启动该版本的主机补跑。
+后按用户建议，对隔离测试副本改名：将同一份 Node 24.16.0 可执行文件复制为
+`pilot-runtime`，逐字节 SHA256 相同；将测试副本 `dist/entry.js` 中唯一一处
+`process.title = "openclaw"` 改为 `pilot-gateway-check`。保留官方入口文件、包名、
+版本号和模型/工具逻辑。进程表确认显示名为 `pilot-gateway-check`，随后真实验收通过。
+仅改名可执行文件时版本命令也已成功，说明先前失败与本机运行方式有关；没有足够证据
+认定具体系统组件是原因。改名属于测试环境适配，不是 Pilot 产品修复，也不修改用户日常安装。
+改名范围、原文件 hash 和版本命令结果记录在 `gateway-neutral/` 下。
 
 ## 真实调用与 CMS 读回
 
@@ -54,6 +98,7 @@ ARMS 工作区，通过 `aliyun --profile arms cms2 trace search` 按精确 Trac
 | 新版 Hermes | 3 | 6 | 6/6 | 6/6 | 6/6 | 3/3 |
 | OpenClaw v2026.6.5 | 2 | 3 | 3/3 | 3/3 | 3/3 | 2/2 |
 | OpenClaw v2026.6.10 | 2 | 3 | 3/3 | 3/3 | 3/3 | 2/2 |
+| OpenClaw 2026.10.5（改名运行） | 2 | 3 | 3/3 | 3/3 | 3/3 | 2/2 |
 
 新版 Hermes 的 TTFT 有两个适配点：lazy-forward facade 后的原生 streaming helper；
 以及 bounded hook 在独立 `copy_context` 工作线程中执行，导致 hook 中设置的
@@ -61,7 +106,7 @@ ARMS 工作区，通过 `aliyun --profile arms cms2 trace search` 按精确 Trac
 唯一未完成请求；没有明确身份或存在歧义时不填 TTFT，不能取“最新请求”猜测。
 
 发送前证据来自独立进程读取源 JSONL，并由测试消费端在真实 httpx / undici 发送边界
-写入 `traceparent`。两个 Hermes 版本各 6 次、两个 OpenClaw 版本各 3 次，
+写入 `traceparent`。两个 Hermes 版本各 6 次、三个 OpenClaw 版本各 3 次，
 均在发送前读到匹配请求，且 header 中的 ID 与实际 CMS LLM span 一致。
 Hermes 测试以请求 body 指纹关联；新版 relay 改写请求时，顺序验收场景只接受唯一未完成
 请求，存在多个候选即拒绝注入。此兜底只用于该顺序测试，不作为生产传播器方案。
@@ -81,13 +126,14 @@ TTFT 回调及复制上下文丢失/身份歧义。旧版仅在最终 history �
 `$APSARA_APM_AGENT_WORKSPACE_DIR/pilot-realtime-context-e2e/`。
 
 - `cloud-verification.json`：逐 LLM JSONL/CMS ID、token、TTFT 比对。
+- `cloud-verification-latest.json`、`strict-validation-latest.log`：改名运行最新版的补测。
 - `outbound-verification.json`：逐请求发送前 header 与源 JSONL、CMS 的关联比对。
 - `<runtime>/evidence/cloud-spans.json`：CMS 实际查询结果。
 - `<runtime>/evidence/timing.jsonl`、`outbound-audit.jsonl`：源文件与发送边界证据。
 - `full-tests-final.log`、`final-targeted-tests.log`、`typecheck-final.log`：自动化检查。
 - 原始环境准备/TTFT 修复前的数据单独保留，未计入上表正式验收。
 
-四个通过真实验收的运行目录均通过仓库严格 JSONL validator：无解析、必填字段、
+五个通过真实验收的运行目录均通过仓库严格 JSONL validator：无解析、必填字段、
 模型/工具配对、重复 event ID 或回合边界错误。配置和凭证不提交到仓库。
 
 严格校验曾在分批采集时发现响应和终止记录同时被标成 turn end：归一化层原有的
