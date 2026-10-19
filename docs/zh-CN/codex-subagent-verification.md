@@ -47,6 +47,12 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 恢复路径复用当前 workspace 过滤、内容开关和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，仍受内容采集配置影响。
 
+### 持久接收与原生终态
+
+公共 `send` / `sendBatch` 都等待启动恢复并持久接收自身记录；journal 恢复走内部追加路径，不以全局“正在恢复/批处理”标志跳过其他调用的持久化。准备前缀与追加期间暂缓 buffer 淘汰，避免只导出后缀后确认整轮。
+
+Codex 只用显式 `gen_ai.turn.end` 收尾，`agent.codex.turn_status=interrupted` 本身不关闭轮次，因为该状态可能出现在分批输出的每条记录上。输出失败后 checkpoint 保持冻结到重启，但只保留一份失败原因；已结束的接收 Promise 从等待集合移除，避免持续失败时不断积累。
+
 ## 可执行回归入口
 
 在已安装仓库依赖的开发环境运行：
@@ -71,7 +77,7 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 | --- | --- |
 | 源码检查 | `npm run typecheck` 通过；4 个相关脚本的 Node 语法检查通过 |
 | 构建 | `npm run build` 完整通过，含 Swift 产物 |
-| 定向回归 | 42 个不同测试文件、667 个测试全部通过；包括 Codex、flusher、checkpoint、Schema、JSONL validator、Orchestrator 启动顺序与内容策略 |
+| 定向回归 | 43 个不同测试文件、677 个测试全部通过；包括 Codex、flusher、checkpoint、Schema、JSONL validator、Orchestrator 启动顺序与内容策略 |
 | 跨输出集成 | Codex 新增跨输出场景单独运行 11/11 通过，已计入上述回归；使用测试接收端/夹具验证，不代表生产云端到达 |
 | 真实安装态 | 本次开源候选未重新安装、触发真实 Agent 场景 |
 | 云端回读 | 本次开源候选未重新执行，不复用旧报告作为通过证明 |

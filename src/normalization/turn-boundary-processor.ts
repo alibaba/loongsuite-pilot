@@ -99,10 +99,9 @@ export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
   if (entry['gen_ai.turn.end'] === true) return true;
 
   const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? ''));
-  if (agentType === 'codex') {
-    const status = entry['agent.codex.turn_status'];
-    return status === 'completed' || status === 'interrupted';
-  }
+  // Codex stamps interrupted status on every record of an aborted turn.
+  // Only its explicit native end marker closes a turn split across batches.
+  if (agentType === 'codex') return false;
   if (agentType === 'openclaw') {
     return entry['agent.openclaw.hook'] === 'llm_output';
   }

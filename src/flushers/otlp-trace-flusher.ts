@@ -551,11 +551,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
   private journalRestore?: Promise<void>;
-  private restoringJournal = false;
 
   // 批量调用计数：大于 0 时 send() 中 Signal A（finish_reason=stop）只标记
   // completed，不立即 flush；最后一个批量调用完成 append 后统一 flush。
-  // 同时覆盖 journal 恢复的嵌套调用和不同 Input 的并发调用。
+  // 同时覆盖单条持久化、journal 恢复和不同 Input 的并发调用。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
   private batchDepth = 0;
@@ -688,10 +687,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
-    if (!this.restoringJournal) {
-      await this.start();
-      if (this.batchDepth === 0) await this.persistCodexEntries([entry]);
-    }
+    await this.start();
+    // A public call always owns durable acceptance, even while another call
+    // is replaying or appending. Keep its resident prefix until I/O completes.
+    this.batchDepth++;
+    try {
+      await this.persistCodexEntries([entry]);
+    } finally { this.batchDepth--; }
+    await this.appendEntry(entry, logicalBytes);
+    if (this.batchDepth === 0) await this.flushCompleted();
+  }
+
+  private async appendEntry(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     // Audit delegation/result records describe an existing tool/work boundary.
     // They must not create, close or reopen a model turn buffer.
     if (isAgentAuditEvent(entry)) return;
@@ -787,22 +794,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
-    if (!this.restoringJournal) await this.start();
-    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
-    // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
-    // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
+    await this.start();
     this.batchDepth++;
     try {
-      // Journal preparation can replay an evicted prefix through sendBatch().
-      // Keep the outer batch protected across that nested preparation as well.
-      if (!this.restoringJournal) await this.persistCodexEntries(entries);
-      for (let i = 0; i < entries.length; i++) {
-        await this.send(entries[i], sizes?.[i]);
-      }
-    } finally {
-      this.batchDepth--;
+      await this.persistCodexEntries(entries);
+      await this.appendBatch(entries, logicalBytes);
+    } finally { this.batchDepth--; }
+    await this.finishBatch();
+  }
+
+  private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
+    for (let i = 0; i < entries.length; i++) {
+      await this.appendEntry(entries[i], sizes?.[i]);
     }
-    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
+  }
+
+  private async finishBatch(): Promise<void> {
+    // Another caller may still be preparing a prefix or appending records.
     if (this.batchDepth === 0) {
       await this.flushCompleted();
       // Another Input may begin a batch while completed exports are awaited.
@@ -843,7 +852,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   override async start(): Promise<void> {
-    if (!this.codexJournal || this.restoringJournal) return;
+    if (!this.codexJournal) return;
     this.journalRestore ??= this.replayCodexJournal(this.codexJournal.load()).catch(cause => {
       const error = new Error('Codex pending trace could not be restored', { cause });
       error.name = 'CodexTurnJournalError';
@@ -853,17 +862,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private async replayCodexJournal(groups: AsyncIterable<AgentActivityEntry[]>): Promise<void> {
-    this.restoringJournal = true;
-    try {
-      for await (const group of groups) {
-        const prepared = this.prepareCodexReplay ? this.prepareCodexReplay(group) : group;
-        if (prepared.length === 0) {
-          await this.codexJournal!.remove(group);
-          continue;
-        }
-        await this.sendBatch(prepared);
+    for await (const group of groups) {
+      const prepared = this.prepareCodexReplay ? this.prepareCodexReplay(group) : group;
+      if (prepared.length === 0) {
+        await this.codexJournal!.remove(group);
+        continue;
       }
-    } finally { this.restoringJournal = false; }
+      // Replay has already been persisted. Use the internal append path, so
+      // public calls can always await start() without recursion or bypasses.
+      this.batchDepth++;
+      try { await this.appendBatch(prepared); }
+      finally { this.batchDepth--; }
+      await this.finishBatch();
+    }
   }
 
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
@@ -1993,7 +2004,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0) return;
+    if (timeout <= 0 || this.batchDepth > 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {

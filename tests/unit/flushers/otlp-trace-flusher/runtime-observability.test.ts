@@ -22,9 +22,9 @@ function entry(turn = 'turn', agent = 'codex', session = 'session'): AgentActivi
 }
 
 const active: OtlpTraceFlusher[] = [];
-function createFlusher(journal?: CodexTurnJournal) {
+function createFlusher(journal?: CodexTurnJournal, turnIdleTimeoutMs?: number) {
   const flusher = new OtlpTraceFlusher({
-    enabled: true, serviceName: 'test', protocol: 'http/protobuf',
+    enabled: true, serviceName: 'test', protocol: 'http/protobuf', turnIdleTimeoutMs,
     endpoints: [{ endpoint: 'http://unused:4318', headers: {} }],
   }, undefined, undefined, journal);
   active.push(flusher);
@@ -220,4 +220,117 @@ describe('Trace runtime scalar snapshots', () => {
     await flusher.send({ ...entry('next'), 'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' });
     expect(converted).toHaveBeenCalledTimes(1);
   });
+
+  it('waits for startup replay before durably accepting a live Codex batch', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-live-'));
+    const journal = new CodexTurnJournal(root);
+    const prefix = { ...entry('restored'), 'user.id': 'owner', 'event.id': 'restored-prefix' };
+    const live = { ...entry('live'), 'user.id': 'owner', 'event.id': 'live-prefix' };
+    await journal.append([prefix]);
+    const load = journal.load.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'load').mockImplementationOnce(async function* () {
+      entered();
+      await ready;
+      yield* load();
+    });
+    const flusher = createFlusher(journal);
+    const restoring = flusher.start();
+    await waiting;
+    let accepted = false;
+    const sending = flusher.sendBatch([live]).then(() => { accepted = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect.soft(accepted).toBe(false);
+    } finally { release(); }
+    await Promise.all([restoring, sending]);
+    const groups = [];
+    for await (const group of load()) groups.push(...group);
+    expect(groups.map(record => record['event.id'])).toContain('live-prefix');
+    expect(flusher.getTraceRuntimeSnapshot()[0].pending_records).toBe(2);
+  });
+
+  it('journals an external single send while another Codex batch is appending', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-batch-single-'));
+    const journal = new CodexTurnJournal(root);
+    const flusher = createFlusher(journal);
+    const batchEntry = { ...entry('batch'), 'user.id': 'owner', 'event.id': 'batch-prefix' };
+    const singleEntry = { ...entry('single'), 'user.id': 'owner', 'event.id': 'single-prefix' };
+    const append = journal.append.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'append').mockImplementation(async records => {
+      if (records.some(record => record['event.id'] === 'batch-prefix')) { entered(); await ready; }
+      await append(records);
+    });
+    const batch = flusher.sendBatch([batchEntry]);
+    await waiting;
+    try {
+      await flusher.send(singleEntry);
+      const groups = [];
+      for await (const group of journal.load()) groups.push(...group);
+      expect(groups.map(record => record['event.id'])).toContain('single-prefix');
+    } finally { release(); await batch; }
+  });
+
+  it('retains a resident Codex prefix when an idle tick overlaps journal append', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-idle-append-'));
+    const journal = new CodexTurnJournal(root);
+    const flusher = createFlusher(journal, 1000);
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let clock = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const prefix = { ...entry(), 'user.id': 'owner', 'event.id': 'prefix',
+      'gen_ai.step.id': 'original-step', 'gen_ai.usage.input_tokens': 11 };
+    const terminal = { ...entry(), 'user.id': 'owner', 'event.id': 'terminal',
+      'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' };
+    await flusher.send(prefix);
+    clock = 3000;
+    const append = journal.append.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'append').mockImplementationOnce(async records => {
+      entered(); await ready; await append(records);
+    });
+    const sending = flusher.send(terminal);
+    await waiting;
+    try {
+      (flusher as any).tickIdleTimeout();
+      expect.soft(flusher.getTraceRuntimeSnapshot()[0].pending_records).toBe(1);
+    } finally { release(); await sending; }
+    await flusher.flush();
+    expect(converted).toHaveBeenCalledTimes(1);
+    expect(converted.mock.calls[0][1]).toEqual([prefix, terminal]);
+    expect(await journal.isAcknowledged(prefix)).toBe(true);
+  });
+
+
+  it('flushes a terminal single send after an overlapping preparation completes', async () => {
+    const flusher = createFlusher();
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(flusher as any, 'persistCodexEntries').mockImplementationOnce(async () => {
+      entered(); await ready;
+    });
+    const pending = flusher.send(entry('pending'));
+    await waiting;
+    try {
+      await flusher.send({ ...entry('terminal'), 'gen_ai.turn.end': true,
+        'agent.codex.turn_status': 'completed' });
+      expect(converted).not.toHaveBeenCalled();
+    } finally { release(); await pending; }
+    expect(converted).toHaveBeenCalledTimes(1);
+    expect(converted.mock.calls[0][1][0]['gen_ai.turn.id']).toBe('terminal');
+  });
+
 });

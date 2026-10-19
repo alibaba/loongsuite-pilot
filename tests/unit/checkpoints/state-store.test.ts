@@ -175,7 +175,7 @@ describe('StateStore', () => {
       expect(writeJsonFile).toHaveBeenCalledTimes(1);
     });
 
-    it('retains a rejected hold so subsequent shared saves keep the last durable cursor', async () => {
+    it('latches a rejected hold so subsequent shared saves keep the last durable cursor', async () => {
       store.setOffset('codex', 1);
       await store.save();
       const failure = Object.assign(new Error('journal unavailable'), { name: 'CodexTurnJournalError' });
@@ -186,6 +186,38 @@ describe('StateStore', () => {
       await expect(store.save()).rejects.toBe(failure);
       expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
       expect(writeJsonFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases settled holds during sustained output failure without unfreezing saves', async () => {
+      store.setOffset('codex', 1);
+      await store.save();
+      const firstFailure = new Error('first journal failure');
+      for (let attempt = 0; attempt < 100; attempt++) {
+        store.holdSaveUntil(Promise.reject(attempt === 0 ? firstFailure : new Error('still unavailable')));
+        store.setOffset('codex', attempt + 2);
+        await expect(store.save()).rejects.toBe(firstFailure);
+      }
+      expect((store as unknown as { saveHolds: Set<Promise<void>> }).saveHolds.size).toBe(0);
+      store.holdSaveUntil(Promise.resolve());
+      await Promise.resolve();
+      await expect(store.save()).rejects.toBe(firstFailure);
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+
+      const restarted = new StateStore(filePath);
+      await restarted.load();
+      restarted.holdSaveUntil(Promise.resolve());
+      restarted.setOffset('codex', 2);
+      await restarted.save();
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 2 } });
+    });
+
+    it('rejects a no-op save after a settled failed hold even without a new revision', async () => {
+      const failure = new Error('journal failure without state mutation');
+      store.holdSaveUntil(Promise.reject(failure));
+      await Promise.resolve();
+      await expect(store.save()).rejects.toBe(failure);
+      expect(writeJsonFile).not.toHaveBeenCalled();
     });
 
     it('honors a new hold before the next revision of an active write', async () => {
