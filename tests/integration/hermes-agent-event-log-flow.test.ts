@@ -152,7 +152,10 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     await manager.stopInput(input.id);
 
     expect(flusher.batchCalls).toHaveLength(1);
-    const records = flusher.batchCalls[0];
+    const allRecords = flusher.batchCalls[0];
+    expect(allRecords.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
+    const records = allRecords.filter(record => record['event.name'] !== 'other')
+      .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
     expect(records.map(record => record['event.name'])).toEqual([
       'llm.request',
       'llm.response',

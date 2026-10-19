@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { TurnBoundaryProcessor } from '../../../../src/normalization/turn-boundary-processor.js';
 
 vi.mock('@loongsuite/otel-util-genai', () => ({
   convertEventLogToTrace: vi.fn(() => ({ traceIds: [], spanCount: 0, warnings: [] })),
@@ -41,6 +42,32 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
 
   afterEach(async () => {
     await flusher.shutdown();
+  });
+
+  it('keeps incremental Hermes retries and overlapping same-session turns until their explicit ends', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    const boundaries = new TurnBoundaryProcessor();
+    const base = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1', 'gen_ai.session.id': 'im-session' };
+    const entry = (turn: string, name: string, fields = {}) => {
+      const value = makeEntry({
+        ...base, trace_id: (turn === 'a' ? 'a' : 'b').repeat(32),
+        'gen_ai.turn.id': turn, 'gen_ai.step.id': turn + ':s1', 'event.name': name, ...fields,
+      });
+      boundaries.enrich([value]);
+      return value;
+    };
+    await flusher.send(entry('a', 'llm.request'));
+    await flusher.send(entry('a', 'llm.response', { 'gen_ai.response.finish_reasons': ['error'] }));
+    await flusher.send(entry('b', 'llm.request'));
+    await flusher.send(entry('b', 'llm.response', { 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(entry('a', 'other', { 'gen_ai.turn.end': true }));
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(convert.mock.calls[0][0].every(r => r['gen_ai.turn.id'] === 'a')).toBe(true);
+    await flusher.send(entry('b', 'other', { 'gen_ai.turn.end': true }));
+    await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
   });
 
   it('flushes a failed legacy OpenClaw turn without llm_output', async () => {
