@@ -88,6 +88,32 @@ describe('mask string masker', () => {
     expect(masked).toContain('[ACCESSKEY_MASKED]:[ACCESSKEY_SECRET_MASKED];');
   });
 
+  it('recognizes a Secret that starts with a slash, plus, or hyphen after the ID', () => {
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const inputs = ['/', '+', '-'].map(separator =>
+      `AKIA1234567890ABCDEF${separator}${secret}`,
+    );
+
+    expect(inputs.map(input => maskString(input, allRules))).toEqual(
+      inputs.map(() => '[ACCESSKEY_MASKED][ACCESSKEY_SECRET_MASKED]'),
+    );
+  });
+
+  it('finishes a Secret candidate at the next recognized AccessKey ID', () => {
+    const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+    const firstId = 'AKIA1234567890ABCDEF';
+    const nextIds = ['LTAI1234567890ABCD', 'AKIA0987654321FEDCBA'];
+    const inputs = [
+      `${firstId} ${secret}=${nextIds[0]}`,
+      `${firstId} ${secret}+${nextIds[1]}`,
+    ];
+
+    expect(inputs.map(input => maskString(input, allRules))).toEqual([
+      `[ACCESSKEY_MASKED] [ACCESSKEY_SECRET_MASKED][ACCESSKEY_MASKED]`,
+      `[ACCESSKEY_MASKED] [ACCESSKEY_SECRET_MASKED][ACCESSKEY_MASKED]`,
+    ]);
+  });
+
   it('scans no more than 1024 characters after an access key ID', () => {
     const secret = 'Aa1'.repeat(13) + 'A';
     const inRange = `AKID1234567890123${' '.repeat(984)}${secret}`;

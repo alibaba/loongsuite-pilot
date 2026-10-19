@@ -125,7 +125,14 @@ function collectCloudAccessKeyRanges(
       nextAnchorStart,
     );
     if (searchStart < searchEnd) {
-      ranges.push(...scanAccessKeySecretCandidates(value, searchStart, searchEnd, anchor.rule.type, replacementMode));
+      ranges.push(...scanAccessKeySecretCandidates(
+        value,
+        searchStart,
+        searchEnd,
+        anchor.rule.type,
+        replacementMode,
+        searchEnd === nextAnchorStart && nextAnchorStart < value.length,
+      ));
     }
   }
 
@@ -147,6 +154,7 @@ function scanAccessKeySecretCandidates(
   end: number,
   type: MaskRange['type'],
   replacementMode: MaskPlan['replacementMode'],
+  stopAtKnownAnchor: boolean,
 ): MaskRange[] {
   const ranges: MaskRange[] = [];
   let tokenStart = -1;
@@ -157,8 +165,9 @@ function scanAccessKeySecretCandidates(
   let hasUppercase = false;
   let hasLowercase = false;
   let hasDigit = false;
-  let canStartToken =
-    start === 0 || !isAccessKeySecretTokenChar(value.charCodeAt(start - 1));
+  // The scan starts at the boundary after a validated AccessKey ID. Allowed Secret
+  // characters such as '/', '+', and '-' may begin the candidate at that boundary.
+  let canStartToken = true;
 
   const resetToken = (): void => {
     tokenStart = -1;
@@ -243,7 +252,7 @@ function scanAccessKeySecretCandidates(
   const nextCode = end < value.length ? value.charCodeAt(end) : -1;
   const tokenContinuesPastWindow =
     isAccessKeySecretBodyChar(nextCode) || nextCode === 61;
-  if (!tokenContinuesPastWindow && tokenStart >= 0) finishToken(true);
+  if ((stopAtKnownAnchor || !tokenContinuesPastWindow) && tokenStart >= 0) finishToken(true);
   return ranges;
 }
 
@@ -257,10 +266,6 @@ function isAccessKeySecretBodyChar(code: number): boolean {
     code === 47 ||
     code === 95
   );
-}
-
-function isAccessKeySecretTokenChar(code: number): boolean {
-  return isAccessKeySecretBodyChar(code) || code === 61;
 }
 
 export function findFirstSensitiveMatch(
