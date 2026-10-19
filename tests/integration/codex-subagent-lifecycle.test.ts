@@ -266,6 +266,9 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
     const first = invocation(logs, 'spawn-a');
     const second = invocation(logs, 'follow-a');
     const nested = invocation(logs, 'spawn-grandchild');
+    expect([first, second, nested].map(entry => entry['gen_ai.input.messages'])).toEqual(
+      ['first', 'second', 'nested'].map(content => [{ role: 'user', parts: [{ type: 'text', content }] }]),
+    );
     expect(first['gen_ai.agent.invocation.id']).not.toBe(second['gen_ai.agent.invocation.id']);
     expect(nested['gen_ai.agent.parent.invocation.id']).toBe(second['gen_ai.agent.invocation.id']);
     expect(nested['gen_ai.agent.invocation.id']).not.toBe(nested['gen_ai.agent.parent.invocation.id']);
@@ -276,12 +279,14 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
     const h = await harness();
     await h.write(PARENT, [metadata(PARENT, 0), ...begin('p1', 1, 'delegate'), ...dispatch('spawn-a', CHILD, 2, 'child-a'), ...end('p1', 3)]);
     const before = invocation(await h.logs(), 'spawn-a');
+    expect(before['gen_ai.input.messages']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'child-a' }] }]);
     await h.restart();
     await h.write(CHILD, [metadata(CHILD, 2.005, PARENT), ...work('c1', 4, 'child-a')], 'c1');
     await h.restart();
     const logs = await h.logs();
     assertChild(logs, h.spans, CHILD, 'c1', 'spawn-a');
     expect(invocation(logs, 'spawn-a')['event.id']).toBe(before['event.id']);
+    expect(invocation(logs, 'spawn-a')['gen_ai.input.messages']).toEqual(before['gen_ai.input.messages']);
     expect(new Set(logs.map(entry => entry['event.id'])).size).toBe(logs.length);
   });
 

@@ -16,6 +16,17 @@ invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCall
 
 `FINAL_ANSWER` 是 Codex 内部结果交付消息类型，解析成标准 `gen_ai.agent.result` 前仍需唯一 invocation 关联与去重。工具受理、子本地完成、父实际收到结果不是同一边界。暂时无法关联的 FINAL_ANSWER 保存文件范围，后续只重试结果审计，不重复模型/工具日志。
 
+## 委派内容字段
+
+| 事件 | 内容字段 | 内容语义 |
+| --- | --- | --- |
+| `gen_ai.agent.invoke` | `gen_ai.input.messages` | 本次交给目标 Agent 的任务及显式传入的上下文 |
+| `gen_ai.agent.result` | `gen_ai.output.messages` | 实际交付给调用方的结果 |
+
+Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内容，复用原生消息转换，写为 `[{role: "user", parts: [{type: "text", content: "任务内容"}]}]`；多段文本保留各自的 part。批量 `agents` / `tasks` 按原始工作序号分别填充，不复制整个批次、不串入其他工作。缺少可读内容时省略字段，不用父会话输入代替，不解密密文，也不补造隐式继承的上下文。
+
+原始工具参数仍在 `tool.call` 的 `gen_ai.tool.call.arguments`，invoke 不再重复携带这个工具内容字段。result 使用 assistant 消息。内容开关与脱敏策略同时作用于这些消息；invocation、event ID 和 Trace 身份不因字段映射变化而改变。历史已采集事件不自动回填。
+
 ## 什么时候发送
 
 | 对象 | 条件 |
@@ -60,7 +71,7 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 | --- | --- |
 | 源码检查 | `npm run typecheck` 通过；4 个相关脚本的 Node 语法检查通过 |
 | 构建 | `npm run build` 完整通过，含 Swift 产物 |
-| 定向回归 | 42 个不同测试文件、654 个测试全部通过；包括 Codex、flusher、checkpoint、Schema、JSONL validator、Orchestrator 启动顺序与内容策略 |
+| 定向回归 | 42 个不同测试文件、667 个测试全部通过；包括 Codex、flusher、checkpoint、Schema、JSONL validator、Orchestrator 启动顺序与内容策略 |
 | 跨输出集成 | Codex 新增跨输出场景单独运行 11/11 通过，已计入上述回归；使用测试接收端/夹具验证，不代表生产云端到达 |
 | 真实安装态 | 本次开源候选未重新安装、触发真实 Agent 场景 |
 | 云端回读 | 本次开源候选未重新执行，不复用旧报告作为通过证明 |

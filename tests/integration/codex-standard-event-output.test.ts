@@ -1,16 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { buildAgentActivityEntry } from '../../src/normalization/entry-builder.js';
 import { expandAgentInputEvents } from '../../src/normalization/agent-input-dual-write.js';
 import { applyAgentContentPolicy } from '../../src/normalization/agent-content-policy.js';
+import { StateStore } from '../../src/checkpoints/state-store.js';
+import { CodexTranscriptInput } from '../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../../src/flushers/http-flusher.js';
 import { SlsFlusher } from '../../src/flushers/sls-flusher.js';
-import { ClientType, type AgentEventName, type SlsFlusherConfig } from '../../src/types/index.js';
+import { ClientType, type AgentActivityEntry, type AgentEventName, type SlsFlusherConfig } from '../../src/types/index.js';
 
 // Exercise the real flusher's serialization and SDK boundary without cloud credentials.
 const { postLogs } = vi.hoisted(() => ({ postLogs: vi.fn().mockResolvedValue(undefined) }));
@@ -45,6 +47,49 @@ const contentFields = [
   'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result',
   'gen_ai.system_instructions', 'gen_ai.tool.definitions',
 ];
+
+async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[]> {
+  const input = new CodexTranscriptInput({
+    stateStore: new StateStore(path.join(directory, 'state.json')),
+    sessionDir: directory, wakeupDir: path.join(directory, 'wakeups'),
+    spanContextDir: path.join(directory, 'contexts'),
+  });
+  const collected: AgentActivityEntry[] = [];
+  input.on('entries', batch => collected.push(...batch));
+  const file = path.join(directory, 'rollout-parent.jsonl');
+  const records = [
+    ['session_meta', { id: 'native-parent', timestamp: '2026-08-07T02:00:00Z', model_provider: 'openai' }],
+    ['turn_context', { turn_id: 'native-turn', model: 'gpt-test' }],
+    ['event_msg', { type: 'task_started', turn_id: 'native-turn' }],
+    ['response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'parent input' }] }],
+    ['response_item', { type: 'function_call', call_id: 'spawn-batch', name: 'spawn_agent',
+      arguments: JSON.stringify({ agents: [{ message: 'task A' }, { prompt: 'task B' }] }) }],
+    ['response_item', { type: 'function_call_output', call_id: 'spawn-batch',
+      output: JSON.stringify({ agents: [{ agent_id: 'child-A' }, { agent_id: 'child-B' }] }) }],
+    ['response_item', { type: 'function_call', call_id: 'wait-batch', name: 'wait',
+      arguments: JSON.stringify({ ids: ['child-A', 'child-B'] }) }],
+    ['response_item', { type: 'function_call_output', call_id: 'wait-batch',
+      output: JSON.stringify({ status: { 'child-A': { completed: 'result A' }, 'child-B': { completed: 'result B' } } }) }],
+    ['event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }],
+    ['event_msg', { type: 'task_complete', turn_id: 'native-turn', last_agent_message: 'done' }],
+  ];
+  await writeFile(file, records.map(([type, payload], i) => JSON.stringify({
+    timestamp: new Date(Date.parse('2026-08-07T02:00:00Z') + i * 1000).toISOString(), type, payload,
+  })).join('\n') + '\n');
+  await (input as unknown as { processFile(file: string): Promise<void> }).processFile(file);
+  const audit = collected.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result');
+  expect(audit.map(entry => entry['event.name'])).toEqual([
+    'gen_ai.agent.invoke', 'gen_ai.agent.invoke', 'gen_ai.agent.result', 'gen_ai.agent.result',
+  ]);
+  expect(audit.slice(0, 2).map(entry => entry['gen_ai.input.messages'])).toEqual(['task A', 'task B'].map(content => [
+    { role: 'user', parts: [{ type: 'text', content }] },
+  ]));
+  expect(audit.slice(2).map(entry => entry['gen_ai.output.messages'])).toEqual(['result A', 'result B'].map(content => [
+    { role: 'assistant', parts: [{ type: 'text', content }] },
+  ]));
+  for (const entry of audit) expect(entry).not.toHaveProperty('gen_ai.tool.call.arguments');
+  return audit;
+}
 
 describe('Codex standard event output boundaries', () => {
   it.each([true, false])('keeps one event and the same identities across JSONL, HTTP and SLS (content=%s)', async captureMessageContent => {
@@ -82,7 +127,8 @@ describe('Codex standard event output boundaries', () => {
 
     try {
       await jsonl.start();
-      const entries = names.map((name, index) => applyAgentContentPolicy(buildAgentActivityEntry({
+      const native = await nativeAgentEvents(directory);
+      const rawEntries = [...names.filter(name => !name.startsWith('gen_ai.agent.')).map((name, index) => buildAgentActivityEntry({
         ...relationFields,
         'event.name': name,
         'event.id': `codex-event-${index}`,
@@ -96,10 +142,12 @@ describe('Codex standard event output boundaries', () => {
         'gen_ai.tool.call.result': { output: 'delegated result' },
         'gen_ai.system_instructions': [{ type: 'text', content: 'instructions' }],
         'gen_ai.tool.definitions': [{ type: 'function', name: 'spawn_agent' }],
-      }), { [ClientType.CodexCliHook]: { captureMessageContent } }));
+      })), ...native];
+      const entries = rawEntries.map(entry => applyAgentContentPolicy(entry, { [ClientType.CodexCliHook]: { captureMessageContent } }));
+      const expectedNames = entries.map(entry => entry['event.name']);
       // The existing agent.input compatibility path must not double-write standard events.
       const output = expandAgentInputEvents(entries);
-      expect(output).toHaveLength(names.length);
+      expect(output).toHaveLength(entries.length);
       await jsonl.sendBatch(output);
       await http.sendBatch(output);
       await sls.sendBatch(output);
@@ -115,11 +163,13 @@ describe('Codex standard event output boundaries', () => {
       ));
       const groups = [jsonLogs, received[0], ...slsLogs];
       for (const logs of groups) {
-        expect(logs.map((log: Record<string, unknown>) => log['event.name'])).toEqual(names);
+        expect(logs.map((log: Record<string, unknown>) => log['event.name'])).toEqual(expectedNames);
         expect(logs.map((log: Record<string, unknown>) => log['event.id']))
           .toEqual(entries.map(entry => entry['event.id']));
-        expect(new Set(logs.map((log: Record<string, unknown>) => log['event.id'])).size).toBe(names.length);
-        for (const log of logs) expect(log).toMatchObject(relationFields);
+        expect(new Set(logs.map((log: Record<string, unknown>) => log['event.id'])).size).toBe(entries.length);
+        for (let i = 0; i < logs.length; i++) {
+          for (const field of Object.keys(relationFields)) expect(logs[i][field]).toBe(entries[i][field]);
+        }
       }
       if (!captureMessageContent) {
         for (const logs of groups) {
@@ -134,6 +184,14 @@ describe('Codex standard event output boundaries', () => {
         const activity = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs[0].content;
         expect(JSON.parse(activity['gen_ai.tool.call.arguments']))
           .toEqual(jsonLogs[0]['gen_ai.tool.call.arguments']);
+        const activityLogs = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs;
+        for (const entry of native) {
+          const index = entries.findIndex(item => item['event.id'] === entry['event.id']);
+          const field = entry['event.name'] === 'gen_ai.agent.invoke' ? 'gen_ai.input.messages' : 'gen_ai.output.messages';
+          expect(jsonLogs[index][field]).toEqual(entry[field]);
+          expect(JSON.parse(received[0][index][field])).toEqual(entry[field]);
+          expect(JSON.parse(activityLogs[index].content[field])).toEqual(entry[field]);
+        }
         const redacted = postLogs.mock.calls.find(call => call[1] === 'redacted')![2].logs;
         for (const { content } of redacted) {
           expect(content).not.toHaveProperty('gen_ai.input.messages');

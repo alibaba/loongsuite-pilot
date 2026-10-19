@@ -28,6 +28,7 @@ import {
   extractCodexPartialTurnWithBoundaries,
   extractCodexTranscriptMeta,
   sessionIdFromTranscriptPath,
+  transcriptInputMessage,
 } from './codex-transcript-extractor.js';
 import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import type { BlobToUriFn, UriResult } from '../../multimodal/types.js';
@@ -3122,15 +3123,25 @@ function appendCodexInvocations(
       : original;
     output.push(entry);
     if (entry['event.name'] !== 'tool.call' || !works) continue;
+    const args = asRecord(entry['gen_ai.tool.call.arguments']);
+    const tasks = Array.isArray(args?.agents) ? args.agents
+      : Array.isArray(args?.tasks) ? args.tasks : undefined;
     for (const work of works) {
       if (!work.invocationId) continue;
+      // Preserve batch positions; never substitute the batch envelope or a
+      // sibling's task when this work has no readable input.
+      const task = tasks ? asRecord(tasks[work.workIndex ?? 0]) : args;
+      const message = [task?.message, task?.prompt, task?.input]
+        .map(content => transcriptInputMessage('user', content)).find(value => value !== null);
       const invoke: AgentActivityEntry = {
         ...entry,
         'event.name': 'gen_ai.agent.invoke',
         'event.id': crypto.createHash('sha256').update(`${work.invocationId}\0invoke`).digest('hex').slice(0, 32),
         'gen_ai.agent.invocation.id': work.invocationId,
         ...(work.childThreadId ? { 'gen_ai.agent.peer.id': work.childThreadId } : {}),
+        ...(message ? { 'gen_ai.input.messages': [message] } : {}),
       };
+      delete invoke['gen_ai.tool.call.arguments'];
       delete invoke['gen_ai.tool.call.result'];
       delete invoke['tool.result.status'];
       output.push(invoke);

@@ -1075,12 +1075,72 @@ describe('CodexTranscriptInput', () => {
     const invoked = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
     expect(invoked).toHaveLength(4);
     expect(new Set(invoked.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(4);
+    for (const invoke of invoked) {
+      const call = lines.map(line => JSON.parse(line)).find(source => source.payload.type === 'function_call'
+        && source.payload.call_id === invoke['gen_ai.tool.call.id']);
+      expect(invoke['gen_ai.input.messages']).toEqual([{
+        role: 'user', parts: [{ type: 'text', content: JSON.parse(call.payload.arguments).message }],
+      }]);
+    }
     expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
     await fs.appendFile(transcript, lines.slice(acknowledgement).join('\n') + '\n', 'utf8');
     await processTranscriptOnce(input, transcript);
     expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke').map(entry => entry['event.id']))
       .toEqual(invoked.map(entry => entry['event.id']));
     expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+  });
+
+  it.each([
+    ['spawn_agent', { message: '  delegated task\nwith explicit context  ' }, '  delegated task\nwith explicit context  '],
+    ['spawn_agent', { prompt: 'prompt work' }, 'prompt work'],
+    ['spawn_agent', { input: 'input work' }, 'input work'],
+    ['followup_task', { target: '/root/child', message: 'new work for reused child' }, 'new work for reused child'],
+    ['send_input', { id: 'child', input: [{ type: 'text', text: 'first part' }, { type: 'text', text: 'second part' }] }, ['first part', 'second part']],
+  ])('maps %s delegation content to input messages', async (name, args, expected) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invoke-content-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const lines = simpleCompletedTurn('invoke-parent', 'invoke-turn', 'parent context is not the task', 'done', 10, 2,
+      '2026-08-07T02:00:00.000Z');
+    lines.splice(4, 0, record('2026-08-07T02:00:04.000Z', 'response_item', {
+      type: 'function_call', call_id: 'invoke-call', name, arguments: JSON.stringify(args),
+    }));
+    const transcript = await writeTranscriptNamed(sessionDir, 'rollout-invoke-parent.jsonl', lines.join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invoke = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke).toHaveLength(1);
+    expect(invoke[0]!['gen_ai.input.messages']).toEqual([{
+      role: 'user', parts: (Array.isArray(expected) ? expected : [expected]).map(content => ({ type: 'text', content })),
+    }]);
+    expect(invoke[0]!['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(invoke[0]).not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(entries.find(entry => entry['event.name'] === 'tool.call')!['gen_ai.tool.call.arguments']).toEqual(args);
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toEqual(invoke);
+  });
+
+  it.each(['agents', 'tasks'])('keeps %s batch invocation content separated by original work index', async batchField => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invoke-batch-content-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const args = { [batchField]: [{ message: 'first work' }, null, { prompt: 'third work' }], message: 'batch envelope' };
+    const lines = simpleCompletedTurn('batch-parent', 'batch-turn', 'unrelated parent input', 'done', 10, 2,
+      '2026-08-07T02:00:00.000Z');
+    lines.splice(4, 0, record('2026-08-07T02:00:04.000Z', 'response_item', {
+      type: 'function_call', call_id: 'batch-call', name: 'spawn_agent', arguments: JSON.stringify(args),
+    }));
+    const transcript = await writeTranscriptNamed(sessionDir, 'rollout-batch-parent.jsonl', lines.join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invokes = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes).toHaveLength(3);
+    expect(invokes.map(entry => entry['gen_ai.input.messages'])).toEqual([
+      [{ role: 'user', parts: [{ type: 'text', content: 'first work' }] }],
+      undefined,
+      [{ role: 'user', parts: [{ type: 'text', content: 'third work' }] }],
+    ]);
+    expect(new Set(invokes.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(3);
+    expect(invokes.every(entry => entry['gen_ai.tool.call.arguments'] === undefined)).toBe(true);
+    expect(entries.find(entry => entry['event.name'] === 'tool.call')!['gen_ai.tool.call.arguments']).toEqual(args);
   });
 
   it('does not attach new children to a historical spawn in a long parent rollout', async () => {
