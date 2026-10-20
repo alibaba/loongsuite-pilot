@@ -395,8 +395,19 @@ export class HookWatchdog {
     this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
-    if (wrapperAsset && !(await isHookWrapperHealthy(wrapperAsset))) {
-      missing.push('hook-wrapper');
+    if (wrapperAsset) {
+      let wrapperHealthy = false;
+      try {
+        wrapperHealthy = await isHookWrapperHealthy(wrapperAsset);
+      } catch (err) {
+        // A read failure must not prevent settings repair. The repair function
+        // reports restoration errors and still reconciles the settings file.
+        logger.debug('hook-watchdog.wrapper-check-failed', {
+          agent: target.agentId,
+          error: String(err),
+        });
+      }
+      if (!wrapperHealthy) missing.push('hook-wrapper');
     }
     const found = target.expectedHooks.filter(event => !missing.includes(event)).length;
     let pendingChangeSignature: { key: string; value: string } | undefined;

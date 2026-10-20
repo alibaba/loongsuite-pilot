@@ -663,10 +663,12 @@ export class Orchestrator extends EventEmitter {
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: async () => {
+          let wrapperRestored = true;
           if (wrapperAsset?.isApplicable()) {
             try {
               await restoreHookWrapper(wrapperAsset);
             } catch (err) {
+              wrapperRestored = false;
               logger.warn('hook wrapper restore failed; continuing settings repair', {
                 agentId: def.id,
                 error: String(err),
@@ -674,7 +676,7 @@ export class Orchestrator extends EventEmitter {
             }
           }
           const result = await this.deploymentManager.deploySingle(def);
-          return result.success;
+          return result.success && wrapperRestored;
         },
         ...(def.id === 'codex' && def.hook.trustToml ? {
           changeWatchPath: resolveHome(def.hook.trustToml.configPath),

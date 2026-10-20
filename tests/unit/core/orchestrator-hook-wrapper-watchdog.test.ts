@@ -49,7 +49,7 @@ describe('Orchestrator hook wrapper watchdog wiring', () => {
     // A wrapper that cannot be replaced must not prevent settings repair.
     await fs.rm(targetPath);
     await fs.mkdir(targetPath);
-    await expect(target.repairFn?.()).resolves.toBe(true);
+    await expect(target.repairFn?.()).resolves.toBe(false);
     expect(deploySingle).toHaveBeenCalledTimes(2);
     await fs.rm(targetPath, { recursive: true });
 
