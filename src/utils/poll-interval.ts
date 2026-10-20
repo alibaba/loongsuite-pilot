@@ -7,7 +7,7 @@
 export const POLL_INTERVAL_ENV = 'LOONGSUITE_PILOT_POLL_INTERVAL_MS';
 
 /** Built-in collector poll interval when no env var or listener override is set. */
-export const DEFAULT_POLL_INTERVAL_MS = 3_000;
+export const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 /** Shortest accepted unified interval. Below this, Node's timer clamp is too easy to hit. */
 const MIN_POLL_INTERVAL_MS = 1_000;

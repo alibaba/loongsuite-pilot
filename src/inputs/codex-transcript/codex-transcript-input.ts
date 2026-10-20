@@ -76,7 +76,7 @@ const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const DYNAMIC_SESSION_FILE_MAX_IDLE_MS = 15 * 60 * 1_000;
 // Cold historical rollouts are stat'd about as often as the old 30s default.
-// Files touched within the hot window stay on the 3s path so appends stay visible.
+// Files touched within the hot window stay on the default poll path so appends stay visible.
 const HISTORICAL_ROLLOUT_RECHECK_MS = 30_000;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.

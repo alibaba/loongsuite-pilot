@@ -314,19 +314,19 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(true);
       expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
-      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 3_000 });
+      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
-      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 3_000 });
-      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 3_000 });
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -391,19 +391,19 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '0');
 
       const zero = await loadConfig();
-      expect(zero.listeners['cursor-hook'].pollInterval).toBe(3_000);
+      expect(zero.listeners['cursor-hook'].pollInterval).toBe(10_000);
 
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', 'nope');
 
       const invalid = await loadConfig();
-      expect(invalid.listeners['cursor-hook'].pollInterval).toBe(3_000);
+      expect(invalid.listeners['cursor-hook'].pollInterval).toBe(10_000);
 
       for (const raw of ['0.4', '3', '1e5', '0x10', '2147483648']) {
         mockReadJsonFile.mockResolvedValueOnce(null);
         vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', raw);
         const ignored = await loadConfig();
-        expect(ignored.listeners['cursor-hook'].pollInterval).toBe(3_000);
+        expect(ignored.listeners['cursor-hook'].pollInterval).toBe(10_000);
       }
 
       mockReadJsonFile.mockResolvedValueOnce(null);
@@ -560,7 +560,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 3_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('parses string boolean captureMessageContent values', async () => {

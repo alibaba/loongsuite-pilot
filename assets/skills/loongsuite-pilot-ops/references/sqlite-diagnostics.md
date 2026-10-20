@@ -202,13 +202,13 @@ tail -3 ~/.loongsuite-pilot/logs/output/<AGENT_TYPE>-$(date -u +%Y-%m-%d).jsonl 
 
 ### 5.1 轮询间隔
 
-默认 3 秒轮询一次 SQLite。可调整：
+默认 10 秒轮询一次 SQLite。可调整：
 
 | 配置方式 | 优先级 |
 |---------|-------|
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS`（毫秒，所有 Agent 共用；只接受 1000 到 2147483647 的十进制整数） | 最高 |
 | `config.json` → `listeners["<INPUT_ID>"].pollInterval` | 中 |
-| 内置默认 3000（Wukong 与 Kiro CLI session 未设统一变量时仍是 60000） | 最低 |
+| 内置默认 10000（Wukong 与 Kiro CLI session 未设统一变量时仍是 60000） | 最低 |
 
 ```bash
 # 检查 config.json 中对应 Input 的轮询配置
@@ -216,7 +216,7 @@ python3 -c "
 import json
 c=json.load(open('$HOME/.loongsuite-pilot/config.json'))
 cfg=c.get('listeners',{}).get('<INPUT_ID>',{})
-print('pollInterval:', cfg.get('pollInterval', '3000 (default)'))
+print('pollInterval:', cfg.get('pollInterval', '10000 (default)'))
 print('enabled:', cfg.get('enabled', 'true (default)'))
 " 2>/dev/null
 ```
