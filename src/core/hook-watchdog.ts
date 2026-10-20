@@ -1,4 +1,5 @@
 import { spawn, execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -15,6 +16,7 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
+const MAX_FAILED_REPAIR_BACKOFF_MS = 60 * 60_000;
 
 export interface PluginCheckTarget {
   agentId: string;
@@ -24,6 +26,8 @@ export interface PluginCheckTarget {
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
+  /** Pilot-owned hook script copied from the installed package. */
+  wrapperAsset?: HookWrapperAsset;
 
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
@@ -51,11 +55,22 @@ export interface PluginCheckTarget {
   enabled?: () => boolean | Promise<boolean>;
 }
 
+export interface HookWrapperAsset {
+  sourcePath: string;
+  targetPath: string;
+  /** False after an update moves the current pointer to a newer package. */
+  isApplicable?: () => boolean;
+}
+
 export interface InterceptCheckTarget {
   id: string;
   check: () => Promise<boolean>;
   repair: () => Promise<void>;
   precondition: () => Promise<boolean>;
+  /** Suspend structural failures and back off other failed repairs. */
+  guardFailedRepairs?: boolean;
+  /** Fingerprint of the executable and plugin source used by repair. */
+  repairInputsFingerprint?: () => Promise<string>;
   /**
    * Whether the owning agent is enabled by the user's selection
    * (config.agents[<id>].enabled). When this returns false the target is not
@@ -250,6 +265,11 @@ export class HookWatchdog {
   private readonly lastChangeSignature: Map<string, string> = new Map();
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
+  private readonly dailyLimitReported: Set<string> = new Set();
+  private readonly lastRepairInputsFingerprint: Map<string, string> = new Map();
+  private readonly blockedRepairFingerprint: Map<string, string> = new Map();
+  private readonly failedRepairCount: Map<string, number> = new Map();
+  private readonly nextFailedRetryAt: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
@@ -348,6 +368,16 @@ export class HookWatchdog {
         return { agentId: target.agentId, status: 'unavailable' };
       }
     }
+    const wrapperAsset = target.wrapperAsset?.isApplicable?.() === false
+      ? undefined
+      : target.wrapperAsset;
+    if (wrapperAsset && !(await fileExists(wrapperAsset.sourcePath))) {
+      logger.debug('hook-watchdog.skipped', {
+        agent: target.agentId,
+        reason: 'wrapper-source-missing',
+      });
+      return { agentId: target.agentId, status: 'unavailable' };
+    }
 
     const document = await readJsonDocument<Record<string, unknown>>(
       target.settingsPath,
@@ -365,7 +395,21 @@ export class HookWatchdog {
     this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
-    const found = target.expectedHooks.length - missing.length;
+    if (wrapperAsset) {
+      let wrapperHealthy = false;
+      try {
+        wrapperHealthy = await isHookWrapperHealthy(wrapperAsset);
+      } catch (err) {
+        // A read failure must not prevent settings repair. The repair function
+        // reports restoration errors and still reconciles the settings file.
+        logger.debug('hook-watchdog.wrapper-check-failed', {
+          agent: target.agentId,
+          error: String(err),
+        });
+      }
+      if (!wrapperHealthy) missing.push('hook-wrapper');
+    }
+    const found = target.expectedHooks.filter(event => !missing.includes(event)).length;
     let pendingChangeSignature: { key: string; value: string } | undefined;
 
     if (
@@ -633,6 +677,7 @@ export class HookWatchdog {
         // intercept written on a prior run is removed — "config disable" stops
         // collection, not just self-healing.
         if (target.enabled && !(await target.enabled())) {
+          if (target.guardFailedRepairs) this.clearFailedRepairState(target.id);
           if (target.cleanup) {
             try {
               await target.cleanup();
@@ -649,6 +694,7 @@ export class HookWatchdog {
 
         const preOk = await target.precondition();
         if (!preOk) {
+          if (target.guardFailedRepairs) this.clearFailedRepairState(target.id);
           logger.debug('intercept-watchdog.skipped', { id: target.id, reason: 'precondition' });
           summary.skipped++;
           continue;
@@ -656,9 +702,32 @@ export class HookWatchdog {
 
         const healthy = await target.check();
         if (healthy) {
+          if (target.guardFailedRepairs) this.clearFailedRepairState(target.id);
           logger.debug('intercept-watchdog.healthy', { id: target.id });
           summary.checked++;
           continue;
+        }
+
+        let fingerprint: string | undefined;
+        if (target.guardFailedRepairs && target.repairInputsFingerprint) {
+          fingerprint = await target.repairInputsFingerprint();
+          const previous = this.lastRepairInputsFingerprint.get(target.id);
+          if (previous !== undefined && previous !== fingerprint) {
+            this.clearFailedRepairState(target.id);
+          }
+          this.lastRepairInputsFingerprint.set(target.id, fingerprint);
+        }
+
+        if (target.guardFailedRepairs) {
+          if (this.blockedRepairFingerprint.has(target.id)) {
+            logger.debug('intercept-watchdog.structural-block', { id: target.id });
+            continue;
+          }
+          const retryAt = this.nextFailedRetryAt.get(target.id);
+          if (retryAt !== undefined && Date.now() < retryAt) {
+            logger.debug('intercept-watchdog.failure-backoff', { id: target.id });
+            continue;
+          }
         }
 
         const lastAt = this.lastRepairAt.get(target.id);
@@ -670,12 +739,21 @@ export class HookWatchdog {
         const dayKey = target.id;
         const count = this.dailyRepairCount.get(dayKey) ?? 0;
         if (count >= MAX_INTERCEPT_REPAIRS_PER_DAY) {
-          logger.warn('intercept-watchdog.daily-limit', { id: target.id, count });
+          if (!this.dailyLimitReported.has(dayKey)) {
+            logger.warn('intercept-watchdog.daily-limit', { id: target.id, count });
+            this.dailyLimitReported.add(dayKey);
+          }
           continue;
         }
 
         logger.warn('intercept-watchdog.repairing', { id: target.id });
-        await target.repair();
+        try {
+          await target.repair();
+        } catch (err) {
+          if (target.guardFailedRepairs) this.recordFailedRepair(target.id, err, fingerprint);
+          throw err;
+        }
+        if (target.guardFailedRepairs) this.clearFailedRepairState(target.id);
         this.lastRepairAt.set(target.id, Date.now());
         this.dailyRepairCount.set(dayKey, count + 1);
         summary.repaired++;
@@ -690,8 +768,37 @@ export class HookWatchdog {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== this.dailyRepairResetDate) {
       this.dailyRepairCount.clear();
+      this.dailyLimitReported.clear();
       this.dailyRepairResetDate = today;
     }
+  }
+
+  private clearFailedRepairState(id: string): void {
+    this.blockedRepairFingerprint.delete(id);
+    this.failedRepairCount.delete(id);
+    this.nextFailedRetryAt.delete(id);
+    this.lastRepairInputsFingerprint.delete(id);
+  }
+
+  private recordFailedRepair(id: string, err: unknown, fingerprint: string | undefined): void {
+    const activationFingerprint = fingerprint?.split('|', 2)[1];
+    const missingActivationCommand = activationFingerprint !== undefined
+      && /^(?:missing:|not-file:|unavailable:)/.test(activationFingerprint);
+    if (fingerprint && missingActivationCommand && /\b(?:ENOENT|ENOTDIR)\b/.test(String(err))) {
+      this.blockedRepairFingerprint.set(id, fingerprint);
+      logger.warn('intercept-watchdog.structural-block', {
+        id,
+        error: String(err),
+        fingerprint,
+      });
+      return;
+    }
+    const failures = (this.failedRepairCount.get(id) ?? 0) + 1;
+    this.failedRepairCount.set(id, failures);
+    const baseMs = Math.max(this.config.repairCooldownMs, 60_000);
+    const ceilingMs = Math.max(MAX_FAILED_REPAIR_BACKOFF_MS, baseMs);
+    const delayMs = Math.min(ceilingMs, baseMs * 2 ** Math.min(failures - 1, 6));
+    this.nextFailedRetryAt.set(id, Date.now() + delayMs);
   }
 
 
@@ -966,5 +1073,40 @@ export class HookWatchdog {
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
       },
     ];
+  }
+}
+
+export async function isHookWrapperHealthy(asset: HookWrapperAsset): Promise<boolean> {
+  const source = await fs.readFile(asset.sourcePath);
+  try {
+    const targetStat = await fs.stat(asset.targetPath);
+    if (!targetStat.isFile() || targetStat.size !== source.length) return false;
+    const target = await fs.readFile(asset.targetPath);
+    return source.equals(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+export async function restoreHookWrapper(asset: HookWrapperAsset): Promise<void> {
+  if (await isHookWrapperHealthy(asset)) return;
+  const source = await fs.readFile(asset.sourcePath);
+  const mode = (await fs.stat(asset.sourcePath)).mode & 0o777;
+  await fs.mkdir(path.dirname(asset.targetPath), { recursive: true });
+  const temporaryPath = `${asset.targetPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, source, { mode });
+    await fs.chmod(temporaryPath, mode);
+    try {
+      await fs.rename(temporaryPath, asset.targetPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await fs.rename(temporaryPath, asset.targetPath);
+    }
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
   }
 }

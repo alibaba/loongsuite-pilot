@@ -11,7 +11,7 @@ import type {
   DirectoryPluginActivationConfig,
   DirectoryPluginConfig,
 } from '../types/index.js';
-import { detectAgent } from './detect-utils.js';
+import { commandExists, detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
@@ -52,7 +52,50 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    return detectAgent(def.detection);
+    if (!(await detectAgent(def.detection))) return false;
+    // Directory existence alone cannot establish that activation can run.
+    // Check the exact executable the strategy will spawn, including overrides.
+    const command = def.directoryPlugin?.activation?.command;
+    return !command || commandExists(command, { fresh: true });
+  }
+
+  /** Changes to either repair input release a failed-attempt budget. */
+  async repairInputsFingerprint(def: AgentDefinition): Promise<string> {
+    const config = def.directoryPlugin;
+    if (!config) return 'missing-directory-plugin-config';
+    let sourceHash: string;
+    try {
+      sourceHash = await this.hashDirectory(config.sourceDir, this.resolveMarkerFile(config));
+    } catch (err) {
+      sourceHash = `source-error:${(err as NodeJS.ErrnoException).code ?? String(err)}`;
+    }
+    const command = config.activation?.command;
+    return `${sourceHash}|${command ? await this.activationCommandFingerprint(command) : 'no-activation'}`;
+  }
+
+  private async activationCommandFingerprint(command: string): Promise<string> {
+    let executable = command;
+    if (!path.isAbsolute(command)) {
+      try {
+        const bin = process.platform === 'win32' ? 'where.exe' : 'which';
+        const result = await execFile(bin, [command], {
+          timeout: 2000,
+          killSignal: 'SIGKILL',
+          windowsHide: true,
+        });
+        executable = String(result.stdout).split(/\r?\n/, 1)[0]?.trim() ?? '';
+      } catch {
+        return `missing:${command}`;
+      }
+    }
+    if (!executable) return `missing:${command}`;
+    try {
+      const stat = await fs.stat(executable);
+      if (!stat.isFile()) return `not-file:${executable}`;
+      return [executable, stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+    } catch (err) {
+      return `unavailable:${executable}:${(err as NodeJS.ErrnoException).code ?? 'unknown'}`;
+    }
   }
 
   async needsDeploy(

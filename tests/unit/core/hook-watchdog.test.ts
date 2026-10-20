@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import {
   HookWatchdog,
+  restoreHookWrapper,
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
@@ -128,6 +129,54 @@ describe('HookWatchdog', () => {
       expect(summary.checked).toBe(1);
       expect(summary.repaired).toBe(0);
       expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('restores a damaged wrapper even when settings still contain every hook', async () => {
+      const sourcePath = path.join(tmpDir, 'package', 'assets', 'hooks', 'claude-hook.sh');
+      const targetPath = path.join(tmpDir, 'pilot', 'hooks', 'claude-hook.sh');
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(sourcePath, '#!/bin/sh\necho correct\n', { mode: 0o755 });
+      await fs.writeFile(targetPath, '#!/bin/sh\necho damaged\n');
+      const wrapperAsset = { sourcePath, targetPath };
+      const repairFn = vi.fn(async () => {
+        await restoreHookWrapper(wrapperAsset);
+        return true;
+      });
+      const target = makeClaudeTarget(tmpDir, { wrapperAsset, repairFn });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      expect((await wd.runCheck()).repaired).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(targetPath, 'utf8')).toBe('#!/bin/sh\necho correct\n');
+      const restoredStat = await fs.stat(targetPath);
+      await restoreHookWrapper(wrapperAsset);
+      expect((await fs.stat(targetPath)).ino).toBe(restoredStat.ino);
+      expect((await wd.runCheck()).checked).toBe(1);
+
+      await fs.writeFile(targetPath, 'new package wrapper\n');
+      target.wrapperAsset!.isApplicable = () => false;
+      expect((await wd.runCheck()).checked).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('still invokes settings repair when the wrapper is not a regular file', async () => {
+      const sourcePath = path.join(tmpDir, 'package', 'assets', 'hooks', 'claude-hook.sh');
+      const targetPath = path.join(tmpDir, 'pilot', 'hooks', 'claude-hook.sh');
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.writeFile(sourcePath, '#!/bin/sh\n', { mode: 0o755 });
+      await fs.mkdir(targetPath, { recursive: true });
+      const repairFn = vi.fn(async () => true);
+      const target = makeClaudeTarget(tmpDir, {
+        wrapperAsset: { sourcePath, targetPath },
+        repairFn,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      expect((await wd.runCheck()).repaired).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
     });
 
     it('parses JSONC settings for Qwen without triggering repair', async () => {
