@@ -256,6 +256,18 @@ export interface SerialiseLogEntryOptions {
 const AGENT_SCOPED_FIELD_RE = /^agent\.[^.]+\..+$/;
 
 /**
+ * Copilot's session cost and usage breakdown (`agent.copilot.usage.<field>`) has no standard
+ * `gen_ai.*` equivalent, so it must reach the log outputs; without this exemption an entry that
+ * only carries cost would leave as an empty shell. Only that one namespace, only for copilot
+ * entries (the same shape of exception as the OpenClaw session key).
+ */
+const COPILOT_USAGE_KEY_RE = /^agent\.copilot\.usage\.[a-z_]+$/;
+
+function isCopilotUsageKey(entry: AgentActivityEntry, key: string): boolean {
+  return entry['gen_ai.agent.type'] === 'copilot' && COPILOT_USAGE_KEY_RE.test(key);
+}
+
+/**
  * Selects the canonical fields that may leave the normalization boundary while
  * preserving their JSON value types. JSON-native sinks should use this shape;
  * string-only sinks can pass it through serialiseLogEntry.
@@ -271,7 +283,7 @@ export function projectLogEntry(
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
     if (key === OPENCLAW_SESSION_KEY) {
       if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
-    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key) && !isCopilotUsageKey(entry, key)) continue;
     out[key] = value;
   }
 

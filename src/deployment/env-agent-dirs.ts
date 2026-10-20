@@ -8,6 +8,7 @@
 export const DEFAULT_PI_CODING_AGENT_DIR = '~/.pi/agent';
 export const DEFAULT_GROK_HOME = '~/.grok';
 export const DEFAULT_DSH_HOME = '~/.dsh';
+export const DEFAULT_COPILOT_HOME = '~/.copilot';
 
 function envDir(name: string, fallback: string, env: NodeJS.ProcessEnv): string {
   const raw = (env[name] ?? '').trim();
@@ -30,4 +31,10 @@ export function resolveDshHome(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return envDir('DSH_HOME', DEFAULT_DSH_HOME, env);
+}
+
+export function resolveCopilotHome(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return envDir('COPILOT_HOME', DEFAULT_COPILOT_HOME, env);
 }

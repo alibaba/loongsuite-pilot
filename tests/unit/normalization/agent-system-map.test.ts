@@ -46,6 +46,10 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('workbuddy')).toBe('workbuddy');
   });
 
+  it('maps copilot to copilot', () => {
+    expect(resolveAgentSystem('copilot')).toBe('copilot');
+  });
+
   it('maps dsh to dsh', () => {
     expect(resolveAgentSystem('dsh')).toBe('dsh');
   });
@@ -64,7 +68,7 @@ describe('resolveAgentSystem', () => {
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
       'cursor', 'cursor-hook', 'grok-build',
-      'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes', 'dsh',
+      'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'copilot', 'hermes', 'dsh',
     ];
     for (const key of expectedKeys) {
       expect(AGENT_SYSTEM_MAP[key]).toBeDefined();
