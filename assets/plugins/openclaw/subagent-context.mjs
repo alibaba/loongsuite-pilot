@@ -14,6 +14,19 @@ export function createSubagentContexts(dataDir, reportError) {
   const filename = id => path.join(directory(), crypto.createHash('sha256').update(id).digest('hex') + '.json');
   let pruned = false;
   return {
+    list() {
+      try {
+        // A bounded, identity-only scan is used for delivered native provenance.
+        const names = fs.readdirSync(directory()).filter(name => /^[a-f0-9]{64}\.json$/.test(name));
+        if (names.length > 4096) return []; // ambiguity/overload never guesses a parent
+        return names.flatMap(name => {
+          try {
+            const value = JSON.parse(fs.readFileSync(path.join(directory(), name), "utf8"));
+            return value.expiresAt > Date.now() && value.invocationId ? [value] : [];
+          } catch { return []; }
+        });
+      } catch { return []; }
+    },
     read(id) {
       try {
         const v = JSON.parse(fs.readFileSync(filename(id), 'utf8'));
@@ -47,6 +60,7 @@ export function stampSubagent(record, parent) {
     parent_span_id: parent.parentSpanId,
     'gen_ai.agent.scope': 'subagent',
     'gen_ai.agent.parent.id': parent.sessionId,
+    ...(parent.invocationId ? { 'gen_ai.agent.parent.invocation.id': parent.invocationId } : {}),
     'gen_ai.subagent.parent_tool_call.id': parent.toolCallId,
     'agent.pilot.parent.turn.id': parent.turnId,
     'user.id': parent.userId,

@@ -12,6 +12,7 @@ function turn(agent: string, id: string, offset: number, child = false) {
     'gen_ai.turn.id': id, 'gen_ai.step.id': id + ':step', 'user.id': 'initiator',
     'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'test-model',
     ...(child ? { parent_span_id: toolSpanId, 'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.parent.invocation.id': 'work-1',
       'gen_ai.agent.parent.id': 'parent', 'gen_ai.subagent.parent_tool_call.id': 'spawn' } : {}),
   };
   const event = (name: string, tick: number, fields = {}) => ({ ...base, 'event.name': name,
@@ -40,6 +41,9 @@ describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', ag
       await send(turn(agent, 'parent', 0));
       const count = spans.length;
       expect(count).toBeGreaterThan(0);
+      await send([{ ...turn(agent, 'parent', 0)[0], 'event.name': 'gen_ai.agent.invoke',
+        'event.id': 'invoke', 'gen_ai.agent.invocation.id': 'work-1' }]);
+      expect(spans).toHaveLength(count);
       await send(turn(agent, 'child-a', 100, true));
       // Hermes native hooks can emit only LLM/tool records, with no input `other`.
       await send(turn(agent, 'child-b', 200, true).filter(r => r['event.name'] !== 'other'));
@@ -49,6 +53,7 @@ describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', ag
       const children = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT' && s.attributes['gen_ai.agent.scope'] === 'subagent');
       expect(children).toHaveLength(2);
       expect(children.every(s => s.parentSpanId === toolSpanId)).toBe(true);
+      expect(children.every(s => s.attributes['gen_ai.agent.parent.invocation.id'] === 'work-1')).toBe(true);
       expect(new Set(children.map(s => s.attributes['gen_ai.session.id']))).toEqual(new Set(['child-a', 'child-b']));
       expect(spans.every(s => s.attributes['gen_ai.user.id'] === 'initiator')).toBe(true);
       const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
