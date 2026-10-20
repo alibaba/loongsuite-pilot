@@ -759,6 +759,7 @@ const COMMON_REQUIRED = [
   'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
 ];
 const EVENT_NAME_ENUM = new Set([
+  'gen_ai.agent.invoke', 'gen_ai.agent.result',
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
   'skill.use', 'tool.approve', 'agent.input', 'other',
 ]);
