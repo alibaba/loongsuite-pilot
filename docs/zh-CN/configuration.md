@@ -60,6 +60,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
+| `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | 所有 Agent 采集器的轮询间隔，单位毫秒。默认 `3000`。覆盖 `listeners.*.pollInterval` 和 `QODER_ANALYTICS_POLL_INTERVAL`。非正数或非数字会被忽略。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
 | `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
 | `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |

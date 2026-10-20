@@ -1,5 +1,6 @@
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
+import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
@@ -787,26 +788,26 @@ function buildListenersConfig(
   file: ConfigFile | null,
 ): Record<string, { enabled: boolean; pollInterval: number }> {
   const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
-    qoder: { enabled: true, pollInterval: 30_000 },
-    'qoder-trace': { enabled: true, pollInterval: 30_000 },
-    'qoder-work': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-log': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-trace': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-hook': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-log': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-trace': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'cursor-hook': { enabled: true, pollInterval: 30_000 },
-    'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'grok-build-log': { enabled: true, pollInterval: 30_000 },
-    'codex-transcript': { enabled: true, pollInterval: 30_000 },
-    'opencode-log': { enabled: true, pollInterval: 30_000 },
-    'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
-    workbuddy: { enabled: true, pollInterval: 30_000 },
-    'hermes-agent-log': { enabled: true, pollInterval: 30_000 },
+    qoder: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'cursor-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'codex-transcript': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'opencode-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -816,7 +817,7 @@ function buildListenersConfig(
     for (const [key, val] of Object.entries(file.listeners)) {
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
-        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
+        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
       };
     }
   }
@@ -833,10 +834,17 @@ function buildListenersConfig(
     }
   }
 
-  // Env overrides for specific poll intervals
+  // Env overrides for specific poll intervals. The unified var wins over these.
   const envPoll = envInt('QODER_ANALYTICS_POLL_INTERVAL', 0);
   if (envPoll > 0) result.qoder.pollInterval = envPoll;
   if (envPoll > 0) result['qoder-trace'].pollInterval = envPoll;
+
+  const globalPoll = globalPollIntervalMs();
+  if (globalPoll !== undefined) {
+    for (const entry of Object.values(result)) {
+      entry.pollInterval = globalPoll;
+    }
+  }
 
   return result;
 }

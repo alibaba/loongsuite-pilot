@@ -202,13 +202,13 @@ tail -3 ~/.loongsuite-pilot/logs/output/<AGENT_TYPE>-$(date -u +%Y-%m-%d).jsonl 
 
 ### 5.1 轮询间隔
 
-默认 30 秒轮询一次 SQLite。可调整：
+默认 3 秒轮询一次 SQLite。可调整：
 
 | 配置方式 | 优先级 |
 |---------|-------|
-| 环境变量（如 `QODER_ANALYTICS_POLL_INTERVAL`，毫秒） | 最高（仅部分 Input 支持） |
+| `LOONGSUITE_PILOT_POLL_INTERVAL_MS`（毫秒，所有 Agent 共用） | 最高 |
 | `config.json` → `listeners["<INPUT_ID>"].pollInterval` | 中 |
-| 内置默认 30000 | 最低 |
+| 内置默认 3000 | 最低 |
 
 ```bash
 # 检查 config.json 中对应 Input 的轮询配置
@@ -216,7 +216,7 @@ python3 -c "
 import json
 c=json.load(open('$HOME/.loongsuite-pilot/config.json'))
 cfg=c.get('listeners',{}).get('<INPUT_ID>',{})
-print('pollInterval:', cfg.get('pollInterval', '30000 (default)'))
+print('pollInterval:', cfg.get('pollInterval', '3000 (default)'))
 print('enabled:', cfg.get('enabled', 'true (default)'))
 " 2>/dev/null
 ```

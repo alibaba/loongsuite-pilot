@@ -43,6 +43,7 @@ import {
   type CodexTranscriptSourceRange,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 type ReliableCodexSubagentLink = CodexSubagentLink & {
   parentTurnId: string;
@@ -199,7 +200,7 @@ export class CodexTranscriptInput extends BaseInput {
     const includeMultimodal = opts.multimodal?.enabled === true && !!processor;
     super({
       stateStore: opts.stateStore,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();

@@ -8,6 +8,7 @@ import { directoryExists, ensureDir, getTodayDateString, resolveHome } from '../
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -31,7 +32,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
   private readonly segmentDirBySession = new Map<string, CachedSegmentDir>();
 
   constructor(opts: QwenWorkCNTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions');
   }
