@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyHookContentPolicy,
   buildCursorHookRecord,
   buildQoderHookRecord,
   inferProviderName,
 } from '../../../assets/hooks/agent-event-normalizer.mjs';
 
 describe('asset hook agent event normalizer', () => {
+  it.each([false, 'false'])('keeps the legacy helper callable during mixed-version hook upgrades (%s)', (captureMessageContent) => {
+    const record = {
+      'gen_ai.agent.type': 'cursor',
+      'gen_ai.tool.call.arguments': { command: 'upgrade-content-sentinel' },
+    };
+    expect(applyHookContentPolicy(record, {
+      agents: { cursor: { captureMessageContent } },
+    })).toEqual(record);
+    expect(JSON.stringify(record)).toContain('upgrade-content-sentinel');
+  });
+
   it('normalizes Cursor tool calls to canonical dotted keys', () => {
     const record = buildCursorHookRecord({
       hook_event_name: 'preToolUse',

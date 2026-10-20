@@ -261,6 +261,15 @@ export function resolveUserId(record, runtimeConfig = {}) {
     || os.hostname();
 }
 
+/**
+ * @deprecated Kept for older hook processors during asset upgrades. Hook files
+ * are copied individually, so removing this export could break an old caller
+ * that loads the new shared module. Legacy content settings have no effect.
+ */
+export function applyHookContentPolicy(record, _runtimeConfig = {}) {
+  return record;
+}
+
 function addSourceAttributes(record, source, raw, mappedKeys) {
   for (const [key, value] of Object.entries(raw ?? {})) {
     if (mappedKeys.has(key)) continue;
