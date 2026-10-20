@@ -47,7 +47,7 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 [OTLP flusher](../../src/flushers/otlp-trace-flusher.ts) 与 [journal](../../src/flushers/codex-turn-journal.ts) 将未完成 Codex 轮次前缀持久保存在数据目录的 `logs/codex-pending-turns/`；完整导出成功后先写确认再清理 pending，最近 10,000 轮确认用于抑制重放。退出、内存 buffer 淘汰均不导出伪造半轮。
 
-[InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；其他持久接收失败仍冻结共享 checkpoint，修复存储或输出后重启恢复。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
+[InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；最终持久接收失败冻结共享 checkpoint，并暂停使用该 StateStore 的新采集和后续批次入队，修复存储或输出后重启恢复。原有失败锁不会因为后续成功或仅重启输入而清除；重启 collector 从磁盘游标重放。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
 
 恢复路径复用当前 workspace 过滤、内容开关和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，仍受内容采集配置影响。
 
@@ -55,7 +55,7 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 公共 `send` / `sendBatch` 都等待启动恢复并持久接收自身记录；journal 恢复走内部追加路径，不以全局“正在恢复/批处理”标志跳过其他调用的持久化。准备前缀与追加期间暂缓 buffer 淘汰，避免只导出后缀后确认整轮。
 
-Codex 只用显式 `gen_ai.turn.end` 收尾，`agent.codex.turn_status=interrupted` 本身不关闭轮次，因为该状态可能出现在分批输出的每条记录上。HTTP 网络失败保留同一批次及接收等待，重试不重新派发到已成功的其他输出。停止输入或 collector 时取消 HTTP 等待和在途请求，未确认的批次不推进 checkpoint；取消造成的失败仍保持冻结到 collector 重启，不通过后续任意一次成功清除全局失败。编排器在发现服务排空之前发出取消；BaseInput 停止时只解除对共享 checkpoint 的等待，仍完整等待 collect、onStart 和 onStop。其他不可恢复的输出失败只保留一份失败原因；已结束的接收 Promise 从等待集合移除，避免持续失败时不断积累。
+Codex 只用显式 `gen_ai.turn.end` 收尾，`agent.codex.turn_status=interrupted` 本身不关闭轮次，因为该状态可能出现在分批输出的每条记录上。HTTP 网络失败保留同一批次及接收等待，重试不重新派发到已成功的其他输出。停止输入或 collector 时取消 HTTP/SLS 在途请求与重试等待，未确认的批次不推进 checkpoint；取消造成的失败仍保持冻结到 collector 重启，不通过后续任意一次成功清除全局失败。编排器在发现服务排空之前发出取消；BaseInput 停止时只解除对共享 checkpoint 的等待，仍完整等待 collect、onStart 和 onStop。其他不可恢复的输出失败只保留一份失败原因；已结束的接收 Promise 从等待集合移除，失败后也不再新增采集或入队，避免积累未决批次。
 
 ## 可执行回归入口
 
@@ -101,3 +101,17 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 输入启动等待 `onStart` 和首轮采集完成，到 checkpoint 保存阶段即视为资源就绪，不等待首轮数据的远端 ACK 或保存完成。因此 `await start()` 不代表数据已持久接收；需要确认落盘时显式等待 `StateStore.save()`。首轮保存仍由原 `cyclePromise` 持有，轮询/文件唤醒复用该周期，checkpoint 仍等待实际输出确认。停止时仍排空采集和实际写盘；没有改变发现服务的串行架构、队列或配置。此边界也覆盖另一输入在保存期间才加入共享输出等待的情况。
 
 此启动边界补充最终回归：39 个测试文件、587 项通过，typecheck 和完整构建通过。包含首轮输出 hold、onStart 期间 watcher 已启动采集、晚到共享 hold、正常写盘停机排空，以及真实发现服务在 503/挂起 HTTP 下的启动与停止。
+
+
+## 新输入与结果状态的边界
+
+未闭合模型波次会重读原始 transcript 区间，重读同一条工作输入不创建新 invocation，也不清除已确认 incoming。同一输入的 canonical 用户记录和兼容 user_message 可能分开到达：未消费区间有 canonical 用户记录时，以它判断新输入；只有 legacy 格式时仍保留兼容识别。该规则按原生记录来源判断，不按文本相等去重，因此真正新增的同文输入仍是新工作。只有扫描水位之后追加的新工作输入使绑定无法确认时，才清除旧 incoming；这一事实随现有 activeTurn checkpoint 保存，避免后续步骤或重启从旧绑定恢复它。以后收到可明确关联的新工作，仍可建立对应 incoming；普通结果通知不触发切换。
+
+wait/status 的 `completed: null` 可以表示原生轮次已结束，但不提供实际结果正文，因此不生成空壳 result、不提前记录结果已交付。实际空字符串结果继续保留；后续明确交付的结果正常输出并去重。严格 JSONL 验收要求 invoke/result 各自有 invocation ID，并按 Codex 原生 turn.end 校验子轮次；运行中未出现 end 合法，重复 start/end 不合法。
+
+
+## 六项评审修复回归（2026-10-20）
+
+47 个相关测试文件、758 项回归全部通过，Node22.22.2 单 worker；typecheck 与完整构建通过。新增回归包含最终输出失败后的轮询/文件唤醒背压、流式入队停止与已有游标重启重放，SLS 三种真实 localhost 传输的请求/响应体取消和停机，输入原始重读/双写镜像/新增同文输入/重启，以及严格 JSONL 字段与子轮次边界。既有 HTTP 503、连接拒绝恢复和多输出身份检查同组通过。
+
+独立复核补回了两个修复中发现的边界：canonical/legacy 输入跨扫描不误清 incoming；Webtracking 200 后未使用的慢响应体在清 timeout 前释放。已有缓存测试改为等待实际采集周期，保留零读取断言，避免 watcher 通知计数错位。上述为源码与 localhost 集成证据，不代表生产云端或 UI 验收。

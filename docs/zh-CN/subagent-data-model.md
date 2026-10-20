@@ -163,7 +163,7 @@ Hook 继续只提供 transcript 位置、唤醒和可用环境上下文，本次
 4. 日志按已闭合步骤增量发送；invoke 不等子执行；实际结果关联暂不明确时保留原始记录范围，重试关联，不重放模型和工具事实。
 5. OTLP 按子自身 turn 缓冲，只有原生 `task_complete/turn_aborted` 关闭；父终态不关闭子工作。
 6. 委派、结果去重、工作绑定与输入游标可恢复。启用 OTLP 时先持久化 pending-turn journal，再允许输入游标推进；已确认导出的轮次保留有界确认记录。
-7. SLS/HTTP Codex 输出等待实际成功回执；失败冻结 checkpoint，修复后重启。多输出部分成功或回执不确定仍可重复相同稳定 ID，交付语义是 at least once，不是恰好一次。
+7. SLS/HTTP Codex 输出等待实际成功回执。HTTP 暂时断网保留原批次等待并自动重试；最终持久接收失败冻结共享 checkpoint，同时暂停新采集和后续批次入队，修复后重启恢复。停止时取消 SLS/HTTP 在途请求与重试等待，未确认游标不推进。多输出部分成功或回执不确定仍可重复相同稳定 ID，交付语义是 at least once，不是恰好一次。
 8. 恢复重放再次应用当前 workspace/content/masking 策略；journal 按组增量读取，避免一次加载全部待完成工作。
 
 源码路径、发送条件及验证命令见[Codex 实现与验证入口](codex-subagent-verification.md)。历史 fusion 文档仅用于理解迁移与旧 checkpoint，不再是新模型的行为契约。

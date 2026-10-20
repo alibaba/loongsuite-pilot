@@ -260,6 +260,108 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(result.out).toContain('missing_required=1');
   });
 
+  it.each(['gen_ai.agent.invoke', 'gen_ai.agent.result'])(
+    'requires an invocation ID only on the %s event', eventName => {
+      const entries = [goodEntry({ 'event.name': eventName })];
+      writeJsonl('codex.jsonl', entries);
+      const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' };
+      const missing = runValidator(env);
+      expect(missing.code).toBe(1);
+      expect(missing.out).toContain('missing_required=1');
+      expect(missing.out).toContain('fields=[gen_ai.agent.invocation.id]');
+
+      entries[0]['gen_ai.agent.invocation.id'] = 'invocation-1';
+      writeJsonl('codex.jsonl', entries);
+      const present = runValidator(env);
+      expect(present.code).toBe(0);
+      expect(present.out).toContain('missing_required=0');
+    },
+  );
+
+  it.each([undefined, 'subagent'].flatMap(scope =>
+    [undefined, 'interrupted', 'completed'].map(status => ({ scope, status })),
+  ))(
+    'accepts Codex scope=$scope status=$status before its native turn end', ({ scope, status }) => {
+      const entries = [goodEntry({
+        'gen_ai.agent.type': 'codex', 'gen_ai.agent.scope': scope,
+        'gen_ai.turn.id': 'turn-1', 'gen_ai.turn.start': true,
+        'agent.codex.turn_status': status,
+      })];
+      const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' };
+      writeJsonl('codex.jsonl', entries);
+      const running = runValidator(env);
+      expect(running.code).toBe(0);
+      expect(running.out).toContain('turn_boundary_error=0');
+
+      entries.push({ ...entries[0], 'event.id': 'evt-end',
+        'gen_ai.turn.start': undefined, 'gen_ai.turn.end': true });
+      writeJsonl('codex.jsonl', entries);
+      const ended = runValidator(env);
+      expect(ended.code).toBe(0);
+      expect(ended.out).toContain('turn_boundary_error=0');
+    },
+  );
+
+  it.each([
+    { name: 'missing start', markers: [{ 'gen_ai.turn.end': true }] },
+    { name: 'duplicate starts', markers: [{ 'gen_ai.turn.start': true }, { 'gen_ai.turn.start': true }] },
+    { name: 'duplicate ends', markers: [
+      { 'gen_ai.turn.start': true, 'gen_ai.turn.end': true }, { 'gen_ai.turn.end': true },
+    ] },
+  ])('rejects Codex child turn $name', ({ markers }) => {
+    writeJsonl('codex.jsonl', markers.map((marker, index) => goodEntry({
+      'event.id': `child-${index}`, 'event.name': 'other',
+      'gen_ai.agent.type': 'codex', 'gen_ai.agent.scope': 'subagent',
+      'gen_ai.turn.id': 'child-turn', ...marker,
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('turn_boundary_error=1');
+  });
+
+  it('keeps non-Codex subagent boundaries outside the turn check', () => {
+    writeJsonl('claude-code.jsonl', [0, 1].map(index => goodEntry({
+      'event.id': `child-${index}`, 'event.name': 'other',
+      'gen_ai.agent.scope': 'subagent', 'gen_ai.turn.id': 'child-turn',
+      'gen_ai.turn.start': true, 'gen_ai.turn.end': true,
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('turn_boundary_error=0');
+  });
+
+  it.each([
+    { agent: 'claude-code', terminal: { 'gen_ai.response.finish_reasons': ['stop'] } },
+    { agent: 'openclaw', terminal: { 'agent.openclaw.hook': 'llm_output' } },
+  ])('keeps $agent terminal signals authoritative for the boundary check', ({ agent, terminal }) => {
+    const entries = [goodEntry({
+      'event.name': 'other', 'gen_ai.agent.type': agent,
+      'gen_ai.turn.id': 'turn-1', 'gen_ai.turn.start': true, ...terminal,
+    })];
+    const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'all', E2E_JSONL_STRICT: '1' };
+    writeJsonl(`${agent}.jsonl`, entries);
+    const missing = runValidator(env);
+    expect(missing.code).toBe(1);
+    expect(missing.out).toContain('turn_boundary_error=1');
+
+    entries[0]['gen_ai.turn.end'] = true;
+    writeJsonl(`${agent}.jsonl`, entries);
+    const ended = runValidator(env);
+    expect(ended.code).toBe(0);
+    expect(ended.out).toContain('turn_boundary_error=0');
+  });
+
+  it('keeps Codex delegation audit events outside their own turn boundary check', () => {
+    writeJsonl('codex.jsonl', ['gen_ai.agent.invoke', 'gen_ai.agent.result'].map((eventName, index) => goodEntry({
+      'event.id': `delegation-${index}`, 'event.name': eventName,
+      'gen_ai.agent.type': 'codex', 'gen_ai.turn.id': 'parent-turn',
+      'gen_ai.agent.invocation.id': 'invocation-1',
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('turn_boundary_error=0');
+  });
+
   it('accepts agent.input as a valid event name', () => {
     writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'agent.input' })]);
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });

@@ -776,21 +776,21 @@ describe('CodexTranscriptInput', () => {
     );
 
     await input.start();
-    await waitFor(() => deltas.length >= 1);
+    await runInputCycle(input);
     const ownerMeta = record('2026-06-24T06:00:01.000Z', 'session_meta', {
       id: ownerId,
       model_provider: 'openai',
     }) + '\n';
     await fs.appendFile(transcript, ownerMeta, 'utf8');
-    (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 2);
-    (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 3);
+    await runInputCycle(input);
+    await runInputCycle(input);
 
     expect(transcriptCheckpoint(stateStore, transcript))
       .toMatchObject({ ownerSessionMetaOffset: Buffer.byteLength(copiedMeta) });
-    expect(deltas[2].rawReadCalls).toBe(0);
-    expect(deltas[2].rawReadBytes).toBe(0);
+    // Startup watcher notifications may add cycles; inspect the unchanged
+    // cycle we actually drained rather than a notification-dependent index.
+    expect(deltas.at(-1)!.rawReadCalls).toBe(0);
+    expect(deltas.at(-1)!.rawReadBytes).toBe(0);
     await input.stop();
   });
 
@@ -1466,6 +1466,153 @@ describe('CodexTranscriptInput', () => {
     await processTranscriptOnce(active.input, parentPath);
     expect(active.entries).toHaveLength(count);
   });
+
+  it.each([false, true].flatMap(restart => ['canonical', 'legacy'].flatMap(format =>
+    ['none', 'user', 'agent', 'result'].map(incoming => ({ restart, incoming, format })))))(
+    'distinguishes new work from an uncommitted creation input reread (restart=$restart, incoming=$incoming, format=$format)',
+    async ({ restart, incoming, format }) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-uncommitted-incoming-'));
+      tempDirs.push(root);
+      const first = await createDormantInput(root);
+      const parent = 'uncommitted-parent';
+      const child = 'uncommitted-child';
+      const at = (seconds: number) => new Date(Date.parse('2026-08-07T03:20:00.000Z') + seconds * 1_000).toISOString();
+      const parentLines = simpleCompletedTurn(parent, 'parent-turn', 'delegate', 'accepted', 10, 2, at(0));
+      parentLines.splice(4, 0,
+        record(at(3.1), 'response_item', { type: 'function_call', call_id: 'initial-spawn', name: 'spawn_agent',
+          arguments: JSON.stringify({ task_name: 'child', message: 'initial delegated work' }) }),
+        record(at(3.2), 'response_item', { type: 'function_call_output', call_id: 'initial-spawn', output: JSON.stringify({ agent_id: child }) }),
+        record(at(3.3), 'response_item', { type: 'function_call', call_id: 'queued-followup', name: 'followup_task',
+          arguments: JSON.stringify({ id: child, message: 'replacement work' }) }),
+        record(at(3.4), 'response_item', { type: 'function_call_output', call_id: 'queued-followup', output: JSON.stringify({ agent_id: child }) }));
+      const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-uncommitted-parent.jsonl', parentLines.join('\n') + '\n');
+      await processTranscriptOnce(first.input, parentPath);
+      const invocation = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!['gen_ai.agent.invocation.id'];
+      const childLines = simpleCompletedTurn(child, 'child-turn', 'initial delegated work', 'child done', 20, 3, at(10));
+      childLines[0] = record(at(10), 'session_meta', { id: child, session_id: parent, thread_source: 'subagent',
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/child' } } } });
+      if (format === 'legacy') childLines[3] = record(at(13), 'event_msg', {
+        type: 'user_message', message: 'initial delegated work',
+      });
+      const childPath = await writeTranscriptNamed(first.sessionDir, 'rollout-uncommitted-child.jsonl', childLines.slice(0, 4).join('\n') + '\n');
+      await processTranscriptOnce(first.input, childPath);
+      expect(transcriptCheckpoint(first.stateStore, childPath).activeTurn).toMatchObject({
+        emittedStepCount: 0, delegation: { invocationId: invocation },
+      });
+      // A growing rollout rereads the original ordinary user input until the first wave closes.
+      await fs.appendFile(childPath, record(at(13.1), 'response_item', { type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: 'additional runtime context' }] }) + '\n');
+      await processTranscriptOnce(first.input, childPath);
+      expect(transcriptCheckpoint(first.stateStore, childPath).activeTurn).toMatchObject({
+        emittedStepCount: 0, delegation: { invocationId: invocation },
+      });
+      await first.stateStore.save();
+      let active = restart ? await createDormantInput(root) : first;
+      if (format === 'canonical') {
+        // Codex persists canonical input before its separately emitted legacy mirror.
+        await fs.appendFile(childPath, record(at(13.15), 'event_msg', {
+          type: 'user_message', message: 'initial delegated work',
+        }) + '\n');
+        await processTranscriptOnce(active.input, childPath);
+        expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toMatchObject({
+          delegation: { invocationId: invocation },
+        });
+      }
+      if (incoming !== 'none') {
+        const payload = incoming === 'user'
+          ? format === 'canonical'
+            ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'initial delegated work' }] }
+            : { type: 'user_message', message: 'initial delegated work' }
+          : { type: 'agent_message', author: incoming === 'result' ? '/root/child/leaf' : '/root', recipient: '/root/child',
+            content: [{ type: 'input_text', text: incoming === 'result' ? 'Message Type: FINAL_ANSWER\nleaf done' : 'Message Type: NEW_TASK\nnew unobserved work' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 'child-turn' } };
+        await fs.appendFile(childPath, record(at(13.2), incoming === 'user' && format === 'legacy' ? 'event_msg' : 'response_item', payload) + '\n');
+        await processTranscriptOnce(active.input, childPath);
+      }
+      await fs.appendFile(childPath, [
+        record(at(14), 'response_item', { type: 'function_call', call_id: 'work-tool', name: 'exec_command', arguments: '{}' }),
+        record(at(14.1), 'response_item', { type: 'function_call_output', call_id: 'work-tool', output: 'ok' }),
+        record(at(14.2), 'event_msg', tokenUsage(20, 3)),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toMatchObject({ emittedStepCount: 1 });
+      const earlierResponses = responsesForTurn(active.entries, 'child-turn');
+      if (restart) {
+        await active.stateStore.save();
+        active = await createDormantInput(root);
+      }
+
+      await fs.appendFile(childPath, [
+        record(at(15), 'response_item', { type: 'function_call', call_id: 'second-tool', name: 'exec_command', arguments: '{}' }),
+        record(at(15.1), 'response_item', { type: 'function_call_output', call_id: 'second-tool', output: 'ok' }),
+        record(at(15.2), 'event_msg', tokenUsage(30, 4)),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      const responses = restart ? [...earlierResponses, ...responsesForTurn(active.entries, 'child-turn')]
+        : responsesForTurn(active.entries, 'child-turn');
+      expect(responses).toHaveLength(2);
+      for (const response of responses) expect(response['gen_ai.agent.parent.invocation.id']).toBe(
+        incoming === 'user' || incoming === 'agent' ? undefined : invocation);
+      const followup = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+        && entry['gen_ai.tool.call.id'] === 'queued-followup')!['gen_ai.agent.invocation.id'];
+      await fs.appendFile(childPath, [
+        record(at(16), 'response_item', { type: 'agent_message', author: '/root', recipient: '/root/child',
+          content: [{ type: 'input_text', text: 'replacement work' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'child-turn' } }),
+        record(at(17), 'event_msg', { type: 'agent_message', message: 'replacement done', phase: 'final' }),
+        record(at(17.1), 'event_msg', tokenUsage(40, 5)),
+        record(at(18), 'event_msg', { type: 'task_complete', turn_id: 'child-turn', last_agent_message: 'replacement done' }),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      expect(responsesForTurn(active.entries, 'child-turn').at(-1)!['gen_ai.agent.parent.invocation.id']).toBe(followup);
+      expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toBeNull();
+    },
+  );
+
+  it.each(['status', 'results'].flatMap(format => ['', 'actual result'].map(body => ({ format, body }))))(
+    'does not deliver a null-only completion before the real result (format=$format, body=$body)',
+    async ({ format, body }) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-null-result-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const session = 'null-result-parent';
+      const child = 'null-result-child';
+      const start = '2026-08-07T03:25:00.000Z';
+      const at = (seconds: number) => new Date(Date.parse(start) + seconds * 1_000).toISOString();
+      const lines = simpleCompletedTurn(session, 'parent-turn', 'delegate', 'accepted', 10, 2, start);
+      const status = (value: string | null) => format === 'status'
+        ? { status: { [child]: { completed: value } } }
+        : { results: [{ agent_id: child, status: 'completed', output: value }] };
+      lines.splice(4, 0,
+        record(at(3.1), 'response_item', { type: 'function_call', call_id: 'null-spawn', name: 'spawn_agent',
+          arguments: JSON.stringify({ task_name: 'child', message: 'work' }) }),
+        record(at(3.2), 'response_item', { type: 'function_call_output', call_id: 'null-spawn', output: JSON.stringify({ agent_id: child }) }),
+        record(at(3.3), 'response_item', { type: 'function_call', call_id: 'empty-wait', name: 'wait_agent', arguments: '{}' }),
+        record(at(3.4), 'response_item', { type: 'function_call_output', call_id: 'empty-wait', output: JSON.stringify(status(null)) }));
+      const transcript = await writeTranscriptNamed(sessionDir, 'rollout-null-result-parent.jsonl', lines.join('\n') + '\n');
+      await processTranscriptOnce(input, transcript);
+      expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+      const invocation = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!['gen_ai.agent.invocation.id'];
+      expect(stateStore.get('codex-transcript').extra?.codexResultInvocations ?? []).not.toContain(invocation);
+      expect(transcriptCheckpoint(stateStore, transcript).activeTurn).toBeNull();
+      const receipt = simpleCompletedTurn(session, 'receipt-turn', 'collect', 'received', 20, 3, at(10)).slice(1);
+      receipt.splice(3, 0,
+        record(at(13.1), 'response_item', { type: 'function_call', call_id: 'actual-wait', name: 'wait_agent', arguments: '{}' }),
+        record(at(13.2), 'response_item', { type: 'function_call_output', call_id: 'actual-wait', output: JSON.stringify(status(body)) }),
+        record(at(13.3), 'response_item', { type: 'agent_message', author: child, recipient: '/root',
+          content: [{ type: 'input_text', text: `Message Type: FINAL_ANSWER\n${body}` }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'receipt-turn', tool_call_id: 'null-spawn' } }));
+      await fs.appendFile(transcript, receipt.join('\n') + '\n');
+      await processTranscriptOnce(input, transcript);
+      const results = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result');
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ 'gen_ai.agent.invocation.id': invocation,
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: body }] }] });
+      expect(transcriptCheckpoint(stateStore, transcript).activeTurn).toBeNull();
+      await processTranscriptOnce(input, transcript);
+      expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(1);
+    },
+  );
 
   it('binds agent_id-only spawn, reused child work and nested invocation to their immediate callers', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-reuse-nested-'));

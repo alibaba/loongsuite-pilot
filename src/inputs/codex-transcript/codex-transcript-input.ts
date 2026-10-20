@@ -827,12 +827,24 @@ export class CodexTranscriptInput extends BaseInput {
       contextStepCount: committedTurn.steps.length,
     });
     if (meta) {
-      const resolved = this.subagentLinker.resolveWork(meta, turn, records.items, checkpoint.firstOwnedTurnId === turn.transcriptTurnId);
-      if (resolved) activeTurn.delegation = resolved;
-      else if (activeTurn.emittedPrompt && (activeTurn.emittedStepCount ?? 0) > 0
-        && records.items.some(source => isCodexWorkInput(source, turn.transcriptTurnId))) {
-        // Fresh unbound input must not inherit an earlier incoming invocation.
-        activeTurn.delegation = undefined;
+      const hasCanonicalUserInput = records.items.some(source => source.record.type === 'response_item'
+        && asRecord(source.record.payload)?.type === 'message' && isCodexWorkInput(source, turn.transcriptTurnId));
+      // Canonical user input precedes its legacy mirror before model execution.
+      // Both remain in the unfinished range; legacy-only rollouts retain the fallback.
+      const hasNewWork = records.items.some(source => source.startOffset >= checkpoint.scanOffset
+        && (!hasCanonicalUserInput || source.record.type !== 'event_msg')
+        && isCodexWorkInput(source, turn.transcriptTurnId));
+      // Rereading an unfinished wave must preserve its original binding. After
+      // new unbound work, however, saved linker context must not revive it.
+      if (!activeTurn.delegationUnbound || hasNewWork) {
+        const resolved = this.subagentLinker.resolveWork(meta, turn, records.items, checkpoint.firstOwnedTurnId === turn.transcriptTurnId);
+        if (resolved) {
+          activeTurn.delegation = resolved;
+          activeTurn.delegationUnbound = undefined;
+        } else if (hasNewWork && activeTurn.delegation) {
+          activeTurn.delegation = undefined;
+          activeTurn.delegationUnbound = true;
+        }
       }
     }
     const delegation = activeTurn.delegation;
@@ -2833,6 +2845,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     emittedToolResultIds: stringArray(active.emittedToolResultIds),
     inputContext: parseInputContext(active.inputContext),
     ...(asRecord(active.delegation) ? { delegation: active.delegation as CodexSubagentLink } : {}),
+    ...(active.delegationUnbound === true ? { delegationUnbound: true } : {}),
     ...(typeof active.emittedTraceId === 'string' ? { emittedTraceId: active.emittedTraceId } : {}),
     emittedAuditEventIds: stringArray(active.emittedAuditEventIds),
     subagentSpawns: parsePendingFusionChildren(active.subagentSpawns),
@@ -3222,13 +3235,16 @@ function appendCodexAgentResults(
     if (status) for (const [peer, state] of Object.entries(status)) {
       const completed = asRecord(state);
       if (completed && ('completed' in completed || 'errored' in completed || 'failed' in completed)) {
-        append(entry, `${entry['event.id']}:${peer}`, peer, completed.completed ?? completed.errored ?? completed.failed);
+        const value = completed.completed ?? completed.errored ?? completed.failed;
+        if (value !== undefined && value !== null) append(entry, `${entry['event.id']}:${peer}`, peer, value);
       }
     }
     if (Array.isArray(result.results)) for (const item of result.results) {
       const receipt = asRecord(item);
       if (receipt && ['completed', 'failed', 'errored'].includes(stringValue(receipt.status) ?? '')) {
-        append(entry, `${entry['event.id']}:${stringValue(receipt.agent_id) ?? ''}`, stringValue(receipt.agent_id), receipt.output ?? receipt.result ?? receipt.error,
+        const value = receipt.output ?? receipt.result ?? receipt.error;
+        if (value !== undefined && value !== null) append(entry,
+          `${entry['event.id']}:${stringValue(receipt.agent_id) ?? ''}`, stringValue(receipt.agent_id), value,
           undefined, stringValue(receipt.turn_id));
       }
     }

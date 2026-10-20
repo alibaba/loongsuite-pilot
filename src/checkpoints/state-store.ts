@@ -46,6 +46,8 @@ export class StateStore {
 
   get waitingForOutput(): boolean { return this.saveHolds.size > 0; }
 
+  get saveFailed(): boolean { return this.saveFailure !== null; }
+
   /** Do not checkpoint source progress before its output has been durably accepted. */
   holdSaveUntil(promise: Promise<void>): void {
     this.saveHolds.add(promise);

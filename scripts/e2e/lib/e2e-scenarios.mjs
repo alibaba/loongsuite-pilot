@@ -769,6 +769,8 @@ const CONDITIONAL_REQUIRED = {
   'tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
   'gen_ai.tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
   'gen_ai.tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.agent.invoke': ['gen_ai.agent.invocation.id'],
+  'gen_ai.agent.result': ['gen_ai.agent.invocation.id'],
   'skill.use': ['gen_ai.skill.name'],
 };
 const COVERAGE_FIELDS = [
@@ -846,13 +848,11 @@ function normalizedAgentType(value) {
 }
 
 function isTerminalTurnEntry(entry) {
-  if (entry['gen_ai.agent.scope'] === 'subagent') return false;
-  if (entry['gen_ai.turn.end'] === true) return true;
   const agentType = normalizedAgentType(entry['gen_ai.agent.type']);
-  if (agentType === 'codex') {
-    return entry['agent.codex.turn_status'] === 'completed'
-      || entry['agent.codex.turn_status'] === 'interrupted';
-  }
+  if (entry['gen_ai.agent.scope'] === 'subagent' && agentType !== 'codex') return false;
+  if (entry['gen_ai.turn.end'] === true) return true;
+  // Codex status applies to every record; only the native marker closes a turn.
+  if (agentType === 'codex') return false;
   if (agentType === 'openclaw') {
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
@@ -1038,7 +1038,9 @@ const turns = new Map();
 for (const row of rows) {
   const entry = row.entry;
   if (!hasValue(entry['gen_ai.turn.id'])) continue;
-  if (entry['gen_ai.agent.scope'] === 'subagent') continue;
+  if (entry['gen_ai.agent.scope'] === 'subagent'
+    && normalizedAgentType(entry['gen_ai.agent.type']) !== 'codex') continue;
+  if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
   const key = String(entry['gen_ai.agent.type']) + '\\0'
     + String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
   if (!turns.has(key)) turns.set(key, []);

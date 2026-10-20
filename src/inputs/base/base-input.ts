@@ -63,6 +63,8 @@ export abstract class BaseInput extends EventEmitter {
     return this._running;
   }
 
+  get checkpointFailed(): boolean { return this.stateStore.saveFailed; }
+
   start(): Promise<void> {
     // A restart must not create resources before the preceding stop has drained them.
     if (this.stopPromise) return this.stopPromise.then(() => this.start());
@@ -134,6 +136,9 @@ export abstract class BaseInput extends EventEmitter {
 
   private runCycle(): Promise<void> {
     if (this.cyclePromise) return this.cyclePromise;
+    // A terminal output failure freezes the shared cursor until restart. Do
+    // not keep reading into a queue whose checkpoint can no longer progress.
+    if (this.checkpointFailed) return Promise.resolve();
     this.cyclePromise = this.runCycleOnce().finally(() => {
       this.cyclePromise = null;
     });

@@ -188,6 +188,9 @@ export class InputManager extends EventEmitter {
       this.handleInputRuntimeDelta(input.id, delta);
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
+      // Streaming inputs can emit again inside a collect that was already in
+      // flight when an earlier output failed. Keep the cursor frozen for recovery.
+      if (input.checkpointFailed) return;
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
       const handling = previous
         .catch(() => undefined)

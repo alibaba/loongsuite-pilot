@@ -38,6 +38,8 @@ export interface CodexActiveTranscriptTurn {
   inputContext?: CodexTranscriptInputContext;
   /** Incoming work is bound by evidence, independently of creation lineage. */
   delegation?: CodexSubagentLink;
+  /** New unbound work invalidated the old incoming context for this turn. */
+  delegationUnbound?: boolean;
   /** Fixed at first emission; late links must not re-export an existing trace. */
   emittedTraceId?: string;
   emittedAuditEventIds?: string[];
