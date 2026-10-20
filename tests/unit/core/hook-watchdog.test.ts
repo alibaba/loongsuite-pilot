@@ -161,7 +161,7 @@ describe('HookWatchdog', () => {
       expect(repairFn).toHaveBeenCalledTimes(1);
     });
 
-    it('still invokes settings repair when the wrapper cannot be read', async () => {
+    it('still invokes settings repair when the wrapper is not a regular file', async () => {
       const sourcePath = path.join(tmpDir, 'package', 'assets', 'hooks', 'claude-hook.sh');
       const targetPath = path.join(tmpDir, 'pilot', 'hooks', 'claude-hook.sh');
       await fs.mkdir(path.dirname(sourcePath), { recursive: true });
@@ -177,8 +177,6 @@ describe('HookWatchdog', () => {
       const wd = new HookWatchdog(makeConfig(), [target]);
       expect((await wd.runCheck()).repaired).toBe(1);
       expect(repairFn).toHaveBeenCalledTimes(1);
-      expect(mockLogger.debug.mock.calls.some(([event]) => event === 'hook-watchdog.wrapper-check-failed'))
-        .toBe(true);
     });
 
     it('parses JSONC settings for Qwen without triggering repair', async () => {

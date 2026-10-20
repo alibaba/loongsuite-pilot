@@ -1079,6 +1079,8 @@ export class HookWatchdog {
 export async function isHookWrapperHealthy(asset: HookWrapperAsset): Promise<boolean> {
   const source = await fs.readFile(asset.sourcePath);
   try {
+    const targetStat = await fs.stat(asset.targetPath);
+    if (!targetStat.isFile() || targetStat.size !== source.length) return false;
     const target = await fs.readFile(asset.targetPath);
     return source.equals(target);
   } catch (err) {
