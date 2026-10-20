@@ -46,6 +46,13 @@ describe('Orchestrator hook wrapper watchdog wiring', () => {
     expect(await fs.readFile(targetPath)).toEqual(await fs.readFile(target.wrapperAsset!.sourcePath));
     expect(deploySingle).toHaveBeenCalledWith(def);
 
+    // A wrapper that cannot be replaced must not prevent settings repair.
+    await fs.rm(targetPath);
+    await fs.mkdir(targetPath);
+    await expect(target.repairFn?.()).resolves.toBe(true);
+    expect(deploySingle).toHaveBeenCalledTimes(2);
+    await fs.rm(targetPath, { recursive: true });
+
     const newerPackage = path.join(tmpDir, 'versions', 'newer');
     await fs.mkdir(newerPackage, { recursive: true });
     await fs.writeFile(path.join(tmpDir, 'current'), 'newer\n');

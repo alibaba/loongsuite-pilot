@@ -663,7 +663,16 @@ export class Orchestrator extends EventEmitter {
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: async () => {
-          if (wrapperAsset?.isApplicable()) await restoreHookWrapper(wrapperAsset);
+          if (wrapperAsset?.isApplicable()) {
+            try {
+              await restoreHookWrapper(wrapperAsset);
+            } catch (err) {
+              logger.warn('hook wrapper restore failed; continuing settings repair', {
+                agentId: def.id,
+                error: String(err),
+              });
+            }
+          }
           const result = await this.deploymentManager.deploySingle(def);
           return result.success;
         },

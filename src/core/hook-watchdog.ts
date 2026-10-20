@@ -770,8 +770,16 @@ export class HookWatchdog {
   }
 
   private recordFailedRepair(id: string, err: unknown, fingerprint: string | undefined): void {
-    if (/\b(?:ENOENT|ENOTDIR)\b/.test(String(err))) {
-      this.blockedRepairFingerprint.set(id, fingerprint ?? 'unknown');
+    const activationFingerprint = fingerprint?.split('|', 2)[1];
+    const missingActivationCommand = activationFingerprint !== undefined
+      && /^(?:missing:|not-file:|unavailable:)/.test(activationFingerprint);
+    if (fingerprint && missingActivationCommand && /\b(?:ENOENT|ENOTDIR)\b/.test(String(err))) {
+      this.blockedRepairFingerprint.set(id, fingerprint);
+      logger.warn('intercept-watchdog.structural-block', {
+        id,
+        error: String(err),
+        fingerprint,
+      });
       return;
     }
     const failures = (this.failedRepairCount.get(id) ?? 0) + 1;
@@ -1077,7 +1085,14 @@ export async function restoreHookWrapper(asset: HookWrapperAsset): Promise<void>
   try {
     await fs.writeFile(temporaryPath, source, { mode });
     await fs.chmod(temporaryPath, mode);
-    await fs.rename(temporaryPath, asset.targetPath);
+    try {
+      await fs.rename(temporaryPath, asset.targetPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw err;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await fs.rename(temporaryPath, asset.targetPath);
+    }
   } finally {
     await fs.rm(temporaryPath, { force: true }).catch(() => {});
   }

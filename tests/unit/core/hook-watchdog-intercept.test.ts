@@ -139,7 +139,7 @@ describe('HookWatchdog intercept targets', () => {
   });
 
   it('stops ENOENT directory-plugin retries until repair inputs change', async () => {
-    let fingerprint = 'source-v1|cli-v1';
+    let fingerprint = 'source-v1|missing:/bin/hermes';
     const repair = vi.fn().mockRejectedValue(new Error('spawn hermes ENOENT'));
     const target = makeTarget({
       id: 'directory-plugin:hermes-agent',
@@ -151,22 +151,47 @@ describe('HookWatchdog intercept targets', () => {
     const wd = new HookWatchdog({ ...defaultConfig, repairCooldownMs: 0 }, [], [target]);
     for (let i = 0; i < 5; i++) await wd.runCheck();
     expect(repair).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls.filter(([event]) => event === 'intercept-watchdog.structural-block'))
+      .toHaveLength(1);
     (wd as any).dailyRepairResetDate = '1970-01-01';
     await wd.runCheck();
     expect(repair).toHaveBeenCalledTimes(1);
-    fingerprint = 'source-v1|cli-v2';
+    fingerprint = 'source-v1|unavailable:/bin/hermes:ENOENT';
     await wd.runCheck();
     expect(repair).toHaveBeenCalledTimes(2);
-    fingerprint = 'source-v2|cli-v2';
+    fingerprint = 'source-v2|unavailable:/bin/hermes:ENOENT';
     await wd.runCheck();
     expect(repair).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries guarded repairs without a fingerprint after backoff', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const repair = vi.fn()
+      .mockRejectedValueOnce(new Error('spawn hermes ENOENT'))
+      .mockResolvedValue(undefined);
+    const target = makeTarget({
+      guardFailedRepairs: true,
+      check: vi.fn().mockResolvedValue(false),
+      repair,
+    });
+    const wd = new HookWatchdog({ ...defaultConfig, repairCooldownMs: 0 }, [], [target]);
+    try {
+      await wd.runCheck();
+      expect(repair).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(now + 60_001);
+      await wd.runCheck();
+      expect(repair).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('backs off transient failures and retries after the activation service recovers', async () => {
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     const repair = vi.fn()
-      .mockRejectedValueOnce(new Error('activation temporarily failed'))
+      .mockRejectedValueOnce(new Error('spawn hermes ENOENT'))
       .mockRejectedValueOnce(new Error('activation temporarily failed'))
       .mockResolvedValue(undefined);
     const target = makeTarget({
@@ -188,6 +213,8 @@ describe('HookWatchdog intercept targets', () => {
       await wd.runCheck();
       expect(repair).toHaveBeenCalledTimes(3);
       expect(logger.warn.mock.calls.filter(([event]) => event === 'intercept-watchdog.daily-limit'))
+        .toHaveLength(0);
+      expect(logger.warn.mock.calls.filter(([event]) => event === 'intercept-watchdog.structural-block'))
         .toHaveLength(0);
     } finally {
       clock.mockRestore();

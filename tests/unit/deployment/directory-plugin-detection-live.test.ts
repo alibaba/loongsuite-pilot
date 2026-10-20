@@ -55,4 +55,37 @@ describe('directory plugin detection with a stray Hermes home', () => {
     await fs.writeFile(path.join(sourceDir, 'plugin.py'), '# updated plugin\n');
     expect(await strategy.repairInputsFingerprint(def)).not.toBe(installedFingerprint);
   });
+
+  it.skipIf(process.platform === 'win32')('can recover when a missing CLI interpreter is installed later', async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-hermes-interpreter-'));
+    const hermesHome = path.join(root, '.hermes');
+    const sourceDir = path.join(root, 'source');
+    const cli = path.join(root, 'hermes');
+    const interpreter = path.join(root, 'hermes-interpreter');
+    await fs.mkdir(hermesHome);
+    await fs.mkdir(sourceDir);
+    await fs.writeFile(path.join(sourceDir, 'plugin.py'), '# test plugin\n');
+    await fs.writeFile(cli, `#!${interpreter}\n`, { mode: 0o755 });
+    const def: AgentDefinition = {
+      id: 'hermes-agent',
+      displayName: 'Hermes Agent',
+      deployMode: 'directory-plugin',
+      detection: { paths: [hermesHome], commands: [] },
+      directoryPlugin: {
+        sourceDir,
+        targetDir: path.join(hermesHome, 'plugins', 'loongsuite-pilot'),
+        activation: { command: cli, probeArgs: ['--help'], enableArgs: ['plugins', 'enable'] },
+      },
+    };
+    const strategy = new DirectoryPluginStrategy(root);
+
+    expect(await strategy.detect(def)).toBe(true);
+    const fingerprint = await strategy.repairInputsFingerprint(def);
+    expect((await strategy.deploy(def)).error).toContain('ENOENT');
+
+    await fs.symlink('/bin/sh', interpreter);
+    expect(await strategy.repairInputsFingerprint(def)).toBe(fingerprint);
+    const recovered = await strategy.deploy(def);
+    expect(recovered, recovered.error).toMatchObject({ success: true });
+  });
 });
