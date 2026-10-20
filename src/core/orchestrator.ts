@@ -554,6 +554,7 @@ export class Orchestrator extends EventEmitter {
     this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
+    this.inputManager?.cancelPendingOutputs();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
     // The final dataflow window must observe the last serialized collect and

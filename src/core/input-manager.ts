@@ -81,6 +81,7 @@ export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
+  private readonly entryAbortControllers = new Map<string, AbortController>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -157,6 +158,9 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
+    if (input.agentType === ClientType.CodexCliHook) {
+      this.entryAbortControllers.set(input.id, new AbortController());
+    }
     this.counters.set(input.id, {
       sourceKind: 'primary',
       rawReadCalls: 0,
@@ -239,6 +243,9 @@ export class InputManager extends EventEmitter {
       logger.warn('cannot start unknown input', { id });
       return;
     }
+    if (this.entryAbortControllers.get(id)?.signal.aborted) {
+      this.entryAbortControllers.set(id, new AbortController());
+    }
     await input.start();
     logger.info('input started', { id });
   }
@@ -246,12 +253,19 @@ export class InputManager extends EventEmitter {
   async stopInput(id: string): Promise<void> {
     const input = this.inputs.get(id);
     if (!input) return;
+    this.entryAbortControllers.get(id)?.abort();
     await input.stop();
     await this.drainInputQueue(id);
     logger.info('input stopped', { id });
   }
 
+  /** Called before discovery drains starts that may themselves await output. */
+  cancelPendingOutputs(): void {
+    for (const controller of this.entryAbortControllers.values()) controller.abort();
+  }
+
   async stopAll(): Promise<void> {
+    this.cancelPendingOutputs();
     for (const [id, input] of this.inputs) {
       if (input.running) {
         await input.stop();
@@ -497,7 +511,8 @@ export class InputManager extends EventEmitter {
 
     const counter = this.counters.get(inputId);
     try {
-      await this.flusher.sendBatch(entries, logicalBytes);
+      const signal = this.entryAbortControllers.get(inputId)?.signal;
+      await (signal ? this.flusher.sendBatch(entries, logicalBytes, signal) : this.flusher.sendBatch(entries, logicalBytes));
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {

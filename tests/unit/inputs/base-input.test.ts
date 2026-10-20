@@ -88,6 +88,46 @@ describe('BaseInput', () => {
     });
   });
 
+  it('stops waiting for a shared checkpoint without abandoning its save or cleanup', async () => {
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    let rejectSave!: (error: Error) => void;
+    const saving = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saving; });
+    Object.defineProperty(stateStore, 'waitingForOutput', { value: true });
+    const onStop = vi.fn();
+    input.onStopFn = onStop;
+    const start = input.start();
+    await waiting;
+    await input.stop();
+    await start;
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(input.running).toBe(false);
+    // The shared save remains owned by StateStore; a later failure is handled
+    // even though this input no longer waits for it.
+    rejectSave(new Error('another output was cancelled'));
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still drains an active checkpoint write when no output hold is pending', async () => {
+    let entered!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    let finish!: () => void;
+    const saved = new Promise<void>(resolve => { finish = resolve; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saved; });
+    const onStop = vi.fn();
+    input.onStopFn = onStop;
+    const start = input.start();
+    await writing;
+    const stop = input.stop();
+    await Promise.resolve();
+    expect(onStop).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([start, stop]);
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
   it('drains startup resources before stop and never collects after cancelled startup', async () => {
     let entered!: () => void;
     let release!: () => void;

@@ -39,9 +39,9 @@ export class MultiFlusher extends BaseFlusher {
     if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
-  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void> {
     const results = await Promise.allSettled(
-      this.flushers.map(r => r.sendBatch(entries, logicalBytes)),
+      this.flushers.map(r => signal ? r.sendBatch(entries, logicalBytes, signal) : r.sendBatch(entries, logicalBytes)),
     );
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === 'rejected') {

@@ -47,7 +47,7 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 [OTLP flusher](../../src/flushers/otlp-trace-flusher.ts) 与 [journal](../../src/flushers/codex-turn-journal.ts) 将未完成 Codex 轮次前缀持久保存在数据目录的 `logs/codex-pending-turns/`；完整导出成功后先写确认再清理 pending，最近 10,000 轮确认用于抑制重放。退出、内存 buffer 淘汰均不导出伪造半轮。
 
-[InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。失败冻结共享 checkpoint；修复存储或输出后重启恢复。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
+[InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；其他持久接收失败仍冻结共享 checkpoint，修复存储或输出后重启恢复。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
 
 恢复路径复用当前 workspace 过滤、内容开关和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，仍受内容采集配置影响。
 
@@ -55,7 +55,7 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 公共 `send` / `sendBatch` 都等待启动恢复并持久接收自身记录；journal 恢复走内部追加路径，不以全局“正在恢复/批处理”标志跳过其他调用的持久化。准备前缀与追加期间暂缓 buffer 淘汰，避免只导出后缀后确认整轮。
 
-Codex 只用显式 `gen_ai.turn.end` 收尾，`agent.codex.turn_status=interrupted` 本身不关闭轮次，因为该状态可能出现在分批输出的每条记录上。输出失败后 checkpoint 保持冻结到重启，但只保留一份失败原因；已结束的接收 Promise 从等待集合移除，避免持续失败时不断积累。
+Codex 只用显式 `gen_ai.turn.end` 收尾，`agent.codex.turn_status=interrupted` 本身不关闭轮次，因为该状态可能出现在分批输出的每条记录上。HTTP 网络失败保留同一批次及接收等待，重试不重新派发到已成功的其他输出。停止输入或 collector 时取消 HTTP 等待和在途请求，未确认的批次不推进 checkpoint；取消造成的失败仍保持冻结到 collector 重启，不通过后续任意一次成功清除全局失败。编排器在发现服务排空之前发出取消；BaseInput 停止时只解除对共享 checkpoint 的等待，仍完整等待 collect、onStart 和 onStop。其他不可恢复的输出失败只保留一份失败原因；已结束的接收 Promise 从等待集合移除，避免持续失败时不断积累。
 
 ## 可执行回归入口
 
@@ -87,3 +87,11 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 | 云端回读 | 本次开源候选未重新执行，不复用旧报告作为通过证明 |
 
 真实安装态与云端回读仍需独立执行、明确报告。历史数据不自动修复，其他 Agent 仍由各自任务推进。
+
+## HTTP 断网恢复与停机回归（2026-10-20）
+
+配置 HTTP 输出时，暂时断网、连接拒绝或服务端 503 不结束本批的持久接收等待；已有 flush 定时器继续重试原序列化批次，成功 ACK 后输入 checkpoint 自动保存，其他已成功输出不重发。每批 ACK 独立，重试与显式 flush 共用单个在途任务。
+
+停止输入/collector 时取消 HTTP 接收等待与在途请求，未确认的游标不推进；因取消终止的接收仍需 collector 重启从已持久化游标恢复，不以任意后续成功清除全局失败。不承诺无首次持久游标的新文件一定能靠重启补回，也不改变启动 baseline 策略。停机只解除对输出确认的等待，正在写盘的 checkpoint 及 collect/onStart/onStop 仍等待完成。
+
+本轮源码回归 38 个测试文件、582 项全部通过，typecheck 与完整构建通过。其中 6 项真实 localhost 集成覆盖 503 恢复、连接拒绝恢复、HTTP/JSONL 身份与重复检查、无响应请求停机、正常停启及非 Codex 输入受共享 checkpoint 阻塞时的停止。测试使用隔离输入和本地接收端，不构成真实 Agent、生产云端或 UI 验收。

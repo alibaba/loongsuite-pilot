@@ -29,6 +29,14 @@ describe('MultiFlusher', () => {
       expect(send).toHaveBeenCalledWith(entries, sizes);
       expect(multi.getTraceRuntimeSnapshot()).toEqual([]);
     });
+    it('forwards an input cancellation signal to every destination', async () => {
+      const send = vi.spyOn(f1, 'sendBatch');
+      const controller = new AbortController();
+      const entries = [buildTestEntry()];
+      await multi.sendBatch(entries, undefined, controller.signal);
+      expect(send).toHaveBeenCalledWith(entries, undefined, controller.signal);
+    });
+
     it('dispatches to all child flushers in parallel', async () => {
       const entries = [buildTestEntry(), buildTestEntry()];
       await multi.sendBatch(entries);

@@ -37,6 +37,7 @@ export abstract class BaseInput extends EventEmitter {
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
+  private releaseCheckpointWait: (() => void) | null = null;
   private _running = false;
   protected workspacePolicy = new WorkspacePolicy();
 
@@ -91,6 +92,7 @@ export abstract class BaseInput extends EventEmitter {
     if (this.stopPromise) return this.stopPromise;
     if (!this._running && !this.startPromise) return Promise.resolve();
     this._running = false;
+    if (this.stateStore.waitingForOutput) this.releaseCheckpointWait?.();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -140,11 +142,21 @@ export abstract class BaseInput extends EventEmitter {
         this.emit('entries', entries);
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
-      await this.stateStore.save();
+      // A shared checkpoint may wait for another input's HTTP recovery. Stop
+      // must still drain our collect/onStop without waiting for that network;
+      // StateStore retains the save and its output holds until actual ACK.
+      await Promise.race([
+        this.stateStore.save(),
+        new Promise<void>(resolve => {
+          this.releaseCheckpointWait = resolve;
+          if (!this._running && this.stateStore.waitingForOutput) resolve();
+        }),
+      ]);
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
       this.emit('collect-error', err);
     } finally {
+      this.releaseCheckpointWait = null;
       const collectDurationMs = runtime.now() - collectStartedAt;
       this.activeRuntimeAccumulator = null;
       this.emit('input-runtime-delta', runtime.finish(collectDurationMs));

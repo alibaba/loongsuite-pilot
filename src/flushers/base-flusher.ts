@@ -17,7 +17,7 @@ export abstract class BaseFlusher {
   abstract readonly name: string;
 
   abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
-  abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void>;
+  abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;
 
