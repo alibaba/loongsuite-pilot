@@ -31,15 +31,15 @@ describe('sensitive-type interceptor rules', () => {
   });
 
   it.each([
-    ['cloudAccessKey', 'please use LTAI1234567890ABCD', '[ACCESSKEY_MASKED]'],
-    ['cloudAccessKey', 'aws=AKIAIOSFODNN7EXAMPLE', '[ACCESSKEY_MASKED]'],
-    ['cloudAccessKey', 'sts=ASIAABCDEFGHIJKLMNOP', '[ACCESSKEY_MASKED]'],
-    ['cloudAccessKey', 'tencent=AKIDabcdefghijklmnopqrstuvwxyz', '[ACCESSKEY_MASKED]'],
-    ['apiKey', 'openai=sk-1234567890abcdefghijklmnop', '[APIKEY_MASKED]'],
-    ['apiKey', 'github=ghp_1234567890abcdefghijklmnop', '[APIKEY_MASKED]'],
-    ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----', '[PRIVATEKEY_MASKED]'],
-    ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot', '[DATABASEURL_MASKED]'],
-    ['databaseUrl', 'jdbc:mysql://localhost:3306/db?user=root&password=MySynthMysql12', '[DATABASEURL_MASKED]'],
+    ['cloudAccessKey', 'please use LTAI1234567890ABCD', '[ACCESSKEY_BLOCKED]'],
+    ['cloudAccessKey', 'aws=AKIAIOSFODNN7EXAMPLE', '[ACCESSKEY_BLOCKED]'],
+    ['cloudAccessKey', 'sts=ASIAABCDEFGHIJKLMNOP', '[ACCESSKEY_BLOCKED]'],
+    ['cloudAccessKey', 'tencent=AKIDabcdefghijklmnopqrstuvwxyz', '[ACCESSKEY_BLOCKED]'],
+    ['apiKey', 'openai=sk-1234567890abcdefghijklmnop', '[APIKEY_BLOCKED]'],
+    ['apiKey', 'github=ghp_1234567890abcdefghijklmnop', '[APIKEY_BLOCKED]'],
+    ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----', '[PRIVATEKEY_BLOCKED]'],
+    ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot', '[DATABASEURL_BLOCKED]'],
+    ['databaseUrl', 'jdbc:mysql://localhost:3306/db?user=root&password=MySynthMysql12', '[DATABASEURL_BLOCKED]'],
   ] as const)('blocks %s text through the engine', async (type, prompt, reason) => {
     const engine = new RuleEngine(builtinRules(), new Set([type]));
     await expect(engine.evaluate(request({ prompt }))).resolves.toEqual({
@@ -58,7 +58,7 @@ describe('sensitive-type interceptor rules', () => {
       toolInput: { command: 'export KEY=sk-1234567890abcdefghijklmnop' },
     }))).resolves.toEqual({
       action: 'block',
-      reason: '[APIKEY_MASKED]',
+      reason: '[APIKEY_BLOCKED]',
       ruleId: 'apiKey',
       evaluatedRules: ['apiKey'],
     });
@@ -72,7 +72,7 @@ describe('sensitive-type interceptor rules', () => {
       toolResponse: { stdout: 'openai=sk-1234567890abcdefghijklmnop' },
     }))).resolves.toEqual({
       action: 'block',
-      reason: '[APIKEY_MASKED]',
+      reason: '[APIKEY_BLOCKED]',
       ruleId: 'apiKey',
       evaluatedRules: ['apiKey'],
     });
@@ -96,7 +96,7 @@ describe('sensitive-type interceptor rules', () => {
       },
     }))).resolves.toEqual({
       action: 'block',
-      reason: '[DATABASEURL_MASKED]',
+      reason: '[DATABASEURL_BLOCKED]',
       ruleId: 'databaseUrl',
       evaluatedRules: ['databaseUrl'],
     });
