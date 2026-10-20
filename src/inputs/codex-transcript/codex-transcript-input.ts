@@ -354,7 +354,7 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   private async processFile(filePath: string): Promise<number> {
-    const observed: { stat?: Awaited<ReturnType<typeof fs.stat>> } = {};
+    const observed: { stat?: RolloutStatSnapshot } = {};
     try {
       return await this.scanRolloutFile(filePath, observed);
     } finally {
@@ -419,7 +419,7 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async scanRolloutFile(
     filePath: string,
-    observed: { stat?: Awaited<ReturnType<typeof fs.stat>> },
+    observed: { stat?: RolloutStatSnapshot },
   ): Promise<number> {
     const runtime = this.getInputRuntimeAccumulator();
     let stat;
@@ -428,7 +428,7 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return 0;
     }
-    observed.stat = stat;
+    observed.stat = rolloutStatSnapshot(stat);
     const key = this.stateKey(filePath);
     // onStart()/collect() index the current inode before processFile(). Keep
     // this lookup ahead of inode recovery: forkBootstrap is intentionally
@@ -2546,6 +2546,24 @@ export class CodexTranscriptInput extends BaseInput {
       return result;
     };
   }
+}
+
+interface RolloutStatSnapshot {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+function rolloutStatSnapshot(stat: {
+  ino: number | bigint;
+  size: number | bigint;
+  mtimeMs: number | bigint;
+}): RolloutStatSnapshot {
+  return {
+    ino: Number(stat.ino),
+    size: Number(stat.size),
+    mtimeMs: Number(stat.mtimeMs),
+  };
 }
 
 function rolloutCaughtUp(
