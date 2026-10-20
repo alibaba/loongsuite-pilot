@@ -393,6 +393,8 @@ async function main() {
     const transcriptIdx = args.indexOf('--transcript');
     const sessionIdx = args.indexOf('--session');
     const cwdIdx = args.indexOf('--cwd');
+    const hostProductIdx = args.indexOf('--host-product');
+    const hostProduct = hostProductIdx >= 0 && args[hostProductIdx + 1] === 'app' ? 'app' : undefined;
     const triggerEndLineIdx = args.indexOf('--trigger-end-line');
     const transcriptPath = transcriptIdx >= 0 ? args[transcriptIdx + 1] : '';
     const sessionId = sessionIdx >= 0 ? args[sessionIdx + 1] : '';
@@ -407,6 +409,7 @@ async function main() {
     const runtimeConfig = {
       ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
       ...(userIdentity ? { userIdentity } : {}),
+      hostProduct,
     };
 
     // Reserve the transcript before applying the flush delay. Earlier Stop
@@ -422,7 +425,7 @@ async function main() {
     if (!lockAcquired) {
       logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
       await spawnDelayedRetry(
-        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity, hostProduct,
       );
       return;
     }
@@ -521,7 +524,7 @@ async function main() {
       if (committed === false) {
         logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
         await spawnDelayedRetry(
-          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity, hostProduct,
         );
       }
     } finally {
@@ -535,7 +538,10 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId, cwd, extra } = payload;
+  const { transcriptPath, sessionId, cwd, extra, parentBusinessInfo } = payload;
+  // Product identity belongs to this Stop, not to the underlying CLI runtime.
+  // Do not persist it by session: the same native session can resume in a CLI.
+  const hostProduct = agentId === 'qoder' && parentBusinessInfo?.product === 'app' ? 'app' : undefined;
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   if (sessionId) {
@@ -553,6 +559,7 @@ async function main() {
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),
+    hostProduct,
   };
   const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
   if (!range) return;
@@ -589,6 +596,7 @@ async function main() {
             cwd,
             lockedRange.endLine,
             userIdentity,
+            hostProduct,
           );
         }
       }
@@ -609,7 +617,7 @@ async function main() {
     // Do not suppress a spawn just because a retry currently owns the lock:
     // the new Stop may belong to a distinct queued Turn. The child waits, then
     // re-reads the cursor and either commits that Turn or proves it is a duplicate.
-    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity, hostProduct);
     return;
   }
 
@@ -618,7 +626,7 @@ async function main() {
   // blocking the foreground hook or dropping it.
   if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
     logDebug(agentId, `Stop deferred: transcript lock held for ${transcriptPath}`);
-    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity, hostProduct);
     return;
   }
   try {
@@ -640,7 +648,7 @@ async function main() {
     );
     if (committed === false) {
       logDebug(agentId, `Stop commit failed; rescheduling ${transcriptPath}`);
-      await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
+      await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity, hostProduct);
     }
   } finally {
     releaseRetryLock(transcriptPath);
@@ -655,6 +663,7 @@ async function spawnDelayedRetry(
   cwd,
   triggerEndLine,
   userIdentity,
+  hostProduct,
 ) {
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
@@ -667,6 +676,7 @@ async function spawnDelayedRetry(
     '--session', sessionId,
     '--trigger-end-line', String(triggerEndLine),
     ...(cwd ? ['--cwd', cwd] : []),
+    ...(hostProduct === 'app' ? ['--host-product', 'app'] : []),
   ];
   const child = spawn(nodebin, spawnArgs, {
     detached: true,
@@ -1257,7 +1267,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       row => row.type === 'assistant' || isToolResult(row),
     );
     const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    return finalizeRecords(legacyRecords, cwd, runtimeConfig?.userIdentity);
+    return finalizeRecords(legacyRecords, cwd, runtimeConfig);
   }
 
   // For each LLM call boundary, produce events
@@ -1511,16 +1521,23 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  return finalizeRecords(records, cwd, runtimeConfig?.userIdentity);
+  return finalizeRecords(records, cwd, runtimeConfig);
 }
 
-function finalizeRecords(records, cwd, userIdentity) {
+function finalizeRecords(records, cwd, runtimeConfig) {
+  const userIdentity = runtimeConfig?.userIdentity;
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
     if (userIdentity?.name) record['user.name'] = userIdentity.name;
     if (userIdentity?.email) record['user.email'] = userIdentity.email;
     Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+    // Keep parsing/attachments/turn semantics on the CLI path, then label the
+    // emitted product. Only explicit host evidence overrides CLI identity.
+    if (runtimeConfig?.hostProduct === 'app' && record['gen_ai.agent.type'] === 'qoder-cli') {
+      record['gen_ai.agent.type'] = 'qoder-app';
+      record['gen_ai.framework'] = 'qoder-app';
+    }
   }
   return records;
 }
