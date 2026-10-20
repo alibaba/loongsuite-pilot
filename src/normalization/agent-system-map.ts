@@ -11,6 +11,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qoder-cli-hook': 'qoder',
   'cursor': 'cursor',
   'cursor-hook': 'cursor',
+  'cursor-cli': 'cursor',
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
   'mimo-code': 'mimo-code',
