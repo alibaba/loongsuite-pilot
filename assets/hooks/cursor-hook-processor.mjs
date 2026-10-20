@@ -18,6 +18,7 @@ import { pathToFileURL } from 'node:url';
 import { filterWorkspaceRecords } from './shared/workspace-privacy.mjs';
 import { decodePayload } from './shared/decode-payload.mjs';
 import {
+  applyHookContentPolicy,
   hashJson,
   loadHookRuntimeConfig,
   sanitizeObject,
@@ -148,7 +149,7 @@ function compactJournal(allEvents, consumedConversationIds) {
 }
 
 function applyPolicy(record, runtimeConfig) {
-  return sanitizeObject(record) || {};
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
 function cloneJson(value) {

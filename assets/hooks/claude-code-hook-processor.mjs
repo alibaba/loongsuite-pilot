@@ -39,6 +39,7 @@ import {
   toJsonValue,
   loadHookRuntimeConfig,
   resolveUserId,
+  applyHookContentPolicy,
 } from './agent-event-normalizer.mjs';
 
 import {
@@ -721,7 +722,8 @@ function sortRecordsByTimestamp(records) {
 }
 
 function cleanRecords(records, runtimeConfig) {
-  return records.map((record) => sanitizeObject(record) || record);
+  return records.map((record) =>
+    applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig));
 }
 
 function extendBackgroundAgentResult(records, link, childRecords) {

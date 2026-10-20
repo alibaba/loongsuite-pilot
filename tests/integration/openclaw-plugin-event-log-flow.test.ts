@@ -31,6 +31,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
       userId: 'plugin-config-user',
+      agents: { openclaw: { captureMessageContent: true } },
     }));
 
     const previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -114,7 +115,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     });
     const flusher = new MockFlusher();
     const manager = new InputManager();
-    manager.setAgentsConfig({ [ClientType.OpenClaw]: {} });
+    manager.setAgentsConfig({ [ClientType.OpenClaw]: { captureMessageContent: true } });
     manager.setConfiguredUserId('collector-config-user');
     manager.setUserId('collector-fallback-user');
     manager.setFlusher(flusher);

@@ -694,6 +694,7 @@ describe('Orchestrator', () => {
     const agentsWantMultimodal = {
       codex: {
         enabled: true,
+        captureMessageContent: true,
         multimodal: { uploadMode: 'input' as const },
       },
     };

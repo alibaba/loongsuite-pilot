@@ -14,6 +14,7 @@ import {
   resolveCursorModel,
   resolveUserId,
   timestampToUnixNanos,
+  applyHookContentPolicy,
   sanitizeObject,
   toJsonValue,
   parseMaybeJson,
@@ -1170,7 +1171,7 @@ function inferProvider(model) {
 }
 
 function applyPolicy(record, runtimeConfig) {
-  return sanitizeObject(record) || {};
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
 const SUBAGENT_TOOL_NAMES = new Set(['Subagent', 'Task']);

@@ -22,6 +22,7 @@ import {
   updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
+  applyHookContentPolicy,
   inferProviderName,
   resolveUserId,
   sanitizeObject,
@@ -369,7 +370,7 @@ function buildRecord(fields, sourceRow, runtimeConfig, cwd, eventKey) {
   if (cwd) record['agent.qwenworkcn.cwd'] = cwd;
   if (sourceRow?.type) record['agent.qwenworkcn.raw_type'] = sourceRow.type;
   if (sourceRow?.version) record['agent.qwenworkcn.version'] = sourceRow.version;
-  return sanitizeObject(record) || null;
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || null;
 }
 
 function blocksOf(row) {

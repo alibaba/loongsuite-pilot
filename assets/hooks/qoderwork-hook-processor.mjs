@@ -31,6 +31,7 @@ import {
   inferProviderName,
   resolveUserId,
   timestampToUnixNanos,
+  applyHookContentPolicy,
   sanitizeObject,
   getStringValue,
 } from './agent-event-normalizer.mjs';
@@ -527,7 +528,7 @@ function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
     if (sourceRow.version) record['agent.qoderwork.version'] = sourceRow.version;
     if (sourceRow.agentId) record['agent.qoderwork.agentId'] = sourceRow.agentId;
   }
-  return sanitizeObject(record) || null;
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || null;
 }
 
 function isToolResult(row) {

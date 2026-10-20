@@ -296,7 +296,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     const desired = {
       enabled: true,
       hooks: { allowConversationAccess: true },
-      config: { retainedSetting: false },
+      config: { captureMessageContent: false },
     };
     await strategy.deploy(openclawDef());
     expect(await strategy.needsDeploy(openclawDef({ entryConfig: desired }))).toBe(true);
@@ -330,7 +330,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
           'loongsuite-pilot-openclaw': {
             enabled: true,
             hooks: { allowConversationAccess: false, customHookSetting: 'keep-me' },
-            config: { retainedSetting: false },
+            config: { captureMessageContent: false },
           },
         },
       },
@@ -342,7 +342,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(plugins.entries['loongsuite-pilot-openclaw']).toEqual({
       enabled: true,
       hooks: { allowConversationAccess: true, customHookSetting: 'keep-me' },
-      config: { retainedSetting: false },
+      config: { captureMessageContent: false },
     });
   });
 
