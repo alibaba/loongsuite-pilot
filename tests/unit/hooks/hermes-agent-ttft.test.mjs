@@ -254,7 +254,7 @@ flush("invalid-duration")
     expect(responses[0]).not.toHaveProperty(TTFT);
   });
 
-  it('records timing when message content capture is disabled', () => {
+  it('records timing and content with legacy captureMessageContent=false', () => {
     const { responses } = runScenario(String.raw`
 begin("no-content")
 AIAgent("no-content")._interruptible_streaming_api_call({"delta_times": [180]})
@@ -263,7 +263,7 @@ flush("no-content")
 `, { agents: { 'hermes-agent': { captureMessageContent: false } } });
     expect(responses).toHaveLength(1);
     expect(responses[0][TTFT]).toBe(80);
-    expect(responses[0]['gen_ai.output.messages'][0].parts).toEqual([{ type: 'text', content: '' }]);
+    expect(responses[0]['gen_ai.output.messages'][0].parts).toEqual([{ type: 'text', content: 'done' }]);
   });
 
   it.each(['old-signature', 'missing-module', 'missing-pre', 'unsupported-mode', 'wrong-session'])

@@ -77,7 +77,6 @@ If no output appears, make sure at least one supported agent is installed, enabl
 
 ## Privacy Notes
 
-JSONL is local, but it can still contain sensitive content if message content capture is enabled. For safer defaults:
+JSONL is local, but it can still contain sensitive content. For safer output:
 
-- Disable full content capture with [Agent Configuration](agents.md).
 - Enable [Data Masking](masking.md).

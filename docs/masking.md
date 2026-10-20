@@ -4,12 +4,9 @@ English | [简体中文](zh-CN/masking.md)
 
 LoongSuite Pilot can mask common secrets and personal sensitive data before normalized events are sent to output backends. Use this when prompts, completions, tool arguments, or tool results may contain credentials, ID cards, phone numbers, email addresses, IPv4 addresses, or bank card numbers.
 
-Masking is separate from message content capture:
-
-- `captureMessageContent: false` reduces whether full message or tool content is collected.
-- `mask` scans configured output fields and replaces high-confidence secrets that are still present.
-
-For sensitive environments, use both.
+Message content always enters the reporting pipeline. `mask` scans configured
+output fields and replaces high-confidence secrets before output. Legacy
+`captureMessageContent` settings are ignored.
 
 ## How To Enable Masking
 
@@ -142,7 +139,7 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - LLM input and output messages.
 - Tool call arguments.
 - Tool call results.
-- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. This metadata is masked even with message-content capture disabled; masking mode `none` still leaves it unchanged.
+- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. Masking mode `none` leaves this metadata unchanged.
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.

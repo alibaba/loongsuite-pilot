@@ -70,6 +70,7 @@ describe('InputManager', () => {
   });
 
   it('filters excluded sessions before identity rewriting and every output destination', async () => {
+    manager.setAgentsConfig({ [ClientType.Qoder]: { captureMessageContent: false } });
     manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
     const input = new StubInput('privacy');
     manager.registerInput(input as any);
@@ -367,8 +368,8 @@ describe('InputManager', () => {
     });
   });
 
-  describe('agent content policy', () => {
-    it('deletes sensitive fields before dispatch when message content capture is disabled', async () => {
+  describe('legacy message content config', () => {
+    it('preserves content when legacy captureMessageContent is false', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -386,12 +387,10 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched).not.toHaveProperty('input.messages');
-      expect(dispatched).not.toHaveProperty('tool.result.payload');
-      expect(dispatched).not.toHaveProperty('content');
-      expect(dispatched).not.toHaveProperty('inlineDiffMessage');
-      expect(dispatched).not.toHaveProperty('agent.content');
-      expect(dispatched).not.toHaveProperty('agent.inline_diff_message');
+      expect(dispatched['input.messages']).toEqual([{ role: 'user', content: 'secret prompt' }]);
+      expect(dispatched['tool.result.payload']).toEqual({ output: 'secret output' });
+      expect(dispatched.content).toBe('legacy secret');
+      expect(dispatched.inlineDiffMessage).toBe('legacy diff');
       expect(dispatched['gen_ai.agent.type']).toBe(ClientType.Cursor);
       expect(dispatched['event.name']).toBe('other');
     });
@@ -411,7 +410,7 @@ describe('InputManager', () => {
       expect(dispatched['input.messages']).toEqual([{ role: 'user', content: 'visible prompt' }]);
     });
 
-    it('applies policy by agent.type rather than input id', async () => {
+    it('ignores legacy config across every input for the agent', async () => {
       const hookInput = new StubInput('cursor-hook');
       const sqliteInput = new StubInput('cursor-sqlite');
       manager.registerInput(hookInput as any);
@@ -433,11 +432,11 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(flusher.batchCalls).toHaveLength(2);
-      expect(flusher.batchCalls[0][0]).not.toHaveProperty('input.messages');
-      expect(flusher.batchCalls[1][0]).not.toHaveProperty('input.messages');
+      expect(flusher.batchCalls[0][0]['input.messages']).toBeDefined();
+      expect(flusher.batchCalls[1][0]['input.messages']).toBeDefined();
     });
 
-    it('dispatches the same policy-applied entries to all child flushers', async () => {
+    it('dispatches content to all child flushers despite legacy config', async () => {
       const jsonl = new MockFlusher('jsonl');
       const sls = new MockFlusher('sls');
       const http = new MockFlusher('http');
@@ -458,7 +457,9 @@ describe('InputManager', () => {
 
       for (const child of [jsonl, sls, http]) {
         expect(child.batchCalls).toHaveLength(1);
-        expect(child.batchCalls[0][0]).not.toHaveProperty('output.messages');
+        expect(child.batchCalls[0][0]['output.messages']).toEqual([
+          { type: 'text', content: 'secret response' },
+        ]);
         expect(child.batchCalls[0][0]['gen_ai.agent.type']).toBe(ClientType.Cursor);
       }
     });
@@ -555,10 +556,11 @@ describe('InputManager', () => {
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });
 
-    it('drops message content when the qoder capture policy is off', async () => {
+    it('keeps blocked prompt content and masks it despite the legacy qoder opt-out', async () => {
       manager.setAgentsConfig({
         [ClientType.Qoder]: { captureMessageContent: false },
       });
+      manager.setMaskConfig({ mode: 'all', types: [] });
       const entry = buildBlockedQoderPromptEntry({
         agent: 'qodercli',
         event: 'UserPromptSubmit',
@@ -569,8 +571,8 @@ describe('InputManager', () => {
       await manager.flushPreparedEntries([entry]);
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched).not.toHaveProperty('gen_ai.input.messages');
-      expect(dispatched).not.toHaveProperty('gen_ai.input.messages_delta');
+      expect(dispatched).toHaveProperty('gen_ai.input.messages');
+      expect(JSON.stringify(dispatched)).toContain('[APIKEY_MASKED]');
       expect(JSON.stringify(dispatched)).not.toContain('sk-1234567890abcdefghijklmnop');
     });
   });
@@ -598,7 +600,7 @@ describe('InputManager', () => {
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });
 
-    it('applies content policy before mask when message content capture is disabled', async () => {
+    it('still masks content when legacy captureMessageContent is false', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -616,8 +618,10 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched).not.toHaveProperty('input.messages');
-      expect(JSON.stringify(dispatched)).not.toContain('[APIKEY_MASKED]');
+      expect(dispatched['input.messages']).toEqual([
+        { role: 'user', content: '[APIKEY_MASKED]' },
+      ]);
+      expect(JSON.stringify(dispatched)).toContain('[APIKEY_MASKED]');
       expect(JSON.stringify(dispatched)).not.toContain(apiKey);
     });
 
@@ -699,7 +703,7 @@ describe('InputManager', () => {
       expect(source['event.id']).toBe('input-other');
     });
 
-    it('does not generate agent.input after content policy removes input fields', async () => {
+    it('generates agent.input despite legacy captureMessageContent=false', async () => {
       const input = new StubInput('dual-write-content-policy');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -715,9 +719,13 @@ describe('InputManager', () => {
       await manager.stopAll();
 
       expect(flusher.batchCalls).toHaveLength(1);
-      expect(flusher.batchCalls[0]).toHaveLength(1);
-      expect(flusher.batchCalls[0][0]['event.name']).toBe('other');
-      expect(flusher.batchCalls[0][0]).not.toHaveProperty('gen_ai.input.messages_delta');
+      expect(flusher.batchCalls[0]).toHaveLength(2);
+      expect(flusher.batchCalls[0].map(entry => entry['event.name'])).toEqual([
+        'other',
+        'agent.input',
+      ]);
+      expect(flusher.batchCalls[0][0]['gen_ai.input.messages_delta']).toBeDefined();
+      expect(flusher.batchCalls[0][1]['gen_ai.input.messages_delta']).toBeDefined();
     });
 
     it('does not copy a non-input other event', async () => {

@@ -4,12 +4,7 @@
 
 LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密钥和个人敏感信息进行脱敏。适用于 Prompt、Completion、工具参数或工具结果中可能出现凭证、身份证、电话、邮箱、IPv4 或银行卡的场景。
 
-脱敏和消息内容采集是两层不同控制：
-
-- `captureMessageContent: false` 会减少是否采集完整消息或工具内容。
-- `mask` 会扫描已配置的输出字段，并替换仍然存在的高置信密钥。
-
-敏感环境建议两者同时使用。
+消息内容默认进入上报链路。`mask` 会在输出前扫描已配置的字段，并替换其中的高置信密钥；历史 `captureMessageContent` 配置会被忽略。
 
 ## 如何开启脱敏
 
@@ -139,7 +134,7 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - LLM 输入和输出消息。
 - 工具调用参数。
 - 工具调用结果。
-- OpenClaw 路由 key（`agent.openclaw.session_key`），其中可能包含渠道用户/群组标识。关闭消息内容采集时仍遵循脱敏规则；`mask.mode=none` 时保持原值。
+- OpenClaw 路由 key（`agent.openclaw.session_key`），其中可能包含渠道用户/群组标识；`mask.mode=none` 时保持原值。
 - 已知 Agent 内容字段，例如 `agent.content`、`agent.inline_diff_message` 和部分 compact 内容字段。
 
 模型名、token 数、耗时、Git 分支、workspace 路径等稳定元数据不作为密钥内容字段扫描。
@@ -155,7 +150,7 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - AccessKey Secret 仅在识别到受支持的 AccessKey ID 后启动搜索，最多检查其后 1024 个字符；不要求出现 Secret 字段名。候选值为 20–60 个字符（最多计入两个末尾的 `=`），且同时包含大写字母、小写字母和数字。允许 `+`、`/`、`-`、`_`；空白、冒号、分号、逗号、引号、括号和中间的 `=` 会结束候选值。这是启发式筛选，附近符合条件的普通字符串也可能被脱敏。
 - 车牌、地址、公司名、职称和自定义键值不在本期范围。
 
-## 推荐隐私配置
+## 推荐脱敏配置
 
 敏感或团队统一管理的环境建议：
 
@@ -163,16 +158,11 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 {
   "mask": {
     "mode": "all"
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
   }
 }
 ```
 
-只有当分析确实需要完整 Prompt、Completion、工具参数或工具结果，并且下游存储已被批准时，才建议使用 `captureMessageContent: true`。
+启用消息内容上报前，应确认下游存储和访问权限符合团队的数据安全要求。
 
 ## 验证脱敏
 

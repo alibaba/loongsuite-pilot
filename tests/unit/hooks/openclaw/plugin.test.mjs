@@ -1203,26 +1203,14 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
-  it('redacts content before persistence while retaining token usage', async () => {
+  it('ignores legacy Pilot captureMessageContent=false', async () => {
     fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
       agents: { openclaw: { captureMessageContent: false } },
     }));
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
-    const sensitiveFields = [
-      'gen_ai.input.messages',
-      'gen_ai.input.messages_delta',
-      'gen_ai.output.messages',
-      'gen_ai.tool.call.arguments',
-      'gen_ai.tool.call.result',
-      'gen_ai.system_instructions',
-      'gen_ai.tool.definitions',
-      'agent.openclaw.persisted_message',
-      'agent.openclaw.last_assistant_message',
-    ];
-    for (const record of records) {
-      for (const field of sensitiveFields) expect(record[field]).toBeUndefined();
-    }
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
     const response = records.find((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(response['gen_ai.usage.input_tokens']).toBeGreaterThan(0);
     expect(response['gen_ai.usage.output_tokens']).toBeGreaterThan(0);
@@ -1246,13 +1234,13 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(configReads).toHaveLength(1);
   });
 
-  it('honors the OpenClaw plugin-level captureMessageContent=false setting', async () => {
+  it('ignores the legacy OpenClaw plugin-level captureMessageContent=false setting', async () => {
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
       pluginConfig: { captureMessageContent: false },
     });
-    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(false);
-    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(false);
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
   });
 
   it('writes the log directory and JSONL file with private permissions', async () => {
@@ -1394,7 +1382,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
-  it.each([true, false])('preserves privacy when content capture changes from %s while a response waits', async (capture) => {
+  it.each([true, false])('keeps buffered content when legacy capture changes from %s while a response waits', async (capture) => {
     const configPath = path.join(pilotDataDir, 'config.json');
     const config = enabled => JSON.stringify({ agents: { openclaw: { captureMessageContent: enabled } } });
     fs.writeFileSync(configPath, config(capture));
@@ -1410,7 +1398,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12 }, ctx);
     const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
     expect(responses).toHaveLength(1);
-    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(JSON.stringify(responses[0]['gen_ai.output.messages'])).toContain('private-sentinel');
     expect(responses[0]['gen_ai.response.time_to_first_token']).toBe(12_000_000);
     expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
   });
@@ -1506,7 +1494,7 @@ describe('subagent trace propagation', () => {
   });
 });
 
-it('keeps simultaneous spawns separate and recovers their identity after plugin restart with content off', async () => {
+it('keeps simultaneous spawns separate after plugin restart with legacy content-off config', async () => {
   delete process.env.LOONGSUITE_USER_ID;
   fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
   const h = registerPlugin(await loadPlugin());
@@ -1534,7 +1522,7 @@ it('keeps simultaneous spawns separate and recovers their identity after plugin 
     expect(child.length).toBeGreaterThan(0);
     expect(child.every(r => r.trace_id === call.trace_id && r.parent_span_id === call.span_id && r['user.id'] === `user-${i}`)).toBe(true);
   }
-  expect(JSON.stringify(rows)).not.toContain('secret-task');
+  expect(JSON.stringify(rows)).toContain('secret-task');
   const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
   expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
 });

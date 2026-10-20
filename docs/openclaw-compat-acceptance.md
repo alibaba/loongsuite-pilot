@@ -1,5 +1,9 @@
 # OpenClaw compatibility acceptance
 
+> Historical evidence notice: the reports below validate commits from before
+> `captureMessageContent` was retired. Their content-off results apply only to
+> those tested heads; current code ignores the legacy setting and reports content.
+
 ## Automatic entry follow-up — validation scope
 
 The follow-up on `fix/openclaw-auto-entry` removes mandatory `OPENCLAW_CLI_PATH`
@@ -38,8 +42,8 @@ CMS/XTrace SLS readback. Native sender on 3.8 remains out of scope.
   shell, package manager, procfs scan or runtime permission bootstrap.
   No Gateway reload/restart is introduced by this compatibility fix. Applying
   a new environment to an existing container may still require redeployment.
-- Legacy and modern `gen_ai.system_instructions` now use canonical text-part
-  arrays. Content-off still removes them.
+- Legacy and modern `gen_ai.system_instructions` use canonical text-part arrays
+  on the historical tested head.
 
 ### Exact target and execution
 

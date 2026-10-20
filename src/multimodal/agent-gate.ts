@@ -9,7 +9,6 @@ export function isAgentMultimodalEnabled(
   agent: AgentConfig,
 ): boolean {
   if (!agentId || !isMultimodalSupportedAgent(agentId)) return false;
-  if (agent.captureMessageContent === false) return false;
   const mode = agent.multimodal?.uploadMode;
   return !!mode && mode !== 'none';
 }

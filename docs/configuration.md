@@ -110,7 +110,6 @@ Minimal API Key reuse (Codex). The storage target is explicit and matches the SL
   "agents": {
     "codex": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": { "uploadMode": "all" }
     }
   }

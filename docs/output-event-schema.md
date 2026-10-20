@@ -26,8 +26,8 @@ During the compatibility period, an `other` carrying `gen_ai.input.messages` or
 The compatibility copy preserves the input content and context, but has a
 deterministically derived `event.id` and omits `gen_ai.turn.start` and
 `gen_ai.turn.end`; the legacy `other` remains the sole owner of Turn boundaries.
-Expansion runs after the content policy, so no `agent.input` is generated when
-that policy removes both canonical input fields. SLS, JSONL, and HTTP retain both
+Expansion runs after masking, so both events carry the same masked content.
+Records without canonical input fields do not generate `agent.input`. SLS, JSONL, and HTTP retain both
 events when a copy is generated. OTLP Trace conversion continues to consume the
 legacy `other` and excludes the compatibility copy, so the Span tree does not
 gain an empty STEP.
@@ -48,7 +48,8 @@ Required levels follow OpenTelemetry wording:
 - `Required` - always provided.
 - `Conditionally Required` - provided when the condition applies.
 - `Recommended` - provided when the source agent exposes the data.
-- `Opt-In` - optional and usually sensitive; enable only when needed.
+- `When available` - reported whenever the integration provides the field.
+- `Opt-In` - requires an independently enabled feature, such as multimodal upload.
 
 | Field | Type | Required Level | Description |
 |-------|------|----------------|-------------|
@@ -89,19 +90,19 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | Cache-read token cost in USD. |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | Cache-creation token cost in USD. |
 | `gen_ai.usage.total_cost` | double | Recommended | Total event cost in USD. |
-| `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
+| `gen_ai.input.messages` | json array | When available | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media; stripped when `captureMessageContent` is false. |
-| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | Summary of `uri` media on this event's `messages_delta` and `tool.call.result`. Same item shape as `gen_ai.input.multimodal_metadata`. Excludes cumulative `gen_ai.input.messages`; omitted when those surfaces have no media; stripped when `captureMessageContent` is false. |
-| `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media. |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | Summary of `uri` media on this event's `messages_delta` and `tool.call.result`. Same item shape as `gen_ai.input.multimodal_metadata`. Excludes cumulative `gen_ai.input.messages`; omitted when those surfaces have no media. |
+| `gen_ai.output.messages` | json array | When available | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
 | `gen_ai.output.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on output and tool calls. Same item shape as the input summary; omitted when those surfaces have no media. |
-| `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
+| `gen_ai.system_instructions` | json array | When available | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
-| `gen_ai.tool.call.arguments` | json | Opt-In | Tool call arguments. May contain sensitive content. |
-| `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
+| `gen_ai.tool.call.arguments` | json | When available | Tool call arguments. May contain sensitive content. |
+| `gen_ai.tool.call.result` | json | When available | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
@@ -118,7 +119,7 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
-Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
 ## OpenClaw Session Key
 
@@ -136,7 +137,7 @@ not automatically create an SLS index or a dedicated ARMS UI column.
 
 ## System Instructions
 
-`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It rides the existing message-content controls (Opt-In requirement level, per-agent `captureMessageContent`, and the masking pipeline), so it is omitted entirely when content capture is disabled.
+`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It enters the same masking pipeline as other message content before output.
 
 For `hermes` the prompt is read from the provider request body observed at `pre_api_request`, because `conversation_history` never replays system messages. Provider shapes are normalized to the same parts array: OpenAI-compatible `messages[]` entries with role `system` / `developer`, Responses API top-level `instructions`, Anthropic and Bedrock top-level `system` (string or block list), and Gemini `systemInstruction.parts[].text`. A blank or absent prompt yields no field.
 

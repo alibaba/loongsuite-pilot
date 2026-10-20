@@ -183,7 +183,7 @@ function buildTraces(spans, traceIdFilter) {
 function pass(id, detail) { return { id, status: 'pass', ...(detail ? { detail } : {}) }; }
 function error(id, detail, spanId, spanName) { return { id, status: 'error', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
 function warn(id, detail, spanId, spanName) { return { id, status: 'warn', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
-function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'captureMessageContent not enabled' }; }
+function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'message content not observed' }; }
 
 // ─── 5a. Structure Validation ───────────────────────────────────────────────
 
@@ -1084,6 +1084,7 @@ function buildReport(traces, inputFile, rules, severityFilter) {
       rulesVersion: rules.version,
       timestamp: new Date().toISOString(),
       input: path.basename(inputFile),
+      // Compatibility key: this now reports observed evidence, not a config switch.
       captureMessageContent: traces.some(t => t.hasMessageContent),
     },
     summary: {
@@ -1125,7 +1126,7 @@ function filterBySeverity(checks, severity) {
 
 function formatText(report) {
   const lines = [];
-  const mc = report.meta.captureMessageContent ? 'enabled' : 'disabled';
+  const mc = report.meta.captureMessageContent ? 'observed' : 'not observed';
   lines.push('');
   lines.push('╔' + '═'.repeat(62) + '╗');
   lines.push('║  GenAI Trace Validation Report' + ' '.repeat(32) + '║');
