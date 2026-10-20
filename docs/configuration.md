@@ -53,7 +53,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
-| `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | Poll interval in milliseconds for every agent collector. Default is `3000`. Overrides `listeners.*.pollInterval` and `QODER_ANALYTICS_POLL_INTERVAL`. Non-positive or non-numeric values are ignored. |
+| `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | Poll interval in milliseconds for every agent collector. Default is `3000`. Overrides `listeners.*.pollInterval` and `QODER_ANALYTICS_POLL_INTERVAL`. Only decimal integers from `1000` through `2147483647` are accepted; anything else is ignored. When this variable is unset, Wukong and Kiro CLI session keep their 60 second built-in interval. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 | `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all`, `none`, or `custom`. |
 | `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | Comma-separated interceptor types. Used only with `custom` mode. |
