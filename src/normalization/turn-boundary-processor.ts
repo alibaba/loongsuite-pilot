@@ -1,4 +1,5 @@
 import type { AgentActivityEntry } from '../types/index.js';
+import { isAgentAuditEvent } from './agent-audit-event.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 
 const MAX_TRACKED_TURNS = 4_096;
@@ -27,6 +28,7 @@ export class TurnBoundaryProcessor {
 
     const grouped = new Map<string, AgentActivityEntry[]>();
     for (const entry of entries) {
+      if (isAgentAuditEvent(entry)) continue;
       if (entry['gen_ai.agent.scope'] === 'subagent') continue;
       const key = turnKey(entry);
       if (!key) continue;
