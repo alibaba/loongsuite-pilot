@@ -38,6 +38,7 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private releaseCheckpointWait: (() => void) | null = null;
+  private releaseStartupWait: (() => void) | null = null;
   private _running = false;
   protected workspacePolicy = new WorkspacePolicy();
 
@@ -77,7 +78,12 @@ export abstract class BaseInput extends EventEmitter {
     try {
       await this.onStart();
       if (!this._running) return;
-      await this.runCycle();
+      const outputWait = new Promise<void>(resolve => { this.releaseStartupWait = resolve; });
+      const firstCycle = this.runCycle();
+      // Watchers may already have started a cycle during onStart. Readiness
+      // must not wait for its checkpoint, but cyclePromise still owns it.
+      if (this.releaseCheckpointWait) this.releaseStartupWait?.();
+      await Promise.race([firstCycle, outputWait]);
       if (!this._running) return;
       this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
     } catch (error) {
@@ -85,6 +91,8 @@ export abstract class BaseInput extends EventEmitter {
       // A concurrent stop owns cleanup after this startup settles.
       if (!this.stopPromise) await this.onStop();
       throw error;
+    } finally {
+      this.releaseStartupWait = null;
     }
   }
 
@@ -149,6 +157,7 @@ export abstract class BaseInput extends EventEmitter {
         this.stateStore.save(),
         new Promise<void>(resolve => {
           this.releaseCheckpointWait = resolve;
+          this.releaseStartupWait?.();
           if (!this._running && this.stateStore.waitingForOutput) resolve();
         }),
       ]);

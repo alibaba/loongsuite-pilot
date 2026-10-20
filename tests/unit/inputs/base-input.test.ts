@@ -128,6 +128,54 @@ describe('BaseInput', () => {
     expect(onStop).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])('finishes startup at an output hold without overlapping the pending first cycle (watcher=%s)', async earlyWatcher => {
+    let accept!: () => void;
+    const saving = new Promise<void>(resolve => { accept = resolve; });
+    let held = true;
+    Object.defineProperty(stateStore, 'waitingForOutput', { get: () => held });
+    let entered!: () => void;
+    const checkpoint = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saving; });
+    input.collectFn = vi.fn(async () => []);
+    if (earlyWatcher) {
+      input.onStartFn = async () => {
+        (input as unknown as { requestCollection(): void }).requestCollection();
+        await checkpoint;
+      };
+    }
+    let ready = false;
+    const start = input.start().then(() => { ready = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ready).toBe(true);
+      await start;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(input.collectFn).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      held = false;
+      accept();
+      await start;
+      await input.stop();
+    }
+  });
+
+  it('does not couple startup to a checkpoint that can acquire a later output hold', async () => {
+    let complete!: () => void;
+    const writing = new Promise<void>(resolve => { complete = resolve; });
+    let held = false;
+    Object.defineProperty(stateStore, 'waitingForOutput', { get: () => held });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => writing);
+    let ready = false;
+    const start = input.start().then(() => { ready = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ready).toBe(true);
+    held = true;
+    await start;
+    await input.stop();
+    complete();
+  });
+
   it('drains startup resources before stop and never collects after cancelled startup', async () => {
     let entered!: () => void;
     let release!: () => void;

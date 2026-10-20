@@ -117,7 +117,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       let started = false;
       const start = f.manager.startInput(f.input.id).then(() => { started = true; });
       await vi.waitFor(() => expect(attempts.length).toBeGreaterThanOrEqual(2));
-      expect(started).toBe(false);
+      expect(started).toBe(true);
       expect(await f.checkpoint()).toBe(0);
       expect((await f.events()).map(entry => entry['event.id'])).toEqual(['event-recovery']);
 
@@ -125,6 +125,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       // No explicit flush/restart: the existing HTTP timer must finish the same
       // outstanding acceptance and release BaseInput's pending state save.
       await within(start, 3000);
+      await f.store.save();
       expect(await f.checkpoint()).toBe(1);
       expect(accepted).toHaveLength(1);
       for (const entries of attempts) expect(entries).toEqual(attempts[0]);
@@ -158,11 +159,12 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       await vi.waitFor(async () => expect(await f.events()).toHaveLength(1));
       // Complete an actual failed socket attempt while the receiver is offline.
       await f.http.flush();
-      expect(started).toBe(false);
+      expect(started).toBe(true);
       expect(await f.checkpoint()).toBe(0);
 
       await listen(server, port);
       await within(start, 3000);
+      await f.store.save();
       expect(await f.checkpoint()).toBe(1);
       expect(accepted.flat().map(entry => entry['event.id'])).toEqual(['event-offline']);
       expect((await f.events()).map(entry => entry['event.id'])).toEqual(['event-offline']);
@@ -226,7 +228,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       let otherStarted = false;
       const otherStart = f.manager.startInput(other.id).then(() => { otherStarted = true; });
       await vi.waitFor(() => expect(f.store.getOffset(other.id)).toBe(1));
-      expect(otherStarted).toBe(false);
+      expect(otherStarted).toBe(true);
       expect(await f.checkpoint()).toBe(0);
       expect(await f.checkpoint(other.id)).toBe(0);
 
@@ -241,6 +243,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
 
       healthy = true;
       await within(codexStart, 3000);
+      await f.store.save();
       expect(await f.checkpoint()).toBe(1);
       expect(await f.checkpoint(other.id)).toBe(1);
     } finally {
@@ -262,9 +265,11 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
     try {
       f.input.enqueue('event-first-start');
       await within(f.manager.startInput(f.input.id));
+      await f.store.save();
       await within(f.manager.stopInput(f.input.id));
       f.input.enqueue('event-second-start');
       await within(f.manager.startInput(f.input.id));
+      await f.store.save();
       expect(await f.checkpoint()).toBe(2);
       const expected = ['event-first-start', 'event-second-start'];
       expect(accepted.flat().map(entry => entry['event.id'])).toEqual(expected);

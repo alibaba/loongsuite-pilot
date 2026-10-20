@@ -95,3 +95,9 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 停止输入/collector 时取消 HTTP 接收等待与在途请求，未确认的游标不推进；因取消终止的接收仍需 collector 重启从已持久化游标恢复，不以任意后续成功清除全局失败。不承诺无首次持久游标的新文件一定能靠重启补回，也不改变启动 baseline 策略。停机只解除对输出确认的等待，正在写盘的 checkpoint 及 collect/onStart/onStop 仍等待完成。
 
 本轮源码回归 38 个测试文件、582 项全部通过，typecheck 与完整构建通过。其中 6 项真实 localhost 集成覆盖 503 恢复、连接拒绝恢复、HTTP/JSONL 身份与重复检查、无响应请求停机、正常停启及非 Codex 输入受共享 checkpoint 阻塞时的停止。测试使用隔离输入和本地接收端，不构成真实 Agent、生产云端或 UI 验收。
+
+## 首轮输出与启动就绪
+
+输入启动等待 `onStart` 和首轮采集完成，到 checkpoint 保存阶段即视为资源就绪，不等待首轮数据的远端 ACK 或保存完成。因此 `await start()` 不代表数据已持久接收；需要确认落盘时显式等待 `StateStore.save()`。首轮保存仍由原 `cyclePromise` 持有，轮询/文件唤醒复用该周期，checkpoint 仍等待实际输出确认。停止时仍排空采集和实际写盘；没有改变发现服务的串行架构、队列或配置。此边界也覆盖另一输入在保存期间才加入共享输出等待的情况。
+
+此启动边界补充最终回归：39 个测试文件、587 项通过，typecheck 和完整构建通过。包含首轮输出 hold、onStart 期间 watcher 已启动采集、晚到共享 hold、正常写盘停机排空，以及真实发现服务在 503/挂起 HTTP 下的启动与停止。
