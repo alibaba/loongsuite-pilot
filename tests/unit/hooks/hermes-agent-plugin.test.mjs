@@ -339,10 +339,18 @@ class Context:
 
 ctx = Context()
 module.register(ctx)
+from concurrent.futures import ThreadPoolExecutor
+workers = {}
 for line in events_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
-    ctx.hooks[event["hook"]](**event["payload"])
-print(json.dumps(sorted(ctx.hooks)))
+    if event.get("thread"):
+        worker = workers.setdefault(event["thread"], ThreadPoolExecutor(max_workers=1))
+        worker.submit(ctx.hooks[event["hook"]], **event["payload"]).result()
+    else:
+        ctx.hooks[event["hook"]](**event["payload"])
+for worker in workers.values():
+    worker.shutdown()
+print(json.dumps({"hooks": sorted(ctx.hooks), "activeTurns": sum(len(state["turns"]) for state in module._SESSIONS.values()), "sessions": len(module._SESSIONS)}))
 `;
   const env = {
     ...process.env,
@@ -365,7 +373,7 @@ print(json.dumps(sorted(ctx.hooks)))
     encoding: 'utf8',
   });
   expect(run.status, run.stderr).toBe(0);
-  const hooks = JSON.parse(run.stdout.trim());
+  const { hooks, activeTurns, sessions } = JSON.parse(run.stdout.trim());
   const logDir = path.join(root, 'logs', 'hermes-agent');
   if (!expectLogFile) {
     return { hooks, records: [], raw: '', root, logDir, stderr: run.stderr };
@@ -376,7 +384,7 @@ print(json.dumps(sorted(ctx.hooks)))
     .trim()
     .split('\n')
     .map(line => JSON.parse(line));
-  return { hooks, records, raw: JSON.stringify(records), root, logDir, stderr: run.stderr };
+  return { hooks, records, activeTurns, sessions, raw: JSON.stringify(records), root, logDir, stderr: run.stderr };
 }
 
 function activeSessionEvictionEvents() {
@@ -429,6 +437,115 @@ afterEach(() => {
 });
 
 describe('Hermes Agent native plugin', () => {
+  it.each([[true, true], [false, true], [true, false], [true, 'legacy-thread']])('isolates overlapping turns in one IM session (capture=%s, observer=%s)', (captureMessageContent, observerIds) => {
+    // Synthetic payloads follow the observed foreground/background hook interleaving.
+    const makeTurn = (label, sender) => observerV1Turn()
+      .filter(event => !['on_session_start', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll('probe-sender', sender)
+          .replaceAll('approved files', `${label} files`)
+          .replaceAll('call_fixture_001', `call_${label}`)
+          .replaceAll('api-request-', `${label}-api-`));
+        if (observerIds === true) payload.turn_id = label;
+        else delete payload.turn_id;
+        payload.task_id = label;
+        payload.platform = 'dingtalk';
+        if (observerIds === 'legacy-thread' && (event.hook.includes('llm') || event.hook === 'on_session_end')) delete payload.task_id;
+        return { hook: event.hook, payload, ...(observerIds === 'legacy-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground', 'im-user-A');
+    const background = makeTurn('background', '');
+    // Foreground API is in flight when background pre_llm_call arrives.
+    const events = [...foreground.slice(0, 2), ...background.slice(0, 2),
+      ...foreground.slice(2),
+      // A duplicate finish for the completed foreground must not end background.
+      foreground.at(-1), ...background.slice(2)];
+    const { records } = replay(events, { configUser: '', captureMessageContent });
+    expect(records).toHaveLength(12);
+    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', os.hostname()]]) {
+      const own = records.filter(record => record['gen_ai.turn.id'] === label);
+      expect(own).toHaveLength(6);
+      expect(new Set(own.map(record => record.trace_id)).size).toBe(1);
+      expect(own.every(record => record['user.id'] === sender)).toBe(true);
+      expect(own.filter(record => record['event.name'] === 'llm.request')
+        .map(record => record['gen_ai.request.id'])).toEqual([`${label}-api-1`, `${label}-api-2`]);
+      const input = JSON.stringify(own.find(record => record['event.name'] === 'llm.request')['gen_ai.input.messages']);
+      expect(input).toContain(`${label} files`);
+      expect(own.find(record => record['event.name'] === 'tool.call')['gen_ai.tool.call.id']).toBe(`call_${label}`);
+    }
+    expect(new Set(records.map(record => record.trace_id)).size).toBe(2);
+  });
+
+  it.each([
+    ['same-thread', 'on_session_end', 'none'],
+    ['cross-thread', 'on_session_end', 'none'],
+    ['same-thread', 'on_session_finalize', 'none'],
+    ['cross-thread', 'on_session_finalize', 'none'],
+    ['same-thread', 'on_session_end', 'stale-turn'],
+    ['same-thread', 'on_session_end', 'stale-task'],
+  ])('preserves pending background tools and response across %s %s (%s)', (threadMode, hook, identity) => {
+    const makeTurn = label => firstTurn()
+      .filter(event => !['on_session_start', 'on_session_end', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll(TURN_ONE, label)
+          .replaceAll('call_fixture_001', `call_${label}`));
+        // Same-thread cases leave observer IDs absent so stale tagged ends
+        // cannot adopt legacy turns; cross-thread cases use current observer IDs.
+        if (threadMode === 'cross-thread') payload.turn_id = label;
+        if (event.hook.includes('llm')) payload.task_id = label;
+        return { hook: event.hook, payload, ...(threadMode === 'cross-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground');
+    const background = makeTurn('background');
+    const pending = background.findIndex(event => event.hook === 'post_tool_call');
+    const end = {
+      hook,
+      payload: { session_id: SESSION_ID,
+        ...(identity === 'stale-turn' ? { turn_id: 'completed-foreground' } : {}),
+        ...(identity === 'stale-task' ? { task_id: 'completed-foreground' } : {}),
+      },
+      ...(threadMode === 'cross-thread' ? { thread: 'foreground' } : {}),
+    };
+    const { records, activeTurns, sessions } = replay([
+      ...foreground.slice(0, 3), ...background.slice(0, pending),
+      ...foreground.slice(3), end, end, ...background.slice(pending),
+    ]);
+    expect(activeTurns).toBe(0);
+    if (hook === 'on_session_finalize') expect(sessions).toBe(0);
+    expect(records).toHaveLength(12);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(12);
+    const own = records.filter(record => record['gen_ai.turn.id'] === 'background');
+    expect(own).toHaveLength(6);
+    expect(own.find(record => record['event.name'] === 'tool.result')['gen_ai.tool.call.result'])
+      .toMatchObject({ output: '17 /etc/hosts\n11 /etc/shells\n28 total', exit_code: 0 });
+    expect(JSON.stringify(own.filter(record => record['event.name'] === 'llm.response')))
+      .toContain('The files have 17 and 11 lines, for a total of 28.');
+  });
+
+  it.each(['turn_id', 'task_id'])('uses exact %s to end a failed turn in an overlapping session', idKey => {
+    const failed = failedApiTurn().filter(event => !['on_session_end', 'on_session_finalize'].includes(event.hook));
+    const events = failed.map(event => ({ ...event, payload: { ...event.payload, [idKey]: 'failed' } }));
+    const other = { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, turn_id: 'other', task_id: 'other', user_message: 'other' } };
+    const end = { hook: 'on_session_end', payload: { session_id: SESSION_ID, [idKey]: 'failed' } };
+    const { records, activeTurns } = replay([...events, other, end, end]);
+    expect(activeTurns).toBe(1);
+    expect(records).toHaveLength(2);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records.find(record => record['event.name'] === 'llm.response')['error.type']).toBeTruthy();
+  });
+
+  it('flushes completed APIs once at process exit without inventing unfinished API results', () => {
+    const turn = firstTurn();
+    const events = turn.slice(0, turn.findIndex(event => event.hook === 'post_tool_call'));
+    const { records } = replay([...events,
+      { hook: 'on_session_finalize', payload: { session_id: SESSION_ID } },
+      { hook: 'pre_api_request', payload: { ...apiPayload('unfinished', 1), turn_id: 'unfinished' } },
+    ]);
+    expect(records.map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+  });
+
   it('registers all native callbacks and emits the canonical six-event tool turn', () => {
     const { hooks, records } = replay(firstTurn(), {
       pilotEnvUser: 'pilot-env-user',
@@ -900,12 +1017,13 @@ describe('Hermes Agent native plugin', () => {
   it('flushes completed API records before evicting an active session', () => {
     const { records } = replay(activeSessionEvictionEvents());
 
-    expect(records.map(record => record['event.name'])).toEqual([
-      'llm.request',
-      'llm.response',
-    ]);
-    expect(records.every(record =>
-      record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    // Eviction writes the first pair; interpreter exit drains the other 99
+    // completed APIs, but never the last session's unfinished request.
+    expect(records).toHaveLength(200);
+    expect(records.slice(0, 2).map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(records.slice(0, 2).every(record => record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(200);
+    expect(records.some(record => record['gen_ai.session.id'] === 'active-session-100')).toBe(false);
   });
 
   it('reports callback failures without exposing payload content', () => {

@@ -81,7 +81,7 @@ export class PluginInjectStrategy implements DeployStrategy {
   private lastOpenClawProblem?: string;
 
   constructor(dataDir: string, _pilotDir: string,
-    private readonly resolveOpenClaw: () => Promise<OpenClawHost | null> = resolveOpenClawHost) {
+    private readonly resolveOpenClaw?: () => Promise<OpenClawHost | null>) {
     this.dataDir = dataDir;
   }
 
@@ -91,12 +91,15 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private async resolveDeploymentHost(): Promise<OpenClawHost | null> {
-    const host = await this.resolveOpenClaw();
+    let detail: string | undefined;
+    const host = await (this.resolveOpenClaw ? this.resolveOpenClaw() : resolveOpenClawHost(process.env, process.cwd(), {
+      onProblem: message => { detail = message; },
+    }));
     if (isOpenClawHostBound(host)) {
       this.lastOpenClawProblem = undefined;
       return host;
     }
-    const problem = openClawBindingProblem(host);
+    const problem = openClawBindingProblem(host, detail);
     // Re-evaluate metadata on every check, but do not spam an unchanged warning.
     if (problem !== this.lastOpenClawProblem) logger.warn(problem);
     this.lastOpenClawProblem = problem;
@@ -183,7 +186,12 @@ export class PluginInjectStrategy implements DeployStrategy {
       } else {
         logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
       }
-      return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
+      return {
+        success: true,
+        agentId: def.id,
+        deployMode: 'plugin-inject',
+        pluginInjectConfigPath: path.resolve(configPath),
+      };
     } catch (err) {
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
@@ -231,6 +239,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       logger.error('undeploy failed', { agentId: def.id, error: String(err) });
       return false;
     }
+  }
+
+  /** First existing config path the inject/undeploy loop will actually touch. */
+  async resolveExistingConfigPath(config: PluginInjectConfig): Promise<string | null> {
+    return this.findConfigFile(config, false);
   }
 
   private async findConfigFile(
@@ -427,7 +440,9 @@ export class PluginInjectStrategy implements DeployStrategy {
       && !Array.isArray(entry)
       && this.isDeepSubset(entry as Record<string, unknown>, desiredEntry);
 
-    return hasPath && entryConfigured;
+    const allowed = !Array.isArray(plugins.allow) || plugins.allow.length === 0
+      || plugins.allow.includes(pluginId);
+    return hasPath && entryConfigured && allowed;
   }
 
   private openclawInject(
@@ -455,6 +470,14 @@ export class PluginInjectStrategy implements DeployStrategy {
     let paths = this.ensurePathsArray(load);
     const entries = this.ensureEntriesObject(plugins);
 
+    // A non-empty host allowlist otherwise silently disables the installed
+    // integration. Preserve all existing entries, including company plugins.
+    if (Array.isArray(plugins.allow) && plugins.allow.length > 0
+      && !plugins.allow.includes(config.pluginId)) {
+      plugins.allow.push(config.pluginId);
+      mutated = true;
+    }
+
     for (const legacyEntry of legacyEntries) {
       const legacySpec = typeof legacyEntry === 'string'
         ? legacyEntry
@@ -481,15 +504,14 @@ export class PluginInjectStrategy implements DeployStrategy {
       }
     }
 
-    if (paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
-      const before = paths.length;
+    const desiredPath = this.toOpenclawPath(resolvedSpec);
+    const ownedPaths = paths.filter((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId));
+    // Leave the existing canonical entry (and its ordering) untouched. Removing
+    // and re-adding it on every deploy rewrites a live Gateway's config needlessly.
+    if (ownedPaths.length !== 1 || ownedPaths[0] !== desiredPath) {
       load.paths = paths.filter((entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId));
       paths = load.paths as unknown[];
-      if ((load.paths as unknown[]).length !== before) mutated = true;
-    }
-
-    if (!paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
-      paths.push(this.toOpenclawPath(resolvedSpec));
+      paths.push(desiredPath);
       mutated = true;
     }
 

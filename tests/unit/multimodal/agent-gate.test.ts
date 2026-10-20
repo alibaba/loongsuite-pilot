@@ -18,14 +18,14 @@ describe('agent multimodal gate', () => {
 
   it('requires a supported agent id and non-none uploadMode', () => {
     const enabled = {
-      multimodal: { uploadMode: 'both' as const },
+      multimodal: { uploadMode: 'all' as const },
     };
     expect(isAgentMultimodalEnabled('codex', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('qoder', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('cursor', enabled)).toBe(false);
     expect(isAgentMultimodalEnabled('codex', {
       captureMessageContent: false,
-      multimodal: { uploadMode: 'both' },
+      multimodal: { uploadMode: 'all' },
     })).toBe(true);
     expect(isAgentMultimodalEnabled('codex', {
       multimodal: { uploadMode: 'none' },
@@ -36,15 +36,15 @@ describe('agent multimodal gate', () => {
   it('anyAgentMultimodalEnabled scans agents map with id capability check', () => {
     expect(anyAgentMultimodalEnabled({
       cursor: {
-        multimodal: { uploadMode: 'both' },
+        multimodal: { uploadMode: 'all' },
       },
       codex: {
-        multimodal: { uploadMode: 'both' },
+        multimodal: { uploadMode: 'all' },
       },
     })).toBe(true);
     expect(anyAgentMultimodalEnabled({
       cursor: {
-        multimodal: { uploadMode: 'both' },
+        multimodal: { uploadMode: 'all' },
       },
     })).toBe(false);
     expect(anyAgentMultimodalEnabled({})).toBe(false);

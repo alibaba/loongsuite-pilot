@@ -2,7 +2,26 @@
 
 English | [简体中文](zh-CN/agents.md)
 
-Use this guide to choose which AI coding agents Pilot should collect from and whether sensitive message content should be captured.
+Use this guide to choose which AI coding agents Pilot should collect from and configure collection and masking.
+
+## Hermes TTFT
+
+For Hermes OpenAI-compatible streaming chat completions, Pilot records
+`gen_ai.response.time_to_first_token` in nanoseconds, from `pre_api_request`
+to Hermes' first non-empty text, reasoning, or tool-name delta. Role-only and
+usage frames do not count. Timing is measured independently of message content.
+
+This uses Hermes' native `on_first_delta` callback (verified with Hermes 0.19.0).
+Older runtimes without that callback, other API modes, non-streaming responses,
+and requests without an observed first output omit TTFT. Total API duration is
+never used as a substitute. Restart the Hermes process after updating the plugin.
+
+## Hermes concurrent conversations
+
+Foreground conversations and background skill reviews can share a session. Pilot
+keeps their identity, input and model/tool calls separate by turn/task identity.
+Background reviews without a native sender ID retain the configured identity or
+hostname fallback; they do not inherit the last IM user in the session.
 
 ## Supported Agent IDs
 
@@ -15,18 +34,18 @@ type differences are called out in the notes.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
-| Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
-| DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. |
-| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. |
+| Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. |
+| DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). |
+| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. Detection and hook config follow Grok's `GROK_HOME` (default `~/.grok`). |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
 | OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.3.8 or later. Automatic legacy/modern adaptation; model-call timing is inferred before 2026.5.12. |
 | OpenCode | `opencode` | Plugin injection. |
-| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
+| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. Detection and `settings.json` follow Pi's `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
-| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
+| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; emitted records use `qoder-idea`. |
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
@@ -47,10 +66,11 @@ best-effort wakeup and is not required for directory discovery.
 
 ## Grok Build Collection And Lifecycle
 
-Pilot detects Grok Build from `~/.grok` and installs four fail-open hooks in
-`~/.grok/hooks/loongsuite-pilot.json`: `stop`, `stop_failure`,
-`user_prompt_submit`, and `session_end`. Subagent hooks are intentionally not
-installed or collected.
+Pilot detects Grok Build from Grok's `GROK_HOME` (default `~/.grok`) and
+installs four fail-open hooks in `$GROK_HOME/hooks/loongsuite-pilot.json`:
+`stop`, `stop_failure`, `user_prompt_submit`, and `session_end`. Subagent
+hooks are intentionally not installed or collected. `GROK_WORKSPACE_DIR` is
+the workspace, not the Agent home.
 
 Each completed turn is reconstructed from three Grok-owned JSONL sources:
 
@@ -58,7 +78,7 @@ Each completed turn is reconstructed from three Grok-owned JSONL sources:
   arguments, tool results, and the system instruction.
 - Session `updates.jsonl` provides the real prompt ID, turn terminal state,
   cancellation or failure, and tool status.
-- `~/.grok/logs/unified.jsonl` provides model timing and token usage plus tool
+- `$GROK_HOME/logs/unified.jsonl` provides model timing and token usage plus tool
   execution timing and success.
 
 Collection starts with the turn observed after installation and does not replay
@@ -73,20 +93,24 @@ party hooks.
 
 ## DeepSeek Harness Collection And Lifecycle
 
-Pilot resolves one exact Harness home for both detection and deployment. It
-keeps a previously deployed patch path for repair and cleanup, then checks an
-explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and — on
-Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
-`~/.dsh` and `dsh` command detection remain the fallback. Pilot does not scan
-temporary directories or assume a fixed non-default home; multiple distinct
-running homes found during initial discovery are reported as ambiguous instead
-of selecting one silently.
+Pilot resolves one exact Harness home for both detection and deployment.
+Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). It keeps a
+previously deployed patch path for repair and cleanup, then checks an
+explicit local-definition `patchPath`, the Pilot service's `DSH_HOME`, and —
+on Linux — the `DSH_HOME` of a unique same-user running DSH process. Standard
+`~/.dsh` and `dsh` command detection remain the fallback. `DSH_WORKSPACE_DIR`
+is the workspace, not the Harness home. Pilot does not scan temporary
+directories or assume a fixed non-default home; multiple distinct running
+homes found during initial discovery are reported as ambiguous instead of
+selecting one silently.
 
 When `dsh` is enabled, Pilot appends one marked, Pilot-owned block to the
 resolved `<DSH_HOME>/cordis.patch.yml`. That block loads the packaged plugin
 from `$PILOT_DATA/plugins/dsh/plugin.mjs`; bytes outside the marked block are
 preserved. Start a new DSH process after first enabling or reinstalling the
-integration so the host loads the current patch.
+integration so the host loads the current patch. Set `AGENTTEAMS_WORKER_NAME`
+and `AGENTTEAMS_INSTANCE_ID` on that DSH process. The plugin stamps the worker
+identity into the JSONL; the collector does not read its own environment later.
 
 The plugin writes append-only native events to
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory
@@ -110,26 +134,60 @@ omits TTFT instead of fabricating zero.
 Pilot supports OpenClaw releases `>=2026.3.8`. Before writing host configuration,
 Pilot reads the selected installation's `package.json` using in-process filesystem
 operations. No version argument is needed, and version discovery starts no CLI,
-shell, or package-manager subprocess. Before starting the installer and collector,
-set `OPENCLAW_CLI_PATH` to the **absolute actual Gateway launch entry** in their
-shared container/service environment. For `WORKDIR /app` and
-`node openclaw.mjs gateway ...`, set `OPENCLAW_CLI_PATH=/app/openclaw.mjs`.
-Both initial installation and every collector/watchdog restart must inherit it;
-a one-command shell assignment is not sufficient for a separately managed service.
-The bound entry supports executable symlinks (npm/pnpm), npm/pnpm global wrappers
-and enterprise bundle layouts. Runtime
-version labels (`OPENCLAW_SERVICE_VERSION`, `OPENCLAW_BUNDLED_VERSION`, and
-`OPENCLAW_VERSION`) alone never authorize installation or schema capabilities.
-Without this binding, PATH/cwd/bundle discovery only reports candidates: OpenClaw
-deployment is skipped with a diagnostic and configuration is left untouched,
-even when a candidate version is readable. Missing/relative/invalid entries and
-unknown/unsupported versions also remain non-ready and retryable; they never fall
-back to another installation. Existing configuration is not cleaned in that state.
-This is an intentional restriction on automatic deployment. An explicit entry
-selects its own metadata regardless of another installation on PATH. No version
-cache, process scan, runtime permission bootstrap, or Gateway reload is used.
-Configure the environment before the normal container deployment/start; applying
-new environment variables to an existing container may require redeployment.
+shell, or package-manager subprocess. `OPENCLAW_CLI_PATH` is optional.
+
+Entry resolution, in order:
+
+1. An explicitly supplied absolute `OPENCLAW_CLI_PATH` (override).
+2. `agents.openclaw.cliPath` saved in the Pilot config by the installer.
+3. Automatic discovery: the current OpenClaw package directory with
+   `openclaw.mjs`, the fixed `./openclaw` child package directory, the standard
+   `~/.openclaw-bundle` (or `OPENCLAW_BUNDLE_ROOT`)
+   nested installation, and the first OpenClaw command on PATH. Symlinks to the
+   same package are deduplicated. Distinct packages are ambiguous, even when
+   their versions match; Pilot does not guess which one runs the Gateway.
+
+For a source container with `WORKDIR /app` and `node openclaw.mjs gateway ...`,
+run installation from `/app`; no path/version variable is needed if discovery
+is unambiguous. `WORKDIR /app` with `node openclaw/openclaw.mjs gateway ...`
+is also supported: installation from `/app` checks `/app/openclaw/package.json`
+and `/app/openclaw/openclaw.mjs`. This is a fixed child lookup, not recursive
+directory discovery; both layouts still participate in ambiguity checks.
+If the parent's `package.json` is unreadable or malformed, Pilot still checks
+the fixed child only when the parent `openclaw.mjs` is confirmed absent. A valid
+child is required; this exception does not fall through to PATH alone. An
+unsupported parent OpenClaw, invalid child package, or uncertain directory
+access still blocks selection and reports the failing path.
+Shared installations exposed on PATH or in the standard bundle
+are also discovered without a manual override. The installer saves the selected
+entry, not the version, when OpenClaw is enabled. Collector/watchdog restarts
+read this config even when their PATH/cwd or service-manager environment differ.
+Custom Pilot config locations use `AGENT_DATA_COLLECTION_CONFIG`; the public
+installer passes its `--data-dir` config to the probe automatically.
+
+For conflicting or nonstandard installations, optionally supply the actual
+Gateway entry once during installation. Invalid explicit entries never fall back.
+Collector/watchdog also refuse to rebind an invalid persisted entry. Only the
+public installer enables recovery: if the saved entry is confirmed missing and
+automatic discovery finds exactly one valid installation, selecting OpenClaw
+(including accepting the default selection) saves the replacement. The probe
+reports the old path and never writes configuration itself. Existing but
+unsupported/unreadable entries and ambiguous candidates are not recovered.
+An implicit home Bundle whose fixed entry is confirmed missing is ignored as a
+leftover without deleting files; an existing unsupported/unreadable Bundle or
+invalid explicit `OPENCLAW_BUNDLE_ROOT` still blocks automatic selection.
+The resolver and collector use the same config-path/home expansion rules,
+including Windows `~\\` and the system home fallback.
+Unknown/unsupported versions remain
+non-ready and retryable. Version labels such as `OPENCLAW_SERVICE_VERSION`,
+`OPENCLAW_BUNDLED_VERSION`, and `OPENCLAW_VERSION` never authorize capabilities.
+On reinstall with automatic/default selection, a discovery miss preserves the
+existing OpenClaw enabled state and entry; an explicit `--agents`/menu selection
+can still disable it. Duplicate deployment leaves an already-correct config
+untouched. No process scan, version cache or Gateway reload command is used.
+Initial injection, explicit disable, or an actual compatibility/config change
+can still trigger the Gateway's own reload/restart: install before Gateway
+startup or arrange a maintenance window for these changes.
 
 | Host version | Adapter | `hooks.allowConversationAccess` |
 | --- | --- | --- |
@@ -277,10 +335,12 @@ Use `config.json` when you need to enable or disable individual agents:
 | Setting | Description |
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
-| `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `tool` / `output` / `both` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
+| `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
 Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+
+Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 
 ## Verify Agent Collection
 

@@ -26,6 +26,23 @@ Or, Environment variable:
 export LOONGSUITE_PILOT_MASK_MODE=all
 ```
 
+To emit recognizable star-masked previews, set:
+
+```json
+{
+  "mask": {
+    "mode": "all",
+    "replacementMode": "preview"
+  }
+}
+```
+
+or:
+
+```bash
+export LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview
+```
+
 Restart Pilot after changing config:
 
 ```bash
@@ -47,7 +64,7 @@ loongsuite-pilot restart
 
 | Type             | What It Covers                                        |
 | ---------------- | ----------------------------------------------------- |
-| `cloudAccessKey` | Alibaba Cloud, AWS, and Tencent-style access key IDs. |
+| `cloudAccessKey` | Alibaba Cloud, AWS, and Tencent-style access key IDs; after a valid ID is found, nearby likely Secret values are also checked. |
 | `apiKey`         | OpenAI-compatible and GitHub-style API keys.          |
 | `privateKey`     | PEM or OpenSSH private key blocks.                    |
 | `databaseUrl`    | Database URLs with embedded passwords.                |
@@ -76,25 +93,42 @@ export LOONGSUITE_PILOT_MASK_MODE=custom
 export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
-## Replacement Values
+## Replacement Formats
 
-When a rule matches, Pilot replaces the secret with a fixed marker:
+`mask.replacementMode` supports:
+
+| Mode | Behavior |
+| ---- | -------- |
+| `placeholder` | Default. Emit the existing fixed markers unchanged. |
+| `preview` | Keep the marker and append a star-masked preview inside `{}`. Previews are approximate and not unique. |
+
+An empty or invalid value falls back to `placeholder`. In `placeholder` mode, Pilot uses these fixed markers:
 
 
 | Mask Type        | Replacement Marker     |
 | ---------------- | ---------------------- |
-| `cloudAccessKey` | `[ACCESSKEY_MASKED]`   |
+| `cloudAccessKey` | `[ACCESSKEY_MASKED]` for IDs; `[ACCESSKEY_SECRET_MASKED]` for nearby likely Secret values. |
 | `apiKey`         | `[APIKEY_MASKED]`      |
 | `privateKey`     | `[PRIVATEKEY_MASKED]`  |
 | `databaseUrl`    | `[DATABASEURL_MASKED]` |
 | `idCard`         | `[IDCARD_MASKED]`      |
 | `phone`          | `[PHONE_MASKED]`       |
 | `email`          | `[EMAIL_MASKED]`       |
-| `ipAddress`      | `[IPADDRESS_MASKED]`   |
-| `bankCard`       | `[BANKCARD_MASKED]`    |
+| `ipAddress`      | `[IP_ADDRESS_MASKED]`  |
+| `bankCard`       | `[CREDIT_CARD_MASKED]` |
 
 
-The original value is not preserved in the emitted event.
+Preview examples:
+
+```text
+[PHONE_MASKED]{138****1234}
+[IP_ADDRESS_MASKED]{192.*.*.10}
+[DATABASEURL_MASKED]{mysql://user:****@db.example.com/orders}
+```
+
+Phone and bank-card values are normalized before fixed-position masking so common formatting variants produce the same preview. Database URL query strings and fragments are removed, passwords always become `****`, and IPv4 hosts use the IP preview rule.
+
+The complete original value is not preserved in the emitted event.
 
 ## What Gets Masked
 
@@ -105,6 +139,7 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - LLM input and output messages.
 - Tool call arguments.
 - Tool call results.
+- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. Masking mode `none` leaves this metadata unchanged.
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.
@@ -117,7 +152,8 @@ Stable metadata such as model names, token counts, durations, Git branch, and wo
 - IP covers IPv4 only. Version-shaped text such as `1.2.3.4` is also masked as IPv4.
 - Bank cards cover high-confidence UnionPay, Visa, Mastercard, AmEx, and Discover prefixes and must pass Luhn validation.
 - Phone and bank-card detection is format-based. An 11-digit numeric ID with the same shape, or a 15-19 digit business identifier that matches an issuer prefix and passes Luhn, can also be masked. For logs with many numeric business IDs, prefer `custom` mode and enable only the required types.
-- License plates, addresses, company names, job titles, custom key/value rules, and Secret Keys are outside this phase.
+- AccessKey Secret search starts only after a supported AccessKey ID is recognized and scans at most the following 1,024 characters. It does not require a Secret field label. Candidates must be 20–60 characters, including at most two trailing `=` characters, and contain uppercase letters, lowercase letters, and digits. The characters `+`, `/`, `-`, and `_` are allowed; whitespace, colons, semicolons, commas, quotes, brackets, and a middle `=` end a candidate. This is a heuristic, so a nearby ordinary string that meets the criteria may also be masked.
+- License plates, addresses, company names, job titles, and custom key/value rules are outside this phase.
 
 ## Verify Masking
 

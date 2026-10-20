@@ -9,6 +9,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +17,7 @@ import { spawn } from 'node:child_process';
 import {
   parseArgs,
   parseStdinPayload,
+  readStdin,
   logDebug,
   getLineRangeInfo,
   appendRowsToHistory,
@@ -23,6 +25,7 @@ import {
   loadHookRuntimeConfig,
   getErrorLogFile,
   HOOKS_DIR,
+  LOONGSUITE_PILOT_DATA_DIR,
   LOONGSUITE_PILOT_LOGS_BASE_DIR,
 } from './shared/hook-processor-base.mjs';
 import {
@@ -47,6 +50,173 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
   agentId: 'qoder',
   allowInvocationIdentity: true,
 });
+
+const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
+const QODER_HOME = path.join(os.homedir(), '.qoder');
+const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
+const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
+const QODER_CLI_IDENTITY_CACHE_FILE = path.join(
+  LOONGSUITE_PILOT_DATA_DIR,
+  'state',
+  'hooks',
+  'qoder-cli-user-identity.json',
+);
+
+function nonEmptyIdentityValue(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= MAX_USER_IDENTITY_VALUE_LENGTH ? trimmed : undefined;
+}
+
+export function extractUserIdentity(extra) {
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
+  const user = extra.user;
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return undefined;
+  const name = nonEmptyIdentityValue(user.name);
+  const email = nonEmptyIdentityValue(user.email);
+  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+}
+
+async function resolveQoderCliUserIdentity() {
+  const authPath = path.join(QODER_HOME, '.auth', 'user');
+  let authStat;
+  try {
+    authStat = fs.statSync(authPath);
+    if (!authStat.isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  let cached;
+  try {
+    cached = JSON.parse(fs.readFileSync(QODER_CLI_IDENTITY_CACHE_FILE, 'utf-8'));
+  } catch {
+    cached = undefined;
+  }
+  if (
+    cached?.schemaVersion === 1
+    && cached.authPath === authPath
+    && cached.mtimeMs === authStat.mtimeMs
+    && cached.size === authStat.size
+  ) {
+    if (Number.isFinite(cached.failedUntil)) {
+      if (Date.now() < cached.failedUntil) return undefined;
+    } else if (cached.loggedIn === false) {
+      return undefined;
+    } else {
+      const name = nonEmptyIdentityValue(cached.name);
+      const email = nonEmptyIdentityValue(cached.email);
+      return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    }
+  }
+
+  let executable;
+  try {
+    const cliDir = path.join(QODER_HOME, 'bin', 'qodercli');
+    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
+    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
+    executable = path.join(
+      cliDir,
+      `qodercli-${version}${process.platform === 'win32' ? '.exe' : ''}`,
+    );
+    fs.accessSync(executable, fs.constants.X_OK);
+    if (!fs.statSync(executable).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const timedOut = Symbol();
+  const child = spawn(executable, ['status', '--output', 'json'], {
+    windowsHide: true,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  let stdout = '';
+  let timer;
+  const output = new Promise(resolve => {
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('error', () => {});
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length <= 64 * 1024) return;
+      try { child.stdout?.destroy(); } catch { /* ignore */ }
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      resolve(undefined);
+    });
+    child.on('error', () => resolve(undefined));
+    child.on('close', (code) => {
+      if (code !== 0) return resolve(undefined);
+      try {
+        const parsed = JSON.parse(String(stdout || '').trim());
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return resolve(undefined);
+        if (parsed.logged_in === false) return resolve({ loggedIn: false });
+        if (parsed.logged_in !== true) return resolve(undefined);
+        const name = nonEmptyIdentityValue(parsed.username);
+        const email = nonEmptyIdentityValue(parsed.email);
+        resolve(name || email
+          ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
+          : undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  });
+  const status = await Promise.race([
+    output,
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve(timedOut), QODER_CLI_STATUS_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (status === timedOut) {
+    try { child.stdout?.destroy(); } catch { /* ignore */ }
+    if (child.pid && process.platform !== 'win32') {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+    } else {
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+    }
+  }
+
+  const temporary = `${QODER_CLI_IDENTITY_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(QODER_CLI_IDENTITY_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(temporary, JSON.stringify(status && status !== timedOut ? {
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      loggedIn: status.loggedIn,
+      ...(status.name ? { name: status.name } : {}),
+      ...(status.email ? { email: status.email } : {}),
+    } : {
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      failedUntil: Date.now() + QODER_CLI_STATUS_FAILURE_TTL_MS,
+    }), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(temporary, QODER_CLI_IDENTITY_CACHE_FILE);
+  } catch {
+    try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
+  }
+  if (!status || status === timedOut || !status.loggedIn) return undefined;
+  return {
+    ...(status.name ? { name: status.name } : {}),
+    ...(status.email ? { email: status.email } : {}),
+  };
+}
+
+async function readRetryUserIdentity() {
+  const value = await readStdin();
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    const name = nonEmptyIdentityValue(parsed?.name);
+    const email = nonEmptyIdentityValue(parsed?.email);
+    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // --- Per-transcript processing lock -----------------------------------------
 // Every Stop can create a detached retry. Serialize the complete read -> append
@@ -233,7 +403,11 @@ async function main() {
     const { agentId, logPrefix } = parseArgs();
     if (!transcriptPath || !sessionId) return;
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
-    const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+    const userIdentity = await readRetryUserIdentity();
+    const runtimeConfig = {
+      ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
+      ...(userIdentity ? { userIdentity } : {}),
+    };
 
     // Reserve the transcript before applying the flush delay. Earlier Stop
     // retries therefore retain commit order while later retries wait. The wait
@@ -247,7 +421,9 @@ async function main() {
     });
     if (!lockAcquired) {
       logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
-      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+      await spawnDelayedRetry(
+        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+      );
       return;
     }
     try {
@@ -344,7 +520,9 @@ async function main() {
       );
       if (committed === false) {
         logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
-        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+        await spawnDelayedRetry(
+          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
+        );
       }
     } finally {
       releaseRetryLock(transcriptPath);
@@ -357,18 +535,25 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId, cwd } = payload;
+  const { transcriptPath, sessionId, cwd, extra } = payload;
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   if (sessionId) {
     recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
   }
 
-  const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-
   // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
   // and the eventual processor input.
   const snapshot = readTranscriptSnapshot(transcriptPath);
+  const cliTranscript = agentId === 'qoder'
+    && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
+  const userIdentity = cliTranscript
+    ? await resolveQoderCliUserIdentity()
+    : (agentId === 'qoder' ? extractUserIdentity(extra) : undefined);
+  const runtimeConfig = {
+    ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
+    ...(userIdentity ? { userIdentity } : {}),
+  };
   const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
   if (!range) return;
 
@@ -396,13 +581,14 @@ async function main() {
         if (lockedRows.length === 0) {
           updateLineRecord(agentId, transcriptPath, sessionId, lockedRange.endLine);
         } else {
-          spawnDelayedRetry(
+          await spawnDelayedRetry(
             agentId,
             transcriptPath,
             sessionId,
             logPrefix,
             cwd,
             lockedRange.endLine,
+            userIdentity,
           );
         }
       }
@@ -423,7 +609,7 @@ async function main() {
     // Do not suppress a spawn just because a retry currently owns the lock:
     // the new Stop may belong to a distinct queued Turn. The child waits, then
     // re-reads the cursor and either commits that Turn or proves it is a duplicate.
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     return;
   }
 
@@ -432,7 +618,7 @@ async function main() {
   // blocking the foreground hook or dropping it.
   if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
     logDebug(agentId, `Stop deferred: transcript lock held for ${transcriptPath}`);
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     return;
   }
   try {
@@ -454,14 +640,22 @@ async function main() {
     );
     if (committed === false) {
       logDebug(agentId, `Stop commit failed; rescheduling ${transcriptPath}`);
-      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+      await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
     }
   } finally {
     releaseRetryLock(transcriptPath);
   }
 }
 
-function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine) {
+async function spawnDelayedRetry(
+  agentId,
+  transcriptPath,
+  sessionId,
+  logPrefix,
+  cwd,
+  triggerEndLine,
+  userIdentity,
+) {
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
   const spawnArgs = [
@@ -476,9 +670,16 @@ function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, t
   ];
   const child = spawn(nodebin, spawnArgs, {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['pipe', 'ignore', 'ignore'],
     env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
   });
+  if (child.stdin) {
+    await new Promise(resolve => {
+      const done = () => resolve();
+      child.stdin.once('error', done);
+      child.stdin.end(userIdentity ? JSON.stringify(userIdentity) : '', done);
+    });
+  }
   child.unref();
   logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
 }
@@ -919,20 +1120,24 @@ function hookEventOf(row) {
 
 export function buildLlmBoundaries(_progressEvents, contentEvents) {
   // Step 1: Group assistant blocks into LLM calls. Qoder transcript assistant
-  // rows do not carry message.id, and progress windows are hook timing signals,
-  // not reliable provider-call boundaries.
+  // rows do not consistently carry message.id, and progress windows are hook
+  // timing signals, not reliable provider-call boundaries.
   //
   // IDE transcript rows are content blocks, not one row per provider call. A
   // complete response may therefore be spread over thinking, text and multiple
   // tool_use rows, and parallel tool execution may even place an early
   // tool_result between later tool_use rows. The deterministic boundary is:
-  // after every tool_use in the current response has a matching tool_result,
-  // the next assistant row starts a new LLM call.
+  // a non-empty stop_reason marks the current provider response complete. The
+  // actual split is delayed until the next assistant row so any intervening
+  // tool_result remains in the completed response's transcript range. For old
+  // rows without stop_reason, matching every tool_use to a tool_result remains
+  // the structural fallback.
   const assistantGroups = [];
   let currentGroup = [];
   let currentGroupStartIndex = -1;
   let currentToolIds = new Set();
   let resolvedToolIds = new Set();
+  let currentResponseComplete = false;
 
   function flushGroup(contentEndIndex) {
     if (currentGroup.length > 0) {
@@ -946,6 +1151,7 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
     currentGroupStartIndex = -1;
     currentToolIds = new Set();
     resolvedToolIds = new Set();
+    currentResponseComplete = false;
   }
 
   for (let rowIndex = 0; rowIndex < contentEvents.length; rowIndex++) {
@@ -967,10 +1173,10 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
       currentToolIds.size > 0 &&
       [...currentToolIds].every(id => resolvedToolIds.has(id));
     // Progress hooks carry no tool id and third-party hooks share the same
-    // transcript. They cannot safely close an LLM group. If a transcript ever
-    // omits tool_result, conservatively retain later assistant rows in this
-    // group instead of inventing a boundary and an orphan request.
-    if (toolCycleComplete) flushGroup(rowIndex);
+    // transcript, so they cannot safely close an LLM group. stop_reason belongs
+    // to the provider response itself and preserves a following terminal
+    // response even when a cancelled/interrupted tool omitted tool_result.
+    if (currentResponseComplete || toolCycleComplete) flushGroup(rowIndex);
 
     if (currentGroup.length === 0) currentGroupStartIndex = rowIndex;
     currentGroup.push(row);
@@ -978,6 +1184,9 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
       if (block?.type === 'tool_use' && block.id) {
         currentToolIds.add(block.id);
       }
+    }
+    if (typeof row.message?.stop_reason === 'string' && row.message.stop_reason.length > 0) {
+      currentResponseComplete = true;
     }
   }
   flushGroup(contentEvents.length);
@@ -1013,33 +1222,31 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   // Find user prompt
   const userRow = contentEvents.find(isRealUserPrompt)
     || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const userText = userRow ? (extractUserTexts(userRow)[0] ?? '') : '';
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
   const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
 
   // User-hook event (ENTRY input)
-  if (userRow) {
-    const userText = extractUserText(userRow);
-    if (userText) {
-      const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
-      records.push({
-        'event.id': crypto.randomUUID(),
-        'event.name': 'other',
-        'gen_ai.turn.id': turnId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': agentType,
-        'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': userHookModel,
-        'user.id': userId,
-        'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
-        'agent.source': 'qoder-transcript-hook',
-        'agent.qoder.raw_type': 'user',
-        'agent.qoder.content_type': 'text',
-        time_unix_nano: timestampToUnixNanos(userRow.timestamp),
-        observed_time_unix_nano: observedTs,
-        ...cliAttachmentFields(agentType, userRow, allParsed),
-      });
-    }
+  if (userRow && userText) {
+    const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
+    records.push({
+      'event.id': crypto.randomUUID(),
+      'event.name': 'other',
+      'gen_ai.turn.id': turnId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.provider.name': providerName,
+      'gen_ai.request.model': userHookModel,
+      'user.id': userId,
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
+      'agent.source': 'qoder-transcript-hook',
+      'agent.qoder.raw_type': 'user',
+      'agent.qoder.content_type': 'text',
+      time_unix_nano: timestampToUnixNanos(userRow.timestamp),
+      observed_time_unix_nano: observedTs,
+      ...cliAttachmentFields(agentType, userRow, allParsed),
+    });
   }
 
   // If no assistant boundaries were detected, fall back to legacy behavior. The turn
@@ -1050,7 +1257,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       row => row.type === 'assistant' || isToolResult(row),
     );
     const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    return finalizeRecords(legacyRecords, cwd);
+    return finalizeRecords(legacyRecords, cwd, runtimeConfig?.userIdentity);
   }
 
   // For each LLM call boundary, produce events
@@ -1093,7 +1300,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     let inputDelta;
     let emitRequest = i > 0;
     if (i === 0 && userRow) {
-      inputDelta = [{ role: 'user', parts: buildUserMessageParts(extractUserText(userRow), contentEvents, agentType) }];
+      inputDelta = [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }];
       emitRequest = true;
     } else if (inputToolResults.length > 0) {
       inputDelta = [];
@@ -1304,13 +1511,15 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  return finalizeRecords(records, cwd);
+  return finalizeRecords(records, cwd, runtimeConfig?.userIdentity);
 }
 
-function finalizeRecords(records, cwd) {
+function finalizeRecords(records, cwd, userIdentity) {
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
+    if (userIdentity?.name) record['user.name'] = userIdentity.name;
+    if (userIdentity?.email) record['user.email'] = userIdentity.email;
     Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
   }
   return records;
@@ -1618,16 +1827,19 @@ function isControlUserRow(row) {
   return tags !== null && isControlEnvelopeSequence(tags, row);
 }
 
-function extractUserText(row) {
+function extractUserTexts(row) {
   const content = row.message?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === 'text') return block.text || '';
-      if (typeof block === 'string') return block;
+  if (typeof content === 'string') return content ? [content] : [];
+  if (!Array.isArray(content)) return [];
+  const texts = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      if (block) texts.push(block);
+      continue;
     }
+    if (block?.type === 'text' && block.text) texts.push(block.text);
   }
-  return '';
+  return texts;
 }
 
 function buildUserMessageParts(userText, contentEvents, agentType) {
@@ -1636,10 +1848,11 @@ function buildUserMessageParts(userText, contentEvents, agentType) {
   const seen = new Set([userText]);
   for (const row of contentEvents) {
     if (row.type !== 'user' || isToolResult(row)) continue;
-    const text = extractUserText(row);
-    if (!text || seen.has(text)) continue;
-    parts.push({ type: 'text', content: text });
-    seen.add(text);
+    for (const text of extractUserTexts(row)) {
+      if (!text || seen.has(text)) continue;
+      parts.push({ type: 'text', content: text });
+      seen.add(text);
+    }
   }
   return parts;
 }

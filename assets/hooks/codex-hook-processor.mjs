@@ -55,6 +55,31 @@ function safePathPart(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
 }
 
+function sessionDirFromTranscriptPath(transcriptPath, codexHome) {
+  if (typeof transcriptPath !== 'string' || !path.isAbsolute(transcriptPath)) return null;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return null;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !/^\d{4}$/.test(path.basename(yearDir))
+    || !/^(0[1-9]|1[0-2])$/.test(path.basename(monthDir))
+    || !/^(0[1-9]|[12]\d|3[01])$/.test(path.basename(dayDir))
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return null;
+  }
+
+  const relative = path.relative(codexHome, sessionDir);
+  const parts = relative.split(path.sep);
+  const supportedLayout = relative === 'sessions'
+    || (parts.length === 3 && parts[0] === 'u' && parts[1] && parts[2] === 'sessions');
+  return supportedLayout ? sessionDir : null;
+}
+
 function writeAtomicJson(directory, fileName, payload, {
   writeStage,
   writeErrorType,
@@ -123,6 +148,11 @@ function writeWakeupMarker(input, hookEvent) {
     ? process.env.CODEX_HOME.trim()
     : '';
   const codexHome = path.resolve(configuredCodexHome || path.join(os.homedir(), '.codex'));
+  const transcriptPath = typeof input.transcript_path === 'string' && input.transcript_path
+    ? input.transcript_path
+    : '';
+  const sessionDir = sessionDirFromTranscriptPath(transcriptPath, codexHome)
+    ?? path.join(codexHome, 'sessions');
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
@@ -165,12 +195,12 @@ function writeWakeupMarker(input, hookEvent) {
     ...(typeof input.turn_id === 'string' && input.turn_id ? { turn_id: input.turn_id } : {}),
     ...(initialTurnId ? { initial_turn_id: initialTurnId } : {}),
     ...(recoveryTurnId ? { recovery_turn_id: recoveryTurnId } : {}),
-    ...(typeof input.transcript_path === 'string' && input.transcript_path
-      ? { transcript_path: input.transcript_path }
+    ...(transcriptPath
+      ? { transcript_path: transcriptPath }
       : {}),
     hook_event: hookEvent,
     codex_home: codexHome,
-    session_dir: path.join(codexHome, 'sessions'),
+    session_dir: sessionDir,
     ...RESOURCE_ATTRIBUTE_FIELDS,
     received_at: new Date().toISOString(),
   };

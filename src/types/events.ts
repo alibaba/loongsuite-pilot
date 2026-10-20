@@ -42,6 +42,8 @@ export interface AgentActivityEntry {
   observed_time_unix_nano?: string;
   'event.id': string;
   'user.id': string;
+  'user.name'?: string;
+  'user.email'?: string;
   'event.name': AgentEventName;
   trace_id?: string;
   span_id?: string;
@@ -62,6 +64,8 @@ export interface AgentActivityEntry {
   'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
+  /** HTTP response status captured at the model transport boundary. */
+  'http.response.status_code'?: number;
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
   'gen_ai.response.finish_reasons'?: string[];
@@ -81,13 +85,18 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;
   'gen_ai.input.multimodal_metadata'?: JsonValue;
+  'gen_ai.input.multimodal_metadata_delta'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  /** Host-observed guardrail verdict for this tool phase. */
+  'gen_ai.guardrail.triggered'?: boolean;
+  'gen_ai.guardrail.action'?: 'allow' | 'block';
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

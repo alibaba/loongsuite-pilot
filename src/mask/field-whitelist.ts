@@ -1,8 +1,12 @@
 export const FIELDS_TO_MASK = new Set<string>([
+  // Routing keys may contain channel sender/group identifiers.
+  'agent.openclaw.session_key',
   'gen_ai.input.messages',
   'gen_ai.input.messages_delta',
   'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
   'gen_ai.output.messages',
+  'gen_ai.output.multimodal_metadata',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
   'gen_ai.system_instructions',

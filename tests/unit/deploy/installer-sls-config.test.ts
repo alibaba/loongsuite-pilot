@@ -38,4 +38,27 @@ describe('public installer SLS config output', () => {
     expect(content).toContain("config.sls.mode = 'ak'");
     expect(content).toContain('delete config.sls.apiKey');
   });
+
+  it('deploy/installer-opensource.sh supports --all-agents to collect every agent', async () => {
+    const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.sh'), 'utf8');
+
+    expect(content).toContain('ALL_AGENTS=0');
+    expect(content).toContain('--all-agents)');
+    expect(content).toContain('if [ "$ALL_AGENTS" = "1" ]; then');
+    expect(content).toContain("const allAgentsMode = '${ALL_AGENTS}';");
+    expect(content).toContain("if (allAgentsMode === '1') {");
+    expect(content).toContain('delete agent.enabled;');
+    expect(content).not.toContain('delete config.agents;');
+  });
+
+  it('deploy/installer-opensource.ps1 supports -AllAgents to collect every agent', async () => {
+    const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.ps1'), 'utf8');
+
+    expect(content).toContain('[switch]$AllAgents');
+    expect(content).toContain('if ($AllAgents) {');
+    expect(content).toContain('allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })');
+    expect(content).toContain("if (opts.allAgentsMode === '1') {");
+    expect(content).toContain('delete agent.enabled;');
+    expect(content).not.toContain('delete config.agents;');
+  });
 });

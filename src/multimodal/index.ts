@@ -5,10 +5,7 @@ export {
 export { MultimodalProcessor } from './processor.js';
 export { matchAll, resolveImagePath, takeUniqueExtractedPaths } from './resolve.js';
 export { attachMultimodalMetadataForEntry } from './rewrite.js';
-export { createUploader } from './uploader/factory.js';
-export {
-  resolveMultimodalEventStorageBasePath,
-} from './uploader/sls-client.js';
+export { createDelegatedOssUploader, createUploader } from './uploader/factory.js';
 export type {
   PathToUriFn,
   UriPart,

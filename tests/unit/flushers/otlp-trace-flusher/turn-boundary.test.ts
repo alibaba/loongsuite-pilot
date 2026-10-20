@@ -146,19 +146,29 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
   });
 
-  it('Signal A: finish_reason=error triggers immediate flush', async () => {
+  it('claude-code: a mid-turn error span does NOT end the turn; turn.end does', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
+    // A retried attempt carries finish_reasons=['error'] but is not terminal:
+    // more attempts follow in the same turn, so it must not flush the buffer.
     await flusher.send(makeEntry({ 'event.name': 'llm.request' }));
     await flusher.send(makeEntry({
       'gen_ai.response.finish_reasons': ['error'],
       'error.type': 'RateLimitError',
     }));
+    expect(mockConvert).not.toHaveBeenCalled();
 
+    // The terminal failure carries both ['error'] and turn.end=true — the turn
+    // boundary is the turn.end signal, not the error finish reason.
+    await flusher.send(makeEntry({
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'RateLimitError',
+      'gen_ai.turn.end': true,
+    }));
     expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(3);
   });
 
   it('Signal A: finish_reason=tool_calls does NOT end turn', async () => {

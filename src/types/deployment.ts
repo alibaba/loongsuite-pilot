@@ -38,6 +38,16 @@ export interface TrustTomlConfig {
   marker: string;
 }
 
+export interface InterceptorHookConfig {
+  hookCommand: string;
+  events: string[];
+  matcher?: string;
+  eventMatchers?: Record<string, string>;
+  timeout?: number | Record<string, number>;
+  insert?: 'head' | 'tail';
+  replaceHookCommands?: string[];
+}
+
 export interface AgentHookConfig {
   settingsPath: string;
   /**
@@ -120,6 +130,12 @@ export interface AgentHookConfig {
     name: string;
     tools: string[];
   };
+  /**
+   * Independent blocking hook, installed alongside the collection hook.
+   * Events, command, timeout, and insertion order are owned by this block
+   * so collection hookCommand stays a single string.
+   */
+  interceptor?: InterceptorHookConfig;
 }
 
 export interface PluginSourceConfig {
@@ -282,6 +298,8 @@ export interface DeployResult {
   /** Set whenever `skipped` is true. */
   reason?: DeploySkipReason;
   error?: string;
+  /** Absolute config file PluginInjectStrategy actually wrote or confirmed. */
+  pluginInjectConfigPath?: string;
 }
 
 // ─── Deploy Strategy ───
@@ -304,6 +322,10 @@ export interface DeployedAgentRecord {
   targetDir?: string;
   /** Resolved cordis.patch.yml path used by the DSH integration lifecycle. */
   dshPatchPath?: string;
+  /** Resolved Grok hook settings file written during deploy. */
+  hookSettingsPath?: string;
+  /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
+  pluginInjectConfigPath?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

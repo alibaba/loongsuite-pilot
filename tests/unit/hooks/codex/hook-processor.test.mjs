@@ -64,6 +64,7 @@ describe('codex transcript discovery hook', () => {
       'PostToolUse',
       'PostToolUseFailure',
     ]);
+    expect(definition.hook).not.toHaveProperty('replaceHookCommands');
   });
 
   test('writes an atomic wakeup marker with the effective CODEX_HOME', () => {
@@ -86,6 +87,31 @@ describe('codex transcript discovery hook', () => {
       session_dir: path.join(codexHome, 'sessions'),
     });
     expect(fs.existsSync(path.join(dataDir, 'logs', 'codex'))).toBe(false);
+  });
+
+  test('records the isolated user session directory from transcript_path', () => {
+    const codexHome = path.join(dataDir, 'codex-home');
+    const isolatedSessionDir = path.join(codexHome, 'u', 'd4bb12dfd37d67c70484b62e0ed31509', 'sessions');
+    const transcriptPath = path.join(
+      isolatedSessionDir,
+      '2026',
+      '09',
+      '17',
+      'rollout-2026-09-17T02-43-12-session.jsonl',
+    );
+
+    const result = runHook('stop', {
+      session_id: 'cdx-isolated-home',
+      turn_id: 'turn-isolated-home',
+      transcript_path: transcriptPath,
+    }, { CODEX_HOME: codexHome });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(fs.readFileSync(markerPath('cdx-isolated-home'), 'utf8'))).toMatchObject({
+      codex_home: codexHome,
+      session_dir: isolatedSessionDir,
+      transcript_path: transcriptPath,
+    });
   });
 
   test.each(['session-start', 'user-prompt-submit', 'stop'])(

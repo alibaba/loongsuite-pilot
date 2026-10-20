@@ -324,32 +324,18 @@ describe('hook-processor: cmdStop end-to-end', () => {
   });
 });
 
-describe('hook-processor: subagent_start / subagent_stop (v1 accumulate-only)', () => {
-  test('subagent_start writes to state.events, does NOT emit JSONL', () => {
-    const result = runHook('subagent-start', {
-      session_id: 'sess-sa-1',
-      agent_id: 'sub-1', agent_type: 'Explore',
-      subagent_session_id: 'sub-sess-1',
-    });
+describe('hook-processor: child Hooks do not race parent state', () => {
+  test.each(['subagent-start', 'subagent-stop'])('%s acknowledges without changing parent offsets', (event) => {
+    const stateDir = path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const stateFile = path.join(stateDir, 'sess-sa-1.json');
+    const existing = JSON.stringify({ transcript_offset: 12345, turn_count: 2 });
+    fs.writeFileSync(stateFile, existing);
+    const result = runHook(event, { session_id: 'sess-sa-1', agent_id: 'child', agent_type: 'Explore' });
     expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
     expect(readEmittedRecords()).toEqual([]);
-    const stateFile = path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions', 'sess-sa-1.json');
-    expect(fs.existsSync(stateFile)).toBe(true);
-    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-    expect(state.events).toHaveLength(1);
-    expect(state.events[0].type).toBe('subagent_start');
-  });
-
-  test('subagent_stop writes to state.events', () => {
-    runHook('subagent-start', {
-      session_id: 'sess-sa-2', agent_id: 'sub-1', agent_type: 'Explore', subagent_session_id: 'sub-sess-2',
-    });
-    runHook('subagent-stop', {
-      session_id: 'sess-sa-2', subagent_session_id: 'sub-sess-2', stop_reason: 'end_turn',
-    });
-    const state = JSON.parse(fs.readFileSync(
-      path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions', 'sess-sa-2.json'), 'utf-8'));
-    expect(state.events.map((e) => e.type)).toEqual(['subagent_start', 'subagent_stop']);
+    expect(fs.readFileSync(stateFile, 'utf8')).toBe(existing);
   });
 });
 

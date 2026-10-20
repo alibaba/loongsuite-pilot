@@ -8,7 +8,6 @@ import { directoryExists, ensureDir, getTodayDateString, resolveHome } from '../
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
-import { getInterceptFile, readInterceptFile, type InterceptData, type InterceptTokenData } from '../qoder-trace/intercept-token-reader.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -18,13 +17,6 @@ const MAX_HOOK_READ_BYTES = 16 * 1024 * 1024;
 
 type HookOffsetMap = Record<string, number>;
 
-/**
- * Independent QwenWorkCN trace collector.
- *
- * Hook history owns the event graph and step boundaries. QwenWorkCN session
- * segments enrich timing/model/usage, and the host-specific runtime intercept
- * supplies usage when the segment writer reports zero tokens.
- */
 export class QwenWorkCNTraceInput extends BaseInput {
   readonly id = 'qwen-work-cn-trace';
   readonly agentType = ClientType.QwenWorkCN;
@@ -32,7 +24,6 @@ export class QwenWorkCNTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly segmentsRoot: string;
-  private readonly interceptFile: string;
   private readonly segmentPairs = new Map<string, SegmentLlmPair[]>();
   private readonly segmentToolTimings = new Map<string, Map<string, SegmentToolTiming>>();
   private readonly subagentTurns = new Map<string, Map<string, number>>();
@@ -43,7 +34,6 @@ export class QwenWorkCNTraceInput extends BaseInput {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions');
-    this.interceptFile = opts.interceptFile ?? getInterceptFile('qwenworkcn-intercept.jsonl');
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -54,7 +44,6 @@ export class QwenWorkCNTraceInput extends BaseInput {
     return [
       opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history'),
       opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions'),
-      opts.interceptFile ?? getInterceptFile('qwenworkcn-intercept.jsonl'),
     ];
   }
 
@@ -84,10 +73,9 @@ export class QwenWorkCNTraceInput extends BaseInput {
         await this.readSegmentsForSession(sessionId, cwd);
       }
 
-      const interceptData = await this.readInterceptData();
       const output: AgentActivityEntry[] = [];
       for (const turnEntries of this.groupByTurn(entries).values()) {
-        this.enrichTurn(turnEntries, interceptData);
+        this.enrichTurn(turnEntries);
         this.injectTraceId(turnEntries);
         for (const entry of turnEntries) {
           (entry as Record<string, unknown>)['gen_ai.agent.type'] = ClientType.QwenWorkCN;
@@ -442,12 +430,11 @@ export class QwenWorkCNTraceInput extends BaseInput {
     return isIgnoredTurn(turnId) || this.subagentTurns.get(sessionId)?.has(turnId) === true;
   }
 
-  private enrichTurn(entries: AgentActivityEntry[], interceptData: InterceptData): void {
+  private enrichTurn(entries: AgentActivityEntry[]): void {
     const sessionId = entries.find(entry => entry['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
     const turnId = entries.find(entry => entry['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((key): key is string => key !== undefined);
-    const interceptTokens = new Map<string, InterceptTokenData>(interceptData.tokens.map(token => [token.id, token]));
 
     if (sessionId) {
       for (const stepId of stepOrder) {
@@ -457,7 +444,6 @@ export class QwenWorkCNTraceInput extends BaseInput {
         const response = stepEntries.find(entry => entry['event.name'] === 'llm.response');
         if (request && response) {
           const pair = this.takeSegmentPair(sessionId, turnId, request, response);
-          let hasSegmentUsage = false;
           if (pair) {
             (request as Record<string, unknown>).time_unix_nano = pair.startNano;
             (response as Record<string, unknown>).time_unix_nano = pair.endNano;
@@ -473,21 +459,10 @@ export class QwenWorkCNTraceInput extends BaseInput {
                 }
               }
             }
-            hasSegmentUsage = this.applyUsage(response, pair.usage);
+            this.applyUsage(response, pair.usage);
           }
-          if (!hasSegmentUsage) this.applyInterceptUsage(response, interceptTokens);
-          else this.applyInterceptUsageOverlay(response, interceptTokens);
         }
         this.applyToolTiming(sessionId, stepEntries);
-      }
-    }
-
-    if (interceptData.systemPrompt) {
-      const firstRequest = entries.find(entry => entry['event.name'] === 'llm.request' && entry['gen_ai.step.id']);
-      if (firstRequest) {
-        (firstRequest as Record<string, unknown>)['gen_ai.system_instructions'] = [
-          { type: 'text', content: interceptData.systemPrompt.content },
-        ];
       }
     }
 
@@ -507,60 +482,17 @@ export class QwenWorkCNTraceInput extends BaseInput {
     }
   }
 
-  private applyUsage(response: AgentActivityEntry, usage: TokenUsage): boolean {
+  private applyUsage(response: AgentActivityEntry, usage: TokenUsage): void {
     const inputTokens = positiveNumber(usage.inputTokens);
     const outputTokens = positiveNumber(usage.outputTokens);
     const cacheReadTokens = positiveNumber(usage.cacheReadInputTokens);
     const cacheCreationTokens = positiveNumber(usage.cacheCreationInputTokens);
-    const reasoningTokens = positiveNumber(usage.reasoningTokens);
-    if (!inputTokens
-      && !outputTokens
-      && !cacheReadTokens
-      && !cacheCreationTokens
-      && !reasoningTokens) return false;
     const target = response as Record<string, unknown>;
     if (inputTokens) target['gen_ai.usage.input_tokens'] = inputTokens;
     if (outputTokens) target['gen_ai.usage.output_tokens'] = outputTokens;
     if (inputTokens || outputTokens) target['gen_ai.usage.total_tokens'] = (inputTokens ?? 0) + (outputTokens ?? 0);
     if (cacheReadTokens) target['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
     if (cacheCreationTokens) target['gen_ai.usage.cache_creation.input_tokens'] = cacheCreationTokens;
-    if (reasoningTokens) target['gen_ai.usage.reasoning_tokens'] = reasoningTokens;
-    return true;
-  }
-
-  private applyInterceptUsage(response: AgentActivityEntry, tokens: Map<string, InterceptTokenData>): boolean {
-    const responseId = response['gen_ai.response.id'] as string | undefined;
-    const match = responseId ? tokens.get(responseId) : undefined;
-    if (!match) return false;
-    const applied = this.applyUsage(response, {
-      inputTokens: match.promptTokens,
-      outputTokens: match.completionTokens,
-      cacheReadInputTokens: match.cachedTokens,
-      reasoningTokens: match.reasoningTokens,
-    });
-    if (applied && match.totalTokens) {
-      (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] = match.totalTokens;
-    }
-    return applied;
-  }
-
-  private applyInterceptUsageOverlay(response: AgentActivityEntry, tokens: Map<string, InterceptTokenData>): void {
-    const responseId = response['gen_ai.response.id'] as string | undefined;
-    const match = responseId ? tokens.get(responseId) : undefined;
-    if (match?.cachedTokens && !response['gen_ai.usage.cache_read.input_tokens']) {
-      (response as Record<string, unknown>)['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
-    }
-    if (match?.reasoningTokens && !response['gen_ai.usage.reasoning_tokens']) {
-      (response as Record<string, unknown>)['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
-    }
-  }
-
-  private async readInterceptData(): Promise<InterceptData> {
-    try {
-      return await readInterceptFile(this.interceptFile);
-    } catch {
-      return { tokens: [], systemPrompt: null };
-    }
   }
 
   private takeSegmentPair(
@@ -638,12 +570,11 @@ export class QwenWorkCNTraceInput extends BaseInput {
 export interface QwenWorkCNTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
-  interceptFile?: string;
 }
 
 export type QwenWorkCNTraceWatchPaths = Pick<
   QwenWorkCNTraceInputOptions,
-  'logDir' | 'segmentsRoot' | 'interceptFile'
+  'logDir' | 'segmentsRoot'
 >;
 
 interface SegmentEvent {
@@ -667,7 +598,6 @@ interface TokenUsage {
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
-  reasoningTokens?: number;
 }
 
 interface InFlightPair {

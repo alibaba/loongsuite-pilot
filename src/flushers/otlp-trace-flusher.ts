@@ -14,10 +14,13 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
+import { convertDelegatedTurn } from './delegated-turn-converter.js';
+import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
+import { SpanEnricherRunner } from './span-enricher.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -33,19 +36,33 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  attachReservedLlmSpanIds,
   attachReservedToolSpanIds,
-  ReservedToolSpanIdGenerator,
-  type ToolSpanIdReservations,
-} from './tool-span-id-reservation.js';
+  ReservedSpanIdGenerator,
+  type SpanIdReservations,
+} from './span-id-reservation.js';
+
+import {
+  OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
+} from '../normalization/openclaw-session-key.js';
 
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+// Claude Code marks a failed attempt (mid-turn retry or terminal API failure)
+// with finish_reasons=['error']. 'error' must NOT be a turn boundary on its own,
+// or a mid-turn retry would flush the turn before its later records arrive; the
+// terminal failure is flagged with gen_ai.turn.end===true instead.
+const CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
 const GROK_TERMINAL_FINISH_REASONS = new Set(['length', 'content_filter']);
 const GROK_PASSTHROUGH_KEYS = [
   'loongsuite.grok.match.strategy',
   'loongsuite.grok.timing.source',
+] as const;
+const USER_IDENTITY_PASSTHROUGH_KEYS = [
+  'user.name',
+  'user.email',
 ] as const;
 const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.compatibility',
@@ -109,7 +126,8 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
-  toolSpanIds: ToolSpanIdReservations;
+  toolSpanIds: SpanIdReservations;
+  llmSpanIds: SpanIdReservations;
   active: number;
 }
 
@@ -407,6 +425,10 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
   'gen_ai.subagent.parent_tool_call.id',
+  'agent.pilot.parent.turn.id',
+  'agent.qwen-code-cli.subagent.collection',
+  'agent.qwen-code-cli.subagent.status',
+  'agent.qwen-code-cli.timing.source',
 ];
 
 function estimateSpanSize(span: ReadableSpan): number {
@@ -505,6 +527,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   readonly name = 'otlp-trace';
 
   private readonly cfg: OtlpTraceFlusherConfig;
+  private readonly spanEnrichers: SpanEnricherRunner;
   private readonly turnBuffers = new Map<string, TurnBuffer>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
@@ -543,6 +566,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    this.spanEnrichers = new SpanEnricherRunner(cfg.spanEnricherPaths ?? []);
     this.globalAttributesProvider = globalAttributesProvider;
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
     this.endpoints = cfg.endpoints.map((ep, i) => ({
@@ -574,8 +598,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .map(prefix => prefix.trim())
       .filter(prefix => prefix.length > 0);
 
-    process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
-    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
+    // The converter reads these process-wide settings at conversion time. Pilot
+    // always exports message content; inherited SDK opt-outs must not silently
+    // remove it. Preserve unrelated semantic-convention opt-ins.
+    const semconvOptIns = (process.env.OTEL_SEMCONV_STABILITY_OPT_IN ?? '')
+      .split(',').map(value => value.trim()).filter(Boolean);
+    if (!semconvOptIns.some(value => value.toLowerCase() === 'gen_ai_latest_experimental')) {
+      semconvOptIns.push('gen_ai_latest_experimental');
+    }
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = semconvOptIns.join(',');
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
 
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
@@ -822,6 +854,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwen-code-cli'
+      && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
+      return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
+    }
     // A fused child shares the parent's turn buffer. Its stop closes only the
     // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -855,6 +891,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
             entry['gen_ai.response.finish_reasons'],
             GROK_TERMINAL_FINISH_REASONS,
           ));
+    }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'claude-code') {
+      // A failed attempt carries finish_reasons=['error']: a mid-turn retry
+      // must not end the turn (its later records still arrive), so 'error' is
+      // excluded here. The terminal API failure is flagged with
+      // gen_ai.turn.end===true; successful turns end with a model stop reason.
+      return entry['gen_ai.turn.end'] === true
+        || hasFinishReason(
+          entry['gen_ai.response.finish_reasons'],
+          CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
+        );
     }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
@@ -970,7 +1017,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resourceIdentity,
       convertKey,
     );
-    const { handler, provider, inMem, toolSpanIds } = convertState;
+    const { handler, provider, inMem, toolSpanIds, llmSpanIds } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
@@ -1003,6 +1050,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+          ...USER_IDENTITY_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
           ...agentSpecificKeys,
           ...customKeys,
@@ -1045,18 +1093,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
+        llmSpanIds.prepare(sanitized);
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
         let succeeded = false;
         try {
-          result = convertEventLogToTrace(
+          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+            : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
+            : convertEventLogToTrace;
+          result = convert(
             sanitized as unknown as EventLogRecord[],
             { handler, strict: false, passthroughKeys },
           );
           succeeded = true;
         } finally {
           toolSpanIds.clear();
+          llmSpanIds.clear();
           if (counters) {
             counters.converter_calls_total++;
             counters.converter_duration_ms_total += performance.now() - convertStarted;
@@ -1080,7 +1133,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
 
       await provider.forceFlush();
-      const spans = inMem.getFinishedSpans();
+      let spans = inMem.getFinishedSpans();
       inMem.reset();
 
       if (spans.length === 0) return;
@@ -1088,13 +1141,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
         this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
+        this.enrichOpenClawSessionKey(records, spans);
         this.enrichOpenClawToolAttributes(records, spans);
         this.enrichOpenClawLlmAttributes(records, spans);
+      }
+      if (agentType === 'claude-code') {
+        this.enrichClaudeCodeLlmAttributes(records, spans);
       }
       if (agentType === 'grok-build') {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
 
+      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
@@ -1219,7 +1277,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
     const inMem = new InMemorySpanExporter();
-    const idGenerator = new ReservedToolSpanIdGenerator();
+    const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
       idGenerator,
@@ -1227,8 +1285,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
+    const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
@@ -1313,6 +1372,81 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (span.attributes['gen_ai.span.kind'] === 'AGENT') {
           span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
         }
+      }
+    }
+  }
+
+  private enrichClaudeCodeLlmAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const byResponseId = new Map<string, {
+      errorType?: string;
+      statusCode?: number;
+      requestId?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.request' && record['event.name'] !== 'llm.response') continue;
+      const responseId = record['gen_ai.response.id'];
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const current = byResponseId.get(responseId) ?? {};
+      const errorType = record['error.type'];
+      const statusCode = record['http.response.status_code'];
+      const requestId = record['gen_ai.request.id'];
+      if (typeof errorType === 'string' && errorType) current.errorType = errorType;
+      if (typeof statusCode === 'number' && Number.isFinite(statusCode)) current.statusCode = statusCode;
+      if (typeof requestId === 'string' && requestId) current.requestId = requestId;
+      byResponseId.set(responseId, current);
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const responseId = span.attributes['gen_ai.response.id'];
+      if (typeof responseId !== 'string') continue;
+      const data = byResponseId.get(responseId);
+      if (!data) continue;
+      if (data.requestId) span.attributes['gen_ai.request.id'] = data.requestId;
+      if (data.statusCode !== undefined) {
+        span.attributes['http.response.status_code'] = data.statusCode;
+      }
+      if (data.errorType) {
+        span.attributes['error.type'] = data.errorType;
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: 'model request failed',
+        });
+      }
+    }
+  }
+
+  private enrichOpenClawSessionKey(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const keys = new Set<string>();
+    const scopes = new Set<string>();
+    for (const record of records) {
+      if (record['gen_ai.agent.type'] !== 'openclaw'
+        || record[OPENCLAW_SESSION_KEY_AMBIGUOUS] === true) return;
+      scopes.add(JSON.stringify([
+        record.trace_id, record['gen_ai.session.id'], record['gen_ai.turn.id'],
+        record['gen_ai.agent.id'], record['gen_ai.agent.name'], record['gen_ai.agent.scope'],
+      ]));
+      const value = record[OPENCLAW_SESSION_KEY];
+      if (value !== undefined && value !== null) {
+        if (!isOpenClawSessionKey(value)) return;
+        keys.add(value);
+      }
+    }
+    // Normal OpenClaw buffers contain a single native run. Do not guess for a
+    // mixed/fused scope (especially a child without its own key), or conflicts.
+    // This is deliberately post-conversion: passthrough can select a first value
+    // and not all synthetic parent/STEP spans carry the native turn identifier.
+    if (scopes.size !== 1 || keys.size !== 1) return;
+    const sessionKey = [...keys][0];
+    const traceId = records[0]?.trace_id;
+    for (const span of spans) {
+      if (span.spanContext().traceId === traceId
+        && ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL'].includes(String(span.attributes['gen_ai.span.kind']))) {
+        span.attributes[OPENCLAW_SESSION_KEY] = sessionKey;
       }
     }
   }

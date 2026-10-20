@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import * as os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as fsUtils from '../../../src/utils/fs-utils.js';
 import {
   HookWatchdog,
   parseWindowsUserEnv,
@@ -10,16 +14,25 @@ import {
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 
+const logger = vi.hoisted(() => ({
+  info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+}));
+
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  }),
+  createLogger: () => logger,
 }));
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
-  execFile: vi.fn(),
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: vi.fn(),
+  }),
 }));
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: vi.fn(actual.homedir) };
+});
 
 const defaultConfig: HookWatchdogConfig = {
   enabled: true,
@@ -274,53 +287,31 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     expect(ids).toContain('qodercli-rc');
     expect(ids).toContain('claude-code-rc');
     if (process.platform === 'darwin') {
-      expect(ids).toContain('qoderwork-env');
       expect(ids).toContain('qwenworkcn-env');
+      expect(ids).toContain('qoderwork-env'); // retired: present for cleanup only
     }
   });
 
-  it('keeps macOS runtime targets aligned with installer product families', () => {
-    const defs = HookWatchdog.macRuntimeInterceptDefs();
-    expect(defs).toEqual([
+  it('retires both legacy macOS runtime env/plist pairs', () => {
+    expect(HookWatchdog.macRetiredRuntimeInterceptDefs()).toEqual([
       {
         id: 'qoderwork-env',
         envName: 'QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qoderwork-env',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
       },
       {
         id: 'qwenworkcn-env',
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
-        agentIds: ['qwen-work-cn'],
-        appNames: ['QwenWorkCN.app'],
       },
     ]);
-
-    const installer = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
-    for (const def of defs) {
-      expect(installer).toContain(def.envName);
-      expect(installer).toContain(def.plistLabel);
-      for (const appName of def.appNames) expect(installer).toContain(appName);
-    }
   });
 
-  it('keeps independent Windows runtime targets for QwenWorkCN and QoderWork', () => {
-    const defs = HookWatchdog.winRuntimeInterceptDefs();
-    expect(defs).toHaveLength(2);
-    expect(defs).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        id: 'qwenworkcn-win-env',
-        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
-        agentIds: ['qwen-work-cn'],
-      }),
-      expect.objectContaining({
-        id: 'qoderwork-win-env',
-        envName: 'QODER_WORKER_RUNTIME_PATH',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-      }),
-    ]));
+  it('retires both legacy Windows runtime env vars', () => {
+    expect(HookWatchdog.winRetiredRuntimeInterceptDefs()).toEqual([
+      { id: 'qoderwork-win-env', envName: 'QODER_WORKER_RUNTIME_PATH' },
+      { id: 'qwenworkcn-win-env', envName: 'QW_QODER_WORKER_RUNTIME_PATH' },
+    ]);
   });
 
   it.each(['REG_SZ', 'REG_EXPAND_SZ'])('parses a Windows %s User environment value', (registryType) => {
@@ -343,65 +334,301 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
     )).toBe('');
   });
 
-  it('keeps Windows runtime cleanup failures observable', () => {
-    const source = readFileSync(resolve('src/core/hook-watchdog.ts'), 'utf-8');
-    const windowsSection = source.slice(
-      source.indexOf('// ── QoderWork-family Windows User env vars'),
-      source.indexOf('// ── Shell rc intercept targets'),
-    );
-    expect(windowsSection).toContain("logger.debug('windows runtime override cleanup failed'");
-    expect(windowsSection).toContain("reason: 'wrapper-missing'");
-    expect(windowsSection).toContain("reason: 'app-missing'");
-    expect(windowsSection).not.toContain('cleanupOwnedWindowsUserEnv(def.envName, wrapperPath).catch');
-  });
-
-  it('defaults every target to enabled when no gate is passed', () => {
+  it('defaults every non-retired target to enabled when no gate is passed', () => {
+    const retired = new Set([
+      ...HookWatchdog.macRetiredRuntimeInterceptDefs(),
+      ...HookWatchdog.winRetiredRuntimeInterceptDefs(),
+    ].map(d => d.id));
     const targets = HookWatchdog.defaultInterceptTargets('/tmp/test-pilot');
     for (const t of targets) {
-      // enabled is optional; when present it must report true under the default gate
-      expect(t.enabled?.() ?? true).toBe(true);
+      // enabled is optional; when present it must report true under the default
+      // gate — except retired targets, which stay disabled so they only clean up.
+      expect(t.enabled?.() ?? true).toBe(!retired.has(t.id));
     }
   });
 
-  it('wires the isAgentEnabled gate to the right agent id per target', () => {
-    const disabled = new Set([
-      'claude-code',
-      'qoder',
-      'qoder-work',
-      'qoder-work-cn',
-      'qwen-work-cn',
-    ]);
-    const targets = HookWatchdog.defaultInterceptTargets(
-      '/tmp/test-pilot',
-      (id) => !disabled.has(id),
-    );
+  it('wires the isAgentEnabled gate only to shell intercepts', () => {
+    const isEnabled = vi.fn((id: string) => id === 'qoder-cn');
+    const targets = HookWatchdog.defaultInterceptTargets('/tmp/test-pilot', isEnabled);
     const byId = Object.fromEntries(targets.map(t => [t.id, t]));
 
-    expect(byId['claude-code-rc'].enabled?.()).toBe(false); // → claude-code
-    expect(byId['qodercli-rc'].enabled?.()).toBe(false);    // → qoder
-    if (process.platform === 'darwin') {
-      expect(byId['qoderwork-env'].enabled?.()).toBe(false); // → qoder-work family
-      expect(byId['qwenworkcn-env'].enabled?.()).toBe(false); // → qwen-work-cn
+    expect(byId['claude-code-rc'].enabled?.()).toBe(false);
+    expect(byId['qodercli-rc'].enabled?.()).toBe(false);
+    expect(byId['qoderclicn-rc'].enabled?.()).toBe(true);
+    expect(isEnabled.mock.calls.map(([id]) => id)).toEqual(['claude-code', 'qoder', 'qoder-cn']);
+  });
+});
+
+describe.each(['darwin', 'win32'] as const)('%s retired runtime intercept lifecycle (mock exec and temporary HOME)', platformName => {
+  const exec = vi.mocked(promisify(execFile));
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const defs = platformName === 'darwin'
+    ? HookWatchdog.macRetiredRuntimeInterceptDefs()
+    : HookWatchdog.winRetiredRuntimeInterceptDefs();
+  const allAgents = ['qoder-work', 'qoder-work-cn', 'qwen-work-cn'];
+  let tmp: string;
+  let dataDir: string;
+  let wrapper: string;
+  let env: Map<string, string>;
+
+  function plist(id: string): string {
+    return join(tmp, 'Library', 'LaunchAgents', `com.loongsuite-pilot.${id}.plist`);
+  }
+
+  function targets(isEnabled?: (id: string) => boolean) {
+    return HookWatchdog.defaultInterceptTargets(dataDir, isEnabled, [])
+      .filter(t => t.id.endsWith('-env'));
+  }
+
+  function installFixtures() {
+    mkdirSync(join(dataDir, 'hooks'), { recursive: true });
+    writeFileSync(wrapper, '// shared wrapper\n');
+    for (const app of ['QoderWork', 'QoderWorkCN', 'QwenWorkCN']) {
+      const appPath = platformName === 'darwin'
+        ? join(tmp, 'Applications', `${app}.app`)
+        : join(tmp, 'AppData', 'Local', 'Programs', app);
+      mkdirSync(appPath, { recursive: true });
     }
+  }
+
+  function seedOwnedOverrides() {
+    for (const def of defs) {
+      env.set(def.envName, wrapper);
+      if (platformName === 'darwin') writeFileSync(plist(def.id), 'legacy Pilot plist');
+    }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmp = mkdtempSync(join(os.tmpdir(), 'runtime-intercept-'));
+    dataDir = join(tmp, 'custom data'); // No loongsuite-pilot substring.
+    wrapper = join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+    env = new Map();
+    mkdirSync(join(tmp, 'Library', 'LaunchAgents'), { recursive: true });
+    vi.stubEnv('HOME', tmp);
+    vi.stubEnv('USERPROFILE', tmp);
+    vi.stubEnv('LOCALAPPDATA', join(tmp, 'AppData', 'Local'));
+    vi.mocked(os.homedir).mockReturnValue(tmp);
+    vi.spyOn(fsUtils, 'directoryExists').mockImplementation(async p =>
+      p.startsWith(`${tmp}/`) && existsSync(p));
+    Object.defineProperty(process, 'platform', { ...platform, value: platformName });
+    exec.mockReset();
+    exec.mockImplementation(async (command, args, options) => {
+      const argv = args as string[];
+      if (platformName === 'darwin') {
+        expect(command).toBe('launchctl');
+        const [op, key] = argv;
+        if (op === 'getenv') {
+          if (!env.has(key)) throw new Error('environment variable is unset');
+          return { stdout: `${env.get(key)}\n`, stderr: '' };
+        }
+        if (op === 'unsetenv') env.delete(key);
+        else {
+          expect(op).toBe('unload');
+          expect(key.startsWith(`${tmp}/`)).toBe(true);
+        }
+      } else if (command === 'reg.exe') {
+        const [op, registryKey, flag, key] = argv;
+        expect(registryKey).toBe('HKCU\\Environment');
+        expect(flag).toBe('/v');
+        if (op === 'query') {
+          if (!env.has(key)) throw new Error('registry value is absent');
+          return { stdout: `    ${key}    REG_SZ    ${env.get(key)}\r\n`, stderr: '' };
+        }
+        expect(op).toBe('delete');
+        expect(argv[4]).toBe('/f');
+        env.delete(key);
+      } else {
+        expect(command).toBe('powershell.exe');
+        expect(argv.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command']);
+        expect(argv[3]).toContain("SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, $null, 'User')");
+        const key = options?.env?.LOONGSUITE_PILOT_RUNTIME_ENV_NAME;
+        expect(defs.map(d => d.envName)).toContain(key);
+        expect(env.has(key!)).toBe(false);
+      }
+      return { stdout: '', stderr: '' };
+    });
   });
 
-  it.runIf(process.platform === 'darwin')('keeps QoderWorkCN and QwenWorkCN gates independent', () => {
-    const qoderCnOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
-      '/tmp/test-pilot',
-      id => id === 'qoder-work-cn',
-    ).map(t => [t.id, t]));
-
-    expect(qoderCnOnly['qoderwork-env'].enabled?.()).toBe(true);
-    expect(qoderCnOnly['qwenworkcn-env'].enabled?.()).toBe(false);
-
-    const qwenOnly = Object.fromEntries(HookWatchdog.defaultInterceptTargets(
-      '/tmp/test-pilot',
-      id => id === 'qwen-work-cn',
-    ).map(t => [t.id, t]));
-
-    expect(qwenOnly['qoderwork-env'].enabled?.()).toBe(false);
-    expect(qwenOnly['qwenworkcn-env'].enabled?.()).toBe(true);
+  afterEach(async () => {
+    const calls = exec.mock.calls.slice();
+    Object.defineProperty(process, 'platform', platform);
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    const actualOs = await vi.importActual<typeof import('node:os')>('node:os');
+    vi.mocked(os.homedir).mockImplementation(actualOs.homedir);
+    exec.mockReset();
+    rmSync(tmp, { recursive: true, force: true });
+    expect(calls.filter(([, args]) => ['setenv', 'load', 'add'].includes(args?.[0] as string))).toEqual([]);
   });
+
+  it.each([
+    ['default-enabled agents', undefined],
+    ['all agents disabled', []],
+    ['qoder-work only', ['qoder-work']],
+    ['qoder-work-cn only', ['qoder-work-cn']],
+    ['qwen-work-cn only', ['qwen-work-cn']],
+    ['all three products enabled', allAgents],
+  ] as [string, string[] | undefined][])('cleans both legacy overrides idempotently with %s', async (_label, enabled) => {
+    installFixtures();
+    seedOwnedOverrides();
+    const gate = enabled && vi.fn((id: string) => enabled.includes(id));
+    const envTargets = targets(gate);
+    expect(envTargets.map(t => t.id)).toEqual(defs.map(d => d.id));
+    for (const target of envTargets) {
+      expect(target.enabled!()).toBe(false);
+      vi.spyOn(target, 'precondition');
+      vi.spyOn(target, 'check');
+      vi.spyOn(target, 'repair');
+      vi.spyOn(target, 'cleanup');
+    }
+    const wd = new HookWatchdog(defaultConfig, [], envTargets);
+
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    for (const target of envTargets) {
+      expect(target.precondition).not.toHaveBeenCalled();
+      expect(target.check).not.toHaveBeenCalled();
+      expect(target.repair).not.toHaveBeenCalled();
+      expect(target.cleanup).toHaveBeenCalledTimes(2);
+    }
+    if (gate) expect(gate).not.toHaveBeenCalled();
+    expect(fsUtils.directoryExists).not.toHaveBeenCalled();
+    expect(env.size).toBe(0);
+    expect(readFileSync(wrapper, 'utf8')).toBe('// shared wrapper\n');
+    for (const def of defs) {
+      if (platformName === 'darwin') {
+        expect(existsSync(plist(def.id))).toBe(false);
+        expect(exec).toHaveBeenCalledWith('launchctl', ['unsetenv', def.envName]);
+        expect(exec).toHaveBeenCalledWith('launchctl', ['unload', plist(def.id)]);
+      } else {
+        expect(exec).toHaveBeenCalledWith('reg.exe', [
+          'delete', 'HKCU\\Environment', '/v', def.envName, '/f',
+        ], { timeout: 10_000, windowsHide: true });
+        expect(exec).toHaveBeenCalledWith('powershell.exe', expect.any(Array), expect.objectContaining({
+          timeout: 10_000,
+          windowsHide: true,
+          env: expect.objectContaining({ LOONGSUITE_PILOT_RUNTIME_ENV_NAME: def.envName }),
+        }));
+      }
+    }
+    expect(exec.mock.calls.map(([command, args]) => `${command}:${args?.[0]}`)).toEqual(
+      platformName === 'darwin'
+        ? ['launchctl:getenv', 'launchctl:unsetenv', 'launchctl:unload',
+          'launchctl:getenv', 'launchctl:unsetenv', 'launchctl:unload', 'launchctl:getenv', 'launchctl:getenv']
+        : ['reg.exe:query', 'reg.exe:delete', 'powershell.exe:-NoProfile',
+          'reg.exe:query', 'reg.exe:delete', 'powershell.exe:-NoProfile', 'reg.exe:query', 'reg.exe:query'],
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('never injects on a fresh install even with all three products enabled and present', async () => {
+    installFixtures();
+    const wd = new HookWatchdog(defaultConfig, [], targets(id => allAgents.includes(id)));
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    expect(env.size).toBe(0);
+    expect(exec).toHaveBeenCalledTimes(4);
+    for (const def of defs) expect(existsSync(plist(def.id))).toBe(false);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('cleans missing-wrapper leftovers under a custom dataDir without checking app installation', async () => {
+    seedOwnedOverrides();
+    const wd = new HookWatchdog(defaultConfig, [], targets(() => true));
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+    expect(env.size).toBe(0);
+    expect(existsSync(dataDir)).toBe(false);
+    for (const def of defs) expect(existsSync(plist(def.id))).toBe(false);
+    expect(fsUtils.directoryExists).not.toHaveBeenCalled();
+  });
+
+  it.each(['vendor', 'same-basename', 'suffix'])('preserves third-party %s paths, unrelated env and plists', async variant => {
+    const foreign = variant === 'vendor' ? join(tmp, 'third-party', 'runtime.mjs')
+      : variant === 'same-basename' ? join(tmp, 'loongsuite-pilot-other', 'hooks', 'qoderwork-runtime-wrapper.mjs')
+        : `${wrapper}.backup`;
+    for (const def of defs) env.set(def.envName, foreign);
+    env.set('UNRELATED_RUNTIME_PATH', wrapper);
+    const originalEnv = new Map(env);
+    const thirdPartyPlist = join(tmp, 'Library', 'LaunchAgents', 'com.third-party.runtime.plist');
+    writeFileSync(thirdPartyPlist, 'third-party plist');
+    const nearMatchPlist = `${plist('qwenworkcn-env')}.backup`;
+    writeFileSync(nearMatchPlist, 'user backup');
+    if (platformName === 'darwin') {
+      for (const def of defs) writeFileSync(plist(def.id), 'legacy Pilot plist');
+    }
+    const wd = new HookWatchdog(defaultConfig, [], targets(() => true));
+    await wd.runCheck();
+    await wd.runCheck();
+    expect(env).toEqual(originalEnv);
+    expect(readFileSync(thirdPartyPlist, 'utf8')).toBe('third-party plist');
+    expect(readFileSync(nearMatchPlist, 'utf8')).toBe('user backup');
+    expect(exec.mock.calls.filter(([cmd, args]) =>
+      cmd === 'powershell.exe' || ['unsetenv', 'delete'].includes(args?.[0] as string))).toEqual([]);
+    for (const def of defs) expect(existsSync(plist(def.id))).toBe(false);
+  });
+
+  it('keeps the existing platform-specific ownership case comparison', async () => {
+    for (const def of defs) env.set(def.envName, wrapper.toUpperCase());
+    await new HookWatchdog(defaultConfig, [], targets()).runCheck();
+    expect(env.size).toBe(platformName === 'win32' ? 0 : 2);
+  });
+
+  if (platformName === 'darwin') {
+    it('unloads and removes both Pilot plists even when getenv fails and the wrapper is missing', async () => {
+      for (const def of defs) writeFileSync(plist(def.id), 'legacy Pilot plist');
+      await new HookWatchdog(defaultConfig, [], targets()).runCheck();
+      for (const def of defs) {
+        expect(existsSync(plist(def.id))).toBe(false);
+        expect(exec).toHaveBeenCalledWith('launchctl', ['unload', plist(def.id)]);
+      }
+      expect(exec.mock.calls.some(([, args]) => args?.[0] === 'unsetenv')).toBe(false);
+    });
+  } else {
+    it('reports a failed registry deletion, continues other cleanup, and retries next cycle', async () => {
+      seedOwnedOverrides();
+      const implementation = exec.getMockImplementation()!;
+      let failDelete = true;
+      exec.mockImplementation(async (...args) => {
+        if (args[0] === 'reg.exe' && args[1]?.[0] === 'delete' && args[1]?.[3] === defs[0].envName && failDelete) {
+          failDelete = false;
+          throw new Error('access denied');
+        }
+        return implementation(...args);
+      });
+      const wd = new HookWatchdog(defaultConfig, [], targets());
+      expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+      expect(env.has(defs[0].envName)).toBe(true);
+      expect(env.has(defs[1].envName)).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith('intercept-watchdog.cleanup-failed', {
+        id: defs[0].id, error: 'Error: access denied',
+      });
+      expect(exec.mock.calls.filter(([cmd]) => cmd === 'powershell.exe')).toHaveLength(1);
+      await wd.runCheck();
+      expect(env.size).toBe(0);
+      expect(exec.mock.calls.filter(([cmd]) => cmd === 'powershell.exe')).toHaveLength(2);
+    });
+
+    it('keeps registry deletions when broadcasts fail and reports the recovery action', async () => {
+      seedOwnedOverrides();
+      const implementation = exec.getMockImplementation()!;
+      exec.mockImplementation(async (...args) => {
+        if (args[0] === 'powershell.exe') throw new Error('PowerShell unavailable');
+        return implementation(...args);
+      });
+      const wd = new HookWatchdog(defaultConfig, [], targets());
+      expect(await wd.runCheck()).toEqual({ checked: 0, repaired: 0, skipped: 2 });
+      expect(env.size).toBe(0);
+      for (const def of defs) {
+        expect(logger.warn).toHaveBeenCalledWith('windows runtime environment persisted but broadcast failed', {
+          envName: def.envName, action: 'sign out and back in to refresh Explorer',
+        });
+      }
+      await wd.runCheck();
+      expect(exec.mock.calls.filter(([cmd]) => cmd === 'powershell.exe')).toHaveLength(2);
+    });
+  }
 });
 
 describe('intercept rc target check/repair/cleanup against a temp rc (real closures)', () => {

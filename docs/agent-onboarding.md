@@ -43,7 +43,7 @@ upgrades, and uninstall cleanup. If an `AgentSession` already exists, restart
 the custom Agent or call `session.reload()` after registration.
 
 The `agentDir` must be dedicated to this custom Agent. Do not reuse the built-in
-PI directory (`~/.pi/agent`) or share one directory between custom Agents:
+PI directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) or share one directory between custom Agents:
 PI loads every configured extension in that directory, which would duplicate
 telemetry and mix Agent identities. This does not change the custom Agent's
 normal startup command or SDK call.
@@ -144,6 +144,13 @@ Important fields:
 `plugin` / `plugins` fields (for example Pi Coding Agent uses `extensions`). Set
 `pluginInject.createIfMissing` to create the first configured JSON file when
 the agent supports an empty settings file.
+
+String fields may include `$PILOT_DIR`, `$PILOT_DATA`, `$HERMES_HOME` /
+`$HERMES_CLI`, `$PI_CODING_AGENT_DIR`, `$GROK_HOME`, and `$DSH_HOME`. Unset or
+blank Agent-home variables expand to the documented defaults (`~/.hermes`,
+`~/.pi/agent`, `~/.grok`, `~/.dsh`). Workspace-directory variables such as
+`GROK_WORKSPACE_DIR` and `DSH_WORKSPACE_DIR` are not Agent homes and are not
+substituted.
 
 > When adding a `plugin-inject` agent, also register it in the uninstaller (`deploy/installer-opensource.sh` / `.ps1`) so its injected spec is removed on uninstall. Plugin-inject agents are additionally self-healed at runtime by the hook watchdog, which re-injects the spec if another tool overwrites the config.
 

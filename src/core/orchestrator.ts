@@ -1,10 +1,16 @@
+import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
 import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
+import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
+import { interceptorToolVerdictPath } from '../interceptor/paths.js';
+import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../interceptor/config.js';
+import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
+import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import {
@@ -70,10 +76,10 @@ import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import {
   anyAgentMultimodalEnabled,
+  createDelegatedOssUploader,
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
-  resolveMultimodalEventStorageBasePath,
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
@@ -169,6 +175,8 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
+  private interceptorService: InterceptorService | null = null;
+  private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
@@ -218,9 +226,29 @@ export class Orchestrator extends EventEmitter {
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
+    const workspacePolicy = new WorkspacePolicy(
+      this.config.privacy?.excludeWorkspaces,
+      path.join(this.dataDir, 'state', 'workspace-exclusions'),
+    );
+    this.inputManager.setWorkspacePolicy(workspacePolicy);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
+    this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
+    this.verdictStore.restore();
+    const interceptorConfig = await loadInterceptorConfig();
+    this.inputManager.setInterceptResultLinker(
+      new InterceptResultLinker(
+        this.verdictStore,
+        resolveEnabledInterceptorTypes(interceptorConfig).size > 0,
+      ),
+    );
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
     // acp-correlate store so agent spans reparent under the upstream span.
@@ -245,21 +273,40 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const eventBase = await resolveMultimodalEventStorageBasePath(multimodalConfig);
-        if (!eventBase.ok) {
-          logger.error('multimodal init failed; disabled for process', { error: eventBase.error });
+        let processor: MultimodalProcessor;
+        if (multimodalConfig.storage.type === 'delegatedOss') {
+          const runtime = createDelegatedOssUploader(
+            multimodalConfig.storage,
+            multimodalConfig.storageBasePath,
+          );
+          const eventBase = await runtime.resolveStorageBase();
+          processor = new MultimodalProcessor(
+            eventBase.ok ? eventBase.storageBasePath : undefined,
+            runtime.uploader,
+            runtime.resolveStorageBase,
+          );
+          if (eventBase.ok) {
+            logger.info('multimodal processor enabled', {
+              type: multimodalConfig.storage.type,
+              mode: multimodalConfig.storage.auth.mode,
+              storageBasePath: eventBase.storageBasePath,
+            });
+          } else {
+            logger.warn('multimodal processor waiting for delegatedOss bucket', {
+              error: eventBase.error,
+            });
+          }
         } else {
-          const uploader = createUploader(multimodalConfig, {
-            ...(eventBase.origin ? { expectedPresignOrigin: eventBase.origin } : {}),
-          });
-          const processor = new MultimodalProcessor(eventBase.storageBasePath, uploader);
-          this.inputManager.setMultimodalProcessor(processor);
-          this.multimodalProcessor = processor;
+          const uploader = createUploader(multimodalConfig);
+          processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
           logger.info('multimodal processor enabled', {
             type: multimodalConfig.storage.type,
-            storageBasePath: eventBase.storageBasePath,
+            mode: multimodalConfig.storage.auth.mode,
+            storageBasePath: multimodalConfig.storageBasePath,
           });
         }
+        this.inputManager.setMultimodalProcessor(processor);
+        this.multimodalProcessor = processor;
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }
@@ -273,6 +320,19 @@ export class Orchestrator extends EventEmitter {
       pilotDir,
     });
     await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
+
+    // Build the watchdog immediately after deployment so its constructor records
+    // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
+    // started later, after discovery and retention services are ready.
+    const hookWatchdogTargets = this.buildHookWatchdogTargets();
+    const interceptTargets = [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
+    ];
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -311,15 +371,6 @@ export class Orchestrator extends EventEmitter {
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
-    const hookWatchdogTargets = this.buildHookWatchdogTargets();
-    const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
-      ...this.buildGrokBuildInterceptTargets(),
-      ...this.buildPluginInjectInterceptTargets(),
-      ...this.buildDirectoryPluginInterceptTargets(),
-      ...this.buildDshYamlPatchInterceptTargets(),
-    ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -340,6 +391,7 @@ export class Orchestrator extends EventEmitter {
         failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
+        workspacePolicy,
       });
       await this.pipelineManager.start();
     } else {
@@ -403,6 +455,23 @@ export class Orchestrator extends EventEmitter {
       logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
     });
 
+    // Interceptor HTTP shares this process. A bind failure leaves hooks fail-open
+    // and must not keep the collector from collecting.
+    this.interceptorService = await startInterceptorService({
+      dataDir: this.dataDir,
+      version: packageVersion,
+      gitCommit: packageGitCommit || undefined,
+      verdictStore: this.verdictStore ?? undefined,
+      emitBlockedPrompt: (entry) => {
+        void this.inputManager.flushPreparedEntries([entry]).catch(err => {
+          logger.warn('blocked prompt flush failed', { error: String(err) });
+        });
+      },
+    }).catch(err => {
+      logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
+      return null;
+    });
+
     // Only the native macOS menu bar app remains optional.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
@@ -460,6 +529,18 @@ export class Orchestrator extends EventEmitter {
     });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
+    await this.interceptorService?.stop().catch(err => {
+      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    if (!this.interceptorService) {
+      try {
+        this.verdictStore?.dump();
+      } catch (err) {
+        logger.warn('interceptor verdict checkpoint failed', { error: String(err) });
+      }
+    }
+    this.interceptorService = null;
+    this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
@@ -570,6 +651,12 @@ export class Orchestrator extends EventEmitter {
         // each check so a config change takes effect without rebuilding targets.
         enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        ...(def.id === 'codex' && def.hook.trustToml ? {
+          changeWatchPath: resolveHome(def.hook.trustToml.configPath),
+          // Reuse the deployment strategy's exact hook/trust inspection. The
+          // watchdog only decides when to run it; it owns no TOML logic.
+          needsRepairOnChange: () => this.deploymentManager.needsRedeploy(def),
+        } : {}),
       });
     }
 
@@ -1147,15 +1234,12 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
-    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
-      interceptFile: qwenWorkCNInterceptFile,
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1169,7 +1253,6 @@ export class Orchestrator extends EventEmitter {
         watchPaths: QwenWorkCNTraceInput.getWatchPaths({
           logDir: qwenWorkCNLogDir,
           segmentsRoot: qwenWorkCNSegmentsRoot,
-          interceptFile: qwenWorkCNInterceptFile,
         }),
         isAvailable: QwenWorkCNTraceInput.checkAvailability,
         enabled: qwenWorkCNTraceEnabled,
@@ -1367,8 +1450,13 @@ export class Orchestrator extends EventEmitter {
     const codexAgentCfg = this.config.agents.codex ?? {};
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
+    const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
+    const codexSpanContextDir = path.join(this.dataDir, 'state', 'codex', 'transcript-span-contexts');
+    await ensureDir(codexWakeupDir);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      wakeupDir: codexWakeupDir,
+      spanContextDir: codexSpanContextDir,
       multimodal: {
         enabled: codexMultimodalEnabled,
         uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
@@ -1378,8 +1466,8 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
       this.inputManager.buildDetectionEntry(codexTranscriptInput, {
-        watchPaths: CodexTranscriptInput.getWatchPaths(),
-        isAvailable: CodexTranscriptInput.checkAvailability,
+        watchPaths: CodexTranscriptInput.getWatchPaths(codexWakeupDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(codexWakeupDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
             'codex-transcript',

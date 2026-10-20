@@ -224,6 +224,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
@@ -350,6 +353,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
@@ -463,6 +469,14 @@ describe('Hook JSONL integration flow', () => {
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
       session_id: 'sess-delayed-ide',
+      extra: {
+        email: 'git-user@example.com',
+        user: {
+          name: 'qoder-user',
+          email: 'qoder-user@example.com',
+          uid: 'qoder-native-user-id',
+        },
+      },
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
     });
@@ -474,6 +488,12 @@ describe('Hook JSONL integration flow', () => {
     const llmResponses = records.filter(r => r['event.name'] === 'llm.response');
     const toolCalls = records.filter(r => r['event.name'] === 'tool.call');
 
+    expect(records.every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
+    expect(records.some(record => record['user.email'] === 'git-user@example.com')).toBe(false);
+    expect(records.some(record => Object.hasOwn(record, 'user.uid'))).toBe(false);
     expect(llmRequests).toHaveLength(3);
     expect(llmResponses).toHaveLength(3);
     expect(new Set(llmRequests.map(r => r['gen_ai.step.id']))).toEqual(new Set(llmResponses.map(r => r['gen_ai.step.id'])));
@@ -698,6 +718,9 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),

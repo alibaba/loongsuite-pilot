@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { WorkspacePolicy } from './workspace-policy.js';
 import type {
   AgentActivityEntry,
   AgentDetectionEntry,
@@ -20,6 +21,7 @@ import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
+import type { InterceptResultLinker } from './intercept-result-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -81,12 +83,27 @@ export class InputManager extends EventEmitter {
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
   private configuredUserId: string = '';
-  private agentsConfig: AgentsConfig = {};
-  private maskConfig: MaskConfig = { mode: 'none', types: [] };
-  private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
+  private maskConfig: MaskConfig = {
+    mode: 'none',
+    types: [],
+    replacementMode: 'placeholder',
+  };
+  private maskPlan: MaskPlan = {
+    rules: [],
+    piiTypes: new Set(),
+    replacementMode: 'placeholder',
+  };
   private traceLinker: TraceLinker | null = null;
+  private interceptResultLinker: InterceptResultLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
+
+  private workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void {
+    this.workspacePolicy = policy;
+    for (const input of this.inputs.values()) input.setWorkspacePolicy(policy);
+  }
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -104,9 +121,8 @@ export class InputManager extends EventEmitter {
     this.configuredUserId = userId;
   }
 
-  setAgentsConfig(config: AgentsConfig): void {
-    this.agentsConfig = config;
-  }
+  /** @deprecated Retained for callers; per-agent content opt-outs are ignored. */
+  setAgentsConfig(_config: AgentsConfig): void {}
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
@@ -115,6 +131,10 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  setInterceptResultLinker(linker: InterceptResultLinker): void {
+    this.interceptResultLinker = linker;
   }
 
   /** Process-scoped; reject replacing a different live instance. */
@@ -131,6 +151,7 @@ export class InputManager extends EventEmitter {
       logger.warn('input already registered', { id: input.id });
       return;
     }
+    input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
     this.counters.set(input.id, {
       sourceKind: 'primary',
@@ -326,7 +347,20 @@ export class InputManager extends EventEmitter {
     inputId: string,
     entries: AgentActivityEntry[],
   ): Promise<void> {
+    entries = this.workspacePolicy.filter(entries, this.inputs.get(inputId)?.agentType);
     if (entries.length === 0) return;
+
+    // Join while entries still carry the agent-native session id.
+    if (this.interceptResultLinker) {
+      try {
+        this.interceptResultLinker.enrich(entries);
+      } catch (err) {
+        logger.warn('interceptor result linking failed (skipped)', {
+          inputId,
+          error: String(err),
+        });
+      }
+    }
 
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
@@ -361,9 +395,7 @@ export class InputManager extends EventEmitter {
       }
     }
 
-    for (const entry of entries) {
-      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
-    }
+    this.applyIdentity(entries);
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
     // existing boundary markers, and must not block the normal output path.
@@ -376,14 +408,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const maskedEntries =
-      this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
-        ? entries
-        : entries.map(entry =>
-            maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
-          );
-
-    const expandedEntries = expandAgentInputEvents(maskedEntries);
+    const expandedEntries = expandAgentInputEvents(this.applyMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -394,6 +419,49 @@ export class InputManager extends EventEmitter {
 
     logger.info('dispatching entries', { inputId, count: expandedEntries.length });
     await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes, logicalBytes);
+  }
+
+  /**
+   * Flush entries that did not come from an Input. Reuses git enrichment,
+   * invocation identity, and mask, then the same flusher.
+   */
+  async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const inputId = 'interceptor';
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
+
+    this.applyIdentity(entries);
+    const prepared = this.applyMask(entries);
+    let outputBatchBytes = 0;
+    const logicalBytes = prepared.map(entry => {
+      const bytes = Buffer.byteLength(JSON.stringify(entry));
+      outputBatchBytes += bytes;
+      return bytes;
+    });
+    logger.info('dispatching entries', { inputId, count: prepared.length });
+    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes);
+  }
+
+  private applyIdentity(entries: AgentActivityEntry[]): void {
+    for (const entry of entries) {
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
+    }
+  }
+
+  private applyMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
+      return entries;
+    }
+    return entries.map(entry =>
+      maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
+    );
   }
 
   markInputStarted(id: string): void {

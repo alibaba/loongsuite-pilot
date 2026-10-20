@@ -1,5 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AnalyticsConfig } from '../../../src/types/index.js';
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const mkdir = vi.fn(actual.mkdir);
+  const writeFile = vi.fn(actual.writeFile);
+  return { ...actual, mkdir, writeFile, default: { ...actual, mkdir, writeFile } };
+});
 
 const { mockLoggerWarn } = vi.hoisted(() => ({
   mockLoggerWarn: vi.fn(),
@@ -49,7 +67,7 @@ vi.mock('../../../src/dashboard/index.js', () => ({
 }));
 
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
-const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, '/home/test'));
+const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, os.homedir()));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
@@ -112,18 +130,12 @@ vi.mock('axios', () => ({
 
 // This suite exercises orchestration only; loading the native sqlite binding is
 // unnecessary and makes the test depend on the local Node ABI.
-vi.mock('sqlite3', () => ({
-  default: {
-    Database: vi.fn(),
-    OPEN_READONLY: 1,
-  },
-}));
-
 vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   QoderWorkInput: vi.fn().mockImplementation(() => ({
     id: 'qoder-work',
     agentType: 'qoder-work',
     collectionMethod: 'sqlite-polling',
+    setWorkspacePolicy: vi.fn(),
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -136,6 +148,7 @@ vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
     id: 'cursor-hook',
     agentType: 'cursor',
     collectionMethod: 'hook-jsonl',
+    setWorkspacePolicy: vi.fn(),
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -160,12 +173,10 @@ vi.mock('../../../src/metrics/alarm-manager.js', () => ({
 }));
 
 const {
-  mockResolveMultimodalEventStorageBasePath,
-  mockCreateUploader,
+  mockCreateDelegatedOssUploader,
   MockMultimodalProcessor,
 } = vi.hoisted(() => ({
-  mockResolveMultimodalEventStorageBasePath: vi.fn(),
-  mockCreateUploader: vi.fn(),
+  mockCreateDelegatedOssUploader: vi.fn(),
   MockMultimodalProcessor: vi.fn(),
 }));
 
@@ -173,10 +184,7 @@ vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/multimodal/index.js')>();
   return {
     ...actual,
-    resolveMultimodalEventStorageBasePath: (...args: unknown[]) => (
-      mockResolveMultimodalEventStorageBasePath(...args)
-    ),
-    createUploader: (...args: unknown[]) => mockCreateUploader(...args),
+    createDelegatedOssUploader: (...args: unknown[]) => mockCreateDelegatedOssUploader(...args),
     MultimodalProcessor: MockMultimodalProcessor,
   };
 });
@@ -237,17 +245,85 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       port: 8765,
     },
     agents: {},
+    interceptor: { mode: 'none', types: [] },
     ...overrides,
   };
 }
 
 describe('Orchestrator', () => {
+  let homeDir: string;
+  let restoreHome: () => void;
   beforeEach(() => {
     vi.clearAllMocks();
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-home-'));
+    restoreHome = isolateAgentHome(homeDir);
+    mockResolveHome.mockImplementation(p => p.replace(/^~/, homeDir));
     discoveryEntries = [];
   });
 
+  afterEach(() => {
+    try { fs.rmSync(homeDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
+  });
+
   describe('startup sequence (T038)', () => {
+    it('creates a detected OpenCode config only inside the isolated home', async () => {
+      const binDir = path.join(homeDir, 'bin');
+      fs.mkdirSync(binDir);
+      const windows = process.platform === 'win32';
+      fs.writeFileSync(path.join(binDir, windows ? 'opencode.cmd' : 'opencode'),
+        windows ? '@exit /b 0\r\n' : '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ''}`;
+
+      const mkdir = vi.mocked(fsp.mkdir);
+      const writeFile = vi.mocked(fsp.writeFile);
+      const originalMkdir = mkdir.getMockImplementation()!;
+      const originalWriteFile = writeFile.getMockImplementation()!;
+      const writes: string[] = [];
+      const escapedTargets: string[] = [];
+      const checkTarget = (target: string) => {
+        const resolved = path.resolve(target);
+        const relative = path.relative(homeDir, resolved);
+        if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+          escapedTargets.push(resolved);
+          throw new Error(`Deployment write escaped temporary home: ${target}`);
+        }
+        writes.push(resolved);
+      };
+      mkdir.mockImplementation((target, options) => {
+        checkTarget(String(target));
+        return originalMkdir(target, options);
+      });
+      writeFile.mockImplementation((target, data, options) => {
+        checkTarget(String(target));
+        return originalWriteFile(target, data, options);
+      });
+
+      const dataDir = path.join(homeDir, 'pilot-data');
+      let orch: Orchestrator | undefined;
+      try {
+        orch = new Orchestrator(makeConfig({ dataDir }));
+        // Exercise real CLI detection and deployment for OpenCode only.
+        (orch as any).isAgentGatedEnabled = (id: string) => id === 'opencode';
+        await orch.start();
+        const configPath = path.join(homeDir, '.config', 'opencode', 'opencode.jsonc');
+        expect(escapedTargets).toEqual([]);
+        expect(writes).toContain(configPath);
+        expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugin).toEqual([
+          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode/plugin.mjs`,
+        ]);
+      } finally {
+        try { await orch?.stop(); }
+        finally {
+          mkdir.mockImplementation(originalMkdir);
+          writeFile.mockImplementation(originalWriteFile);
+          if (previousPath === undefined) delete process.env.PATH;
+          else process.env.PATH = previousPath;
+        }
+      }
+    });
+
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
         dashboard: {
@@ -396,22 +472,19 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
-    it('uses the configured dataDir for all QwenWorkCN Hook and intercept paths', async () => {
+    it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));
       await orch.start();
 
       const input = orch.getInputManager().getInput('qwen-work-cn-trace') as any;
       const historyDir = `${dataDir}/logs/qwen-work-cn/history`;
-      const interceptFile = `${dataDir}/logs/qwenworkcn-intercept.jsonl`;
       expect(input.logDir).toBe(historyDir);
-      expect(input.interceptFile).toBe(interceptFile);
 
       const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-trace');
       expect(detection?.watchPaths).toEqual([
         historyDir,
-        '/home/test/.qwenworkcn/logs/sessions',
-        interceptFile,
+        `${homeDir}/.qwenworkcn/logs/sessions`,
       ]);
 
       await orch.stop();
@@ -618,7 +691,6 @@ describe('Orchestrator', () => {
   });
 
   describe('multimodal startup wiring', () => {
-    const fakeUploader = { upload: vi.fn(), shutdown: vi.fn() };
     const agentsWantMultimodal = {
       codex: {
         enabled: true,
@@ -641,13 +713,26 @@ describe('Orchestrator', () => {
       },
       storageBasePath: 'sls://proj/logstore',
     };
+    const uploader = { upload: vi.fn(), shutdown: vi.fn() };
+    const resolveStorageBase = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'presign failed',
+    });
 
     let setProcessor: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      mockCreateUploader.mockReturnValue(fakeUploader);
-      MockMultimodalProcessor.mockImplementation((base: string) => ({
-        storageBasePath: base,
+      mockCreateDelegatedOssUploader.mockClear();
+      resolveStorageBase.mockReset().mockResolvedValue({
+        ok: false,
+        error: 'presign failed',
+      });
+      mockCreateDelegatedOssUploader.mockReturnValue({
+        uploader,
+        resolveStorageBase,
+      });
+      MockMultimodalProcessor.mockImplementation((storageBasePath?: string) => ({
+        storageBasePath,
         shutdown: vi.fn().mockResolvedValue(undefined),
       }));
       setProcessor = vi.spyOn(InputManager.prototype, 'setMultimodalProcessor');
@@ -657,10 +742,63 @@ describe('Orchestrator', () => {
       setProcessor.mockRestore();
     });
 
-    it('does not install a processor when event-base resolution fails', async () => {
-      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
-        ok: false,
-        error: 'presign failed',
+    it('uses the configured storageBasePath directly for sls', async () => {
+      const sls = {
+        storage: {
+          type: 'sls' as const,
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'proj',
+            logstore: 'logstore',
+          },
+          auth: {
+            mode: 'ak' as const,
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+        storageBasePath: 'sls://proj/logstore',
+      };
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: sls,
+      }));
+
+      await orch.start();
+
+      expect(mockCreateDelegatedOssUploader).not.toHaveBeenCalled();
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        sls.storageBasePath,
+        expect.anything(),
+      );
+      await orch.stop();
+    });
+
+    it('leaves delegatedOss retrying inside the processor when the startup sniff fails', async () => {
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: delegatedOss,
+      }));
+
+      await orch.start();
+
+      expect(resolveStorageBase).toHaveBeenCalledOnce();
+      expect(mockCreateDelegatedOssUploader).toHaveBeenCalledWith(
+        delegatedOss.storage,
+        delegatedOss.storageBasePath,
+      );
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        undefined,
+        uploader,
+        resolveStorageBase,
+      );
+      await orch.stop();
+    });
+
+    it('installs a processor when the delegatedOss sniff succeeds', async () => {
+      resolveStorageBase.mockResolvedValue({
+        ok: true,
+        storageBasePath: 'oss://user-bucket/proj/logstore',
       });
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
@@ -669,49 +807,16 @@ describe('Orchestrator', () => {
 
       await orch.start();
 
-      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
-      expect(mockCreateUploader).not.toHaveBeenCalled();
-      expect(MockMultimodalProcessor).not.toHaveBeenCalled();
-      expect(setProcessor).not.toHaveBeenCalled();
-      await orch.stop();
-    });
-
-    it('installs a processor when event-base resolution succeeds', async () => {
-      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
-        ok: true,
-        storageBasePath: 'oss://user-bucket/proj/logstore',
-        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
-      });
-      const orch = new Orchestrator(makeConfig({
-        agents: agentsWantMultimodal,
-        multimodal: {
-          ...delegatedOss,
-          storage: {
-            ...delegatedOss.storage,
-            target: {
-              ...delegatedOss.storage.target,
-              ossBucket: 'user-bucket',
-            },
-          },
-        },
-      }));
-
-      await orch.start();
-
-      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
-      expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
-        storage: expect.objectContaining({ type: 'delegatedOss' }),
-      }), {
-        expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
-      });
+      expect(mockCreateDelegatedOssUploader).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'delegatedOss' }),
+        delegatedOss.storageBasePath,
+      );
       expect(MockMultimodalProcessor).toHaveBeenCalledWith(
         'oss://user-bucket/proj/logstore',
-        fakeUploader,
+        uploader,
+        resolveStorageBase,
       );
       expect(setProcessor).toHaveBeenCalledTimes(1);
-      expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
-        storageBasePath: 'oss://user-bucket/proj/logstore',
-      });
       await orch.stop();
     });
   });

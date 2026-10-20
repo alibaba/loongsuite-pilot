@@ -32,6 +32,7 @@ export interface CmsConfig {
 }
 
 export type MaskMode = 'none' | 'all' | 'custom';
+export type MaskReplacementMode = 'placeholder' | 'preview';
 
 export const PII_MASK_TYPES = [
   'idCard',
@@ -56,9 +57,27 @@ export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 export interface MaskConfig {
   mode: MaskMode;
   types: MaskType[];
+  replacementMode?: MaskReplacementMode;
+}
+
+/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
+export const SUPPORTED_INTERCEPTOR_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+] as const satisfies readonly MaskType[];
+
+export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
+
+export interface InterceptorConfig {
+  mode: MaskMode;
+  types: InterceptorType[];
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -100,6 +119,7 @@ export interface InnerTraceConfig {
 }
 
 export interface AnalyticsConfig {
+  privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
@@ -130,6 +150,8 @@ export interface AnalyticsConfig {
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Local interceptor rules. Same `{ mode, types }` shape as mask; types are a subset. */
+  interceptor: InterceptorConfig;
 }
 
 /**
@@ -141,6 +163,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Propagate the linked context to the LLM gateway as a `traceparent` header. */
+  propagateToLlm: boolean;
   /** Generate a per-turn trace context for tools when no upstream context is available. */
   generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
@@ -151,30 +175,24 @@ export const MULTIMODAL_UPLOAD_MODES = [
   'none',
   'input',
   'output',
-  'tool',
-  'both',
+  'all',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
 /** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'both';
+  return mode === 'input' || mode === 'all';
 }
 
 /** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
-  return mode === 'output' || mode === 'both';
-}
-
-/** uploadMode covers tool results. */
-export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'tool' || mode === 'both';
+  return mode === 'output' || mode === 'all';
 }
 
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
 export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey', 'anonymous'] as const;
 export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
 
 export interface MultimodalAkAuth {
@@ -189,18 +207,19 @@ export interface MultimodalApiKeyAuth {
   apiKey: string;
 }
 
-/** Discriminated auth after load. User config must be exactly one complete credential set. */
-export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+export interface MultimodalAnonymousAuth {
+  mode: 'anonymous';
+}
+
+/** Credential-bearing auth shared by SLS, delegated OSS, and direct OSS. */
+export type MultimodalCredentialAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+/** SLS PutObject also supports explicit credential-free anonymous writes. */
+export type MultimodalStorageAuth = MultimodalCredentialAuth | MultimodalAnonymousAuth;
 
 export interface MultimodalSlsTarget {
   endpoint: string;
   project: string;
   logstore: string;
-}
-
-export interface MultimodalDelegatedOssTarget extends MultimodalSlsTarget {
-  /** Expected landing bucket. Not provisioned by Pilot. */
-  ossBucket?: string;
 }
 
 export interface MultimodalOssTarget {
@@ -210,7 +229,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalDelegatedOssTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalCredentialAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**
@@ -258,6 +277,8 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];

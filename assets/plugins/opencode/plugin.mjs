@@ -472,8 +472,12 @@ function handleChatMessage(inp, out, userId) {
 
   session.turnSeq += 1;
   if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
-  const turnId = `${sessionID}:t${session.turnSeq}`;
   const traceId = generateTraceId();
+  // `opencode run -s` resumes a session in a fresh process, resetting turnSeq.
+  // Include this invocation's random ID so the trace flusher cannot mistake
+  // a resumed turn for an already-exported one. This suffix stays unchanged
+  // even when upstream linking later replaces the record's trace_id.
+  const turnId = `${sessionID}:t${session.turnSeq}:${traceId}`;
 
   session.currentTurn = {
     turnId,

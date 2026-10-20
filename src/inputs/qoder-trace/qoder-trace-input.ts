@@ -13,7 +13,7 @@ import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot, type SqliteTokenResult } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import {
   collectCliExpectedRequestIds,
@@ -38,6 +38,22 @@ export interface QoderTraceInputOptions extends InputOptions {
 }
 
 const QODER_ATTACHMENTS_FIELD = 'agent.qoder.attachments';
+const IDE_SQLITE_RETRY_DELAY_MS = 1_000;
+
+function needsIdeSqliteRetry(entries: AgentActivityEntry[]): boolean {
+  return entries.some(entry => {
+    if (entry['event.name'] !== 'llm.response') return false;
+    const inputTokens = entry['gen_ai.usage.input_tokens'];
+    const outputTokens = entry['gen_ai.usage.output_tokens'];
+    // The SQLite reader only returns rows with positive input or output usage.
+    // Unmatched responses may already have zero-filled usage, so field presence
+    // alone cannot tell us whether the current batch was enriched.
+    return !entry['gen_ai.response.id'] || !(
+      (typeof inputTokens === 'number' && inputTokens > 0) ||
+      (typeof outputTokens === 'number' && outputTokens > 0)
+    );
+  });
+}
 
 function stripQoderAttachmentCarrier(entries: AgentActivityEntry[]): void {
   for (const entry of entries) {
@@ -159,6 +175,10 @@ export class QoderTraceInput extends BaseInput {
     return readSegmentTokensForSession(sessionId, expectedRequestIds);
   }
 
+  protected readIdeSqliteTokens(sessionId: string): Promise<SqliteTokenResult> {
+    return readSqliteTokensForSession(sessionId);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
@@ -209,9 +229,42 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    const ideSqliteSnapshots = new Map<string, {
+      result: SqliteTokenResult;
+      enrichedEntries: AgentActivityEntry[];
+    }>();
+    const ideRetrySessions: string[] = [];
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      const { rows: sqliteRows, matchedDbPath } = await readSqliteTokensForSession(sessionId);
-      enrichIdeTurn(sessionEntries, sqliteRows);
+      const result = await this.readIdeSqliteTokens(sessionId);
+      // Enrichment only changes top-level fields. Probe shallow copies so a
+      // retry does not reuse modified timestamps or partially written usage.
+      const probeEntries = sessionEntries.map(entry => ({ ...entry }));
+      enrichIdeTurn(probeEntries, result.rows);
+      ideSqliteSnapshots.set(sessionId, { result, enrichedEntries: probeEntries });
+      if (needsIdeSqliteRetry(probeEntries)) ideRetrySessions.push(sessionId);
+    }
+
+    if (ideRetrySessions.length > 0 && !this.multimodalStopped) {
+      // One shared asynchronous wait per batch, even with several IDE sessions.
+      await new Promise<void>(resolve => setTimeout(resolve, IDE_SQLITE_RETRY_DELAY_MS));
+      for (const sessionId of ideRetrySessions) {
+        if (this.multimodalStopped) break;
+        const retryResult = await this.readIdeSqliteTokens(sessionId);
+        // A transient failure or disappearing DB must not discard rows already
+        // available on the first read. Session snapshots normally only grow.
+        if (retryResult.rows.length >= ideSqliteSnapshots.get(sessionId)!.result.rows.length) {
+          const enrichedEntries = ideSessionGroups.get(sessionId)!.map(entry => ({ ...entry }));
+          enrichIdeTurn(enrichedEntries, retryResult.rows);
+          ideSqliteSnapshots.set(sessionId, { result: retryResult, enrichedEntries });
+        }
+      }
+    }
+
+    for (const [sessionId, sessionEntries] of ideSessionGroups) {
+      const { result: { matchedDbPath }, enrichedEntries } = ideSqliteSnapshots.get(sessionId)!;
+      for (let i = 0; i < sessionEntries.length; i++) {
+        Object.assign(sessionEntries[i], enrichedEntries[i]);
+      }
 
       // Fix agent type when hook processor couldn't detect qoder-idea (Node < 22 fallback).
       // If all entries are labeled 'qoder' but tokens came from the IntelliJ-specific DB, relabel.
@@ -225,6 +278,7 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    this.workspacePolicy.filter(rawEntries, this.agentType);
     if (this.multimodalEnabled && this.multimodalProcessor) {
       const pathToUri = async (filePath: string, timeUnixMs?: number) => {
         if (this.multimodalStopped) return null;
@@ -233,15 +287,25 @@ export class QoderTraceInput extends BaseInput {
         });
       };
       for (const sessionEntries of ideSessionGroups.values()) {
+        if (sessionEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
         // JetBrains shares this input but has no multimodal extractor yet.
         if (isQoderIdeaSession(sessionEntries)) continue;
         if (this.multimodalStopped) break;
+        const before = sessionEntries.length;
         await enrichIdeMultimodal(sessionEntries, {
           uploadMode: this.multimodalUploadMode,
           pathToUri,
         });
+        for (let i = before; i < sessionEntries.length; i++) {
+          const entry = sessionEntries[i];
+          insertBeforeMatchingResponse(rawEntries, entry);
+          const turnId = (entry['gen_ai.turn.id'] as string) || 'unknown';
+          const group = turnGroups.get(turnId);
+          if (group) insertBeforeMatchingResponse(group, entry);
+        }
       }
       for (const turnEntries of cliTurns) {
+        if (turnEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
         if (this.multimodalStopped) break;
         await enrichCliMultimodal(turnEntries, {
           uploadMode: this.multimodalUploadMode,
@@ -409,4 +473,16 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+function insertBeforeMatchingResponse(
+  target: AgentActivityEntry[],
+  request: AgentActivityEntry,
+): void {
+  const requestId = request['gen_ai.request.id'];
+  const idx = target.findIndex(e =>
+    e['event.name'] === 'llm.response' && e['gen_ai.request.id'] === requestId,
+  );
+  if (idx >= 0) target.splice(idx, 0, request);
+  else target.push(request);
 }

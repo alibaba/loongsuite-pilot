@@ -1,8 +1,8 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { ClientType, CollectionMethod } from '../../types/index.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
@@ -290,36 +290,6 @@ function readMaxUpdatedAt(dbPath: string): Promise<number> {
     rows => rows[0]?.maxUpdate ?? 0,
   );
 }
-
-function queryReadonly<T>(
-  dbPath: string,
-  sql: string,
-  params: unknown[],
-): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    let db: sqlite3.Database;
-    db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) {
-        reject(openErr);
-        return;
-      }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) {
-            reject(queryErr);
-            return;
-          }
-          if (closeErr) {
-            reject(closeErr);
-            return;
-          }
-          resolve(rows);
-        });
-      });
-    });
-  });
-}
-
 
 function getStringArray(extra: unknown, key: string): string[] {
   const value = toPlainObject(extra)[key];

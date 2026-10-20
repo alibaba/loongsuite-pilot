@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { resolveHome } from './fs-utils.js';
+import { resolveHome, type HomeResolutionOptions } from './fs-utils.js';
 
 // The single home of "where is the pilot data dir". Three consumers used to
 // carry private copies of this precedence chain — loadConfig() here,
@@ -26,8 +26,13 @@ export const DEFAULT_CONFIG_PATH = `${DEFAULT_DATA_DIR}/config.json`;
  * unset (a path cannot meaningfully start or end with a space).
  */
 export function configJsonPath(): string {
-  const fromEnv = (process.env.AGENT_DATA_COLLECTION_CONFIG ?? '').trim();
-  return resolveHome(fromEnv || DEFAULT_CONFIG_PATH);
+  return configJsonPathFrom(process.env);
+}
+
+/** Same config location for isolated probes and the live config loader. */
+export function configJsonPathFrom(env: NodeJS.ProcessEnv, options: Omit<HomeResolutionOptions, 'env'> = {}): string {
+  const fromEnv = (env.AGENT_DATA_COLLECTION_CONFIG ?? '').trim();
+  return resolveHome(fromEnv || DEFAULT_CONFIG_PATH, { ...options, env });
 }
 
 /**

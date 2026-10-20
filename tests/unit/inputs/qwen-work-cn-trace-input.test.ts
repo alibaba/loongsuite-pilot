@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as interceptReader from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,6 +22,8 @@ describe('QwenWorkCNTraceInput', () => {
     historyDir = path.join(root, 'history');
     segmentsRoot = path.join(root, 'sessions');
     interceptFile = path.join(root, 'qwenworkcn-intercept.jsonl');
+    vi.spyOn(interceptReader, 'getInterceptFile').mockReturnValue(interceptFile);
+    vi.spyOn(interceptReader, 'readInterceptFile');
     await fs.mkdir(historyDir, { recursive: true });
     await fs.mkdir(segmentsRoot, { recursive: true });
     stateStore = new MockStateStore();
@@ -28,6 +31,7 @@ describe('QwenWorkCNTraceInput', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -36,7 +40,6 @@ describe('QwenWorkCNTraceInput', () => {
       stateStore: stateStore as never,
       logDir: historyDir,
       segmentsRoot,
-      interceptFile,
       pollIntervalMs: 60_000,
     });
   }
@@ -68,20 +71,19 @@ describe('QwenWorkCNTraceInput', () => {
     await fs.writeFile(path.join(directory, 'run.jsonl'), `${events.map(value => JSON.stringify(value)).join('\n')}\n`);
   }
 
-  it('has an independent QwenWorkCN identity and watches all three sources', () => {
+  it('has an independent QwenWorkCN identity and watches only native sources', () => {
     const input = makeInput();
     expect(input.id).toBe('qwen-work-cn-trace');
     expect(input.agentType).toBe(ClientType.QwenWorkCN);
     expect(input.collectionMethod).toBe(CollectionMethod.HookJsonl);
-    expect(QwenWorkCNTraceInput.getWatchPaths()).toEqual(expect.arrayContaining([
+    expect(QwenWorkCNTraceInput.getWatchPaths()).toEqual([
+      expect.stringContaining('qwen-work-cn/history'),
       expect.stringContaining('.qwenworkcn/logs/sessions'),
-      expect.stringContaining('qwenworkcn-intercept.jsonl'),
-    ]));
+    ]);
     expect(QwenWorkCNTraceInput.getWatchPaths({
       logDir: historyDir,
       segmentsRoot,
-      interceptFile,
-    })).toEqual([historyDir, segmentsRoot, interceptFile]);
+    })).toEqual([historyDir, segmentsRoot]);
   });
 
   it('strips a legacy bare runtime version while preserving the agent-scoped version', async () => {
@@ -99,7 +101,7 @@ describe('QwenWorkCNTraceInput', () => {
     expect(entries[0]['agent.qwenworkcn.version']).toBe('0.1.5');
   });
 
-  it('enriches zero-token Qwen segments from qwenworkcn-intercept by response id', async () => {
+  it('keeps native model and timing but ignores legacy intercept data for zero-token segments', async () => {
     await writeHistory([
       entry({
         'event.id': 'request',
@@ -135,16 +137,23 @@ describe('QwenWorkCNTraceInput', () => {
       cached_tokens: 24_576,
       reasoning_tokens: 285,
       total_tokens: 32_911,
-    })}\n`);
+    })}\n${JSON.stringify({ type: 'system_prompt', ts: Date.now(), content: 'Synthetic legacy instructions' })}\n`);
+    const legacyContent = await fs.readFile(interceptFile, 'utf8');
 
     const entries = await collectOnce(makeInput());
     const response = entries.find(value => value['event.id'] === 'response')!;
-    expect(response['gen_ai.usage.input_tokens']).toBe(32_244);
-    expect(response['gen_ai.usage.output_tokens']).toBe(667);
-    expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(24_576);
-    expect(response['gen_ai.usage.reasoning_tokens']).toBe(285);
+    const request = entries.find(value => value['event.id'] === 'request')!;
+    expect(interceptReader.readInterceptFile).not.toHaveBeenCalled();
+    expect(await fs.readFile(interceptFile, 'utf8')).toBe(legacyContent);
+    expect(request.time_unix_nano).toBe(nano('2026-08-06T06:00:00.000Z'));
+    expect(response.time_unix_nano).toBe(nano('2026-08-06T06:00:05.000Z'));
+    expect(request['gen_ai.system_instructions']).toBeUndefined();
+    expect(response['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(response['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(response['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
+    expect(response['gen_ai.usage.reasoning_tokens']).toBeUndefined();
     expect(response['workspace.path']).toBe(cwd);
-    expect(response['gen_ai.usage.total_tokens']).toBe(32_911);
+    expect(response['gen_ai.usage.total_tokens']).toBeUndefined();
     expect(response['gen_ai.request.model']).toBe('qmodel_latest');
     expect(response['gen_ai.response.model']).toBe('qmodel_latest');
     expect(entries.every(value => value['gen_ai.request.model'] === 'qmodel_latest')).toBe(true);
@@ -152,14 +161,14 @@ describe('QwenWorkCNTraceInput', () => {
     expect(entries[0]?.trace_id).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('keeps non-zero segment usage authoritative and only overlays missing cache usage', async () => {
+  it('collects native token and cache usage without intercept overlays', async () => {
     await writeHistory([
       entry({ 'event.id': 'request', 'event.name': 'llm.request' }),
       entry({ 'event.id': 'response', 'gen_ai.response.id': 'chatcmpl-qwen-2' }),
     ]);
     await writeSegments([
       { ts: '2026-08-06T06:00:00.000Z', type: 'model.request.started', turn_id: 'turn-1', request_id: 'request-2', data: { model: 'qmodel_latest' } },
-      { ts: '2026-08-06T06:00:05.000Z', type: 'model.response.completed', turn_id: 'turn-1', request_id: 'request-2', data: { model: 'qmodel_latest', input_tokens: 100, output_tokens: 20 } },
+      { ts: '2026-08-06T06:00:05.000Z', type: 'model.response.completed', turn_id: 'turn-1', request_id: 'request-2', data: { model: 'qmodel_latest', input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 60, cache_creation_input_tokens: 10 } },
     ]);
     await fs.writeFile(interceptFile, `${JSON.stringify({
       type: 'token', ts: Date.now(), id: 'chatcmpl-qwen-2',
@@ -171,8 +180,10 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.input_tokens']).toBe(100);
     expect(response['gen_ai.usage.output_tokens']).toBe(20);
     expect(response['gen_ai.usage.total_tokens']).toBe(120);
-    expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(80);
-    expect(response['gen_ai.usage.reasoning_tokens']).toBe(7);
+    expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(60);
+    expect(response['gen_ai.usage.cache_creation.input_tokens']).toBe(10);
+    expect(response['gen_ai.usage.reasoning_tokens']).toBeUndefined();
+    expect(interceptReader.readInterceptFile).not.toHaveBeenCalled();
   });
 
   it('does not read the QoderWork intercept file', async () => {

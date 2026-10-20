@@ -1,8 +1,9 @@
+import { v5 as uuidv5 } from 'uuid';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
+import { AGENT_INPUT_EVENT_NAMESPACE } from '../../normalization/agent-input-dual-write.js';
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesOutput,
-  multimodalUploadIncludesTool,
 } from '../../types/index.js';
 import {
   attachMultimodalMetadataForEntry,
@@ -16,7 +17,10 @@ import {
 } from '../../multimodal/index.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
 import { createLogger } from '../../utils/logger.js';
-import { readAttachedImagePathsForRequestIds } from './sqlite-token-reader.js';
+import {
+  readAttachedImagePathsForRequestIds,
+  type AttachedImageLookup,
+} from './sqlite-token-reader.js';
 
 const logger = createLogger('QoderIdeMultimodal');
 
@@ -35,14 +39,14 @@ const MARKDOWN_IMAGE_RE = new RegExp(
 );
 
 /**
- * request_id → attached paths. Process-local LRU.
- * Map values may be `[]` (confirmed empty or already attached). Ids absent from a lookup are not cached.
+ * request_id → attached lookup. Process-local LRU.
+ * `paths: []` means confirmed empty or already attached. Ids absent from a lookup are not cached.
  */
-const attachedPathsByRequestId = new LruMap<string[]>(MULTIMODAL_LRU_LIMIT);
+const attachedLookupByRequestId = new LruMap<AttachedImageLookup>(MULTIMODAL_LRU_LIMIT);
 
 /** Clear process-local attachedImagePaths cache. */
 export function clearAttachedImagePathsCache(): void {
-  attachedPathsByRequestId.clear();
+  attachedLookupByRequestId.clear();
 }
 
 interface EnrichStats {
@@ -93,11 +97,10 @@ async function enrichIdeMultimodalInner(
 
   if (multimodalUploadIncludesInput(opts.uploadMode)) {
     await enrichInputAttachedImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesTool(opts.uploadMode)) {
     await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
   }
   if (multimodalUploadIncludesOutput(opts.uploadMode)) {
+    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
     await enrichOutputMarkdownImages(entries, opts.pathToUri, touched, stats);
   }
 
@@ -134,12 +137,12 @@ async function enrichInputAttachedImages(
   const uniqueIds = [...new Set(requestIds)];
   if (uniqueIds.length === 0) return;
 
-  const byRequest = new Map<string, string[]>();
+  const byRequest = new Map<string, AttachedImageLookup>();
   const newIds: string[] = [];
   for (const id of uniqueIds) {
-    const cached = attachedPathsByRequestId.get(id);
+    const cached = attachedLookupByRequestId.get(id);
     if (cached !== undefined) {
-      if (cached.length > 0) byRequest.set(id, cached);
+      if (cached.paths.length > 0) byRequest.set(id, cached);
     } else {
       newIds.push(id);
     }
@@ -149,8 +152,8 @@ async function enrichInputAttachedImages(
     try {
       const fetched = await readAttachedImagePathsWithRetry(newIds);
       for (const [id, found] of fetched) {
-        attachedPathsByRequestId.set(id, found);
-        if (found.length > 0) byRequest.set(id, found);
+        attachedLookupByRequestId.set(id, found);
+        if (found.paths.length > 0) byRequest.set(id, found);
       }
     } catch (err) {
       logger.warn('qoder ide multimodal attachedImagePaths lookup failed', {
@@ -162,28 +165,24 @@ async function enrichInputAttachedImages(
   if (byRequest.size === 0) return;
   stats.attachedRequests = byRequest.size;
 
-  // Group input carriers by request_id (prefer llm.request; other rarely has request_id).
   const carriersByRequest = new Map<string, AgentActivityEntry>();
   for (const entry of entries) {
     const requestId = requestIdOf(entry);
     if (!requestId || !byRequest.has(requestId)) continue;
-    const name = entry['event.name'];
-    const hasDelta = Array.isArray(entry['gen_ai.input.messages_delta']);
-    if (!hasDelta) continue;
-    if (name === 'llm.request') {
-      carriersByRequest.set(requestId, entry);
-      continue;
-    }
-    if (name === 'other' && !carriersByRequest.has(requestId)) {
+    if (entry['event.name'] !== 'llm.request') continue;
+    if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
+    if (!carriersByRequest.has(requestId)) {
       carriersByRequest.set(requestId, entry);
     }
   }
 
   // When request_id is only on llm.response, fall back to same-turn input carrier.
-  for (const [requestId, paths] of byRequest) {
+  for (const [requestId, lookup] of byRequest) {
     let carrier = carriersByRequest.get(requestId);
+    let synthesized = false;
+    let response: AgentActivityEntry | undefined;
     if (!carrier) {
-      const response = entries.find(
+      response = entries.find(
         e => e['event.name'] === 'llm.response' && requestIdOf(e) === requestId,
       );
       if (response) {
@@ -197,16 +196,43 @@ async function enrichInputAttachedImages(
           && e['event.name'] === 'other'
           && Array.isArray(e['gen_ai.input.messages_delta']),
         );
+        if (!carrier) {
+          carrier = synthesizeUriOnlyRequest(response, requestId, lookup.startMs);
+          entries.push(carrier);
+          synthesized = true;
+        }
       }
     }
     if (!carrier) continue;
-    const timeMs = entryTimeMs(carrier);
-    const n = await appendUriPartsToMessagesDelta(carrier, paths, pathToUri, timeMs, stats);
-    if (n > 0) {
+    // Also attach the same-turn other, which has no request_id.
+    const siblingName = carrier['event.name'] === 'other' ? 'llm.request' : 'other';
+    const sibling = entries.find(e =>
+      e !== carrier
+      && e['gen_ai.turn.id'] === carrier['gen_ai.turn.id']
+      && e['event.name'] === siblingName
+      && Array.isArray(e['gen_ai.input.messages_delta'])
+      && (!requestIdOf(e) || requestIdOf(e) === requestId),
+    );
+    const uriParts = await convertPathsToUriParts(
+      lookup.paths, pathToUri, entryTimeMs(carrier), stats,
+    );
+
+    let requestAttached = 0;
+    for (const target of [carrier, sibling]) {
+      if (!target) continue;
+      const n = applyUriPartsToMessagesDelta(target, uriParts);
+      if (n <= 0) continue;
       stats.inputUri += n;
-      touched.add(carrier);
-      // Consume paths so this request_id is not attached again on later batches.
-      attachedPathsByRequestId.set(requestId, []);
+      touched.add(target);
+      if (target['event.name'] === 'llm.request') requestAttached = n;
+    }
+    if (requestAttached > 0) {
+      attachedLookupByRequestId.set(requestId, { paths: [] });
+    } else if (synthesized) {
+      entries.pop();
+      if (response && carrier['gen_ai.turn.start'] === true) {
+        response['gen_ai.turn.start'] = true;
+      }
     }
   }
 }
@@ -217,8 +243,8 @@ async function enrichInputAttachedImages(
  */
 async function readAttachedImagePathsWithRetry(
   requestIds: string[],
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, AttachedImageLookup>> {
+  const result = new Map<string, AttachedImageLookup>();
   let pending = requestIds;
   let lastError: unknown;
 
@@ -231,8 +257,8 @@ async function readAttachedImagePathsWithRetry(
     try {
       const fetched = await readAttachedImagePathsForRequestIds(pending);
       for (const id of pending) {
-        const paths = fetched.get(id);
-        if (paths !== undefined) result.set(id, paths);
+        const lookup = fetched.get(id);
+        if (lookup !== undefined) result.set(id, lookup);
       }
       pending = pending.filter(id => !fetched.has(id));
     } catch (err) {
@@ -280,6 +306,35 @@ async function enrichToolResultImages(
   }
 }
 
+async function enrichToolCallImages(
+  entries: AgentActivityEntry[],
+  pathToUri: PathToUriFn,
+  touched: Set<AgentActivityEntry>,
+  stats: EnrichStats,
+): Promise<void> {
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'tool.call') continue;
+    if (entry['gen_ai.tool.name'] !== 'Read') continue;
+    const raw = entry['gen_ai.tool.call.arguments'];
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (Array.isArray(raw)) continue;
+
+    const paths = extractToolCallImagePaths(raw, cwdOf(entry));
+    if (paths.length === 0) continue;
+
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    if (uriParts.length === 0) continue;
+
+    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    entry['gen_ai.tool.call.arguments'] = [
+      { type: 'text', content: original },
+      ...uriParts,
+    ] as unknown as JsonValue;
+    stats.outputUri += uriParts.length;
+    touched.add(entry);
+  }
+}
+
 async function enrichOutputMarkdownImages(
   entries: AgentActivityEntry[],
   pathToUri: PathToUriFn,
@@ -320,17 +375,13 @@ async function enrichOutputMarkdownImages(
 }
 
 /** @returns number of uri parts appended */
-async function appendUriPartsToMessagesDelta(
+function applyUriPartsToMessagesDelta(
   entry: AgentActivityEntry,
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<number> {
+  uriParts: UriPart[],
+): number {
+  if (uriParts.length === 0) return 0;
   const messages = entry['gen_ai.input.messages_delta'];
   if (!Array.isArray(messages) || messages.length === 0) {
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-    if (uriParts.length === 0) return 0;
     entry['gen_ai.input.messages_delta'] = [
       { role: 'user', parts: uriParts },
     ] as unknown as JsonValue;
@@ -342,8 +393,6 @@ async function appendUriPartsToMessagesDelta(
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
   record.parts = parts;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
-  if (uriParts.length === 0) return 0;
   parts.push(...uriParts);
   return uriParts.length;
 }
@@ -403,11 +452,83 @@ export function extractToolImagePaths(text: string): string[] {
   ]);
 }
 
+export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
+  let record: Record<string, unknown> | null = null;
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    record = args as Record<string, unknown>;
+  } else if (typeof args === 'string' && args) {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        record = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // hook writes JSON.stringify; ignore non-JSON argument strings
+    }
+  }
+  const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
+  if (!filePath) return [];
+  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
+}
+
 export function extractMarkdownImagePaths(text: string, cwd?: string): string[] {
   return takeUniqueExtractedPaths(
     matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]),
     cwd ? raw => resolveImagePath(raw, cwd) : undefined,
   );
+}
+
+export function deriveSyntheticIdeRequestEventId(responseEventId: string, requestId: string): string {
+  return uuidv5(
+    `qoder-ide-synthetic-llm.request\0${responseEventId}\0${requestId}`,
+    AGENT_INPUT_EVENT_NAMESPACE,
+  );
+}
+
+function synthesizeUriOnlyRequest(
+  response: AgentActivityEntry,
+  requestId: string,
+  gmtCreateMs?: number,
+): AgentActivityEntry {
+  const carrier = { ...response } as AgentActivityEntry;
+  carrier['event.id'] = deriveSyntheticIdeRequestEventId(String(response['event.id'] ?? ''), requestId);
+  carrier['event.name'] = 'llm.request';
+  const startNano = msToUnixNano(gmtCreateMs);
+  if (startNano !== undefined && isStrictlyBefore(startNano, response.time_unix_nano)) {
+    carrier.time_unix_nano = startNano;
+  }
+  for (const key of Object.keys(carrier)) {
+    if (isResponseOnlyField(key)) delete carrier[key];
+  }
+  if (response['gen_ai.turn.start'] === true) {
+    delete response['gen_ai.turn.start'];
+  }
+  return carrier;
+}
+
+function msToUnixNano(ms: number | undefined): string | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return String(BigInt(Math.trunc(ms)) * 1_000_000n);
+}
+
+function isStrictlyBefore(candidateNano: string, responseNano: unknown): boolean {
+  if (typeof responseNano !== 'string' || !/^\d+$/.test(responseNano)) return true;
+  try {
+    return BigInt(candidateNano) < BigInt(responseNano);
+  } catch {
+    return true;
+  }
+}
+
+function isResponseOnlyField(key: string): boolean {
+  return key === 'gen_ai.turn.end'
+    || key === 'agent.stop_reason'
+    || key === 'agent.client_request_id'
+    || key === 'agent.qoder.match_ts'
+    || key.startsWith('gen_ai.output.')
+    || key.startsWith('gen_ai.response.')
+    || key.startsWith('gen_ai.usage.')
+    || key.startsWith('error.');
 }
 
 function cwdOf(entry: AgentActivityEntry): string | undefined {

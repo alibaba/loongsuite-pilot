@@ -3,6 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
+import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
+import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
@@ -10,11 +12,15 @@ import {
   CodexTranscriptInput,
   codexDefaultAllowedRootPaths,
 } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
-import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
+import {
+  InputRuntimeAccumulator,
+  type InputRuntimeDelta,
+} from '../../../../src/inputs/base/input-runtime-metrics.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
+import type { CodexTranscriptCheckpoint, CodexTranscriptMeta } from '../../../../src/inputs/codex-transcript/codex-transcript-types.js';
 
 const tempDirs: string[] = [];
 const SUBAGENT_FIXTURE_DIR = path.resolve(process.cwd(), 'tests/fixtures/codex-subagent');
@@ -410,6 +416,423 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('becomes available from a wakeup marker when the default session root is absent', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-availability-'));
+    tempDirs.push(root);
+    const wakeupDir = path.join(root, 'wakeups');
+    const absentSessionDir = path.join(root, 'absent-sessions');
+    await fs.mkdir(wakeupDir, { recursive: true });
+
+    const isolatedSessionDir = path.join(root, 'codex-home', 'u', 'fixture-user', 'sessions');
+    await fs.mkdir(isolatedSessionDir, { recursive: true });
+    expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(false);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      session_dir: isolatedSessionDir,
+      received_at: new Date().toISOString(),
+    });
+    expect(await CodexTranscriptInput.checkAvailability(wakeupDir, absentSessionDir)).toBe(true);
+    expect(CodexTranscriptInput.getWatchPaths(wakeupDir, absentSessionDir)).toEqual([
+      absentSessionDir,
+      wakeupDir,
+    ]);
+  });
+
+  it.each(['expired', 'malformed', 'missing-timestamp', 'unsupported-layout', 'missing-root'])(
+    'keeps discovery idle for a %s wakeup marker with no default sessions', async kind => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invalid-wakeup-'));
+      tempDirs.push(root);
+      const sessionDir = path.join(root, 'absent-sessions');
+      const wakeupDir = path.join(root, 'wakeups');
+      const home = path.join(root, 'codex-home');
+      const isolated = path.join(home, kind === 'unsupported-layout' ? 'other' : 'u', 'fixture', 'sessions');
+      await fs.mkdir(wakeupDir, { recursive: true });
+      if (kind !== 'missing-root') await fs.mkdir(isolated, { recursive: true });
+      const payload = {
+        codex_home: home,
+        session_dir: isolated,
+        received_at: kind === 'missing-timestamp' ? undefined
+          : new Date(Date.now() - (kind === 'expired' ? 49 * 3600_000 : 0)).toISOString(),
+      };
+      await fs.writeFile(path.join(wakeupDir, 'invalid.json'), kind === 'malformed' ? '{' : JSON.stringify(payload));
+      const input = new CodexTranscriptInput({
+        stateStore: new StateStore(path.join(root, 'state.json')),
+        sessionDir, wakeupDir, spanContextDir: path.join(root, 'contexts'),
+      });
+      const start = vi.spyOn(input, 'start');
+      const svc = new AgentDiscoveryService([{
+        id: input.id, type: input.collectionMethod,
+        watchPaths: CodexTranscriptInput.getWatchPaths(wakeupDir, sessionDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(wakeupDir, sessionDir),
+        start: () => input.start(), stop: () => input.stop(),
+      }]);
+      try {
+        await svc.start();
+        expect(svc.getStates()[input.id]).toBe('idle');
+        expect(start).not.toHaveBeenCalled();
+        expect(input.running).toBe(false);
+        expect((input as unknown as { timer: unknown }).timer).toBeNull();
+        expect((input as unknown as { wakeupWatcher: unknown }).wakeupWatcher).toBeNull();
+      } finally {
+        await svc.stop();
+      }
+    },
+  );
+
+  it('closes the actual wakeup watcher when stopped during Codex initialization', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-stop-during-start-'));
+    tempDirs.push(root);
+    const { input } = await createDormantInput(root);
+    let entered!: () => void;
+    let release!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const internal = input as unknown as {
+      indexDiscoveredTranscriptOwners(files: unknown[]): Promise<void>;
+      wakeupWatcher: unknown;
+      timer: unknown;
+    };
+    vi.spyOn(internal, 'indexDiscoveredTranscriptOwners').mockImplementation(async () => {
+      entered();
+      await gate;
+    });
+    const cycles = vi.fn();
+    input.on('input-runtime-delta', cycles);
+    const starting = input.start();
+    await entering;
+    const stopping = input.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(input.running).toBe(false);
+    expect(internal.wakeupWatcher).toBeNull();
+    expect(internal.timer).toBeNull();
+    expect(cycles).not.toHaveBeenCalled();
+  });
+
+  it.each([33, 64, 65])('prioritizes isolated rollouts globally across %i dual-layout homes', async count => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-global-root-budget-'));
+    tempDirs.push(root);
+    const { input, wakeupDir, sessionDir } = await createDormantInput(root);
+    await fs.mkdir(sessionDir, { recursive: true });
+    const canonicalRoots: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const home = path.join(root, `home-${index}`);
+      const legacy = path.join(home, 'sessions');
+      const isolated = path.join(home, 'u', 'fixture-user', 'sessions');
+      await fs.mkdir(legacy, { recursive: true });
+      const transcript = await writeTranscript(isolated, completedTurn());
+      canonicalRoots.push(await fs.realpath(isolated));
+      await writeWakeupMarker(wakeupDir, String(index).padStart(3, '0'), {
+        codex_home: home, session_dir: legacy, transcript_path: transcript,
+        received_at: new Date().toISOString(),
+      });
+    }
+    const internal = input as unknown as {
+      discoverDynamicSessionDirs(defaultDir: string): Promise<string[]>;
+      discoverSessionFiles(): Promise<Array<{ filePath: string }>>;
+      logger: { warn: (...args: unknown[]) => void };
+    };
+    const warn = vi.spyOn(internal.logger, 'warn');
+    const roots = await internal.discoverDynamicSessionDirs(await fs.realpath(sessionDir));
+    expect(roots).toHaveLength(64);
+    const isolatedRoots = roots.filter(dir => dir.includes(`${path.sep}u${path.sep}`));
+    expect(isolatedRoots).toEqual(canonicalRoots.reverse().slice(0, 64));
+    const rollouts = await internal.discoverSessionFiles();
+    expect(rollouts).toHaveLength(Math.min(count, 64));
+    expect(warn).toHaveBeenCalledWith(
+      'Codex dynamic session root limit reached within scanned markers',
+      { dropped: count * 2 - 64, cap: 64 },
+    );
+    await internal.discoverDynamicSessionDirs(await fs.realpath(sessionDir));
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses cached owner metadata on an unchanged idle collection cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-idle-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    await writeTranscript(sessionDir, completedTurn());
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    await input.stop();
+
+    expect(deltas[0].rawReadCalls).toBe(0);
+    expect(deltas[0].rawReadBytes).toBe(0);
+  });
+
+  it('uses the actual file size as the metadata cache watermark during recovery', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-watermark-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const turnText = completedTurn();
+    const originalText = turnText + record('2026-06-24T06:01:00.000Z', 'event_msg', {
+      type: 'diagnostic',
+      padding: 'x'.repeat(32 * 1024),
+    }) + '\n';
+    const transcript = await writeTranscript(sessionDir, originalText);
+    const originalStat = await fs.stat(transcript);
+    const firstLineEndOffset = Buffer.byteLength(turnText.split('\n')[0]!) + 1;
+    const checkpoint: CodexTranscriptCheckpoint = {
+      inode: originalStat.ino,
+      scanOffset: Buffer.byteLength(turnText),
+      activeTurn: {
+        turnId: 'turn-1',
+        startOffset: firstLineEndOffset,
+        startedAtMs: Date.parse('2026-06-24T06:00:01.000Z'),
+      },
+      pendingTerminal: null,
+      pendingFusion: null,
+      pendingSubagent: null,
+      ownerSessionMetaOffset: 0,
+    };
+    const internals = input as unknown as {
+      recoverTurnSegment(
+        filePath: string,
+        checkpoint: CodexTranscriptCheckpoint,
+        endOffset: number,
+        terminal: boolean,
+      ): Promise<unknown>;
+      loadTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        runtime: InputRuntimeAccumulator,
+      ): Promise<CodexTranscriptMeta | null>;
+      transcriptMetaCacheByPath: Map<string, { fileSize: number }>;
+    };
+
+    await internals.recoverTurnSegment(transcript, checkpoint, Buffer.byteLength(turnText), true);
+    expect(internals.transcriptMetaCacheByPath.get(transcript)?.fileSize).toBe(originalStat.size);
+
+    const rewrittenLines = turnText.trimEnd().split('\n');
+    rewrittenLines[0] = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'replacement-session',
+      model_provider: 'openai',
+    });
+    const rewrittenText = rewrittenLines.join('\n') + '\n' + record(
+      '2026-06-24T06:00:12.000Z',
+      'event_msg',
+      { type: 'diagnostic', padding: 'y'.repeat(8 * 1024) },
+    ) + '\n';
+    await fs.writeFile(transcript, rewrittenText, 'utf8');
+    const rewrittenStat = await fs.stat(transcript);
+    expect(rewrittenStat.ino).toBe(originalStat.ino);
+    expect(rewrittenStat.size).toBeLessThan(originalStat.size);
+    expect(rewrittenStat.size).toBeGreaterThanOrEqual(Buffer.byteLength(turnText));
+
+    const runtime = new InputRuntimeAccumulator();
+    const replacement = await internals.loadTranscriptOwnerMeta(
+      transcript,
+      rewrittenStat.ino,
+      rewrittenStat.size,
+      0,
+      runtime,
+    );
+    expect(replacement?.threadId).toBe('replacement-session');
+    expect(runtime.finish(0).rawReadCalls).toBeGreaterThan(0);
+  });
+
+  it('reclaims metadata only after a transcript has remained absent for the TTL', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-absence-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      'rollout-meta-cache-absence.jsonl',
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: 'absence-session',
+        model_provider: 'openai',
+      }) + '\n',
+      { bootstrapFork: false },
+    );
+    const internals = input as unknown as {
+      indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+      pruneAbsentTranscriptMetaCache(discoveredPaths: Set<string>, now: number): void;
+      transcriptMetaCacheByPath: Map<string, { lastSeenAtMs: number }>;
+    };
+
+    await internals.indexDiscoveredTranscriptOwners([{ filePath: transcript, baselineOnStart: true }]);
+    const lastSeenAtMs = internals.transcriptMetaCacheByPath.get(transcript)!.lastSeenAtMs;
+    await fs.unlink(transcript);
+    await internals.indexDiscoveredTranscriptOwners([]);
+    expect(internals.transcriptMetaCacheByPath.has(transcript)).toBe(true);
+
+    internals.pruneAbsentTranscriptMetaCache(new Set(), lastSeenAtMs + 48 * 60 * 60 * 1_000 + 1);
+    expect(internals.transcriptMetaCacheByPath.has(transcript)).toBe(false);
+  });
+
+  it('bounds cached transcript metadata by estimated bytes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-bytes-'));
+    tempDirs.push(root);
+    const { input } = await createDormantInput(root);
+    const internals = input as unknown as {
+      transcriptMetaCacheMaxBytes: number;
+      transcriptMetaCacheBytes: number;
+      transcriptMetaCacheByPath: Map<string, unknown>;
+      rememberTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        meta: CodexTranscriptMeta,
+      ): void;
+    };
+    internals.transcriptMetaCacheMaxBytes = 2 * 1024;
+    const meta = (threadId: string): CodexTranscriptMeta => ({
+      threadId,
+      rootSessionId: threadId,
+      threadSource: 'user',
+      depth: 0,
+      provider: 'openai',
+      baseInstructions: 'x'.repeat(1_500),
+    });
+
+    internals.rememberTranscriptOwnerMeta('/tmp/first.jsonl', 1, 2_000, 0, meta('first'));
+    internals.rememberTranscriptOwnerMeta('/tmp/second.jsonl', 2, 2_000, 0, meta('second'));
+
+    expect(internals.transcriptMetaCacheByPath.has('/tmp/first.jsonl')).toBe(false);
+    expect(internals.transcriptMetaCacheByPath.has('/tmp/second.jsonl')).toBe(true);
+    expect(internals.transcriptMetaCacheBytes).toBeLessThanOrEqual(internals.transcriptMetaCacheMaxBytes);
+  });
+
+  it('keeps discovery scans from refreshing or evicting the active metadata working set', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-activity-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const writeMeta = (name: string, threadId: string) => writeTranscriptNamed(
+      sessionDir,
+      name,
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: threadId,
+        model_provider: 'openai',
+      }) + '\n',
+      { bootstrapFork: false },
+    );
+    const [coldPath, hotPath, candidatePath] = await Promise.all([
+      writeMeta('rollout-cache-slot-a.jsonl', 'session-0001'),
+      writeMeta('rollout-cache-slot-b.jsonl', 'session-0002'),
+      writeMeta('rollout-cache-slot-c.jsonl', 'session-0003'),
+    ]);
+    const internals = input as unknown as {
+      transcriptMetaCacheMaxEntries: number;
+      transcriptMetaCacheByPath: Map<string, unknown>;
+      indexDiscoveredTranscriptOwners(
+        files: Array<{ filePath: string; baselineOnStart: boolean }>,
+      ): Promise<void>;
+      loadTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        runtime: InputRuntimeAccumulator,
+        cacheAccess?: 'discovery' | 'active',
+      ): Promise<CodexTranscriptMeta | null>;
+    };
+    const load = async (filePath: string, cacheAccess: 'discovery' | 'active') => {
+      const stat = await fs.stat(filePath);
+      return internals.loadTranscriptOwnerMeta(
+        filePath,
+        stat.ino,
+        stat.size,
+        0,
+        new InputRuntimeAccumulator(),
+        cacheAccess,
+      );
+    };
+
+    await load(coldPath, 'active');
+    await load(hotPath, 'active');
+    internals.transcriptMetaCacheMaxEntries = 2;
+
+    await internals.indexDiscoveredTranscriptOwners([
+      { filePath: coldPath, baselineOnStart: true },
+      { filePath: candidatePath, baselineOnStart: true },
+    ]);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([coldPath, hotPath]);
+
+    await processTranscriptOnce(input, candidatePath);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([hotPath, candidatePath]);
+  });
+
+  it('moves the metadata cache when incremental scanning finds the owning session_meta', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-offset-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    const ownerId = uuidV7At('2026-06-24T06:00:00.000Z');
+    const copiedMeta = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'copied-parent',
+      model_provider: 'openai',
+    }) + '\n';
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      `rollout-2026-06-24T06-00-00-${ownerId}.jsonl`,
+      copiedMeta,
+      { bootstrapFork: false },
+    );
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    const ownerMeta = record('2026-06-24T06:00:01.000Z', 'session_meta', {
+      id: ownerId,
+      model_provider: 'openai',
+    }) + '\n';
+    await fs.appendFile(transcript, ownerMeta, 'utf8');
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 2);
+    (input as unknown as { requestCollection(): void }).requestCollection();
+    await waitFor(() => deltas.length >= 3);
+
+    expect(transcriptCheckpoint(stateStore, transcript))
+      .toMatchObject({ ownerSessionMetaOffset: Buffer.byteLength(copiedMeta) });
+    expect(deltas[2].rawReadCalls).toBe(0);
+    expect(deltas[2].rawReadBytes).toBe(0);
+    await input.stop();
+  });
+
+  it('re-registers an evicted child relationship when owner metadata is served from cache', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-linker-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      fixture,
+      { bootstrapFork: false },
+    );
+    const runtime = new InputRuntimeAccumulator();
+    const internals = input as unknown as {
+      getInputRuntimeAccumulator(): InputRuntimeAccumulator;
+      indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+      registerSubagentOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number | null,
+      ): Promise<void>;
+      subagentLinker: { children: Map<string, unknown> };
+    };
+    internals.getInputRuntimeAccumulator = () => runtime;
+    const discovered = [{ filePath: transcript, baselineOnStart: true }];
+
+    await internals.indexDiscoveredTranscriptOwners(discovered);
+    expect(input.getSubagentLinkSnapshot().detectedChildren).toBe(1);
+    internals.subagentLinker.children.clear();
+    const cachedRuntime = new InputRuntimeAccumulator();
+    internals.getInputRuntimeAccumulator = () => cachedRuntime;
+    const stat = await fs.stat(transcript);
+    await internals.registerSubagentOwnerMeta(transcript, stat.ino, stat.size, 0);
+
+    expect(cachedRuntime.finish(0).rawReadCalls).toBe(0);
+    expect(input.getSubagentLinkSnapshot().detectedChildren).toBe(1);
+  });
+
   it('reports physical reads separately from uniquely consumed transcript records', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-runtime-metrics-'));
     tempDirs.push(root);
@@ -423,9 +846,10 @@ describe('CodexTranscriptInput', () => {
     const transcriptText = completedTurn();
     const transcript = await writeTranscript(sessionDir, transcriptText);
     (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 2);
+    // fs.watch may also wake idle cycles; assert the consumption delta, not its index.
+    await waitFor(() => deltas.some(delta => delta.rawInBytes > 0));
 
-    const firstRead = deltas[1];
+    const firstRead = deltas.find(delta => delta.rawInBytes > 0)!;
     const recordCount = transcriptText.trimEnd().split('\n').length;
     expect(firstRead.rawReadCalls).toBeGreaterThan(0);
     expect(firstRead.rawReadBytes).toBeGreaterThanOrEqual(firstRead.rawInBytes);
@@ -444,14 +868,16 @@ describe('CodexTranscriptInput', () => {
     const invalidLine = 'not-json\n';
     await fs.appendFile(transcript, invalidLine, 'utf8');
     (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 3);
+    await waitFor(() => deltas.some(delta => delta.parseFailedRecords > 0));
 
-    const invalidRead = deltas[2];
+    const invalidRead = deltas.find(delta => delta.parseFailedRecords > 0)!;
     expect(invalidRead.rawInBytes).toBe(Buffer.byteLength(invalidLine));
     expect(invalidRead.rawInRecords).toBe(1);
     expect(invalidRead.parseSuccessRecords).toBe(0);
     expect(invalidRead.parseFailedRecords).toBe(1);
 
+    expect(deltas.reduce((total, delta) => total + delta.rawInBytes, 0))
+      .toBe(Buffer.byteLength(transcriptText) + Buffer.byteLength(invalidLine));
     await input.stop();
   });
 
@@ -1346,6 +1772,44 @@ describe('CodexTranscriptInput', () => {
     expect(entryTimestampMs(response)).toBe(Date.parse('2026-06-24T06:00:08.000Z'));
   });
 
+  it('prefers token_usage_record response_id over response item ids', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-response-id-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'check it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'response_item', {
+        type: 'reasoning', id: 'rs-provider-item', summary: [], content: null, encrypted_content: null,
+      }),
+      record('2026-06-24T06:00:05.000Z', 'response_item', {
+        type: 'message', id: 'msg-provider-item', role: 'assistant',
+        content: [{ type: 'output_text', text: 'done' }],
+      }),
+      record('2026-06-24T06:00:06.000Z', 'token_usage_record', {
+        thread_id: 'session-1', turn_id: 'turn-1', session_id: 'session-1',
+        response_id: 'resp-provider-response',
+        usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+      }),
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(100, 10)),
+      record('2026-06-24T06:00:08.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+      }),
+    ].join('\n') + '\n');
+
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'llm.response'));
+    await input.stop();
+
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    expect(request?.['gen_ai.response.id']).toBe('resp-provider-response');
+    expect(response?.['gen_ai.response.id']).toBe('resp-provider-response');
+  });
+
   it('rebuilds completed transcript waves without collapsing reasoning or token usage', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-'));
     tempDirs.push(root);
@@ -1734,6 +2198,34 @@ describe('CodexTranscriptInput', () => {
     const canonicalTranscript = await fs.realpath(transcript);
     expect(entries.some(entry => entry['event.name'] === 'llm.response')).toBe(true);
     expect(entries.some(entry => entry['agent.codex.transcript_turn_id'] === 'turn-1')).toBe(true);
+    expect(transcriptCheckpoint(stateStore, canonicalTranscript).scanOffset)
+      .toBe(Buffer.byteLength(transcriptText));
+  });
+
+  it('discovers a CODEX_HOME user-isolated session directory from transcript_path', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-user-home-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const codexHome = path.join(root, 'codex-home');
+    const isolatedSessionDir = path.join(codexHome, 'u', 'd4bb12dfd37d67c70484b62e0ed31509', 'sessions');
+    const transcriptText = completedTurn();
+    const transcript = await writeTranscript(isolatedSessionDir, transcriptText);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      codex_home: codexHome,
+      // Older hook versions still record the legacy root; transcript_path is authoritative.
+      session_dir: path.join(codexHome, 'sessions'),
+      transcript_path: transcript,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    const canonicalTranscript = await fs.realpath(transcript);
+    expect(entries.some(entry => entry['gen_ai.session.id'] === 'session-1')).toBe(true);
     expect(transcriptCheckpoint(stateStore, canonicalTranscript).scanOffset)
       .toBe(Buffer.byteLength(transcriptText));
   });
@@ -4229,7 +4721,7 @@ describe('Codex transcript multimodal extraction', () => {
     ]);
   });
 
-  it('gates input vs tool image conversion by uploadMode', () => {
+  it('gates user vs tool-result image conversion by uploadMode', () => {
     const png = Buffer.from('fake-png-mode').toString('base64');
     const fixture = multimodalRecords([
       userContentItem([
@@ -4255,17 +4747,18 @@ describe('Codex transcript multimodal extraction', () => {
     expect(JSON.stringify(off!.steps)).not.toContain('"type":"uri"');
     expect(JSON.stringify(off)).not.toContain(png);
 
-    const inputOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
-    expect(userParts(inputOnly!)[1]).toMatchObject({ type: 'uri' });
-    const inputToolOut = inputOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    const inputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
+    expect(userParts(inputMode!)[1]).toMatchObject({ type: 'uri' });
+    const inputToolOut = inputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(true);
 
-    const toolOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'tool' });
-    expect(userParts(toolOnly!).some((p: any) => p.type === 'uri')).toBe(false);
-    const toolOut = toolOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(toolOut?.some(p => p.type === 'uri')).toBe(true);
+    const outputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'output' });
+    expect(userParts(outputMode!).some((p: any) => p.type === 'uri')).toBe(false);
+    const outputToolOut = outputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    expect(JSON.stringify(outputMode)).not.toContain(png);
 
-    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
+    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'all' });
     expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });
     const bothToolOut = both!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
     expect(bothToolOut?.some(p => p.type === 'uri')).toBe(true);
@@ -4349,5 +4842,84 @@ describe('Codex transcript multimodal extraction', () => {
     expect(userParts(second!)[1]).toEqual(userParts(first!)[1]);
     expect(decodeCount).toBe(1);
     expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
+  });
+});
+
+// Exercise real rollout discovery, reliable linking, recovery and event rewriting.
+describe('workspace privacy during Codex subagent fusion', () => {
+  it.each([
+    ['captured child, blocked parent', true, true, false],
+    ['forced child, blocked parent', false, true, false],
+    ['captured child, public parent', true, false, false],
+    ['forced child, public parent', false, false, false],
+    ['captured child, blocked child', true, false, true],
+    ['forced child, blocked child', false, false, true],
+  ] as const)('%s checks privacy before attachment upload', async (_name, childTerminal, blockedParent, blockedChild) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fusion-privacy-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const upload = vi.fn().mockReturnValue({ uri: 'oss://test/child-image', mimeType: 'image/png', modality: 'image' });
+    const input = new CodexTranscriptInput({
+      stateStore, sessionDir, wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'), pollIntervalMs: 10,
+      multimodal: { enabled: true, uploadMode: 'all', processor: { blobToUri: upload } as any },
+    });
+    const policy = new WorkspacePolicy(['/private-project']);
+    input.setWorkspacePolicy(policy);
+    const parentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    if (blockedParent) {
+      // A prior text-only turn has already excluded the parent session.
+      expect(policy.allows({ 'gen_ai.session.id': parentId, cwd: '/private-project' }, input.agentType)).toBe(false);
+    }
+    const raw: AgentActivityEntry[] = [];
+    const output: AgentActivityEntry[] = [];
+    input.on('entries', batch => {
+      raw.push(...batch);
+      // InputManager applies this same policy after the fusion rewrites session IDs.
+      output.push(...policy.filter(batch, input.agentType));
+    });
+    await input.start();
+    try {
+      const parentText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+      const parentLines = parentText.trimEnd().split('\n');
+      const terminal = parentLines.pop()!;
+      const parentPath = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentLines.join('\n') + '\n');
+      await waitFor(() => input.getSubagentLinkSnapshot().detectedSpawns === 4);
+      const childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+      const childRecords = childText.trimEnd().split('\n').map(line => JSON.parse(line));
+      for (const item of childRecords) {
+        if (item.type === 'turn_context' && item.payload.turn_id === 'child-turn-1') {
+          item.payload.cwd = blockedChild ? '/private-project' : '/public-project';
+        }
+        if (item.type === 'response_item' && item.payload.role === 'user'
+          && item.payload.content?.some((part: any) => part.text === 'synthetic child task')) {
+          item.payload.content.push({ type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' });
+        }
+      }
+      if (!childTerminal) childRecords.pop();
+      const childPath = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childRecords.map(item => JSON.stringify(item)).join('\n') + '\n');
+      await waitFor(() => {
+        const checkpoint = transcriptCheckpoint(stateStore, childPath);
+        return childTerminal ? Boolean(checkpoint?.pendingSubagent)
+          : Boolean(checkpoint?.activeTurn && checkpoint.scanOffset > checkpoint.activeTurn.startOffset);
+      });
+      const uploadsBeforeParentTerminal = upload.mock.calls.length;
+      expect(responsesForTurn(raw, 'child-turn-1')).toHaveLength(0);
+      await fs.appendFile(parentPath, terminal + '\n', 'utf8');
+      await waitFor(() => responsesForTurn(raw, 'child-turn-1').length === 1);
+      const fusedChild = raw.filter(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1');
+      expect(fusedChild.length).toBeGreaterThan(0);
+      expect(fusedChild.every(entry => entry['gen_ai.session.id'] === parentId && entry['gen_ai.agent.scope'] === 'subagent')).toBe(true);
+      if (blockedParent || blockedChild) {
+        expect(uploadsBeforeParentTerminal).toBe(0);
+        expect(upload).not.toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(false);
+      } else {
+        expect(upload).toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(true);
+      }
+    } finally { await input.stop(); }
   });
 });

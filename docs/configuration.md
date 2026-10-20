@@ -24,7 +24,8 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
   "collectLog": true,
   "collectTrace": true,
   "dashboard": { "port": 8765 },
-  "serviceName": "my-agent-service"
+  "serviceName": "my-agent-service",
+  "interceptor": { "mode": "none" }
 }
 ```
 
@@ -38,6 +39,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
 | `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
+| `interceptor` | Local interception. Same `{ mode, types }` shape as `mask`; `types` is the credential subset of mask types. See [Local Interception](zh-CN/interceptor.md). |
 
 Equivalent environment variables:
 
@@ -52,6 +54,8 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all`, `none`, or `custom`. |
+| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | Comma-separated interceptor types. Used only with `custom` mode. |
 
 ## SLS Secret Configuration
 
@@ -75,11 +79,43 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 > **Experimental.** Multimodal config and event fields may change.
 
-To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, set `multimodal.storage` in `config.json`: `type`, `target`, and `auth`. Whether upload runs is controlled per agent by `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
+To store images from agent messages (inline base64, or local paths read then encoded) in object storage and keep only a `uri` on the event, Pilot needs object storage plus a non-`none` `agents.<id>.multimodal.uploadMode`. Local file reads are limited to `agents.<id>.multimodal.allowedRootPaths` plus that agent's defaults. See [Multimodal Collection](multimodal.md).
 
-`type` is one of `sls`, `delegatedOss`, or `oss`. This is separate from the log `sls` flusher. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
+Set `multimodal.storage` explicitly (`sls` / `delegatedOss` / `oss`). For SLS-backed storage, `target` needs an endpoint, project, and logstore. A project-qualified endpoint can supply the project. Only `auth.apiKey` may be reused: omit `auth` when `config.sls` has one unambiguous API Key value for the same endpoint, project, and logstore. A different destination, conflicting keys, or AK/WebTracking credentials cannot supply it. Explicit `auth` remains unchanged. Incomplete or invalid storage disables upload; it does not fall back.
 
-`auth` is one complete ApiKey or access-key set. If `mode` is omitted, Pilot infers it from that set.
+`type` is one of `sls`, `delegatedOss`, or `oss`. For `sls` and `delegatedOss` you do not set a storage prefix; Pilot uses `sls://{project}/{logstore}` from `project` and `logstore`.
+
+Minimal API Key reuse (Codex). The storage target is explicit and matches the SLS flusher; `uploadMode` turns conversion on:
+
+```json
+{
+  "sls": {
+    "mode": "apiKey",
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "your-project",
+    "logstore": "your-logstore",
+    "apiKey": "your-sls-project-api-key"
+  },
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "your-logstore"
+      }
+    }
+  },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "multimodal": { "uploadMode": "all" }
+    }
+  }
+}
+```
+
+For a different logstore, set all three target fields and add a matching `config.sls` entry or provide explicit `auth`. When `auth` is present, it must contain one complete API Key or access-key set; Pilot infers the mode if omitted.
 
 ### `type: sls`
 
@@ -126,9 +162,31 @@ ApiKey:
 }
 ```
 
+Anonymous PutObject (the target Logstore must have anonymous multimodal writes enabled):
+
+```json
+{
+  "multimodal": {
+    "storage": {
+      "type": "sls",
+      "target": {
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "your-project",
+        "logstore": "logstore-multimodal"
+      },
+      "auth": {
+        "mode": "anonymous"
+      }
+    }
+  }
+}
+```
+
+Anonymous mode must be explicit, accepts no credential fields, and is supported only by `type=sls`. Anyone who can reach the Project endpoint can write objects anonymously, so use a dedicated Logstore.
+
 ### `type: delegatedOss`
 
-Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`. At startup Pilot confirms the current landing bucket with SLS. Optional `target.ossBucket` is checked against that bucket; a mismatch or a failed check leaves image upload off.
+Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{project}/{logstore}/{YYYYMMDD}/{sha256}.ext`.
 
 ```json
 {
@@ -138,8 +196,7 @@ Asks SLS for a presigned URL, then writes to OSS. Event URI is `oss://{bucket}/{
       "target": {
         "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
         "project": "your-project",
-        "logstore": "logstore-multimodal",
-        "ossBucket": "your-bucket"
+        "logstore": "logstore-multimodal"
       },
       "auth": {
         "mode": "apiKey",
@@ -177,15 +234,14 @@ Writes directly to OSS. AK only.
 |---------|-------------|
 | `multimodal.storage.type` | `sls`, `delegatedOss`, or `oss`. |
 | `multimodal.storage.target.endpoint` | SLS or OSS regional endpoint (OSS accelerate endpoints are not supported). |
-| `multimodal.storage.target.project` | SLS project. Required for `sls` and `delegatedOss`. |
-| `multimodal.storage.target.logstore` | Logstore for multimodal objects; defaults to `logstore-multimodal`. |
-| `multimodal.storage.target.ossBucket` | Optional. `delegatedOss` only; checked against the landing bucket. A mismatch leaves image upload off. |
+| `multimodal.storage.target.project` | SLS project for `sls` / `delegatedOss`. Required unless the target endpoint is project-qualified. An explicit empty value disables upload. |
+| `multimodal.storage.target.logstore` | Required for `sls` / `delegatedOss`. Must match an SLS entry when reusing its API Key. |
 | `multimodal.storage.target.storageBasePath` | Required for `oss`. Must start with `oss://`, for example `oss://bucket/prefix`. |
-| `multimodal.storage.auth.mode` | Optional. `ak` or `apiKey`. If omitted, inferred from the configured credentials. `type=oss` requires `ak`. |
+| `multimodal.storage.auth.mode` | `ak`, `apiKey`, or explicit `anonymous`. If omitted, inferred from explicit credentials or a matching SLS API Key; it never infers anonymous. `anonymous` is supported only by `type=sls`; `type=oss` requires `ak`. |
 | `multimodal.storage.auth.accessKeyId` / `accessKeySecret` | Required when `mode=ak`. Optional `securityToken` for STS. |
-| `multimodal.storage.auth.apiKey` | Required when `mode=apiKey`. Must not be set together with access keys. |
+| `multimodal.storage.auth.apiKey` | Required for explicit `mode=apiKey`; may be omitted with the entire `auth` block when a matching `config.sls` API Key exists. Must not be set together with access keys. |
 
-If `multimodal.storage` is missing or invalid, text collection continues and images are not converted to `uri`.
+The reuse lookup reads `config.sls` only, not inner configuration or environment overrides. If storage is omitted or invalid, text collection continues and images are not converted to `uri`.
 
 ## Configuration Topics
 
@@ -197,6 +253,7 @@ If `multimodal.storage` is missing or invalid, text collection continues and ima
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |
 | POST events to a custom HTTP endpoint | [HTTP Output](http-output.md) |
 | Mask API keys, access keys, private keys, database URLs, and personal sensitive data | [Data Masking](masking.md) |
+| Intercept secrets in prompts and tool calls | [Local Interception](zh-CN/interceptor.md) |
 
 ## Retention
 
@@ -245,3 +302,22 @@ loongsuite-pilot info
 ```
 
 Use [Local JSONL Output](local-jsonl-output.md) as the quickest way to confirm that events are being collected.
+
+## Workspace exclusions
+
+From the source repository, run `bash deploy/installer-opensource.sh install --exclude-workspace "/absolute/project"`. For the downloaded installer:
+
+```bash
+curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && \
+bash /tmp/loongsuite-pilot-installer.sh install --exclude-workspace "/absolute/project"
+```
+
+Use repeatable `--exclude-workspace "/absolute/project"` arguments with the shell installer, or `-ExcludeWorkspace "C:\private", "D:\secret"` with the Windows installer. Explicit installation arguments replace the list; omitted arguments and upgrades preserve it. Alternatively edit `config.json` and restart Pilot:
+
+```json
+{ "privacy": { "excludeWorkspaces": ["/absolute/private-project"] } }
+```
+
+An empty array disables filtering after restart. Run `loongsuite-pilot restart` after every rule edit: hooks may read the new configuration on their next invocation, while the running collector keeps its startup rules. The new rules are not globally effective during this interval. Rules match the directory and descendants, including symlink aliases, without matching sibling prefixes. Windows local paths are matched case-insensitively. Only explicit Agent working-directory/workspace metadata is used; no Git repository is required. Any excluded root in a multi-root workspace blocks the session. Unknown workspaces are allowed. Once identified as excluded, subsequent session events are dropped even after switching directories or restarting Pilot. Each rule list has separate persisted decisions; restoring an earlier list reuses its decisions. Records without a session ID are evaluated individually. If the state directory is unwritable, exclusions remain in memory and public sessions continue normally. A rate-limited diagnostic omits directory names, and later events retry persistence. Cross-process and restart continuity is not guaranteed until persistence succeeds.
+
+Filtering applies before JSONL/SLS/HTTP/OTLP output, Codex/Qoder attachment uploads, shared Hook history writers (`writeJsonlRecords` / `appendRowsToHistory`), and both Cursor stop/deferred-response history writers. Independent file/API pipelines inspect explicit workspace metadata; plain text and records without such metadata remain allowed. This is session output control, not a filesystem access restriction: adapters may read native transcripts or Hook files to identify a workspace, and the Cursor event journal and plugin-owned native/intermediate JSONL files may be written before filtering. Existing local/remote data is not removed; accessing excluded files from another workspace is outside this feature's scope.

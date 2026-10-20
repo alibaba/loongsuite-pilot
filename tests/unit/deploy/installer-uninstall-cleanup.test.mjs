@@ -25,7 +25,7 @@ function extractPiCleanupNodeScript(source, style) {
   const functionStart = source.indexOf(functionMarker);
   const functionEnd = source.indexOf('# ====', functionStart);
   const body = source.slice(functionStart, functionEnd);
-  const scriptStartMarker = style === 'sh' ? 'result=$(node -e "\n' : "-e @'\n";
+  const scriptStartMarker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
   const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@ $cfg $DATA_DIR";
   const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
   const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
@@ -163,6 +163,8 @@ const HOOK_CONFIG_FILES = [...new Set(
     .filter(name => name.endsWith('.json'))
     .map(name => JSON.parse(readFileSync(resolve('agents.d', name), 'utf-8')))
     .filter(agent => agent.deployMode === 'hook' && agent.hook?.settingsPath)
+    // Env-overridable homes (e.g. $GROK_HOME) have dedicated uninstallers.
+    .filter(agent => !String(agent.hook.settingsPath).includes('$'))
     .map(agent => agent.hook.settingsPath.replace(/^~\//, '')),
 )].sort();
 
@@ -278,12 +280,19 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
   });
 
   it('targets Pi settings and matches only the Pilot extension', () => {
-    expect(sh).toContain('.pi/agent/settings.json');
-    expect(ps1).toContain('.pi\\agent\\settings.json');
+    expect(sh).toContain('PI_CODING_AGENT_DIR');
+    expect(sh).toContain('$HOME/.pi/agent');
+    expect(ps1).toContain('PI_CODING_AGENT_DIR');
+    expect(ps1).toContain('.pi\\agent');
     expect(sh).toContain('loongsuite-pilot-pi-coding-agent');
     expect(sh).toContain('plugins/pi-coding-agent/index.mjs');
     expect(ps1).toContain('loongsuite-pilot-pi-coding-agent');
     expect(ps1).toContain('plugins/pi-coding-agent/index.mjs');
+  });
+
+  it('prefers the persisted Pi pluginInjectConfigPath over the current env', () => {
+    expect(sh).toContain('state?.["pi-coding-agent"]?.pluginInjectConfigPath');
+    expect(ps1).toContain('state?.["pi-coding-agent"]?.pluginInjectConfigPath');
   });
 
   it('discovers registered PI SDK Agent settings from local definitions', () => {
@@ -301,6 +310,58 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
   ])('%s cleanup accepts JSONC and continues past damaged targets', (_platform, script, envKey) => {
     verifyPiCleanupContinuesPastInvalidConfig(script, envKey);
   });
+
+  it('cleans a persisted custom Pi home when uninstall has no PI_CODING_AGENT_DIR', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-pi-persisted-'));
+    const customDir = mkdtempSync(join(tmpdir(), 'pilot-pi-custom-home-'));
+    try {
+      const configPath = join(customDir, 'settings.json');
+      const dataDir = join(root, 'custom pilot data');
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        extensions: [
+          join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+          '/opt/third-party/extension.mjs',
+        ],
+      }, null, 2));
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'pi-coding-agent': {
+          deployMode: 'plugin-inject',
+          deployedAt: '2026-01-01T00:00:00.000Z',
+          pluginInjectConfigPath: configPath,
+        },
+      }));
+
+      const run = spawnSync('/bin/bash', [
+        resolve('deploy', 'installer-opensource.sh'),
+        'uninstall',
+        '--data-dir',
+        dataDir,
+        '--lang',
+        'en',
+      ], {
+        encoding: 'utf8',
+        env: (() => {
+          const env = {
+            ...process.env,
+            HOME: root,
+            USERPROFILE: root,
+            PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+          };
+          delete env.PI_CODING_AGENT_DIR;
+          return env;
+        })(),
+      });
+
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+        extensions: ['/opt/third-party/extension.mjs'],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(customDir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('Windows uninstall verifies scheduled task removal', () => {
@@ -366,11 +427,10 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(cleanup).toContain('function Remove-CodexHookConfig');
     expect(cleanup).toContain('.codex\\hooks.json');
     expect(cleanup).toContain('codex-loongsuite-pilot-hook');
-    expect(cleanup).toContain('otel-codex-hook');
-    expect(cleanup).toContain('Pilot Codex nested hook command is still present');
-    expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
-    expect(cleanup).toContain('$null -eq $entry');
-    expect(cleanup).toContain('$verifyEventProperties');
+    expect(cleanup).not.toContain('otel-codex-hook');
+    expect(cleanup).toContain('$keptNestedHooks');
+    expect(cleanup).toContain('Write-FileUtf8NoBom -Path $configPath');
+    expect(cleanup).not.toContain('codex-hook-cleanup.cjs');
   });
 
   it('keeps Codex cleanup separate from the generic hook cleaner', () => {
@@ -384,14 +444,18 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('calls dedicated Codex cleanup from uninstall', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toContain('Remove-CodexHookConfig');
-    expect(uninstall.indexOf('Remove-CodexHookConfig'))
-      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+  });
+
+  it('does not restore broad marker-based trust deletion', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(ps1).not.toContain('function Remove-CodexTrustState');
+    expect(uninstall).not.toContain('Remove-CodexTrustState');
   });
 
   it('passes a valid fs module literal to node when rewriting Codex files', () => {
     const writer = ps1.slice(
       ps1.indexOf('function Write-FileUtf8NoBom'),
-      ps1.indexOf('function Remove-CodexTrustState'),
+      ps1.indexOf('function Test-IsPilotCodexHookCommand'),
     );
     expect(writer).toContain("$rewriteScript = @'");
     expect(writer).toContain("const fs = require('fs');");
@@ -413,11 +477,64 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     }
   });
 
-  it('continues uninstall when dedicated Codex cleanup fails', () => {
+  it('preserves the existing best-effort uninstall policy', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+    expect(uninstall.indexOf('Remove-CodexHookConfig')).toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(sh).not.toContain('remove_codex_hook_config || return 1');
+    expect(sh).not.toContain('upgrade Pilot before uninstalling');
+    expect(ps1).not.toContain('upgrade Pilot before uninstalling');
+    const generic = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+    expect(generic).toContain('$HOME/.codex/hooks.json');
+  });
+});
+
+describe('Unix Codex uninstall preserves third-party assets', () => {
+  it.each(['sh', 'mjs'])('removes only Pilot handlers from mixed groups (%s)', extension => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-assets-'));
+    try {
+      mkdirSync(join(root, '.codex'), { recursive: true });
+      const cache = join(root, '.cache', 'opentelemetry.instrumentation.codex');
+      mkdirSync(join(cache, 'sessions'), { recursive: true });
+      const config = join(root, '.codex', 'hooks.json');
+      const agentTrack = { type: 'command', command: 'otel-codex-hook stop', timeout: 17 };
+      const cached = { type: 'command', command: `bash ${cache}/hook-entry.sh stop` };
+      const unrelated = { type: 'command', command: `${root}/.loongsuite-pilot/third-party.sh` };
+      const pilot = { type: 'command', command: `bash ${root}/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.${extension} stop` };
+      writeFileSync(config, JSON.stringify({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, pilot, cached, unrelated] }, pilot, null, { hooks: [] }],
+        SessionStart: [{ hooks: [pilot] }],
+      } }));
+      const retainedFiles = [join(cache, 'sessions', 'trace.jsonl'), join(root, '.codex', 'config.toml'), join(root, '.codex', 'otel-config.json')];
+      for (const file of retainedFiles) writeFileSync(file, 'agenttrack-original');
+      const cleanup = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+      const run = spawnSync('/bin/bash', ['-c', `${cleanup}\nmsg() { :; }\nremove_hook_configs\nremove_hook_configs`], {
+        encoding: 'utf8', env: { ...process.env, HOME: root },
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, cached, unrelated] }, null, { hooks: [] }],
+      } });
+      for (const file of retainedFiles) expect(readFileSync(file, 'utf8')).toBe('agenttrack-original');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('legacy OTel uninstall leaves non-Pilot Codex assets untouched', () => {
+  it('shell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = sh.slice(sh.indexOf('remove_otel_plugin()'), sh.indexOf('\nprint_summary()'));
+    expect(cleanup).not.toContain('.cache/opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex/otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
+  });
+
+  it('PowerShell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = ps1.slice(ps1.indexOf('function Remove-OtelPlugin'), ps1.indexOf('\nfunction Start-PilotAndWait'));
+    expect(cleanup).not.toContain('.cache\\opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex\\otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
   });
 });
 
@@ -489,7 +606,7 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
     );
     const psCleanup = ps1.slice(
       ps1.indexOf('function Remove-OpenClawPlugin'),
-      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+      ps1.indexOf('function Remove-OtelPlugin', ps1.indexOf('function Remove-OpenClawPlugin')),
     );
 
     expect(shCleanup).not.toMatch(/node\s+-e/);
@@ -603,7 +720,26 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
   });
 });
 
+describe('DSH uninstall smoke', () => {
+  it('honours DSH_HOME when cleaning the YAML patch', () => {
+    expect(sh).toContain('DSH_HOME:-$HOME/.dsh');
+    expect(ps1).toContain('DSH_HOME');
+    expect(ps1).toContain('.dsh');
+  });
+});
+
 describe('Grok Build uninstall smoke', () => {
+  it('honours GROK_HOME when cleaning the hook file', () => {
+    expect(sh).toContain('GROK_HOME:-$HOME/.grok');
+    expect(ps1).toContain('GROK_HOME');
+    expect(ps1).toContain('.grok');
+  });
+
+  it('prefers the persisted Grok hookSettingsPath over the current env', () => {
+    expect(sh).toContain('state?.["grok-build"]?.hookSettingsPath');
+    expect(ps1).toContain('state?.["grok-build"]?.hookSettingsPath');
+  });
+
   it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall.indexOf('Remove-GrokBuildHookConfig'))
@@ -654,14 +790,18 @@ describe('Grok Build uninstall smoke', () => {
         'en',
       ], {
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          HOME: root,
-          USERPROFILE: root,
-          // Exclude a developer-machine Pilot binary while retaining Node and
-          // standard system tools. The uninstall must stay inside this HOME.
-          PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
-        },
+        env: (() => {
+          const env = {
+            ...process.env,
+            HOME: root,
+            USERPROFILE: root,
+            // Exclude a developer-machine Pilot binary while retaining Node and
+            // standard system tools. The uninstall must stay inside this HOME.
+            PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+          };
+          delete env.GROK_HOME;
+          return env;
+        })(),
       });
 
       expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
@@ -680,6 +820,66 @@ describe('Grok Build uninstall smoke', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it('cleans a persisted custom Grok home when uninstall has no GROK_HOME', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-grok-persisted-'));
+    const customHome = mkdtempSync(join(tmpdir(), 'pilot-grok-custom-home-'));
+    try {
+      const configDir = join(customHome, 'hooks');
+      const configPath = join(configDir, 'loongsuite-pilot.json');
+      const dataDir = join(root, 'custom pilot data');
+      mkdirSync(configDir, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({
+        hooks: {
+          stop: [
+            { command: `${join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh')} stop` },
+            { command: '/opt/third-party/stop-hook.sh' },
+          ],
+        },
+      }, null, 2));
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'grok-build': {
+          deployMode: 'hook',
+          deployedAt: '2026-01-01T00:00:00.000Z',
+          hookSettingsPath: configPath,
+        },
+      }));
+
+      const run = spawnSync('/bin/bash', [
+        resolve('deploy', 'installer-opensource.sh'),
+        'uninstall',
+        '--data-dir',
+        dataDir,
+        '--lang',
+        'en',
+      ], {
+        encoding: 'utf8',
+        env: (() => {
+          const env = {
+            ...process.env,
+            HOME: root,
+            USERPROFILE: root,
+            PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+          };
+          delete env.GROK_HOME;
+          return env;
+        })(),
+      });
+
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
+        hooks: {
+          stop: [
+            { command: '/opt/third-party/stop-hook.sh' },
+          ],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(customHome, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('Windows QoderWork-family runtime override lifecycle', () => {
@@ -689,30 +889,60 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
   );
   const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
 
-  it('uses the final agent config and independently maintains both environment variables', () => {
-    expect(runtimeSection).toContain('config?.agents?.[agentId]?.enabled === false');
-    expect(runtimeSection).toContain('QW_QODER_WORKER_RUNTIME_PATH');
-    expect(runtimeSection).toMatch(/\bQODER_WORKER_RUNTIME_PATH\b/);
-    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qwen-work-cn'");
-    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work'");
-    expect(runtimeSection).toContain("Test-AgentCollectionEnabled -AgentId 'qoder-work-cn'");
-    expect(ps1.match(/Inject-QoderworkRuntimeWrapper/g)).toHaveLength(3);
+  function psFunction(name) {
+    const body = ps1.match(new RegExp(`^function ${name} \\{[\\s\\S]*?^\\}`, 'm'))?.[0];
+    expect(body, `missing function ${name}`).toBeDefined();
+    return body;
+  }
+
+  it('unconditionally retires both overrides without any injection helpers', () => {
+    const retire = psFunction('Retire-QoderworkRuntimeOverrides');
+    expect(retire).toContain('Join-Path $DataDir "hooks\\qoderwork-runtime-wrapper.mjs"');
+    expect(retire).toContain(
+      "    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath\n" +
+      "    Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath",
+    );
+    expect(retire.indexOf('Retire-PilotRuntimeOverride')).toBeLessThan(retire.indexOf('    if ('));
+    expect(ps1).not.toMatch(/Inject-QoderworkRuntimeWrapper|Sync-PilotRuntimeOverride|Set-PilotRuntimeOverride|Test-AgentCollectionEnabled|RUNTIME_WRAPPER_MISSING/);
+    expect(ps1.match(/Retire-QoderworkRuntimeOverrides/g)).toHaveLength(3);
   });
 
-  it('uses CLM-safe registry persistence with a guarded Explorer broadcast', () => {
+  it.each(['Install', 'Upgrade'])('Cmd-%s retires overrides after stopping the old collector and before starting the new one', command => {
+    const body = psFunction(`Cmd-${command}`);
+    expect(body.match(/^        Retire-QoderworkRuntimeOverrides$/gm)).toHaveLength(1);
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeGreaterThan(body.indexOf('Stop-PilotService'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeGreaterThan(body.indexOf('Deploy-Package'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeLessThan(body.indexOf('Enable-PilotScheduledTasksAfterDeploy'));
+    expect(body.indexOf('Retire-QoderworkRuntimeOverrides')).toBeLessThan(body.indexOf('Start-PilotAndWait'));
+    expect(body).toContain('        Install-Command\n        Retire-QoderworkRuntimeOverrides\n');
+  });
+
+  it('retires only exact custom-dataDir or legacy Pilot overrides and is a no-op when absent', () => {
+    const retire = psFunction('Retire-PilotRuntimeOverride');
+    expect(retire).toContain('$current = Get-PilotRuntimeOverride -Name $Name');
+    expect(retire).toContain('if (-not $current) { return }');
+    expect(retire).toContain("if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {");
+    expect(retire).toContain('Remove-PilotRuntimeOverride -Name $Name');
+    expect(retire).toContain('if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }');
+  });
+
+  it('uses CLM-safe registry deletion and a guarded null Explorer broadcast, never setting a runtime path', () => {
+    const remove = psFunction('Remove-PilotRuntimeOverride');
     expect(runtimeSection).toContain('reg.exe query "HKCU\\Environment"');
-    expect(runtimeSection).toContain('reg.exe add "HKCU\\Environment"');
-    expect(runtimeSection).toContain('reg.exe delete "HKCU\\Environment"');
-    expect(runtimeSection).toContain('[Environment]::SetEnvironmentVariable');
-    expect(runtimeSection).toContain('catch {');
+    expect(runtimeSection).not.toMatch(/reg\.exe\s+add/);
+    expect(remove).toContain('reg.exe delete "HKCU\\Environment" /v $Name /f');
+    expect(remove).toContain('if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }');
+    expect(remove).toContain("[Environment]::SetEnvironmentVariable($Name, $null, 'User')");
+    expect(remove.indexOf('reg.exe delete')).toBeLessThan(remove.indexOf('[Environment]::SetEnvironmentVariable'));
+    expect(remove).toMatch(/try\s*\{[\s\S]*SetEnvironmentVariable[\s\S]*catch\s*\{\s*return \$false/);
+    expect(runtimeSection.match(/SetEnvironmentVariable\([^\n]+/g))
+      .toEqual(["SetEnvironmentVariable($Name, $null, 'User')"]);
+    expect(runtimeSection).toContain('if ($script:RUNTIME_ENV_BROADCAST_FAILED)');
     expect(runtimeSection).toContain('sign out and back in');
   });
 
   it('treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop', () => {
-    const getter = runtimeSection.slice(
-      runtimeSection.indexOf('function Get-PilotRuntimeOverride'),
-      runtimeSection.indexOf('function Test-AgentCollectionEnabled'),
-    );
+    const getter = psFunction('Get-PilotRuntimeOverride');
     expect(getter).toContain('$prevEAP = $ErrorActionPreference');
     expect(getter).toContain('$ErrorActionPreference = "Continue"');
     expect(getter).toContain('$regExitCode = $LASTEXITCODE');
@@ -721,22 +951,9 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
       .toBeLessThan(getter.indexOf('if ($regExitCode -ne 0)'));
   });
 
-  it('detects app roots without assuming executables are outside version directories', () => {
-    expect(runtimeSection).toContain('Programs\\QwenWorkCN');
-    expect(runtimeSection).toContain('Programs\\QoderWork');
-    expect(runtimeSection).toContain('Programs\\QoderWorkCN');
-    expect(runtimeSection).toContain('Programs\\QoderWork CN');
-    expect(runtimeSection).not.toContain('QoderWork\\QoderWork.exe');
-    expect(runtimeSection).not.toContain('QoderWorkCN\\QoderWorkCN.exe');
-  });
-
-  it('cleans an owned override before returning when the wrapper is missing', () => {
-    const sync = runtimeSection.slice(runtimeSection.indexOf('function Sync-PilotRuntimeOverride'));
-    expect(sync.indexOf('Get-PilotRuntimeOverride')).toBeLessThan(sync.indexOf('Test-Path $WrapperPath'));
-    expect(sync).toContain('Remove-PilotRuntimeOverride -Name $Name');
-    expect(sync).toContain('Wrapper missing; cleaned $Name');
-    expect(sync).toContain('Wrapper missing; did not set $Name');
-    expect(sync).toContain('$script:RUNTIME_WRAPPER_MISSING = $true');
+  it('has no app, config, selection or wrapper-existence gates and leaves wrapper files untouched', () => {
+    expect(runtimeSection).not.toMatch(/Test-Path|config\.json|SELECTED_AGENTS|SelectedAgents|LOCALAPPDATA|Programs\\|NODE_BIN/);
+    expect(runtimeSection).not.toMatch(/Remove-Item|Remove-PilotPath/);
   });
 
   it('uninstalls both overrides only when owned by the current dataDir', () => {

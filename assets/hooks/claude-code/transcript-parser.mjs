@@ -72,6 +72,25 @@ function isSyntheticAssistantRecord(record) {
   return record?.type === 'assistant' && record?.message?.model === '<synthetic>';
 }
 
+function normalizeApiErrorType(value) {
+  if (typeof value !== 'string') return 'model_error';
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 64);
+  return normalized || 'model_error';
+}
+
+function extractApiError(record) {
+  if (record?.isApiErrorMessage !== true) return null;
+  const status = Number(record.apiErrorStatus);
+  const requestId = typeof record.requestId === 'string' && record.requestId.length > 0
+    ? record.requestId.slice(0, 256)
+    : null;
+  return {
+    type: normalizeApiErrorType(record.error),
+    status_code: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    request_id: requestId,
+  };
+}
+
 function promptMapKey(promptId) {
   return promptId || MISSING_PROMPT_ID;
 }
@@ -211,7 +230,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
     if (!recordType) continue;
 
     if (recordType === 'assistant') {
-      if (isSyntheticAssistantRecord(record)) {
+      const apiError = extractApiError(record);
+      if (isSyntheticAssistantRecord(record) && !apiError) {
         continue;
       }
 
@@ -233,6 +253,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
           firstTimestamp: recordTs,
           toolUseTimestamps: new Map(),
           promptId: currentPromptId,
+          apiError,
         });
         conversationRecords.push({ type: 'assistant', msgId, promptId: currentPromptId });
       }
@@ -257,6 +278,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       if (msg.usage) group.usage = msg.usage;
       if (msg.model) group.model = msg.model;
       if (msg.stop_reason) group.stop_reason = msg.stop_reason;
+      if (apiError) group.apiError = apiError;
     } else if (recordType === 'user') {
       const msg = record.message;
       if (!msg) continue;
@@ -436,12 +458,12 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         timestamp: group.firstTimestamp,
         request_start_time: requestStartTime,
         protocol: 'anthropic',
-        model: group.model || 'unknown',
+        model: group.apiError ? 'unknown' : (group.model || 'unknown'),
         message_id: group.id,
         input_messages: delta,
         _input_is_delta: true,
-        output_content: group.mergedContent,
-        stop_reason: group.stop_reason || 'end_turn',
+        output_content: group.apiError ? [] : group.mergedContent,
+        stop_reason: group.apiError ? 'error' : (group.stop_reason || 'end_turn'),
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheRead,
@@ -449,16 +471,19 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         declaredToolIds,
         toolDetails,
         promptId: group.promptId,
+        api_error: group.apiError,
       });
 
       // Only advance past messages that were part of this request. The
       // assistant response becomes new history for the next LLM request and
       // must be emitted together with any following tool_result message.
       history.emittedCount = history.messages.length;
-      history.messages.push({
-        role: 'assistant',
-        content: group.mergedContent,
-      });
+      if (!group.apiError) {
+        history.messages.push({
+          role: 'assistant',
+          content: group.mergedContent,
+        });
+      }
 
       for (const toolId of declaredToolIds) {
         const ts = toolResultTimestamps.get(toolId);

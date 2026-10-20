@@ -9,7 +9,7 @@
  *   $ node claude-code-hook-processor.mjs <subcommand>
  *
  * v2 重构:
- *   - 只处理 4 个 subcommand: pre-tool-use / stop / subagent-start / subagent-stop
+ *   - 只处理 5 个 subcommand: pre-tool-use / stop / stop-failure / subagent-start / subagent-stop
  *   - 纯 transcript 驱动: 时间戳从 transcript record.timestamp 获取
  *   - tool→step 归属: 通过 tool_use_id 从 LLM output_content 匹配到声明方 step
  *   - 不再依赖 alignWithHookEvents / hook 事件累积
@@ -164,6 +164,17 @@ function collectSubagentLinks(turn) {
 // ─── intercept (BUN_OPTIONS preload) data integration ───
 
 const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
+// Reader-side cap so a runaway session's attempts/ dir cannot grow without
+// bound between exports. Enforced by deleting oldest-by-mtime files first, so
+// the current turn's freshly written attempts always survive.
+const MAX_ATTEMPT_FILES = 500;
+const MAX_ATTEMPT_BYTES = 16 * 1024 * 1024; // 16 MiB
+const SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const ZERO_SPAN_ID = '0'.repeat(16);
+
+function isSpanId(value) {
+  return typeof value === 'string' && SPAN_ID_RE.test(value) && value !== ZERO_SPAN_ID;
+}
 
 function interceptSessionDir(sessionId) {
   return path.join(pilotDataDir(), 'intercept', AGENT_ID, sessionId);
@@ -171,7 +182,7 @@ function interceptSessionDir(sessionId) {
 
 /**
  * Read per-LLM-call intercept records dropped by claude-code-fetch-intercept.mjs.
- * Returns Map<response_id, { ttft_ns, system_instructions, _file }>.
+ * Returns Map<response_id, { ttft_ns, system_instructions, llm_span_id, _file }>.
  * Tracks `_file` so reapInterceptFiles can delete merged records after
  * buildTurnRecords consumes them.
  */
@@ -198,6 +209,40 @@ function loadInterceptForSession(sessionId) {
   return out;
 }
 
+function loadAttemptRecordsForSession(sessionId) {
+  const out = [];
+  const dir = path.join(interceptSessionDir(sessionId), 'attempts');
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return out; }
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue;
+    const filePath = path.join(dir, name);
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (_) {
+      continue;
+    }
+    if (
+      raw?.schema_version === 1
+      && typeof raw.attempt_id === 'string'
+      && typeof raw.start_time_unix_nano === 'string'
+      && /^[0-9]+$/.test(raw.start_time_unix_nano)
+      && typeof raw.end_time_unix_nano === 'string'
+      && /^[0-9]+$/.test(raw.end_time_unix_nano)
+      && ['success', 'http_error', 'network_error'].includes(raw.outcome)
+    ) {
+      out.push({ ...raw, _file: filePath });
+    }
+  }
+  out.sort((left, right) => {
+    const a = BigInt(left.start_time_unix_nano);
+    const b = BigInt(right.start_time_unix_nano);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  return out;
+}
+
 /**
  * Delete intercept files corresponding to response_ids that buildTurnRecords
  * actually merged into emitted events. Files whose response_id was not in
@@ -212,25 +257,93 @@ function reapInterceptFiles(intercept, mergedResponseIds) {
   }
 }
 
+function reapAttemptFiles(files) {
+  for (const file of files) {
+    try { fs.unlinkSync(file); } catch (_) {}
+  }
+}
+
 /**
- * Opportunistic cleanup: drop files in this session's intercept dir whose
- * mtime is older than STALE_MS (1h). Called once at the end of exportSession
- * — handles orphans from prior turns whose response_ids never showed up in
- * any subsequent transcript. Also rmdir if the dir is empty afterwards.
+ * Enforce the reader-side count/byte cap on one attempts/ dir by deleting the
+ * oldest-by-mtime files first, so the current turn's fresh attempts survive.
  */
-function reapStaleIntercept(sessionId) {
-  const dir = interceptSessionDir(sessionId);
-  let entries;
-  try { entries = fs.readdirSync(dir); } catch { return; }
-  const now = Date.now();
-  for (const name of entries) {
-    const f = path.join(dir, name);
+function capAttemptDir(attemptDir) {
+  let names;
+  try { names = fs.readdirSync(attemptDir); } catch { return; }
+  const files = [];
+  let totalBytes = 0;
+  for (const name of names) {
+    const f = path.join(attemptDir, name);
+    try {
+      const st = fs.statSync(f);
+      if (!st.isFile()) continue;
+      files.push({ f, mtime: st.mtimeMs, size: st.size });
+      totalBytes += st.size;
+    } catch (_) {}
+  }
+  if (files.length <= MAX_ATTEMPT_FILES && totalBytes <= MAX_ATTEMPT_BYTES) return;
+  files.sort((a, b) => a.mtime - b.mtime);
+  let count = files.length;
+  for (const entry of files) {
+    if (count <= MAX_ATTEMPT_FILES && totalBytes <= MAX_ATTEMPT_BYTES) break;
+    try {
+      fs.unlinkSync(entry.f);
+      count--;
+      totalBytes -= entry.size;
+    } catch (_) {}
+  }
+}
+
+/**
+ * Reap one session's intercept dir: drop stale (mtime > 1h) files, enforce the
+ * attempts/ cap, then rmdir anything left empty. Fail-open throughout.
+ */
+function reapSessionDir(dir, now) {
+  const attemptDir = path.join(dir, 'attempts');
+  let attemptEntries;
+  try { attemptEntries = fs.readdirSync(attemptDir); } catch { attemptEntries = []; }
+  for (const name of attemptEntries) {
+    const f = path.join(attemptDir, name);
     try {
       const st = fs.statSync(f);
       if (now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
     } catch (_) {}
   }
+  capAttemptDir(attemptDir);
+  try { fs.rmdirSync(attemptDir); } catch (_) {}
+
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const name of entries) {
+    const f = path.join(dir, name);
+    try {
+      const st = fs.statSync(f);
+      if (st.isFile() && now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
+    } catch (_) {}
+  }
   try { fs.rmdirSync(dir); } catch (_) {}
+}
+
+/**
+ * Opportunistic cleanup: drop files in this session's intercept dir whose
+ * mtime is older than STALE_MS (1h) and cap the attempts/ dir. Called on every
+ * exportSession exit — including the early returns — so GC no longer runs only
+ * on the successful path. Also sweeps sibling session dirs, since an abandoned
+ * session's files are orphaned once its host process exits.
+ */
+function reapStaleIntercept(sessionId) {
+  const now = Date.now();
+  reapSessionDir(interceptSessionDir(sessionId), now);
+
+  const root = path.join(pilotDataDir(), 'intercept', AGENT_ID);
+  let sessions;
+  try { sessions = fs.readdirSync(root); } catch { return; }
+  for (const name of sessions) {
+    if (name === sessionId) continue;
+    const dir = path.join(root, name);
+    try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
+    reapSessionDir(dir, now);
+  }
 }
 
 function tryReadStdin() {
@@ -343,20 +456,92 @@ function skillAttributes(skillLoad, fallbackName) {
   };
 }
 
-function positiveSkillLoadTimes(skillLoad, fallbackTimestamp) {
+function skillLoadTimesAtLlmEnd(llmEndTimestamp) {
   const minDurationNanos = 1_000_000n; // converter uses millisecond start/end times
-  let call = BigInt(isoToUnixNanos(
-    skillLoad?.commandTimestamp || skillLoad?.metaTimestamp || fallbackTimestamp,
-  ));
-  let result = BigInt(isoToUnixNanos(
-    skillLoad?.metaTimestamp || fallbackTimestamp || skillLoad?.commandTimestamp,
-  ));
-
-  if (call === 0n && result > minDurationNanos) call = result - minDurationNanos;
+  let call = BigInt(isoToUnixNanos(llmEndTimestamp));
   if (call === 0n) call = BigInt(Date.now()) * 1_000_000n;
-  if (result <= call) result = call + minDurationNanos;
+  const result = call + minDurationNanos;
 
   return { call: String(call), result: String(result) };
+}
+
+function syntheticSkillCallPart(skill) {
+  return {
+    type: 'tool_call',
+    id: skill.callId,
+    name: 'load_skill',
+    arguments: { skill: skill.name },
+  };
+}
+
+function syntheticSkillResultMessage(skill) {
+  return {
+    role: 'tool',
+    parts: [{
+      type: 'tool_call_response',
+      id: skill.callId,
+      response: { success: true },
+    }],
+  };
+}
+
+function appendSyntheticSkillCalls(outputMessages, syntheticSkills) {
+  const assistant = outputMessages.find((message) => message.role === 'assistant');
+  if (!assistant) return outputMessages;
+  assistant.parts = Array.isArray(assistant.parts) ? assistant.parts : [];
+  const existingIds = new Set(assistant.parts
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id));
+  for (const skill of syntheticSkills) {
+    if (!existingIds.has(skill.callId)) assistant.parts.push(syntheticSkillCallPart(skill));
+  }
+  return outputMessages;
+}
+
+function injectSyntheticSkillHistory(inputMessages, firstOutputMessages, syntheticSkills) {
+  if (syntheticSkills.length === 0) return inputMessages;
+  const firstAssistant = firstOutputMessages.find((message) => message.role === 'assistant');
+  if (!firstAssistant) return inputMessages;
+
+  const nativeCallIds = new Set((firstAssistant.parts || [])
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id)
+    .filter(Boolean));
+  let assistantIndex = inputMessages.findIndex((message) => {
+    if (message.role !== 'assistant') return false;
+    const ids = new Set((message.parts || [])
+      .filter((part) => part.type === 'tool_call')
+      .map((part) => part.id)
+      .filter(Boolean));
+    return nativeCallIds.size > 0 && [...nativeCallIds].every((id) => ids.has(id));
+  });
+  if (assistantIndex < 0) {
+    const expectedParts = JSON.stringify(firstAssistant.parts || []);
+    assistantIndex = inputMessages.findIndex((message) =>
+      message.role === 'assistant' && JSON.stringify(message.parts || []) === expectedParts);
+  }
+  if (assistantIndex < 0) return inputMessages;
+
+  const assistant = inputMessages[assistantIndex];
+  assistant.parts = Array.isArray(assistant.parts) ? assistant.parts : [];
+  const existingCallIds = new Set(assistant.parts
+    .filter((part) => part.type === 'tool_call')
+    .map((part) => part.id));
+  for (const skill of syntheticSkills) {
+    if (!existingCallIds.has(skill.callId)) assistant.parts.push(syntheticSkillCallPart(skill));
+  }
+
+  const existingResultIds = new Set(inputMessages
+    .flatMap((message) => message.parts || [])
+    .filter((part) => part.type === 'tool_call_response')
+    .map((part) => part.id));
+  const resultMessages = syntheticSkills
+    .filter((skill) => !existingResultIds.has(skill.callId))
+    .map(syntheticSkillResultMessage);
+  let insertAt = assistantIndex + 1;
+  while (insertAt < inputMessages.length && inputMessages[insertAt]?.role === 'tool') insertAt++;
+  inputMessages.splice(insertAt, 0, ...resultMessages);
+  return inputMessages;
 }
 
 // ─── cmd handlers ───
@@ -439,11 +624,12 @@ async function cmdSubagentStop() {
   });
 }
 
-async function cmdStop() {
+async function cmdTerminal(eventKind) {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
+  const isFailure = eventKind === 'stop-failure';
 
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
@@ -467,7 +653,7 @@ async function cmdStop() {
     try {
       await exportSession(
         state,
-        event.stop_reason || 'end_turn',
+        isFailure ? 'error' : (event.stop_reason || 'end_turn'),
         typeof event.prompt_id === 'string' ? event.prompt_id : '',
       );
       if (typeof state._next_transcript_offset === 'number') {
@@ -480,12 +666,20 @@ async function cmdStop() {
     } catch (err) {
       logHookError({
         agentId: AGENT_ID,
-        stage: 'cmd_stop',
+        stage: isFailure ? 'cmd_stop_failure' : 'cmd_stop',
         errorType: 'export_failed',
         errorMessage: err?.message || String(err),
       });
     }
   });
+}
+
+async function cmdStop() {
+  return cmdTerminal('stop');
+}
+
+async function cmdStopFailure() {
+  return cmdTerminal('stop-failure');
 }
 
 // ─── transcript 稳定性等待 ───
@@ -556,10 +750,11 @@ function buildSubagentRecords({
   userId,
   cwd,
   intercept,
+  attemptContext,
 }) {
   const childTranscriptPath = resolveSubagentTranscriptPath(parentTranscriptPath, link.agentId);
   if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) {
-    return { records: [], mergedResponseIds: new Set() };
+    return { records: [], mergedResponseIds: new Set(), consumedAttemptFiles: new Set() };
   }
 
   let childParseResult;
@@ -572,11 +767,12 @@ function buildSubagentRecords({
       errorType: 'parse_failed',
       errorMessage: err?.message || String(err),
     });
-    return { records: [], mergedResponseIds: new Set() };
+    return { records: [], mergedResponseIds: new Set(), consumedAttemptFiles: new Set() };
   }
 
   const childRecords = [];
   const mergedResponseIds = new Set();
+  const consumedAttemptFiles = new Set();
   let childHash = INITIAL_HASH;
   for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
     const childBuild = buildTurnRecords(
@@ -588,9 +784,12 @@ function buildSubagentRecords({
       'end_turn',
       cwd,
       intercept,
+      '',
+      attemptContext,
     );
     childHash = childBuild.hash;
     for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+    for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
 
     for (const childRecord of childBuild.records) {
       // The child prompt is already present in the first llm.request delta.
@@ -611,7 +810,7 @@ function buildSubagentRecords({
     }
   }
 
-  return { records: childRecords, mergedResponseIds };
+  return { records: childRecords, mergedResponseIds, consumedAttemptFiles };
 }
 
 async function finalizePendingSubagentTurns(state) {
@@ -626,6 +825,11 @@ async function finalizePendingSubagentTurns(state) {
   const cwd = state.cwd || undefined;
   const intercept = loadInterceptForSession(sessionId);
   const mergedResponseIds = new Set();
+  const attemptContext = {
+    records: loadAttemptRecordsForSession(sessionId),
+    consumed: new Set(),
+  };
+  const consumedAttemptFiles = new Set();
   const completedSubagents = state.completed_subagents || {};
   const remainingTurns = [];
 
@@ -657,10 +861,12 @@ async function finalizePendingSubagentTurns(state) {
         userId,
         cwd,
         intercept,
+        attemptContext,
       });
       extendBackgroundAgentResult(records, link, childBuild.records);
       records.push(...cleanRecords(childBuild.records, runtimeConfig));
       for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+      for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
       link.completed = true;
       delete completedSubagents[link.agentId];
     }
@@ -687,6 +893,7 @@ async function finalizePendingSubagentTurns(state) {
   state.pending_subagent_turns = remainingTurns;
   state.completed_subagents = completedSubagents;
   reapInterceptFiles(intercept, mergedResponseIds);
+  reapAttemptFiles(consumedAttemptFiles);
   reapStaleIntercept(sessionId);
 }
 
@@ -709,8 +916,24 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   const transcriptPath = state.transcript_path;
   const baseOffset = state.transcript_offset || 0;
 
-  // 等待 transcript 文件写入稳定
+  // 先等 transcript 写入稳定，再判 EOF。StopFailure 常与 transcript 落盘竞态：
+  // hook 先于 Claude Code flush 合成错误记录时 size 尚未越过 baseOffset，若在等待
+  // 之前就按 size<=offset 短路 return，会丢掉终态的 retry/error span。
   await waitForTranscriptStable(transcriptPath, baseOffset);
+
+  // Duplicate Stop/StopFailure hooks are possible during shutdown or wrapper
+  // retries. If, *after* waiting for stability, the offset is still at EOF, there
+  // is genuinely no new data: skip the empty-parse retry loop below (which would
+  // otherwise consume the hook's entire execution budget).
+  try {
+    if (fs.statSync(transcriptPath).size <= baseOffset) {
+      state._next_transcript_offset = baseOffset;
+      reapStaleIntercept(sessionId);
+      return;
+    }
+  } catch (_) {
+    // Keep the existing parser/error path for missing or transient files.
+  }
 
   // 解析 transcript (纯 transcript 驱动,不需要 hook 事件)
   let parseResult;
@@ -731,9 +954,15 @@ async function exportSession(state, stopReason, stopPromptId = '') {
     await waitForTranscriptStable(transcriptPath, baseOffset);
   }
 
-  if (!parseResult) return;
+  if (!parseResult) {
+    reapStaleIntercept(sessionId);
+    return;
+  }
   state._next_transcript_offset = parseResult.nextOffset;
-  if (parseResult.turns.length === 0) return;
+  if (parseResult.turns.length === 0) {
+    reapStaleIntercept(sessionId);
+    return;
+  }
 
   const userId = resolveUserId({}, runtimeConfig);
   const allRecords = [];
@@ -765,12 +994,22 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // produce any files — merge logic safely no-ops in that case.
   const intercept = loadInterceptForSession(sessionId);
   const mergedResponseIds = new Set();
+  const attemptContext = {
+    records: loadAttemptRecordsForSession(sessionId),
+    consumed: new Set(),
+  };
+  const consumedAttemptFiles = new Set();
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
-    const { records, hash, mergedResponseIds: turnMerged } = buildTurnRecords(
+    const {
+      records,
+      hash,
+      mergedResponseIds: turnMerged,
+      consumedAttemptFiles: turnAttemptFiles,
+    } = buildTurnRecords(
       turn,
       baseTurnCount + i,
       sessionId,
@@ -780,10 +1019,14 @@ async function exportSession(state, stopReason, stopPromptId = '') {
       cwd,
       intercept,
       promptIdFallback,
+      attemptContext,
     );
     logHash = hash;
     if (turnMerged) {
       for (const rid of turnMerged) mergedResponseIds.add(rid);
+    }
+    for (const file of turnAttemptFiles) {
+      consumedAttemptFiles.add(file);
     }
 
     const turnRecords = [...records];
@@ -807,12 +1050,14 @@ async function exportSession(state, stopReason, stopPromptId = '') {
           userId,
           cwd,
           intercept,
+          attemptContext,
         });
         if (link.isBackground) {
           extendBackgroundAgentResult(turnRecords, link, childBuild.records);
         }
         turnRecords.push(...childBuild.records);
         for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+        for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
         if (completion) delete state.completed_subagents[link.agentId];
       }
     }
@@ -841,10 +1086,129 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // Cleanup intercept files: delete what we merged + drop stragglers from
   // earlier turns. Failure is silent — host process must not be impacted.
   reapInterceptFiles(intercept, mergedResponseIds);
+  reapAttemptFiles(consumedAttemptFiles);
   reapStaleIntercept(sessionId);
 }
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
+
+function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
+  const attempts = attemptContext?.records;
+  const consumed = attemptContext?.consumed;
+  if (!Array.isArray(attempts) || attempts.length === 0 || !(consumed instanceof Set)) return [];
+
+  const lowerBound = typeof turnStartNs === 'bigint' ? turnStartNs : BigInt(turnStartNs || 0);
+  const withinTurn = (attempt) =>
+    BigInt(attempt.start_time_unix_nano || '0') >= lowerBound;
+
+  const matches = [];
+  for (let i = 0; i < attempts.length; i++) {
+    const matchesId = llmCall.api_error?.request_id
+      ? attempts[i].request_id === llmCall.api_error.request_id
+      : llmCall.message_id && attempts[i].response_id === llmCall.message_id;
+    if (matchesId) matches.push(i);
+  }
+  // Time/model proximity cannot establish ownership in a shared parent/child session.
+  if (matches.length !== 1) return [];
+  const matchIndex = matches[0];
+  const anchor = attempts[matchIndex];
+  if (consumed.has(matchIndex) || !withinTurn(anchor)) return [];
+
+  const indices = [];
+  let next = anchor;
+  if (anchor.request_hash) {
+    for (let i = matchIndex - 1; i >= 0; i--) {
+      const prev = attempts[i];
+      if (prev.request_hash !== anchor.request_hash) continue;
+      if (consumed.has(i) || prev.outcome === 'success' || !withinTurn(prev)) break;
+      if (BigInt(prev.end_time_unix_nano) > BigInt(next.start_time_unix_nano)) {
+        indices.length = 0;
+        break;
+      }
+      indices.push(i);
+      next = prev;
+    }
+  }
+  indices.reverse();
+  indices.push(matchIndex);
+
+  return indices.map((i) => {
+    consumed.add(i);
+    return attempts[i];
+  });
+}
+
+function applyAttemptAttributes(record, attempt) {
+  if (!attempt) return;
+  const requestId = attempt.request_id || attempt.client_request_id;
+  if (requestId && !record['gen_ai.request.id']) {
+    record['gen_ai.request.id'] = requestId;
+  }
+}
+
+function buildRetryAttemptRecords({
+  attempts,
+  baseFields,
+  currentStepId,
+  currentStepSpanId,
+  model,
+}) {
+  const records = [];
+  for (const attempt of attempts) {
+    if (attempt.outcome === 'success') continue;
+    // Reuse the id the preload advertised to the gateway on this physical
+    // request; each attempt minted its own, so a retry's gateway spans nest
+    // under the attempt that issued it.
+    const spanId = isSpanId(attempt.llm_span_id) ? attempt.llm_span_id : generateSpanId();
+    // Provider request IDs may be reused across physical retries.
+    const responseId = `attempt:${attempt.attempt_id}`;
+    const request = {
+      time_unix_nano: attempt.start_time_unix_nano,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.request',
+      ...baseFields,
+      span_id: spanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': attempt.model || model || 'unknown',
+      'gen_ai.input.messages_delta': [],
+    };
+    applyAttemptAttributes(request, attempt);
+
+    const response = {
+      time_unix_nano: attempt.end_time_unix_nano,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.response',
+      ...baseFields,
+      span_id: spanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': attempt.model || model || 'unknown',
+      'gen_ai.response.model': attempt.model || model || 'unknown',
+      // A failed physical attempt produced no model output, so it carries the
+      // sentinel finish reason "error" rather than a model stop reason. The
+      // failure detail is still on error.type + http.response.status_code, and
+      // the OTLP flusher sets the LLM span status to ERROR from error.type;
+      // this attempt does not terminate the surrounding turn.
+      'gen_ai.response.finish_reasons': ['error'],
+      'gen_ai.output.messages': [],
+      'gen_ai.usage.input_tokens': 0,
+      'gen_ai.usage.output_tokens': 0,
+      'gen_ai.usage.total_tokens': 0,
+      'error.type': attempt.error_type || 'model_error',
+    };
+    applyAttemptAttributes(response, attempt);
+    if (typeof attempt.status_code === 'number') {
+      response['http.response.status_code'] = attempt.status_code;
+    }
+    records.push(request, response);
+  }
+  return records;
+}
 
 function buildTurnRecords(
   turn,
@@ -856,6 +1220,7 @@ function buildTurnRecords(
   cwd,
   intercept,
   promptIdFallback = '',
+  attemptContext = null,
 ) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
@@ -866,6 +1231,7 @@ function buildTurnRecords(
   // events. exportSession uses this set to delete the corresponding
   // intercept files after JSONL is flushed.
   const mergedResponseIds = new Set();
+  const consumedAttemptFiles = new Set();
 
   const turnContext = readTurnContext(
     pilotDataDir(),
@@ -908,17 +1274,75 @@ function buildTurnRecords(
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  // Without promptId, promptTimestamp may be the response time rather than a safe lower bound.
+  let turnStartNs = 0n;
+  if (turn.promptId && turn.promptTimestamp) {
+    try { turnStartNs = BigInt(isoToUnixNanos(turn.promptTimestamp)); } catch (_) { turnStartNs = 0n; }
+  }
+  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
+  const realSkillToolIds = new Set();
+  for (const ev of llmCalls) {
+    for (const block of (ev.output_content || [])) {
+      if (block?.type === 'tool_use' && block.name === 'Skill'
+          && block.id && ev.toolDetails?.has(block.id)) {
+        realSkillToolIds.add(block.id);
+      }
+    }
+  }
+  const synthesizedCallIds = new Set();
+  const syntheticSkills = [];
+  for (const skillLoad of skillLoads) {
+    if (skillLoad.sourceToolUseId && realSkillToolIds.has(skillLoad.sourceToolUseId)) continue;
+    const callId = deterministicSkillLoadId(
+      sessionId,
+      skillLoad.promptId || turn.promptId,
+      skillLoad.metaUuid || skillLoad.metaTimestamp,
+      skillLoad.rootPath,
+    );
+    if (synthesizedCallIds.has(callId)) continue;
+    synthesizedCallIds.add(callId);
+    syntheticSkills.push({
+      callId,
+      load: skillLoad,
+      name: skillLoad.name || skillLoad.id || 'unknown',
+    });
+  }
+  const firstOutputMessages = llmCalls[0]
+    ? convertOutputMessages(llmCalls[0].output_content, llmCalls[0].stop_reason)
+    : [];
   let firstStepOwner = null;
 
-  for (const ev of llmCalls) {
+  for (const [llmIndex, ev] of llmCalls.entries()) {
     stepRound++;
     const currentStepId = `${turnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
-    const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
     if (!firstStepOwner) {
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
     }
+
+    const callAttempts = consumeAttemptsForCall(attemptContext, ev, turnStartNs);
+    for (const attempt of callAttempts) {
+      if (attempt._file) consumedAttemptFiles.add(attempt._file);
+    }
+    const finalAttempt = callAttempts.at(-1);
+    const retryAttempts = callAttempts.slice(0, -1);
+
+    // Look up preload-captured data once per LLM call. ev.message_id matches
+    // the SSE message_start `message.id` the preload script extracted.
+    const interceptData = intercept && ev.message_id
+      ? intercept.get(ev.message_id)
+      : undefined;
+    if (interceptData) mergedResponseIds.add(ev.message_id);
+
+    // The preload already advertised its minted span id to the LLM gateway as
+    // traceparent parent-id, so this span has to claim the same id — otherwise
+    // the gateway's spans parent to something pilot never emits. A call that
+    // never reached message_start (terminal API failure) has no enrichment
+    // record, but its last physical attempt still carries the id.
+    const llmSpanId = isSpanId(interceptData?.llm_span_id) ? interceptData.llm_span_id
+      : isSpanId(finalAttempt?.llm_span_id) ? finalAttempt.llm_span_id
+      : generateSpanId();
 
     // 注册该 LLM 声明的所有 tool_use_id → 当前 step
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -927,6 +1351,9 @@ function buildTurnRecords(
 
     // input messages delta/full hash
     const inputMsgs = convertInputMessages(ev.input_messages, ev.protocol || 'anthropic');
+    if (llmIndex > 0) {
+      injectSyntheticSkillHistory(inputMsgs, firstOutputMessages, syntheticSkills);
+    }
     let currentFullHash;
     let delta;
     let logFull;
@@ -940,16 +1367,10 @@ function buildTurnRecords(
       logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
     }
 
-    // Look up preload-captured data once per LLM call. ev.message_id matches
-    // the SSE message_start `message.id` the preload script extracted.
-    const interceptData = intercept && ev.message_id
-      ? intercept.get(ev.message_id)
-      : undefined;
-    if (interceptData) mergedResponseIds.add(ev.message_id);
-
     // llm.request
     const reqRecord = {
-      time_unix_nano: isoToUnixNanos(ev.request_start_time),
+      time_unix_nano: finalAttempt?.start_time_unix_nano
+        || isoToUnixNanos(ev.request_start_time),
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
       ...baseFields,
@@ -962,6 +1383,17 @@ function buildTurnRecords(
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': delta,
     };
+    records.push(...buildRetryAttemptRecords({
+      attempts: retryAttempts,
+      baseFields,
+      currentStepId,
+      currentStepSpanId,
+      model: ev.model,
+    }));
+    applyAttemptAttributes(reqRecord, finalAttempt);
+    if (ev.api_error?.request_id) {
+      reqRecord['gen_ai.request.id'] = ev.api_error.request_id;
+    }
     if (logFull) {
       reqRecord['gen_ai.input.messages'] = inputMsgs;
     }
@@ -998,11 +1430,41 @@ function buildTurnRecords(
       'gen_ai.usage.cache_read.input_tokens': cacheRead,
       'gen_ai.usage.cache_creation.input_tokens': cacheCreation,
       'gen_ai.usage.total_tokens': totalTokens,
-      'gen_ai.output.messages': convertOutputMessages(ev.output_content, ev.stop_reason),
+      'gen_ai.output.messages': llmIndex === 0
+        ? appendSyntheticSkillCalls(
+          convertOutputMessages(ev.output_content, ev.stop_reason),
+          syntheticSkills,
+        )
+        : convertOutputMessages(ev.output_content, ev.stop_reason),
     };
+    applyAttemptAttributes(respRecord, finalAttempt);
     if (interceptData && typeof interceptData.ttft_ns === 'number'
         && Number.isFinite(interceptData.ttft_ns) && interceptData.ttft_ns >= 0) {
       respRecord['gen_ai.response.time_to_first_token'] = interceptData.ttft_ns;
+    }
+    const attemptFailed = finalAttempt && finalAttempt.outcome !== 'success';
+    if (attemptFailed) {
+      respRecord.time_unix_nano = finalAttempt.end_time_unix_nano;
+    }
+    if (ev.api_error || attemptFailed) {
+      const transcriptErrorType = ev.api_error?.type;
+      respRecord['error.type'] = (
+        transcriptErrorType
+        && transcriptErrorType !== 'unknown'
+        && transcriptErrorType !== 'model_error'
+      ) ? transcriptErrorType : (finalAttempt?.error_type || transcriptErrorType || 'model_error');
+      respRecord['gen_ai.response.finish_reasons'] = ['error'];
+      if (llmIndex === llmCalls.length - 1) respRecord['gen_ai.turn.end'] = true;
+      if (ev.api_error) respRecord['gen_ai.output.messages'] = [];
+      if (ev.api_error?.request_id) {
+        respRecord['gen_ai.request.id'] = ev.api_error.request_id;
+      }
+      const statusCode = typeof ev.api_error?.status_code === 'number'
+        ? ev.api_error.status_code
+        : finalAttempt?.status_code;
+      if (typeof statusCode === 'number') {
+        respRecord['http.response.status_code'] = statusCode;
+      }
     }
     records.push(respRecord);
 
@@ -1010,7 +1472,6 @@ function buildTurnRecords(
     prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
   }
 
-  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
   const skillLoadsByToolId = new Map(
     skillLoads
       .filter((load) => load.sourceToolUseId)
@@ -1087,26 +1548,14 @@ function buildTurnRecords(
   }
 
   // /skill 和其他 runtime meta 注入没有 LLM tool_use。将加载事实建模成
-  // extension TOOL span,但不篡改 LLM output.messages。
+  // extension TOOL span，并补入首轮 LLM output 与后续请求历史。
   if (firstStepOwner) {
-    const synthesizedCallIds = new Set();
-    for (const skillLoad of skillLoads) {
+    for (const skill of syntheticSkills) {
+      const { callId, load: skillLoad } = skill;
       if (consumedSkillLoads.has(skillLoad)) continue;
-      const callId = deterministicSkillLoadId(
-        sessionId,
-        skillLoad.promptId || turn.promptId,
-        skillLoad.metaUuid || skillLoad.metaTimestamp,
-        skillLoad.rootPath,
-      );
-      if (synthesizedCallIds.has(callId)) continue;
-      synthesizedCallIds.add(callId);
-
       const toolSpanId = generateSpanId();
       const skillFields = skillAttributes(skillLoad);
-      const times = positiveSkillLoadTimes(
-        skillLoad,
-        llmCalls[0]?.request_start_time || llmCalls[0]?.timestamp,
-      );
+      const times = skillLoadTimesAtLlmEnd(llmCalls[0]?.timestamp);
       records.push({
         time_unix_nano: times.call,
         'event.id': crypto.randomUUID(),
@@ -1152,7 +1601,7 @@ function buildTurnRecords(
     return 0;
   });
 
-  return { records, hash: runningHash, mergedResponseIds };
+  return { records, hash: runningHash, mergedResponseIds, consumedAttemptFiles };
 }
 
 // ─── dispatcher ───
@@ -1160,6 +1609,7 @@ function buildTurnRecords(
 const DISPATCH = {
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
+  'stop-failure': cmdStopFailure,
   'subagent-start': cmdSubagentStart,
   'subagent-stop': cmdSubagentStop,
 };

@@ -4,5 +4,18 @@
   "activation": {
     "onStartup": true
   },
-  "enabledByDefault": true
+  "enabledByDefault": true,
+  "contracts": {
+    "agentToolResultMiddleware": ["openclaw"]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "captureMessageContent": {
+        "type": "boolean",
+        "description": "Deprecated and ignored. Message content capture is always enabled.",
+        "deprecated": true
+      }
+    }
+  }
 }

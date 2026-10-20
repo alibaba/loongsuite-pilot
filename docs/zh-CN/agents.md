@@ -2,7 +2,24 @@
 
 [English](../agents.md) | 简体中文
 
-本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及是否采集敏感消息内容。
+本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及配置采集和数据脱敏。
+
+## Hermes TTFT
+
+对于 Hermes 的 OpenAI 兼容流式 Chat Completions 请求，Pilot 从
+`pre_api_request` 到首个非空文本、推理或工具名称 delta 计算 TTFT，
+以纳秒写入 `gen_ai.response.time_to_first_token`。仅包含 role 或 usage
+的帧不计入首输出。计时与消息内容分别处理。
+
+此功能使用 Hermes 原生 `on_first_delta` 回调（已在 Hermes 0.19.0 验证）。
+旧版本缺少该回调、其他 API 模式、非流式响应，或未观察到首输出时省略 TTFT，
+不会用 API 总耗时代替。更新插件后需重启 Hermes 进程。
+
+## Hermes 并发对话
+
+前台对话和后台技能整理可能共享同一个 session。Pilot 按 turn/task 身份分别保存
+用户身份、输入和模型/工具调用，避免相互覆盖。后台整理未提供原生 sender ID 时，
+仍使用配置身份或 hostname 兜底，不自动继承该 session 最近的 IM 用户。
 
 ## 支持的 Agent ID
 
@@ -14,18 +31,18 @@
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
-| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
-| DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。 |
-| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。 |
+| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook。 |
+| DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。检测路径遵循 DSH 官方的 `DSH_HOME`（默认 `~/.dsh`）。 |
+| Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。检测路径和 Hook 配置遵循 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | MiMo Code | `mimo-code` | 插件注入，采集 LLM、工具和 Token 生命周期事件。 |
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
-| Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
+| Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。检测路径和 `settings.json` 遵循 Pi 官方的 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
-| Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
+| Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；输出记录使用 `qoder-idea`。 |
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
@@ -45,10 +62,10 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 ## Grok Build 采集与生命周期
 
-Pilot 通过 `~/.grok` 检测 Grok Build，并在
-`~/.grok/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
+Pilot 通过 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）检测 Grok Build，并在
+`$GROK_HOME/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
 `stop`、`stop_failure`、`user_prompt_submit` 和 `session_end`。当前明确
-不安装、不采集 subagent Hook。
+不安装、不采集 subagent Hook。`GROK_WORKSPACE_DIR` 是工作区，不是 Agent home。
 
 每个已完成 turn 由 Grok 自身的三类 JSONL 数据融合生成：
 
@@ -56,7 +73,7 @@ Pilot 通过 `~/.grok` 检测 Grok Build，并在
   工具参数、工具结果和 system instruction。
 - session 目录下的 `updates.jsonl` 提供真实 prompt ID、turn 终态、
   取消或失败状态以及工具状态。
-- `~/.grok/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
+- `$GROK_HOME/logs/unified.jsonl` 提供模型时间、Token、工具执行时间
   和成功状态。
 
 采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
@@ -69,10 +86,12 @@ Pilot 所有的 Grok Hook 条目，保留第三方 Hook。
 
 ## DeepSeek Harness 采集与生命周期
 
-Pilot 会为检测和部署解析同一个准确的 Harness home：已部署过的补丁路径
+Pilot 会为检测和部署解析同一个准确的 Harness home：检测路径遵循 DSH 官方的
+`DSH_HOME`（默认 `~/.dsh`）。已部署过的补丁路径
 用于后续修复和清理，其次依次检查本地 Agent 定义中显式设置的 `patchPath`、
 Pilot 服务进程的 `DSH_HOME`，以及 Linux 上唯一、同用户运行中 DSH 进程的
-`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。Pilot 不会扫描
+`DSH_HOME`；标准的 `~/.dsh` 目录和 `dsh` 命令仍作为兜底。`DSH_WORKSPACE_DIR`
+是工作区，不是 Harness home。Pilot 不会扫描
 临时目录或假定某个固定的非默认 home；若初次发现时同时存在多个不同的运行中
 home，会报告歧义而不会静默选择其中一个。
 
@@ -80,6 +99,8 @@ home，会报告歧义而不会静默选择其中一个。
 带 marker 的 Pilot 专属 block，用于加载
 `$PILOT_DATA/plugins/dsh/plugin.mjs`；marker 外的用户及第三方内容保持原样。
 首次启用或重新安装后，需要启动新的 DSH 进程，使宿主加载当前 patch。
+`AGENTTEAMS_WORKER_NAME` 和 `AGENTTEAMS_INSTANCE_ID` 要设在这个 DSH 进程上；
+插件在落盘时写入 Worker 标识，collector 之后不再读取自己的环境变量。
 
 插件将 append-only 原生事件写入
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
@@ -100,19 +121,44 @@ Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream de
 
 Pilot 支持 OpenClaw `>=2026.3.8`。在写入宿主配置之前，Pilot 使用进程内文件
 操作读取选中安装实例的 `package.json`，用户无需传入版本。版本探测不会启动
-OpenClaw、shell、which 或 npm 子进程。需在安装器与 collector 共用的容器/服务环境中，
-将 `OPENCLAW_CLI_PATH` 设置为 **Gateway 实际启动入口的绝对路径**。
-例如 `WORKDIR /app` 下执行 `node openclaw.mjs gateway ...`，设置
-`OPENCLAW_CLI_PATH=/app/openclaw.mjs`。首次安装以及后续 collector/watchdog
-重启都必须继承该变量；只给一次安装命令赋值，不能保证独立服务继承。
-绑定入口支持 npm/pnpm 软链接、全局包装器及企业 Bundle。
+OpenClaw、shell、which 或 npm 子进程。`OPENCLAW_CLI_PATH` 为可选覆盖项，不再必填。
+
+入口按以下优先级解析：
+
+1. 显式指定的绝对路径 `OPENCLAW_CLI_PATH`。
+2. 安装器保存在 Pilot 配置中的 `agents.openclaw.cliPath`。
+3. 自动探测当前 OpenClaw 包工作目录中的 `openclaw.mjs`、固定的 `./openclaw` 子目录中的包、标准
+   `~/.openclaw-bundle`（或 `OPENCLAW_BUNDLE_ROOT`）内的安装，以及 PATH 上首个
+   OpenClaw 命令。指向同一包的软链接会去重；发现不同安装实例时不猜测，版本相同也视为冲突。
+
+对于 `WORKDIR /app`、`node openclaw.mjs gateway ...` 的源码容器，在 `/app` 下安装，
+探测无冲突时无需手动传入路径或版本。PATH 或标准 Bundle 暴露的共享安装也支持自动识别。
+对于 `WORKDIR /app`、`node openclaw/openclaw.mjs gateway ...`，在 `/app` 下安装也会检查
+`/app/openclaw/package.json` 和 `/app/openclaw/openclaw.mjs`。只增加这一固定子目录，
+不递归搜索任意目录；当前目录和子目录中的不同安装仍按冲突处理。
+父目录的 `package.json` 损坏或不可读时，仅在父目录 `openclaw.mjs` 确认不存在的情况下
+继续检查固定子包，且必须找到有效子包，不会仅凭 PATH 回退。已确认不支持的父 OpenClaw、
+损坏的子包或无法确认的目录访问异常仍阻止自动选择，并报告失败路径。
+启用 OpenClaw 时，安装器保存选中的入口，而非缓存版本。后台 collector/watchdog 即使
+工作目录、PATH 或服务环境改变，也会从 Pilot 配置重新读取入口并验证当前版本。
+自定义配置位置遵循 `AGENT_DATA_COLLECTION_CONFIG`；公共安装器会自动将 `--data-dir`
+对应的配置路径传给探测器。
+
+仅在多套安装冲突或非标准目录无法自动识别时，才需要在安装时指定实际 Gateway 入口。
+显式入口失效时不回退；后台 collector/watchdog 对失效的已保存入口也不会静默改绑。
+仅公共安装器启用恢复：确认旧入口已不存在且发现唯一有效新安装后，选择 OpenClaw
+（包括接受默认选择）才保存新入口；探测结果显示旧路径，探测本身不修改配置。
+入口仍存在但版本不支持、不可读或候选冲突时不恢复。隐式 HOME Bundle 的固定入口
+确已不存在时按残留跳过，不删除文件；完整旧版、不可读 Bundle 或无效的显式
+`OPENCLAW_BUNDLE_ROOT` 仍阻止自动选择。配置路径与主配置加载器使用相同的 home
+展开规则，包括 Windows `~\\` 和系统 home 兜底。
+未知或不受支持的版本保持非就绪、可重试。
 `OPENCLAW_SERVICE_VERSION`、`OPENCLAW_BUNDLED_VERSION`、`OPENCLAW_VERSION`
-等版本标签不能单独作为安装或配置能力依据。未绑定时，PATH、工作目录和 Bundle
-探测仅报告候选安装；即使能读取版本，也会提示原因并跳过 OpenClaw 配置注入。
-入口缺失、相对路径、失效或版本不受支持时同样保持非就绪、可重试，不回退到其他安装，
-也不清理既有配置。这是对自动部署准入的有意收紧。显式绑定后，即使 PATH 指向另一版本，
-也只按绑定入口读取元数据。不缓存版本、不扫描进程、不采用运行时权限引导或 Gateway 重载。
-请在正常容器部署/启动前配置环境；给已有容器新增环境变量可能仍需要重新部署。
+等版本标签不能单独作为配置能力依据。重装采用自动/默认选择时，探测失败会保留已有
+OpenClaw 启用状态和入口；显式 `--agents` 或菜单选择仍可以禁用。重复部署不重写已正确的
+配置。不扫描进程、不缓存版本、不执行 Gateway 重载命令。
+首次注入、明确禁用或确有配置/兼容性变化时，Gateway 自身仍可能因配置变化重载/重启；
+请在 Gateway 启动前安装，或为这些变更安排维护窗口。
 
 | 宿主版本 | 采集适配器 | `hooks.allowConversationAccess` |
 | --- | --- | --- |
@@ -189,6 +235,18 @@ Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原�
 重启去重、历史内容配置失效、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
 不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
 
+LLM 响应按模型调用关联 `before_message_write` 与 `model_call_ended`，兼容
+两者不同的到达顺序。结束事件缺失时，仍在下一次调用、运行结束、会话结束
+或缓存淘汰时输出已有响应，保留消息、用量和原始完成时间。
+
+首 Token 延迟通过观察 HTTP SSE 流获得：从请求发起到首个非空文本、推理或工具输出，以纳秒写入 `gen_ai.response.time_to_first_token`，并按 API 类型和 provider response ID 精确关联。支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages。
+
+对于公司版等使用受保护 Undici 传输的宿主，订阅 `undici:request:create` / `headers` / `bodyChunkReceived` 诊断事件，以请求对象隔离状态；普通 fetch 使用透传流观察。两路通过异步请求上下文去重，不按时间邻近匹配，也不替换宿主 provider、凭据或网络安全策略。
+
+OpenClaw 原生 `timeToFirstByteMs` 仅保留为 `agent.openclaw.time_to_first_byte_ms` 诊断字段，不作为 TTFT。非 SSE、未发出受支持诊断事件的自定义传输、缺少稳定响应 ID、ID 重复或超出解析/缓存边界时省略标准 TTFT；压缩的 Undici 原始字节不直接解析，只能由可观察的 fetch 解压后流补充。不能用首字节或总耗时替代。
+
+观察器不修改请求参数，不单独预读响应，不落盘消息内容；消息持久化与模型结束 Hook 合并时保留原始响应时间、usage 和消息内容，历史内容采集配置不影响缓存或输出。
+
 ## 安装时选择 Agent
 
 使用 `--agents` 跳过交互选择：
@@ -246,10 +304,12 @@ loongsuite-pilot restart
 | 配置项 | 说明 |
 |--------|------|
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
-| `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `tool` / `output` / `both` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
+| `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
 消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
+
+已有配置文件不会被改写。升级后需重启常驻的 OpenClaw、Pi、Hermes 进程，以加载新版插件。Agent 启停、工作区黑名单、脱敏和多模态上传配置仍各自生效。
 
 ## 验证 Agent 采集
 

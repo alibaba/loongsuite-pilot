@@ -6,7 +6,7 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). On supported platforms the installer downloads a managed Node.js 22.22 runtime, so a preinstalled Node.js is not required. A system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough. Linux musl (Alpine) and Windows ARM64 have no managed runtime and must supply a Node.js that meets this floor, plus `npm`.
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
@@ -71,8 +71,11 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
+| `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
+| `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to enabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
 | `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
 | `--package-url <url>` | Install from a custom URL or local `file://` path. |
 | `--sls-endpoint <url>` | SLS endpoint URL. |
@@ -83,6 +86,9 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
+| `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
+| `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
+| `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |
@@ -135,6 +141,14 @@ The page reads `logs/metrics-summary.json` directly and does not run a second
 aggregation pipeline.
 
 ### Start or stop the macOS menu bar app
+
+To keep the menu bar closed from the first collector startup, add the option to the installation command:
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
+```
+
+The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard remain enabled. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
 
 The menu bar app starts with the collector by default. Quitting it leaves collection running, so another `loongsuite-pilot start` does not reopen it. Use:
 
@@ -204,6 +218,8 @@ or whether another program has taken its port. Use `loongsuite-pilot status` to
 check Pilot's status if the browser cannot open the expected page.
 
 ## Uninstall
+
+Pilot leaves third-party legacy Codex OTel hooks, configuration, and the `~/.cache/opentelemetry.instrumentation.codex` directory untouched during startup and uninstall, including `--purge`.
 
 Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., and the injected plugin spec in OpenCode's config). Add `--purge` (`-Purge` on Windows) to also delete the local data directory.
 

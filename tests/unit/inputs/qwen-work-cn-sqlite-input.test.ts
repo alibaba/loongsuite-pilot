@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import { execSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import { QwenWorkCNSqliteInput } from '../../../src/inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
@@ -12,7 +12,7 @@ class TestInput extends QwenWorkCNSqliteInput {
   collectNow(): Promise<AgentActivityEntry[]> { return this.collect(); }
 }
 
-describe('QwenWorkCNSqliteInput', () => {
+describe.skipIf(!hasNodeSqlite())('QwenWorkCNSqliteInput', () => {
   let dir: string;
   let dbPath: string;
   let state: MockStateStore;
@@ -77,12 +77,7 @@ describe('QwenWorkCNSqliteInput', () => {
   });
 
   function exec(sql: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const db = new sqlite3.Database(dbPath);
-      db.exec(sql, error => {
-        db.close();
-        if (error) reject(error); else resolve();
-      });
-    });
+    execSql(dbPath, sql);
+    return Promise.resolve();
   }
 });

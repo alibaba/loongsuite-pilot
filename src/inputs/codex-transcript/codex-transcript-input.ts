@@ -67,6 +67,8 @@ const MAX_DYNAMIC_SESSION_DIRS = 64;
 const MAX_DYNAMIC_SESSION_FILES = 64;
 const MAX_DYNAMIC_DIRECTORIES_PER_ROOT = 8;
 const MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT = 256;
+const MAX_CACHED_TRANSCRIPT_META_BYTES = 64 * 1024 * 1024;
+const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS = 48 * 60 * 60 * 1_000;
 const WAKEUP_MARKER_DISCOVERY_TTL_MS = 48 * 60 * 60 * 1_000;
 const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
@@ -126,6 +128,17 @@ interface DiscoveredSessionFile {
   baselineOnStart: boolean;
 }
 
+interface CachedCodexTranscriptMeta {
+  inode: number;
+  fileSize: number;
+  ownerSessionMetaOffset: number;
+  meta: CodexTranscriptMeta;
+  estimatedBytes: number;
+  lastSeenAtMs: number;
+}
+
+type TranscriptMetaCacheAccess = 'discovery' | 'active';
+
 interface DynamicDirectoryWalkBudget {
   remainingDirectories: number;
   remainingRolloutFiles: number;
@@ -172,9 +185,14 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
+  private lastDynamicRootLimitWarningAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
   private readonly transcriptPathByThreadId = new Map<string, string>();
+  private readonly transcriptMetaCacheByPath = new Map<string, CachedCodexTranscriptMeta>();
+  private readonly transcriptMetaCacheMaxEntries = MAX_LINK_DESCRIPTORS;
+  private readonly transcriptMetaCacheMaxBytes = MAX_CACHED_TRANSCRIPT_META_BYTES;
+  private transcriptMetaCacheBytes = 0;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -191,12 +209,31 @@ export class CodexTranscriptInput extends BaseInput {
     this.multimodalProcessor = includeMultimodal ? processor : null;
   }
 
-  static getWatchPaths(): string[] {
-    return [resolveHome(DEFAULT_SESSION_DIR)];
+  static getWatchPaths(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): string[] {
+    return [sessionDir, wakeupDir];
   }
 
-  static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome(DEFAULT_SESSION_DIR));
+  static async checkAvailability(
+    wakeupDir = defaultWakeupDir(),
+    sessionDir = resolveHome(DEFAULT_SESSION_DIR),
+  ): Promise<boolean> {
+    if (await directoryExists(sessionDir)) return true;
+    try {
+      const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
+      const now = Date.now();
+      for (const entry of selectCodexWakeupMarkers(entries)) {
+        const roots = await readCodexWakeupRoots(path.join(wakeupDir, entry.name), now);
+        for (const candidate of roots.flat()) {
+          if (await directoryExists(candidate)) return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   protected override async onStart(): Promise<void> {
@@ -241,6 +278,8 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
+    this.transcriptMetaCacheByPath.clear();
+    this.transcriptMetaCacheBytes = 0;
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
@@ -380,7 +419,21 @@ export class CodexTranscriptInput extends BaseInput {
       );
       checkpointChanged = true;
     }
-    await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
+    const ownerMetaCacheAccess: TranscriptMetaCacheAccess = (
+      checkpoint.scanOffset < stat.size
+      || checkpoint.activeTurn !== null
+      || checkpoint.pendingTerminal !== null
+      || checkpoint.pendingFusion !== null
+      || checkpoint.pendingSubagent !== null
+      || checkpoint.forkBootstrap?.state === 'live-pending'
+    ) ? 'active' : 'discovery';
+    await this.registerSubagentOwnerMeta(
+      filePath,
+      checkpoint.inode,
+      stat.size,
+      checkpoint.ownerSessionMetaOffset,
+      ownerMetaCacheAccess,
+    );
 
     const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
     const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
@@ -485,11 +538,25 @@ export class CodexTranscriptInput extends BaseInput {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
         if (line.record.type === 'session_meta') {
-          checkpoint.ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+          const ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
             filePath,
             checkpoint.ownerSessionMetaOffset,
             line,
           );
+          checkpoint.ownerSessionMetaOffset = ownerSessionMetaOffset;
+          if (ownerSessionMetaOffset === line.startOffset) {
+            const meta = extractCodexTranscriptMeta(line.record);
+            if (meta) {
+              this.rememberTranscriptOwnerMeta(
+                filePath,
+                checkpoint.inode,
+                stat.size,
+                ownerSessionMetaOffset,
+                meta,
+              );
+              this.publishTranscriptOwnerMeta(filePath, meta);
+            }
+          }
           return;
         }
 
@@ -585,6 +652,8 @@ export class CodexTranscriptInput extends BaseInput {
             recoveryCheckpoint,
             nextScanOffset,
             terminalTurnId !== null,
+            undefined,
+            reliableCandidate?.parentThreadId,
           );
           if (
             terminalTurnId
@@ -735,6 +804,7 @@ export class CodexTranscriptInput extends BaseInput {
     endOffset: number,
     terminal: boolean,
     inferredTerminalStatus?: 'interrupted',
+    attachmentParentThreadId?: string,
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -752,16 +822,42 @@ export class CodexTranscriptInput extends BaseInput {
       endOffset,
       runtime,
     );
-    const metaRecord = checkpoint.ownerSessionMetaOffset === null
-      ? null
-      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
-    const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
+    let currentStat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      currentStat = await fs.stat(filePath);
+    } catch {
+      // The already-read recovery range can still be processed, but without a
+      // trustworthy file-size watermark its metadata must not enter the cache.
+    }
+    let meta = currentStat?.ino === checkpoint.inode
+      ? this.cachedTranscriptOwnerMetaForCheckpoint(filePath, checkpoint, currentStat.size)
+      : null;
+    if (!meta && checkpoint.ownerSessionMetaOffset !== null) {
+      const metaRecord = await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
+      meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
+      if (meta) {
+        if (
+          currentStat?.ino === checkpoint.inode
+          && checkpoint.ownerSessionMetaOffset >= 0
+          && checkpoint.ownerSessionMetaOffset < currentStat.size
+        ) {
+          this.rememberTranscriptOwnerMeta(
+            filePath,
+            checkpoint.inode,
+            currentStat.size,
+            checkpoint.ownerSessionMetaOffset,
+            meta,
+          );
+        }
+        this.publishTranscriptOwnerMeta(filePath, meta);
+      }
+    }
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn, filePath),
+      this.partialTurnOptions(activeTurn, filePath, attachmentParentThreadId),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
@@ -791,7 +887,7 @@ export class CodexTranscriptInput extends BaseInput {
     const committedTurn = closedStepCount === turn.steps.length
       ? turn
       : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
-    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta);
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId);
     const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
@@ -906,6 +1002,7 @@ export class CodexTranscriptInput extends BaseInput {
     filePath: string,
     activeTurn: CodexActiveTranscriptTurn,
     meta: ReturnType<typeof extractCodexTranscriptMeta>,
+    attachmentParentThreadId?: string,
   ): Promise<CodexTranscriptInputContext | undefined> {
     const context = activeTurn.inputContext;
     if (!context || context.delta) return context;
@@ -923,7 +1020,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn, filePath),
+      this.partialTurnOptions(activeTurn, filePath, attachmentParentThreadId),
     );
     const lastStep = previous?.steps.at(-1);
     if (!lastStep) {
@@ -939,27 +1036,43 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async registerSubagentOwnerMeta(
     filePath: string,
+    inode: number,
+    fileSize: number,
     ownerSessionMetaOffset: number | null,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
   ): Promise<void> {
     if (ownerSessionMetaOffset === null) return;
-    const threadId = sessionIdFromTranscriptPath(filePath);
-    if (this.subagentLinker.hasThread(threadId)) return;
-    const record = await readJsonLineAt(
+    const indexedMeta = cacheAccess === 'active'
+      && !this.transcriptMetaCacheByPath.has(filePath)
+      ? this.transcriptMetaByPath.get(filePath)
+      : null;
+    if (indexedMeta) {
+      this.rememberTranscriptOwnerMeta(
+        filePath,
+        inode,
+        fileSize,
+        ownerSessionMetaOffset,
+        indexedMeta,
+        'active',
+      );
+      this.publishTranscriptOwnerMeta(filePath, indexedMeta);
+      return;
+    }
+    const meta = await this.loadTranscriptOwnerMeta(
       filePath,
+      inode,
+      fileSize,
       ownerSessionMetaOffset,
       this.getInputRuntimeAccumulator(),
+      cacheAccess,
     );
-    const meta = record ? extractCodexTranscriptMeta(record) : null;
-    if (meta) {
-      this.transcriptMetaByPath.set(filePath, meta);
-      this.transcriptPathByThreadId.set(meta.threadId, filePath);
-      this.subagentLinker.registerChild(meta);
-    }
+    if (meta) this.publishTranscriptOwnerMeta(filePath, meta);
   }
 
   private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
+    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
     for (const { filePath } of files) {
       let stat;
       try {
@@ -980,17 +1093,158 @@ export class CodexTranscriptInput extends BaseInput {
             this.getInputRuntimeAccumulator(),
           );
       if (ownerOffset === null) continue;
-      const record = await readJsonLineAt(
+      const meta = await this.loadTranscriptOwnerMeta(
         filePath,
+        stat.ino,
+        stat.size,
         ownerOffset,
         this.getInputRuntimeAccumulator(),
+        'discovery',
       );
-      const meta = record ? extractCodexTranscriptMeta(record) : null;
       if (!meta) continue;
-      this.transcriptMetaByPath.set(filePath, meta);
-      this.transcriptPathByThreadId.set(meta.threadId, filePath);
-      this.subagentLinker.registerChild(meta);
+      this.publishTranscriptOwnerMeta(filePath, meta);
     }
+  }
+
+  private async loadTranscriptOwnerMeta(
+    filePath: string,
+    inode: number,
+    fileSize: number,
+    ownerSessionMetaOffset: number,
+    runtime?: InputRuntimeAccumulator | null,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
+  ): Promise<CodexTranscriptMeta | null> {
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (cached && reusableCachedTranscriptMeta(cached, inode, fileSize, ownerSessionMetaOffset)) {
+      cached.fileSize = fileSize;
+      cached.lastSeenAtMs = Date.now();
+      if (cacheAccess === 'active') {
+        this.transcriptMetaCacheByPath.delete(filePath);
+        this.transcriptMetaCacheByPath.set(filePath, cached);
+      }
+      return cached.meta;
+    }
+    if (cached) this.removeTranscriptMetaCacheEntry(filePath);
+    if (ownerSessionMetaOffset < 0 || ownerSessionMetaOffset >= fileSize) return null;
+
+    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset, runtime);
+    const meta = record ? extractCodexTranscriptMeta(record) : null;
+    if (!meta) return null;
+    this.rememberTranscriptOwnerMeta(
+      filePath,
+      inode,
+      fileSize,
+      ownerSessionMetaOffset,
+      meta,
+      cacheAccess,
+    );
+    return meta;
+  }
+
+  private rememberTranscriptOwnerMeta(
+    filePath: string,
+    inode: number,
+    fileSize: number,
+    ownerSessionMetaOffset: number,
+    meta: CodexTranscriptMeta,
+    cacheAccess: TranscriptMetaCacheAccess = 'active',
+  ): void {
+    this.removeTranscriptMetaCacheEntry(filePath);
+    const estimatedBytes = estimateCachedTranscriptMetaBytes(filePath, meta);
+    if (estimatedBytes > this.transcriptMetaCacheMaxBytes) return;
+    // A periodic inventory scan proves that a transcript still exists, not
+    // that the user is actively using it. Do not let an uncached historical
+    // path evict the small set of sessions that are actually growing.
+    if (
+      cacheAccess === 'discovery'
+      && (
+        this.transcriptMetaCacheByPath.size >= this.transcriptMetaCacheMaxEntries
+        || this.transcriptMetaCacheBytes + estimatedBytes > this.transcriptMetaCacheMaxBytes
+      )
+    ) {
+      return;
+    }
+    const cached: CachedCodexTranscriptMeta = {
+      inode,
+      fileSize,
+      ownerSessionMetaOffset,
+      meta,
+      estimatedBytes,
+      lastSeenAtMs: Date.now(),
+    };
+    this.transcriptMetaCacheByPath.set(filePath, cached);
+    this.transcriptMetaCacheBytes += estimatedBytes;
+    this.trimTranscriptMetaCache();
+  }
+
+  private cachedTranscriptOwnerMetaForCheckpoint(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+    fileSize: number,
+  ): CodexTranscriptMeta | null {
+    if (checkpoint.ownerSessionMetaOffset === null) return null;
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (
+      !cached
+      || !reusableCachedTranscriptMeta(
+        cached,
+        checkpoint.inode,
+        fileSize,
+        checkpoint.ownerSessionMetaOffset,
+      )
+    ) {
+      return null;
+    }
+    cached.fileSize = fileSize;
+    cached.lastSeenAtMs = Date.now();
+    this.transcriptMetaCacheByPath.delete(filePath);
+    this.transcriptMetaCacheByPath.set(filePath, cached);
+    return cached.meta;
+  }
+
+  private pruneAbsentTranscriptMetaCache(discoveredPaths: Set<string>, now: number): void {
+    for (const [filePath, cached] of this.transcriptMetaCacheByPath) {
+      if (
+        !discoveredPaths.has(filePath)
+        && now - cached.lastSeenAtMs >= CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS
+      ) {
+        this.removeTranscriptMetaCacheEntry(filePath);
+      }
+    }
+  }
+
+  private removeTranscriptMetaCacheEntry(filePath: string): void {
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    if (!cached) return;
+    this.transcriptMetaCacheByPath.delete(filePath);
+    this.transcriptMetaCacheBytes = Math.max(0, this.transcriptMetaCacheBytes - cached.estimatedBytes);
+  }
+
+  private trimTranscriptMetaCache(): void {
+    while (
+      this.transcriptMetaCacheByPath.size > this.transcriptMetaCacheMaxEntries
+      || this.transcriptMetaCacheBytes > this.transcriptMetaCacheMaxBytes
+    ) {
+      const oldest = this.transcriptMetaCacheByPath.keys().next().value as string | undefined;
+      if (oldest === undefined) return;
+      this.removeTranscriptMetaCacheEntry(oldest);
+    }
+  }
+
+  private publishTranscriptOwnerMeta(filePath: string, meta: CodexTranscriptMeta): void {
+    const previous = this.transcriptMetaByPath.get(filePath);
+    if (
+      previous
+      && previous.threadId !== meta.threadId
+      && this.transcriptPathByThreadId.get(previous.threadId) === filePath
+    ) {
+      this.transcriptPathByThreadId.delete(previous.threadId);
+    }
+    this.transcriptMetaByPath.set(filePath, meta);
+    this.transcriptPathByThreadId.set(meta.threadId, filePath);
+    // Linker descriptors have an independent eviction policy. Re-register on
+    // every publish, including cache hits, so metadata and linkage cannot drift.
+    this.subagentLinker.registerChild(meta);
   }
 
   private registerPersistedSubagentSpawns(
@@ -1224,6 +1478,7 @@ export class CodexTranscriptInput extends BaseInput {
           terminalEndOffset,
           true,
           capturedMatches ? undefined : 'interrupted',
+          pending.parentThreadId,
         );
         if (recovered.kind === 'unparseable') {
           degradedToolCallIds.push(item.child.parentToolCallId);
@@ -1882,52 +2137,37 @@ export class CodexTranscriptInput extends BaseInput {
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'));
     const now = Date.now();
     await this.cleanupExpiredWakeupMarkers(allMarkerEntries, now);
-    const markerEntries = allMarkerEntries
-      // Marker names are Codex UUIDv7 session IDs, so descending lexical order
-      // keeps the newest task markers inside the bounded discovery window.
-      .sort((left, right) => right.name.localeCompare(left.name))
-      .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
-    const sessionDirs = new Set<string>();
-
-    for (const entry of markerEntries) {
-      let marker: Record<string, unknown> | null = null;
-      try {
-        marker = asRecord(JSON.parse(await fs.readFile(path.join(this.wakeupDir, entry.name), 'utf8')));
-      } catch {
-        continue;
-      }
-      if (!marker) continue;
-
-      const receivedAt = stringValue(marker.received_at);
-      const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
-      if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) continue;
-
-      const configuredSessionDir = stringValue(marker.session_dir);
-      const configuredCodexHome = stringValue(marker.codex_home);
-      if (configuredSessionDir && !path.isAbsolute(configuredSessionDir)) continue;
-      if (configuredCodexHome && !path.isAbsolute(configuredCodexHome)) continue;
-
-      let sessionDir = configuredSessionDir;
-      if (configuredCodexHome) {
-        const codexHomeSessionDir = path.resolve(configuredCodexHome, 'sessions');
-        if (configuredSessionDir && path.resolve(configuredSessionDir) !== codexHomeSessionDir) continue;
-        sessionDir = codexHomeSessionDir;
-      }
-      if (!sessionDir || !path.isAbsolute(sessionDir)) continue;
-
-      let canonicalSessionDir: string;
-      try {
-        canonicalSessionDir = await fs.realpath(sessionDir);
-        if (!(await fs.stat(canonicalSessionDir)).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      if (canonicalSessionDir === canonicalDefaultSessionDir) continue;
-      sessionDirs.add(canonicalSessionDir);
-      if (sessionDirs.size >= MAX_DYNAMIC_SESSION_DIRS) break;
+    // Reserve the global budget for evidence-backed roots before legacy fallbacks.
+    // Per-marker ordering alone still spends two slots per dual-layout home.
+    const tiers: Set<string>[] = [new Set(), new Set(), new Set()];
+    for (const entry of selectCodexWakeupMarkers(allMarkerEntries)) {
+      const roots = await readCodexWakeupRoots(path.join(this.wakeupDir, entry.name), now);
+      roots.forEach((candidates, tier) => {
+        for (const candidate of candidates) tiers[tier].add(candidate);
+      });
     }
-
-    return [...sessionDirs];
+    const sessionDirs = new Set<string>();
+    for (const candidates of tiers) {
+      for (const candidate of candidates) {
+        try {
+          const canonical = await fs.realpath(candidate);
+          if (canonical === canonicalDefaultSessionDir || !(await fs.stat(canonical)).isDirectory()) continue;
+          sessionDirs.add(canonical);
+        } catch {
+          // A temporarily unavailable root can be retried on the next discovery.
+        }
+      }
+    }
+    // At most three roots per marker are examined within the existing marker cap.
+    const dropped = sessionDirs.size - MAX_DYNAMIC_SESSION_DIRS;
+    if (dropped > 0 && now - this.lastDynamicRootLimitWarningAtMs >= WAKEUP_MARKER_CLEANUP_INTERVAL_MS) {
+      this.lastDynamicRootLimitWarningAtMs = now;
+      this.logger.warn('Codex dynamic session root limit reached within scanned markers', {
+        dropped,
+        cap: MAX_DYNAMIC_SESSION_DIRS,
+      });
+    }
+    return [...sessionDirs].slice(0, MAX_DYNAMIC_SESSION_DIRS);
   }
 
   private async cleanupExpiredWakeupMarkers(entries: Dirent[], now: number): Promise<void> {
@@ -2152,7 +2392,11 @@ export class CodexTranscriptInput extends BaseInput {
     this.stateStore.set(this.id, { ...current, extra });
   }
 
-  private partialTurnOptions(activeTurn: CodexActiveTranscriptTurn, filePath: string): {
+  private partialTurnOptions(
+    activeTurn: CodexActiveTranscriptTurn,
+    filePath: string,
+    attachmentParentThreadId?: string,
+  ): {
     startedAtMs?: number;
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
@@ -2171,7 +2415,7 @@ export class CodexTranscriptInput extends BaseInput {
         ? { lastCumulativeTokenTotal: activeTurn.lastCumulativeTokenTotal }
         : {}),
       ...(this.includeMultimodal && this.multimodalProcessor
-        ? { blobToUri: this.blobToUri(filePath), uploadMode: this.multimodalUploadMode }
+        ? { blobToUri: this.blobToUri(filePath, activeTurn.cwd, attachmentParentThreadId), uploadMode: this.multimodalUploadMode }
         : {}),
       ...(activeTurn.model ? { model: activeTurn.model } : {}),
       ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
@@ -2182,8 +2426,19 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   /** blob→uri with per-transcript replay cache. */
-  private blobToUri(transcriptPath: string): BlobToUriFn {
+  private blobToUri(transcriptPath: string, cwd?: string, attachmentParentThreadId?: string): BlobToUriFn {
     return (params) => {
+      const meta = this.transcriptMetaByPath.get(transcriptPath);
+      if (!this.workspacePolicy.allows({
+        // Match the event session identity, including child rollout threads.
+        'gen_ai.session.id': meta?.threadId ?? sessionIdFromTranscriptPath(transcriptPath),
+        cwd,
+      }, this.agentType)) return null;
+      // Linked recovery uploads before rewriteSubagentEntries assigns the parent
+      // session. Check that destination too, before upload or replay-cache reuse.
+      if (attachmentParentThreadId && !this.workspacePolicy.allows({
+        'gen_ai.session.id': attachmentParentThreadId,
+      }, this.agentType)) return null;
       if (!this.multimodalProcessor) return null;
       const cacheKey = params.reuseKey ? `${transcriptPath}\0${params.reuseKey}` : undefined;
       if (cacheKey) {
@@ -2263,6 +2518,75 @@ function isCodexSessionDateDirectory(name: string, depth: number): boolean {
   if (depth === 1) return /^(0[1-9]|1[0-2])$/.test(name);
   if (depth === 2) return /^(0[1-9]|[12]\d|3[01])$/.test(name);
   return false;
+}
+
+/** Shared by activation and collection so stale/invalid markers cannot start an Input. */
+async function readCodexWakeupRoots(markerPath: string, now: number): Promise<string[][]> {
+  const roots: string[][] = [[], [], []];
+  try {
+    const marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+    if (!marker) return roots;
+    const receivedAt = stringValue(marker.received_at);
+    const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+    if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) return roots;
+
+    const home = stringValue(marker.codex_home);
+    const sessionDir = stringValue(marker.session_dir);
+    const transcriptPath = stringValue(marker.transcript_path);
+    if ((home && !path.isAbsolute(home)) || (sessionDir && !path.isAbsolute(sessionDir))) return roots;
+    const legacy = home ? path.resolve(home, 'sessions') : undefined;
+    const transcriptRoot = transcriptPath ? sessionDirFromTranscriptPath(transcriptPath) : undefined;
+    if (transcriptRoot && (!home || isCodexSessionDirForHome(transcriptRoot, home))) {
+      roots[0].push(transcriptRoot);
+    }
+    if (sessionDir && (!home || isCodexSessionDirForHome(sessionDir, home))) {
+      const resolved = path.resolve(sessionDir);
+      roots[resolved === legacy ? 2 : 1].push(resolved);
+    }
+    if (legacy) roots[2].push(legacy);
+  } catch {
+    // Atomic replacement, invalid JSON, and unreadable markers are retried later.
+  }
+  return roots;
+}
+
+function selectCodexWakeupMarkers(entries: Dirent[]): Dirent[] {
+  // UUIDv7 marker names sort newest first; keep every read within the scan budget.
+  return entries.filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+    .sort((left, right) => right.name.localeCompare(left.name))
+    .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
+}
+
+function sessionDirFromTranscriptPath(transcriptPath: string): string | undefined {
+  if (!path.isAbsolute(transcriptPath)) return undefined;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return undefined;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !isCodexSessionDateDirectory(path.basename(yearDir), 0)
+    || !isCodexSessionDateDirectory(path.basename(monthDir), 1)
+    || !isCodexSessionDateDirectory(path.basename(dayDir), 2)
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return undefined;
+  }
+  return path.resolve(sessionDir);
+}
+
+function isCodexSessionDirForHome(sessionDir: string, codexHome: string): boolean {
+  const relative = path.relative(path.resolve(codexHome), path.resolve(sessionDir));
+  if (relative === 'sessions') return true;
+  const parts = relative.split(path.sep);
+  return parts.length === 3
+    && parts[0] === 'u'
+    && parts[1].length > 0
+    && parts[1] !== '.'
+    && parts[1] !== '..'
+    && parts[2] === 'sessions';
 }
 
 async function canonicalDirectoryPath(directoryPath: string): Promise<string> {
@@ -2741,6 +3065,24 @@ function isCopiedParentTurnByTime(
 ): boolean {
   const uuidTimestamp = uuidV7TimestampMs(turnId);
   return (uuidTimestamp ?? observedStartedAtMs) < ownerCreatedAtMs;
+}
+
+function reusableCachedTranscriptMeta(
+  cached: CachedCodexTranscriptMeta,
+  inode: number,
+  fileSize: number,
+  ownerSessionMetaOffset: number,
+): boolean {
+  return cached.inode === inode
+    && cached.ownerSessionMetaOffset === ownerSessionMetaOffset
+    && fileSize >= cached.fileSize
+    && ownerSessionMetaOffset >= 0
+    && ownerSessionMetaOffset < fileSize;
+}
+
+function estimateCachedTranscriptMetaBytes(filePath: string, meta: CodexTranscriptMeta): number {
+  return Buffer.byteLength(filePath, 'utf8')
+    + Buffer.byteLength(JSON.stringify(meta), 'utf8');
 }
 
 function trimOldestMap<T>(values: Map<string, T>, maxSize: number): void {

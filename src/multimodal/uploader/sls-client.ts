@@ -1,7 +1,8 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { MultimodalRuntimeConfig, MultimodalStorageAuth } from '../types.js';
+import type { MultimodalStorageAuth } from '../types.js';
 import { createLogger } from '../../utils/logger.js';
 import { normalizeOssEndpoint } from '../resolve.js';
+import { DEFAULT_MULTIMODAL_RETRY, withRetries } from './retry.js';
 
 const logger = createLogger('SlsClient');
 
@@ -22,13 +23,17 @@ export interface SlsAuthApiKey {
   apiKey: string;
 }
 
-export type SlsObjectAuth = SlsAuthAk | SlsAuthApiKey;
+export interface SlsAuthAnonymous {
+  mode: 'anonymous';
+}
+
+export type SlsObjectAuth = SlsAuthAk | SlsAuthApiKey | SlsAuthAnonymous;
 
 export interface SlsRequest {
   endpoint: string;
   project: string;
   logstore: string;
-  mode?: 'ak' | 'apiKey';
+  mode?: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
@@ -44,6 +49,8 @@ export interface SlsResult {
   error?: string;
   retryable?: boolean;
 }
+
+export const PRESIGN_ORIGIN_MISMATCH_ERROR = 'presign url origin mismatch';
 
 export interface SlsObjectTarget extends SlsRequest {
   objectKey: string;
@@ -156,17 +163,49 @@ export function normalizeSlsEndpoint(endpoint: string): SlsEndpoint {
   };
 }
 
+const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
+
+/** `{project}.{regional-host}` unless the host already carries that project. */
+export function slsProjectHost(project: string, endpointHost: string): string {
+  const host = endpointHost.replace(/\.$/, '');
+  const hostLower = host.toLowerCase();
+  const projectLower = project.toLowerCase();
+  if (hostLower.endsWith(SLS_PUBLIC_HOST_SUFFIX)) {
+    const rest = hostLower.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    if (parts.length >= 2) {
+      if (parts[0] === projectLower) return host;
+      const regionalHost = `${parts.slice(1).join('.')}${SLS_PUBLIC_HOST_SUFFIX}`;
+      logger.warn('SLS endpoint host carries a different project; using configured project', {
+        endpointHost: host,
+        hostProject: parts[0],
+        project,
+      });
+      return `${project}.${regionalHost}`;
+    }
+  }
+  return `${project}.${host}`;
+}
+
 export function resolveSlsObjectAuth(params: {
-  mode?: 'ak' | 'apiKey';
+  mode?: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
   apiKey?: string;
-}): { kind: 'ak' } & SlsAuthAk | { kind: 'apiKey' } & SlsAuthApiKey {
+}): { kind: 'ak' } & SlsAuthAk
+  | { kind: 'apiKey' } & SlsAuthApiKey
+  | { kind: 'anonymous' } {
   const apiKey = params.apiKey?.trim() ?? '';
   const accessKeyId = params.accessKeyId?.trim() ?? '';
   const accessKeySecret = params.accessKeySecret?.trim() ?? '';
   const securityToken = params.securityToken?.trim() || undefined;
+  if (params.mode === 'anonymous') {
+    if (apiKey || accessKeyId || accessKeySecret || securityToken) {
+      throw new Error('SLS anonymous auth cannot include credentials');
+    }
+    return { kind: 'anonymous' };
+  }
   if (params.mode === 'apiKey') {
     if (!apiKey) throw new Error('SLS apiKey is required');
     return { kind: 'apiKey', apiKey };
@@ -267,7 +306,7 @@ export function buildBearerJsonRequest(args: {
   if (!args.apiKey) {
     throw new Error('SLS apiKey is required');
   }
-  const host = `${args.project}.${args.endpoint.host}`;
+  const host = slsProjectHost(args.project, args.endpoint.host);
   const url = `${args.endpoint.scheme}://${host}${args.resource}`;
   const date = formatRfc822Gmt(args.now ?? new Date());
   const bodyLength = args.body?.length ?? args.bodyLength ?? 0;
@@ -286,6 +325,34 @@ export function buildBearerJsonRequest(args: {
     headers['Content-Length'] = String(bodyLength);
   }
   return { url, headers };
+}
+
+export function buildAnonymousPutRequest(args: {
+  endpoint: SlsEndpoint;
+  project: string;
+  resource: string;
+  contentType: string;
+  bodyLength: number;
+  extraHeaders?: Record<string, string>;
+  now?: Date;
+}): { url: string; headers: Record<string, string> } {
+  const host = slsProjectHost(args.project, args.endpoint.host);
+  const url = `${args.endpoint.scheme}://${host}${args.resource}`;
+  const date = formatRfc822Gmt(args.now ?? new Date());
+  return {
+    url,
+    headers: {
+      Host: host,
+      Date: date,
+      'x-log-date': date,
+      'User-Agent': 'loongsuite-pilot-multimodal-sls/1.0',
+      'x-log-apiversion': SLS_API_VERSION,
+      'x-log-bodyrawsize': String(args.bodyLength),
+      'Content-Type': args.contentType,
+      'Content-Length': String(args.bodyLength),
+      ...(args.extraHeaders ?? {}),
+    },
+  };
 }
 
 export function buildLogV1JsonRequest(args: {
@@ -307,7 +374,7 @@ export function buildLogV1JsonRequest(args: {
     throw new Error('SLS access key ID and secret are required');
   }
 
-  const host = `${args.project}.${args.endpoint.host}`;
+  const host = slsProjectHost(args.project, args.endpoint.host);
   const url = `${args.endpoint.scheme}://${host}${args.resource}`;
   const date = (args.now ?? new Date()).toUTCString();
   const contentMd5 = args.contentMd5
@@ -383,7 +450,6 @@ async function slsHttpRequest(args: {
     }
     const error = `${resp.status} ${text || `${body.length}b`}`;
     const retryable = resp.status === 408 || resp.status === 429 || resp.status >= 500;
-    logger.warn('sls request non-200', { statusCode: resp.status, requestId, error, method: args.method });
     return {
       ok: false,
       statusCode: resp.status,
@@ -405,14 +471,24 @@ async function slsHttpRequest(args: {
   }
 }
 
-/** SLS PutObject via AK Auth V1 or ApiKey Bearer. */
+/** SLS PutObject via AK Auth V1, ApiKey Bearer, or anonymous access. */
 export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResult> {
   try {
     const prepared = prepareSlsObjectTarget(params);
     const contentType = params.contentType || 'application/octet-stream';
     const resource = slsObjectResource(prepared.logstore, prepared.objectKey);
-    const { url, headers } = prepared.auth.kind === 'apiKey'
-      ? buildBearerJsonRequest({
+    let request: { url: string; headers: Record<string, string> };
+    if (prepared.auth.kind === 'anonymous') {
+      request = buildAnonymousPutRequest({
+        endpoint: prepared.endpoint,
+        project: prepared.project,
+        resource,
+        contentType,
+        bodyLength: params.body.length,
+        extraHeaders: metadataHeaders(params.meta),
+      });
+    } else if (prepared.auth.kind === 'apiKey') {
+      request = buildBearerJsonRequest({
         endpoint: prepared.endpoint,
         project: prepared.project,
         method: 'PUT',
@@ -421,8 +497,9 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
         contentType,
         bodyLength: params.body.length,
         extraHeaders: metadataHeaders(params.meta),
-      })
-      : buildLogV1JsonRequest({
+      });
+    } else {
+      request = buildLogV1JsonRequest({
         endpoint: prepared.endpoint,
         project: prepared.project,
         method: 'PUT',
@@ -434,11 +511,12 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
         bodyLength: params.body.length,
         extraHeaders: metadataHeaders(params.meta),
       });
+    }
 
     return await slsHttpRequest({
-      url,
+      url: request.url,
       method: 'PUT',
-      headers,
+      headers: request.headers,
       body: params.body,
       timeoutMs: params.timeoutMs,
       signal: params.signal,
@@ -452,6 +530,9 @@ export async function slsPutObject(params: SlsPutObjectParams): Promise<SlsResul
 export async function slsGeneratePresignedUrl(params: SlsObjectTarget): Promise<SlsPresignResult> {
   try {
     const prepared = prepareSlsObjectTarget(params);
+    if (prepared.auth.kind === 'anonymous') {
+      throw new Error('SLS presign does not support anonymous auth');
+    }
     const body = Buffer.from(JSON.stringify({ key: prepared.objectKey, method: 'PUT' }), 'utf8');
     const { url, headers } = prepared.auth.kind === 'apiKey'
       ? buildBearerJsonRequest({
@@ -546,7 +627,7 @@ export function bindPresignedPutUrl(
     return { ok: false, error: 'presign url origin is required', retryable: false };
   }
   if (parsed.origin !== target.expectedOrigin) {
-    return { ok: false, error: 'presign url origin mismatch', retryable: false };
+    return { ok: false, error: PRESIGN_ORIGIN_MISMATCH_ERROR, retryable: false };
   }
   const objectPath = presignObjectPath(parsed.pathname);
   const expectedPath = `${target.project}/${target.logstore}/${target.objectKey}`;
@@ -626,17 +707,45 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | u
   return undefined;
 }
 
-/** Startup sniff. Shorter than upload timeout so a hung call does not stall start. */
+/** Timeout for the delegatedOss bucket presign. */
 const SLS_STARTUP_TIMEOUT_MS = 5_000;
 export const SLS_HTTP_STORAGE_PROBE_KEY = '_pilot/storage-probe';
 
+/** Presign the delegatedOss probe object. */
+async function probeSlsMultimodalCapability(
+  params: SlsRequest,
+): Promise<SlsPresignResult> {
+  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
+  const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
+    const last = await slsGeneratePresignedUrl({
+      ...params,
+      objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
+      timeoutMs,
+    });
+    if (last.ok && last.url) {
+      return { ok: true as const, value: last };
+    }
+    return {
+      ok: false as const,
+      retryable: last.retryable === true,
+      error: last.error,
+      statusCode: last.statusCode,
+    };
+  }, { signal: params.signal });
+  if (result.ok) return result.value;
+  return { ok: false, error: result.error || 'sls multimodal probe failed', statusCode: result.statusCode };
+}
+
 export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
-  mode: 'ak' | 'apiKey';
+  mode: 'ak' | 'apiKey' | 'anonymous';
   accessKeyId?: string;
   accessKeySecret?: string;
   securityToken?: string;
   apiKey?: string;
 } {
+  if (auth.mode === 'anonymous') {
+    return { mode: 'anonymous' };
+  }
   if (auth.mode === 'apiKey') {
     return { mode: 'apiKey', apiKey: auth.apiKey };
   }
@@ -648,16 +757,11 @@ export function slsStorageAuthFields(auth: MultimodalStorageAuth): {
   };
 }
 
-/** Presign once to learn the landing bucket. Never PUTs. Failure is fail-closed. */
+/** Learn the delegatedOss bucket from a presign URL. */
 export async function sniffSlsHttpEventStorageBasePath(
-  params: Omit<SlsObjectTarget, 'objectKey' | 'timeoutMs'> & { timeoutMs?: number },
+  params: SlsRequest,
 ): Promise<{ ok: true; storageBasePath: string; origin: string } | { ok: false; error: string }> {
-  const timeoutMs = params.timeoutMs ?? SLS_STARTUP_TIMEOUT_MS;
-  const presign = await slsGeneratePresignedUrl({
-    ...params,
-    objectKey: SLS_HTTP_STORAGE_PROBE_KEY,
-    timeoutMs,
-  });
+  const presign = await probeSlsMultimodalCapability(params);
   if (!presign.ok || !presign.url) {
     return { ok: false, error: presign.error || 'presign failed' };
   }
@@ -685,43 +789,4 @@ export async function sniffSlsHttpEventStorageBasePath(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/**
- * Event URI prefix for Processor. Uploader keeps config.storageBasePath (sls://).
- * sls and oss use that prefix as-is. delegatedOss sniffs one presign and pins origin.
- * if target.ossBucket is set, the sniffed bucket must match or multimodal stays off.
- */
-export async function resolveMultimodalEventStorageBasePath(
-  config: MultimodalRuntimeConfig,
-): Promise<{ ok: true; storageBasePath: string; origin?: string } | { ok: false; error: string }> {
-  if (config.storage.type !== 'delegatedOss') {
-    const storageBasePath = (config.storageBasePath ?? '').trim();
-    if (!storageBasePath) {
-      return { ok: false, error: 'multimodal storageBasePath is required' };
-    }
-    return { ok: true, storageBasePath };
-  }
-
-  const { target, auth } = config.storage;
-  const sniffed = await sniffSlsHttpEventStorageBasePath({
-    endpoint: target.endpoint,
-    project: target.project,
-    logstore: target.logstore,
-    ...slsStorageAuthFields(auth),
-    timeoutMs: SLS_STARTUP_TIMEOUT_MS,
-  });
-  if (!sniffed.ok) return sniffed;
-
-  const configuredBucket = target.ossBucket?.trim() ?? '';
-  if (configuredBucket) {
-    const currentBucket = tryParseOssEventStorageBasePath(sniffed.storageBasePath)?.bucket ?? '';
-    if (currentBucket !== configuredBucket) {
-      return {
-        ok: false,
-        error: `configured ossBucket (${configuredBucket}) does not match current landing bucket (${currentBucket || 'unknown'})`,
-      };
-    }
-  }
-  return sniffed;
 }

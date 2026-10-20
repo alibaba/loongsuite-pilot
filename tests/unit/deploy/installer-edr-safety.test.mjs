@@ -31,6 +31,7 @@ describe('public installer keeps agent identity out of Node argv', () => {
     expect(writeConfig).toContain(`printf '%s' "$PROBE_RESULT" |`);
     expect(writeConfig).toContain('LP_SELECTED_AGENTS="$SELECTED_AGENTS"');
     expect(writeConfig).toContain("const selectedAgents = process.env.LP_SELECTED_AGENTS || '';");
+    expect(writeConfig).toContain("const allAgentsMode = '${ALL_AGENTS}';");
     expect(writeConfig).toContain("JSON.parse(fs.readFileSync(0, 'utf8') || '[]')");
     expect(writeConfig).not.toContain("const selectedAgents = '${SELECTED_AGENTS}';");
     expect(writeConfig).not.toContain('" -- "$PROBE_RESULT"');
