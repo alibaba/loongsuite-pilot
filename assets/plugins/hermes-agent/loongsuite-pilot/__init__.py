@@ -51,7 +51,13 @@ _PROCESS_FILE_TOKEN = "%s-%s-%s" % (
     secrets.token_hex(4),
 )
 _STATE_LOCK = threading.RLock()
+# Never hold this lock during file I/O or native callbacks. Closing an API and
+# observing its first delta must be atomic without waiting for another turn's
+# synchronous JSONL append. Lock order is STATE -> TTFT, never the reverse.
+_TTFT_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
+# Detached retry snapshots retain no other active turns/session state.
+_EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
 
@@ -134,7 +140,7 @@ def _install_first_delta_observer() -> None:
             def first_delta(*callback_args: Any, **callback_kwargs: Any) -> Any:
                 try:
                     first_ns = time.perf_counter_ns()
-                    with _STATE_LOCK:
+                    with _TTFT_LOCK:
                         if (
                             not getattr(agent, "_disable_streaming", False)
                             and api.get("post_ns") is None
@@ -620,6 +626,7 @@ def _session(session_id: str) -> Dict[str, Any]:
                     try:
                         _flush_turn(evicted, turn, {})
                     except Exception as error:
+                        _defer_evicted_turn(evicted, turn)
                         _report_internal_error("session eviction flush", error)
     else:
         _SESSIONS.pop(session_id, None)
@@ -699,8 +706,26 @@ def _remember_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[st
         state["turn_count"] = min(2, state["turn_count"] + 1)
     state["turns"][turn["fallback_turn_id"]] = turn
     while len(state["turns"]) > MAX_ACTIVE_TURNS:
-        oldest = next(iter(state["turns"].values()))
-        _flush_turn(state, oldest, {})
+        oldest = next(candidate for candidate in state["turns"].values() if candidate is not turn)
+        try:
+            _flush_turn(state, oldest, {})
+        except Exception as error:
+            # A failing lifecycle flush remains retryable in the active map;
+            # capacity eviction must still make room for this hook's turn.
+            _defer_evicted_turn(state, oldest)
+            _report_internal_error("turn eviction flush", error)
+
+
+def _defer_evicted_turn(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
+    key = turn["fallback_turn_id"]
+    state["turns"].pop(key, None)
+    _EVICTED_TURNS[key] = ({
+        "model": state.get("model"), "platform": state.get("platform"),
+        "turns": {key: turn}, "finalize_requested": False,
+    }, turn)
+    while len(_EVICTED_TURNS) > MAX_ACTIVE_TURNS:
+        _EVICTED_TURNS.pop(next(iter(_EVICTED_TURNS)))
+        _report_internal_error("eviction retry capacity", RuntimeError("dropping oldest evicted turn"))
 
 
 def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
@@ -1383,7 +1408,8 @@ def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         turn["apis"].append(api)
     elif not api.get("api_request_id") and payload.get("api_request_id"):
         api["api_request_id"] = payload.get("api_request_id")
-    api["post_ns"] = now_ns
+    with _TTFT_LOCK:
+        api["post_ns"] = now_ns
     api["post"] = {
         "provider": payload.get("provider"),
         "model": payload.get("model"),
@@ -1434,7 +1460,8 @@ def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
         error = {}
     error_type = error.get("type") or payload.get("reason") or "_OTHER"
     error_message = error.get("message") or payload.get("reason") or "provider request failed"
-    api["post_ns"] = now_ns
+    with _TTFT_LOCK:
+        api["post_ns"] = now_ns
     api["post"] = {
         "provider": payload.get("provider"),
         "model": payload.get("model"),
@@ -1631,4 +1658,10 @@ def _flush_at_exit() -> None:
                     _flush_turn(state, turn, {})
                 except Exception as error:
                     _report_internal_error("process exit flush", error)
+        for state, turn in list(_EVICTED_TURNS.values()):
+            try:
+                _flush_turn(state, turn, {})
+            except Exception as error:
+                _report_internal_error("process exit eviction retry", error)
+        _EVICTED_TURNS.clear()
         _SESSIONS.clear()
