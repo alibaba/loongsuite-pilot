@@ -1,0 +1,83 @@
+import { describe, expect, it } from 'vitest';
+import { ExportResultCode } from '@opentelemetry/core';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import { setupV2 } from '../../assets/plugins/opencode/v2.mjs';
+import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
+import { applyAgentContentPolicy } from '../../src/normalization/agent-content-policy.js';
+import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
+import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
+
+describe('OpenCode V2 event-to-trace contract', () => {
+  it('converts two model steps and parallel tools into one trace without changing V1', async () => {
+    const raw: Record<string, unknown>[] = [];
+    const events: Record<string, unknown>[] = [];
+    const now = Date.now() - 20000;
+    const model = { id: 'gpt-test', providerID: 'openai' };
+    const add = (type: string, data: Record<string, unknown> = {}) => events.push({
+      id: `evt_synthetic_${events.length}`, type, created: now + events.length * 100,
+      data: { sessionID: 'ses_synthetic', ...data },
+    });
+    add('session.execution.started');
+    add('session.step.started', { assistantMessageID: 'msg_first', model, agent: 'build', started: now + 100 });
+    for (const id of ['tool_a', 'tool_b']) {
+      add('session.tool.input.started', { assistantMessageID: 'msg_first', id, name: 'read' });
+      add('session.tool.called', { assistantMessageID: 'msg_first', id, input: { path: 'synthetic.txt' } });
+    }
+    add('session.step.streamed', { assistantMessageID: 'msg_first' });
+    for (const id of ['tool_b', 'tool_a']) add('session.tool.success', { assistantMessageID: 'msg_first', id, content: [{ type: 'text', text: 'synthetic result' }] });
+    const tokens = { input: 10, output: 5, reasoning: 0, cache: { read: 2, write: 0 } };
+    add('session.step.ended', { assistantMessageID: 'msg_first', finish: 'tool-calls', tokens, cost: 0 });
+    add('session.step.started', { assistantMessageID: 'msg_last', model, agent: 'build', started: now + events.length * 100 });
+    add('session.text.ended', { assistantMessageID: 'msg_last', ordinal: 0, text: 'synthetic answer' });
+    add('session.step.ended', { assistantMessageID: 'msg_last', finish: 'stop', tokens, cost: 0 });
+    add('session.execution.succeeded');
+    let done!: () => void;
+    const drained = new Promise<void>(resolve => { done = resolve; });
+    const cleanup = await setupV2({
+      location: { directory: '/synthetic/project' },
+      session: { hook: async (_name: string, cb: (event: unknown) => void) => { cb({ sessionID: 'ses_synthetic', system: [{ text: 'synthetic system' }], messages: [{ role: 'user', content: 'synthetic input' }] }); } },
+      event: { async *subscribe() { for (const event of events) yield event; done(); } },
+    }, {
+      common: (id: string, state: { currentTurn?: { turnId: string; traceId: string } }) => ({
+        'user.id': 'synthetic-user', 'gen_ai.agent.type': 'opencode', 'gen_ai.session.id': id,
+        'gen_ai.turn.id': state.currentTurn?.turnId, trace_id: state.currentTurn?.traceId,
+      }),
+      writeRecord: (record: Record<string, unknown>) => raw.push(record), writeError: (where: string, error: unknown) => { throw new Error(`${where}: ${error}`); },
+      inferProviderName: (id: string) => id, recordUpstreamEnvOnce() {},
+    });
+    await drained; cleanup();
+    const normalized = (await Promise.all(raw.map(record => transformHookRecord(record, ClientType.OpenCode, 'opencode')))).filter((r): r is AgentActivityEntry => r !== null);
+    expect(normalized.every(r => r['agent.opencode.collection'] === 'v2')).toBe(true);
+    const privateOff = normalized.map(r => applyAgentContentPolicy(r, { opencode: { enabled: true, captureMessageContent: false } }));
+    expect(JSON.stringify(privateOff)).not.toContain('synthetic answer');
+    expect(JSON.stringify(privateOff)).not.toContain('synthetic result');
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true,
+      endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }], protocol: 'http/protobuf', serviceName: 'synthetic-v2',
+    }, undefined, () => ({
+      export(batch, callback) { spans.push(...batch); callback({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {},
+    }));
+    try {
+      await flusher.sendBatch(normalized);
+      expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
+      expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+      const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llms).toHaveLength(2);
+      const tools = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL');
+      expect(tools).toHaveLength(2);
+      expect(tools.map(s => s.attributes['gen_ai.tool.call.id']).sort()).toEqual(['tool_a', 'tool_b']);
+      expect(llms.every(s => s.attributes['gen_ai.usage.input_tokens'] === 12)).toBe(true);
+      expect([...llms, ...tools].every(s => s.duration[0] * 1e9 + s.duration[1] > 0)).toBe(true);
+      const ids = new Set(spans.map(s => s.spanContext().spanId));
+      expect(ids.size).toBe(spans.length);
+      // ENTRY may retain an incoming/external parent; every descendant must
+      // resolve inside the exported tree.
+      for (const span of spans) if (span.attributes['gen_ai.span.kind'] !== 'ENTRY' && span.parentSpanId) {
+        expect(ids.has(span.parentSpanId), JSON.stringify(spans.map(s => ({ kind: s.attributes['gen_ai.span.kind'], id: s.spanContext().spanId, parent: s.parentSpanId })))).toBe(true);
+      }
+      const count = spans.length;
+      await flusher.sendBatch(normalized);
+      expect(spans).toHaveLength(count);
+    } finally { await flusher.shutdown(); }
+  });
+});
