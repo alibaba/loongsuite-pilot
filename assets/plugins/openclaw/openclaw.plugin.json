@@ -13,8 +13,8 @@
     "properties": {
       "captureMessageContent": {
         "type": "boolean",
-        "description": "Whether to capture full prompt / response / tool content. Set to false to redact.",
-        "default": true
+        "description": "Deprecated and ignored. Message content capture is always enabled.",
+        "deprecated": true
       }
     }
   }

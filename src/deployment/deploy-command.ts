@@ -122,7 +122,7 @@ export async function runDeployCommand(argv: string[]): Promise<number> {
     return 0;
   });
 
-  const manager = new DeploymentManager({ dataDir, pilotDir });
+  const manager = new DeploymentManager({ dataDir, pilotDir, installedBy: 'build' });
   const results = await manager.deployAll(def => isAgentGatedEnabled(config, def.id));
 
   // Probe workers started during detection must not survive into the image: a

@@ -10,6 +10,7 @@
 |------|------|
 | [产品概览](overview.md) | 了解 Pilot 采集什么、输出到哪里，以及本地会创建哪些文件。 |
 | [安装指南](installation.md) | 安装 Pilot、传入安装参数、卸载或从源码运行。 |
+| [容器快速接入](container-onboarding.md) | 在镜像和 Kubernetes 里选择注入时机，并查看 `hook install` 的原因码。 |
 | [配置总览](configuration.md) | 了解配置加载顺序、全局开关和日志保留策略。 |
 
 ## 配置输出

@@ -76,7 +76,6 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 
 ## 隐私说明
 
-JSONL 虽然是本地文件，但如果开启了消息内容采集，也可能包含敏感内容。建议：
+JSONL 虽然是本地文件，但仍可能包含敏感内容。建议：
 
-- 通过 [Agent 配置](agents.md) 关闭完整内容采集。
 - 开启 [数据脱敏](masking.md)。

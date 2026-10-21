@@ -19,6 +19,7 @@ import {
 } from '../qoder-trace/token-enricher.js';
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 // Written by the runtime wrapper that launches qoderclicn. Kept separate from
 // the international build's file so a machine running both keeps the two
@@ -54,7 +55,7 @@ export class QoderCnTraceInput extends BaseInput {
   private readonly sessionAnchor = new Map<string, { turnId: string; maxStep: number }>();
 
   constructor(opts: QoderCnTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cn/history');
   }
 

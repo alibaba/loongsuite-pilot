@@ -1,7 +1,7 @@
 /**
- * Privacy compliance test: when config sets
+ * Backward-compatibility test: when legacy config sets
  *   agents['qwen-code-cli'].captureMessageContent = false
- * the hook MUST strip sensitive content fields before writing JSONL.
+ * the hook ignores it and retains content fields when writing JSONL.
  *
  * Sensitive fields (per docs/agent-onboarding.md Privacy Checklist + the
  * MESSAGE_CONTENT_FIELDS / MESSAGE_CONTENT_SOURCE_KEYS lists in
@@ -132,8 +132,8 @@ function sensitiveTurn(sid) {
   ];
 }
 
-describe('captureMessageContent privacy policy', () => {
-  test('captureMessageContent=false strips ALL sensitive content fields', () => {
+describe('legacy captureMessageContent config', () => {
+  test('captureMessageContent=false is ignored and content is retained', () => {
     writeConfig(false);
     const sid = 'sess-policy-off';
     const tp = writeTranscript(sid, sensitiveTurn(sid));
@@ -143,23 +143,13 @@ describe('captureMessageContent privacy policy', () => {
     const records = readOutput();
     expect(records.length).toBeGreaterThan(0);
 
-    // ─── No sensitive content field should survive ───
-    for (const rec of records) {
-      expect(rec['gen_ai.input.messages']).toBeUndefined();
-      expect(rec['gen_ai.input.messages_delta']).toBeUndefined();
-      expect(rec['gen_ai.output.messages']).toBeUndefined();
-      expect(rec['gen_ai.tool.call.arguments']).toBeUndefined();
-      expect(rec['gen_ai.tool.call.result']).toBeUndefined();
-    }
-
-    // ─── Confirm no secret strings leak through nested objects either ───
     const fullJson = JSON.stringify(records);
-    expect(fullJson).not.toMatch(/SECRET_PROMPT_CONTENT/);
-    expect(fullJson).not.toMatch(/SECRET_ASSISTANT_TEXT/);
-    expect(fullJson).not.toMatch(/SECRET_ASSISTANT_REASONING/);
-    expect(fullJson).not.toMatch(/SECRET_TOOL_ARG/);
-    expect(fullJson).not.toMatch(/SECRET_TOOL_OUTPUT/);
-    expect(fullJson).not.toMatch(/SECRET_FINAL_REPLY/);
+    expect(fullJson).toMatch(/SECRET_PROMPT_CONTENT/);
+    expect(fullJson).toMatch(/SECRET_ASSISTANT_TEXT/);
+    expect(fullJson).toMatch(/SECRET_ASSISTANT_REASONING/);
+    expect(fullJson).toMatch(/SECRET_TOOL_ARG/);
+    expect(fullJson).toMatch(/SECRET_TOOL_OUTPUT/);
+    expect(fullJson).toMatch(/SECRET_FINAL_REPLY/);
 
     // ─── Non-content observability fields MUST still be present ───
     const llmResponse = records.find((r) => r['event.name'] === 'llm.response');
@@ -181,7 +171,7 @@ describe('captureMessageContent privacy policy', () => {
     expect(toolResult['gen_ai.tool.call.id']).toBe('c1');
   });
 
-  test('captureMessageContent=true (default) keeps content fields', () => {
+  test('legacy captureMessageContent=true keeps content fields', () => {
     writeConfig(true);
     const sid = 'sess-policy-on';
     const tp = writeTranscript(sid, sensitiveTurn(sid));
@@ -198,7 +188,7 @@ describe('captureMessageContent privacy policy', () => {
     expect(fullJson).toMatch(/SECRET_TOOL_OUTPUT/);
   });
 
-  test('config without agents.qwen-code-cli key defaults to capture (back-compat)', () => {
+  test('config without agents.qwen-code-cli key captures content', () => {
     // No config file at all — should default to capture
     const sid = 'sess-no-config';
     const tp = writeTranscript(sid, sensitiveTurn(sid));

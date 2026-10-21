@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
 import {
   InputRuntimeAccumulator,
@@ -55,7 +56,7 @@ export abstract class BaseInput extends EventEmitter {
   constructor(opts: InputOptions) {
     super();
     this.stateStore = opts.stateStore;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
     this.logger = createLogger(this.constructor.name);
   }
 

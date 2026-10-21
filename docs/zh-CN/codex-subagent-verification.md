@@ -29,7 +29,7 @@ invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCall
 
 Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内容，复用原生消息转换，写为 `[{role: "user", parts: [{type: "text", content: "任务内容"}]}]`；多段文本保留各自的 part。批量 `agents` / `tasks` 按原始工作序号分别填充，不复制整个批次、不串入其他工作。缺少可读内容时省略字段，不用父会话输入代替，不解密密文，也不补造隐式继承的上下文。
 
-原始工具参数仍在 `tool.call` 的 `gen_ai.tool.call.arguments`，invoke 不再重复携带这个工具内容字段。result 使用 assistant 消息。内容开关与脱敏策略同时作用于这些消息；invocation、event ID 和 Trace 身份不因字段映射变化而改变。历史已采集事件不自动回填。
+原始工具参数仍在 `tool.call` 的 `gen_ai.tool.call.arguments`，invoke 不再重复携带这个工具内容字段。result 使用 assistant 消息。当前版本始终采集消息内容，脱敏策略同时作用于这些消息；invocation、event ID 和 Trace 身份不因字段映射变化而改变。历史已采集事件不自动回填。
 
 ## 什么时候发送
 
@@ -49,7 +49,7 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 [InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；最终持久接收失败冻结共享 checkpoint，并暂停使用该 StateStore 的新采集和后续批次入队，修复存储或输出后重启恢复。原有失败锁不会因为后续成功或仅重启输入而清除；重启 collector 从磁盘游标重放。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
 
-恢复路径复用当前 workspace 过滤、内容开关和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，仍受内容采集配置影响。
+恢复路径复用当前 workspace 过滤和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，同样应用当前脱敏规则。
 
 ### 持久接收与原生终态
 

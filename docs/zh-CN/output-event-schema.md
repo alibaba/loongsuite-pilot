@@ -39,7 +39,7 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 `other` 会被原样保留，并紧邻追加一条 `agent.input`。兼容副本保留输入内容
 和上下文字段，使用从原 ID 确定性派生的新 `event.id`，但不复制
 `gen_ai.turn.start` 和 `gen_ai.turn.end`；旧 `other` 仍是唯一的 Turn 边界事件。
-双写发生在内容策略之后，因此两个规范输入字段都被策略删除时不会生成
+双写发生在脱敏之后，因此两条事件携带相同的脱敏内容。没有规范输入字段时不生成
 `agent.input`。生成副本时，SLS、JSONL 和 HTTP 保留两条事件；OTLP Trace
 转换继续消费旧 `other`，并在转换前排除兼容副本，因此不会增加空 STEP。
 
@@ -68,7 +68,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 - `Required` - 始终提供。
 - `Conditionally Required` - 条件满足时提供。
 - `Recommended` - 当源 Agent 暴露该数据时提供。
-- `Opt-In` - 可选字段，通常包含敏感信息，仅在需要时开启。
+- `可获取时` - 集成提供该字段时即会上报。
+- `Opt-In` - 依赖独立开启的功能，例如多模态上传。
 
 | 字段 | 类型 | 必填程度 | 说明 |
 |------|------|----------|------|
@@ -112,19 +113,19 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | 缓存读取 token 成本，单位 USD。 |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | 缓存写入 token 成本，单位 USD。 |
 | `gen_ai.usage.total_cost` | double | Recommended | 本次事件总成本，单位 USD。 |
-| `gen_ai.input.messages` | json array | Opt-In | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
+| `gen_ai.input.messages` | json array | 可获取时 | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | 输入与工具输出中 `uri` 多模态的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且这些位置含多模态时写入；`captureMessageContent: false` 时剥离。 |
-| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | 本条事件 `messages_delta` 与 `tool.call.result` 中 `uri` 的摘要，条目形态与 `gen_ai.input.multimodal_metadata` 相同。不包含累计 `gen_ai.input.messages`；没有则不写；`captureMessageContent: false` 时剥离。 |
-| `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | 输入与工具输出中 `uri` 多模态的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且这些位置含多模态时写入。 |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | 本条事件 `messages_delta` 与 `tool.call.result` 中 `uri` 的摘要，条目形态与 `gen_ai.input.multimodal_metadata` 相同。不包含累计 `gen_ai.input.messages`；没有则不写。 |
+| `gen_ai.output.messages` | json array | 可获取时 | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
 | `gen_ai.output.multimodal_metadata` | json array | Opt-In | 输出与工具调用中 `uri` 多模态的摘要，条目形态与输入摘要相同；这些位置没有多模态时不写。 |
-| `gen_ai.system_instructions` | json array | Opt-In | `llm.request` 上发送给模型的 system prompt，以 `text` parts 数组表示，可能包含敏感内容。 |
+| `gen_ai.system_instructions` | json array | 可获取时 | `llm.request` 上发送给模型的 system prompt，以 `text` parts 数组表示，可能包含敏感内容。 |
 | `gen_ai.tool.name` | string | `tool.call` 和 `tool.result` Required | 工具名称。 |
 | `gen_ai.tool.call.id` | string | 可获取时 Recommended | 用于关联 `tool.call` 和 `tool.result` 的工具调用 ID。 |
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
-| `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
-| `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
+| `gen_ai.tool.call.arguments` | json | 可获取时 | 工具调用参数，可能包含敏感内容。 |
+| `gen_ai.tool.call.result` | json | 可获取时 | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
 | `gen_ai.guardrail.triggered` | boolean | 命中内存拦截判定时 Required | 固定为 `true`。没有 tool call id、没有记录、记录已过期，或 interceptor 未开启时省略。 |
 | `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | 可选值只有 `allow` 和 `block`。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。被拦截的 Qoder 用户提示补写的 `llm.request` 为 `block`。工具事件查不到时两个字段都不写。 |
@@ -143,11 +144,11 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
+工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
 ## System Instructions（系统提示词）
 
-`gen_ai.system_instructions` 在 `llm.request` 事件上以 `text` parts 数组承载 system prompt。它复用消息内容的既有管控（Opt-In 要求级别 + 各 agent 的 `captureMessageContent` + 脱敏管道），关闭内容采集时该字段整体缺失。
+`gen_ai.system_instructions` 在 `llm.request` 事件上以 `text` parts 数组承载 system prompt，并经过统一脱敏管道。
 
 `hermes` 的 system prompt 取自 `pre_api_request` 观测到的 provider 请求 body，因为 `conversation_history` 从不回放 system 消息。各 provider 形态归一化为同一组 parts：OpenAI 兼容的 `messages[]` 中 role 为 `system` / `developer` 的消息、Responses API 顶层 `instructions`、Anthropic 与 Bedrock 的顶层 `system`（字符串或 block 列表）、Gemini 的 `systemInstruction.parts[].text`。prompt 为空或不存在时不产出该字段。
 

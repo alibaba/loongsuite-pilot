@@ -4,12 +4,9 @@ English | [简体中文](zh-CN/masking.md)
 
 LoongSuite Pilot can mask common secrets and personal sensitive data before normalized events are sent to output backends. Use this when prompts, completions, tool arguments, or tool results may contain credentials, ID cards, phone numbers, email addresses, IPv4 addresses, or bank card numbers.
 
-Masking is separate from message content capture:
-
-- `captureMessageContent: false` reduces whether full message or tool content is collected.
-- `mask` scans configured output fields and replaces high-confidence secrets that are still present.
-
-For sensitive environments, use both.
+Message content always enters the reporting pipeline. `mask` scans configured
+output fields and replaces high-confidence secrets before output. Legacy
+`captureMessageContent` settings are ignored.
 
 ## How To Enable Masking
 
@@ -67,7 +64,7 @@ loongsuite-pilot restart
 
 | Type             | What It Covers                                        |
 | ---------------- | ----------------------------------------------------- |
-| `cloudAccessKey` | Alibaba Cloud, AWS, and Tencent-style access key IDs. |
+| `cloudAccessKey` | Alibaba Cloud, AWS, and Tencent-style access key IDs; after a valid ID is found, nearby likely Secret values are also checked. |
 | `apiKey`         | OpenAI-compatible and GitHub-style API keys.          |
 | `privateKey`     | PEM or OpenSSH private key blocks.                    |
 | `databaseUrl`    | Database URLs with embedded passwords.                |
@@ -110,7 +107,7 @@ An empty or invalid value falls back to `placeholder`. In `placeholder` mode, Pi
 
 | Mask Type        | Replacement Marker     |
 | ---------------- | ---------------------- |
-| `cloudAccessKey` | `[ACCESSKEY_MASKED]`   |
+| `cloudAccessKey` | `[ACCESSKEY_MASKED]` for IDs; `[ACCESSKEY_SECRET_MASKED]` for nearby likely Secret values. |
 | `apiKey`         | `[APIKEY_MASKED]`      |
 | `privateKey`     | `[PRIVATEKEY_MASKED]`  |
 | `databaseUrl`    | `[DATABASEURL_MASKED]` |
@@ -142,7 +139,7 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - LLM input and output messages.
 - Tool call arguments.
 - Tool call results.
-- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. This metadata is masked even with message-content capture disabled; masking mode `none` still leaves it unchanged.
+- OpenClaw routing keys (`agent.openclaw.session_key`), which may embed channel sender/group identifiers. Masking mode `none` leaves this metadata unchanged.
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.
@@ -155,7 +152,8 @@ Stable metadata such as model names, token counts, durations, Git branch, and wo
 - IP covers IPv4 only. Version-shaped text such as `1.2.3.4` is also masked as IPv4.
 - Bank cards cover high-confidence UnionPay, Visa, Mastercard, AmEx, and Discover prefixes and must pass Luhn validation.
 - Phone and bank-card detection is format-based. An 11-digit numeric ID with the same shape, or a 15-19 digit business identifier that matches an issuer prefix and passes Luhn, can also be masked. For logs with many numeric business IDs, prefer `custom` mode and enable only the required types.
-- License plates, addresses, company names, job titles, custom key/value rules, and Secret Keys are outside this phase.
+- AccessKey Secret search starts only after a supported AccessKey ID is recognized and scans at most the following 1,024 characters. It does not require a Secret field label. Candidates must be 20–60 characters, including at most two trailing `=` characters, and contain uppercase letters, lowercase letters, and digits. The characters `+`, `/`, `-`, and `_` are allowed; whitespace, colons, semicolons, commas, quotes, brackets, and a middle `=` end a candidate. This is a heuristic, so a nearby ordinary string that meets the criteria may also be masked.
+- License plates, addresses, company names, job titles, and custom key/value rules are outside this phase.
 
 ## Verify Masking
 

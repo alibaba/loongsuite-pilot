@@ -129,7 +129,7 @@ OpenClaw 是 `plugin-inject`，不能安装第二条 `interceptor-hook.sh`。拦
 
 | OpenClaw hook | 对应 interceptor 事件 | 拦截信号 |
 |---------------|----------------------|----------|
-| `before_agent_run` | `UserPromptSubmit` | `{ outcome: "block", reason, message }`。`reason` 是内部原因（如 `[APIKEY_MASKED]`），`message` 是包装后的用户可见文本 |
+| `before_agent_run` | `UserPromptSubmit` | `{ outcome: "block", reason, message }`。`reason` 是内部原因（如 `[APIKEY_BLOCKED]`），`message` 是包装后的用户可见文本 |
 | `before_tool_call` | `PreToolUse` | `{ block: true, blockReason }` |
 | `registerAgentToolResultMiddleware` | `PostToolUse` | `{ result }`，替换**当前回合**回给模型的工具结果。可 await，走进程内 HTTP。宿主没有该 API 或拒绝 installed 插件注册时静默跳过 |
 | `tool_result_persist` | `PostToolUse` | `{ message }`，只改 session transcript 落盘。该 hook 必须同步，因此走 `interceptor-cli hook --agent openclaw` 的 spawnSync；与 middleware 按 `toolCallId` 短缓存共用判定 |
@@ -203,7 +203,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,datab
 | `privateKey` | PEM 或 OpenSSH 私钥块。 |
 | `databaseUrl` | 包含密码的数据库 URL。 |
 
-敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`。命中时 interceptor reason 为对应替换 token：`cloudAccessKey` → `[ACCESSKEY_MASKED]`，`apiKey` → `[APIKEY_MASKED]`，`privateKey` → `[PRIVATEKEY_MASKED]`，`databaseUrl` → `[DATABASEURL_MASKED]`。与 `mask` 独立，默认关闭，修改后需重启 collector。
+敏感信息规则复用采集脱敏的 `src/mask/sensitive-rules.json`。命中时 interceptor reason 使用独立的阻断标记：`cloudAccessKey` → `[ACCESSKEY_BLOCKED]`，`apiKey` → `[APIKEY_BLOCKED]`，`privateKey` → `[PRIVATEKEY_BLOCKED]`，`databaseUrl` → `[DATABASEURL_BLOCKED]`。访问日志和采集事件中的敏感内容仍使用 `[xxx_MASKED]` 脱敏；`interceptor` 与 `mask` 独立，默认关闭，修改后需重启 collector。
 
 按注册顺序执行，首个拦截立即短路。规则抛错视为该次判定 fail-open。
 

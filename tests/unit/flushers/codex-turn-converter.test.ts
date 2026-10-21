@@ -71,10 +71,10 @@ describe('Codex native turn conversion', () => {
     } finally { await f.shutdown(); }
   });
 
-  it.each(['content', 'mask'])('reuses current %s policy for a retained prefix and preserves identity and topology', async policy => {
+  it.each(['legacy-content-opt-out', 'mask'])('replays a retained prefix under %s while preserving identity and topology', async policy => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-content-'));
     const manager = new InputManager();
-    if (policy === 'content') manager.setAgentsConfig({ codex: { captureMessageContent: false } });
+    if (policy === 'legacy-content-opt-out') manager.setAgentsConfig({ codex: { captureMessageContent: false } });
     else manager.setMaskConfig({ mode: 'all', types: [] });
     const source = records('child', 'private', 'a'.repeat(32), 0, 'I');
     source[2]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: 'sk-1234567890abcdefghijklmnop' }] }];
@@ -87,9 +87,13 @@ describe('Codex native turn conversion', () => {
       await f.sendBatch(manager.prepareRestoredEntries(source.slice(2)));
       expect(spans).toHaveLength(3);
       const attrs = JSON.stringify(spans.map(span => span.attributes));
-      expect(attrs).not.toContain('sk-1234567890abcdefghijklmnop');
-      if (policy === 'content') expect(attrs).not.toContain('task');
-      else expect(attrs).toContain('[APIKEY_MASKED]');
+      if (policy === 'legacy-content-opt-out') {
+        expect(attrs).toContain('task');
+        expect(attrs).toContain('sk-1234567890abcdefghijklmnop');
+      } else {
+        expect(attrs).not.toContain('sk-1234567890abcdefghijklmnop');
+        expect(attrs).toContain('[APIKEY_MASKED]');
+      }
       expect(spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM')!.spanContext().spanId).toBe('d'.repeat(16));
       expect(spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!.attributes['gen_ai.agent.parent.invocation.id']).toBe('I');
       expect(await journal.isAcknowledged(source[0])).toBe(true);

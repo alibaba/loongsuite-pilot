@@ -562,6 +562,73 @@ describe('CodexTranscriptInput', () => {
     expect(deltas[0].rawReadBytes).toBe(0);
   });
 
+  it('does not stat cold historical rollouts on the next default cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-historical-idle-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    const oldAt = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const oldPaths: string[] = [];
+    for (let index = 0; index < 12; index++) {
+      const day = String(index + 1).padStart(2, '0');
+      const filePath = path.join(sessionDir, '2024', '01', day, `rollout-old-${index}.jsonl`);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, record('2024-01-01T00:00:00.000Z', 'session_meta', {
+        id: `old-${index}`,
+        model_provider: 'openai',
+      }) + '\n', 'utf8');
+      await fs.utimes(filePath, oldAt, oldAt);
+      oldPaths.push(filePath);
+    }
+    const recent = await writeTranscript(sessionDir, completedTurn());
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    const coldBefore = transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset;
+    const recentBefore = transcriptCheckpoint(stateStore, recent).scanOffset;
+    const requestCollection = () => (
+      input as unknown as { requestCollection(): void }
+    ).requestCollection();
+    const collectAfter = async (mutate: () => Promise<void>): Promise<InputRuntimeDelta> => {
+      await mutate();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const mark = deltas.length;
+      requestCollection();
+      await waitFor(() => deltas.length > mark);
+      return deltas[deltas.length - 1]!;
+    };
+
+    try {
+      const coldCycle = await collectAfter(() => fs.appendFile(oldPaths[0]!, record('2024-01-01T00:00:01.000Z', 'event_msg', {
+        type: 'task_started',
+        turn_id: 'late-turn',
+      }) + '\n', 'utf8'));
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+      expect(coldCycle.rawReadCalls).toBe(0);
+
+      await collectAfter(() => fs.appendFile(recent, record('2026-06-24T06:20:00.000Z', 'event_msg', {
+        type: 'task_started',
+        turn_id: 'turn-2',
+      }) + '\n', 'utf8'));
+      expect(transcriptCheckpoint(stateStore, recent).scanOffset).toBeGreaterThan(recentBefore);
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+
+      const created = path.join(sessionDir, '2026', '06', '25', 'rollout-new.jsonl');
+      await collectAfter(async () => {
+        await fs.mkdir(path.dirname(created), { recursive: true });
+        await fs.writeFile(created, record('2026-06-25T00:00:00.000Z', 'session_meta', {
+          id: 'new-session',
+          model_provider: 'openai',
+        }) + '\n', 'utf8');
+      });
+      expect(transcriptCheckpoint(stateStore, created)).toBeDefined();
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+    } finally {
+      await input.stop();
+    }
+  });
+
   it('uses the actual file size as the metadata cache watermark during recovery', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-watermark-'));
     tempDirs.push(root);

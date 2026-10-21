@@ -10,6 +10,7 @@ import { gunzipSync } from 'node:zlib';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { InputManager } from '../../src/core/input-manager.js';
+import { WorkspacePolicy } from '../../src/core/workspace-policy.js';
 import { CodexTranscriptInput } from '../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
@@ -98,6 +99,11 @@ async function harness(capture = true, endpoint?: string, configureJournal?: (jo
     await trace.start();
     manager = new InputManager();
     manager.setAgentsConfig({ codex: { captureMessageContent: capture } });
+    if (!capture) {
+      // Legacy content opt-outs are ignored; real privacy policies still apply.
+      manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/excluded-workspace']));
+    }
     manager.setFlusher(new MultiFlusher([jsonl, trace]));
     input = new CodexTranscriptInput({ stateStore: state, sessionDir, wakeupDir,
       spanContextDir: path.join(root, 'span-contexts'), pollIntervalMs: 60_000 });
@@ -365,15 +371,29 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
     expect(logs.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(1);
   });
 
-  it('keeps invocation joins and trace topology when message content collection is disabled', async () => {
+  it('keeps masked content and invocation topology despite legacy opt-out while filtering excluded workspaces', async () => {
     const h = await harness(false);
-    await h.write(PARENT, [metadata(PARENT, 0), ...begin('p1', 1, 'delegate'), ...dispatch('spawn-a', CHILD, 2, 'child-a'), ...end('p1', 3)]);
-    await h.write(CHILD, [metadata(CHILD, 2.005, PARENT), ...work('c1', 4, 'child-a')], 'c1');
+    const apiKey = 'sk-1234567890abcdefghijklmnop';
+    const prompt = `child-a ${apiKey}`;
+    await h.write(PARENT, [metadata(PARENT, 0), ...begin('p1', 1, 'delegate'), ...dispatch('spawn-a', CHILD, 2, prompt), ...end('p1', 3)]);
+    await h.write(CHILD, [metadata(CHILD, 2.005, PARENT), ...work('c1', 4, prompt)], 'c1');
+    const excluded = begin('excluded-turn', 8, 'excluded-content-sentinel');
+    excluded[0] = record(8, 'turn_context', { turn_id: 'excluded-turn', model: 'gpt-test', cwd: '/excluded-workspace/project' });
+    await h.write(PEER, [metadata(PEER, 7), ...excluded, ...end('excluded-turn', 9)]);
     const logs = await h.logs();
     assertChild(logs, h.spans, CHILD, 'c1', 'spawn-a');
-    const fields = ['gen_ai.input.messages', 'gen_ai.input.messages_delta', 'gen_ai.output.messages',
-      'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'gen_ai.system_instructions'];
-    expect(logs.every(entry => fields.every(field => entry[field] === undefined))).toBe(true);
-    expect(h.spans.every(span => fields.every(field => span.attributes[field] === undefined))).toBe(true);
+    expect(logs.some(entry => entry['gen_ai.input.messages'] || entry['gen_ai.input.messages_delta'])).toBe(true);
+    expect(logs.some(entry => entry['gen_ai.output.messages'])).toBe(true);
+    expect(logs.some(entry => entry['gen_ai.tool.call.arguments'])).toBe(true);
+    expect(logs.some(entry => entry['gen_ai.tool.call.result'])).toBe(true);
+    for (const text of [JSON.stringify(logs), JSON.stringify(h.spans.map(span => span.attributes))]) {
+      expect(text).toContain('child-a');
+      expect(text).toContain('fixture-result');
+      expect(text).toContain('[APIKEY_MASKED]');
+      expect(text).not.toContain(apiKey);
+      expect(text).not.toContain('excluded-content-sentinel');
+    }
+    expect(logs.some(entry => entry['gen_ai.session.id'] === PEER)).toBe(false);
+    expect(h.spans.some(span => span.attributes['gen_ai.session.id'] === PEER)).toBe(false);
   });
 });

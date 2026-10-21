@@ -251,12 +251,12 @@ describe('managed multimodal configuration', () => {
     const config = await loadConfig();
 
     expect(config.agents.qoder.enabled).toBeUndefined();
-    expect(config.agents.codex.captureMessageContent).toBe(true);
+    expect(config.agents.codex.captureMessageContent).toBeUndefined();
     expect(config.agents.cursor).toBeUndefined();
     expect(isAgentGatedEnabled(config, 'qoder')).toBe(true);
     expect(isAgentGatedEnabled(config, 'cursor')).toBe(true);
     expect(isAgentMultimodalEnabled('codex', config.agents.codex)).toBe(true);
-    expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBeUndefined();
     expect(logWarn).toHaveBeenCalledWith('Ignoring unsupported managed agent fields', {
       agentType: 'qoder', ignoredFields: ['enabled'],
     });
@@ -359,7 +359,7 @@ describe('managed multimodal configuration', () => {
     expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual(expected);
   });
 
-  it('preserves explicit user enabled=false and captureMessageContent=false', async () => {
+  it('preserves explicit user enabled=false while ignoring legacy captureMessageContent=false', async () => {
     writeFileSync(innerConfigPath, JSON.stringify({
       agents: {
         qoder: { multimodal: { uploadMode: 'all' } },
@@ -374,7 +374,7 @@ describe('managed multimodal configuration', () => {
 
     expect(isAgentGatedEnabled(config, 'qoder')).toBe(false);
     expect(isAgentGatedEnabled(config, 'cursor')).toBe(true);
-    expect(config.agents.codex.captureMessageContent).toBe(false);
-    expect(isAgentMultimodalEnabled('codex', config.agents.codex)).toBe(false);
+    expect(config.agents.codex.captureMessageContent).toBeUndefined();
+    expect(isAgentMultimodalEnabled('codex', config.agents.codex)).toBe(true);
   });
 });

@@ -119,6 +119,19 @@ describe('eager injection vs daemon deployAll parity', () => {
     await strategy.deploy(defs.find(d => d.id === entry!.agentId)!);
   }
 
+  function hookCommands(settings: string): string[] {
+    const parsed = JSON.parse(settings) as { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> };
+    const commands: string[] = [];
+    for (const groups of Object.values(parsed.hooks ?? {})) {
+      for (const group of groups ?? []) {
+        for (const hook of group.hooks ?? []) {
+          if (hook.command) commands.push(hook.command);
+        }
+      }
+    }
+    return commands;
+  }
+
   function countHookEntries(settings: Record<string, any>): number {
     let n = 0;
     for (const event of Object.keys(settings.hooks ?? {})) {
@@ -141,6 +154,7 @@ describe('eager injection vs daemon deployAll parity', () => {
     // Byte equality, not just "still one entry": a divergent-but-same-count
     // rewrite would mean the two paths disagree about the command string.
     expect(afterDaemon).toBe(afterEager);
+    expect(hookCommands(afterDaemon)).toEqual(hookCommands(afterEager));
     expect(countHookEntries(JSON.parse(afterDaemon))).toBe(1);
 
     const result = results.find(r => r.agentId === 'test-agent');

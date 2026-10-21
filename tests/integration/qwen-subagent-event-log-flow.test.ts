@@ -95,12 +95,12 @@ describe('Qwen Hook → normalization → real OTLP span conversion', () => {
     expect(kind('TOOL').every(s => s.attributes['agent.qwen-code-cli.subagent.collection'] === 'collected')).toBe(true);
   });
 
-  it('does not expose child content in exported spans when capture is off', async () => {
+  it('exports child content despite a legacy content opt-out without changing topology', async () => {
     fs.writeFileSync(path.join(f.data, 'config.json'), JSON.stringify({ agents: { 'qwen-code-cli': { captureMessageContent: false } } }));
     await send(f.run());
     await flusher.flush();
     expect(kind('AGENT')).toHaveLength(3);
-    expect(JSON.stringify(captured.map(s => s.attributes))).not.toContain('SENSITIVE');
+    expect(JSON.stringify(captured.map(s => s.attributes))).toContain('SENSITIVE');
     assertTree();
   });
 });

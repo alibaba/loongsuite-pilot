@@ -15,7 +15,6 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
-import { applyAgentContentPolicy } from '../../../src/normalization/agent-content-policy.js';
 import { buildWorkBuddyEvents } from '../../../src/inputs/workbuddy/workbuddy-event-builder.js';
 import { WorkBuddyInput } from '../../../src/inputs/workbuddy/workbuddy-input.js';
 import type { WorkBuddyRecord } from '../../../src/inputs/workbuddy/workbuddy-types.js';
@@ -171,17 +170,6 @@ describe('WorkBuddy audit-event builder', () => {
       (BigInt(assistantTimestamp) * 1_000_000n).toString(),
     ]);
     expect(entries.every(entry => /^\d+$/.test(entry.observed_time_unix_nano))).toBe(true);
-  });
-
-  it('lets the shared content policy remove all WorkBuddy message and tool content', async () => {
-    const entries = (await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' }))
-      .map(entry => applyAgentContentPolicy(entry, { workbuddy: { captureMessageContent: false } }));
-    for (const entry of entries) {
-      expect(entry['gen_ai.input.messages_delta']).toBeUndefined();
-      expect(entry['gen_ai.output.messages']).toBeUndefined();
-      expect(entry['gen_ai.tool.call.arguments']).toBeUndefined();
-      expect(entry['gen_ai.tool.call.result']).toBeUndefined();
-    }
   });
 
   it('replaces WorkBuddy all-zero trace IDs with a stable valid trace ID', async () => {

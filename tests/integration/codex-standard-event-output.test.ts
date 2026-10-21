@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { buildAgentActivityEntry } from '../../src/normalization/entry-builder.js';
 import { expandAgentInputEvents } from '../../src/normalization/agent-input-dual-write.js';
-import { applyAgentContentPolicy } from '../../src/normalization/agent-content-policy.js';
+import { InputManager } from '../../src/core/input-manager.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { CodexTranscriptInput } from '../../src/inputs/codex-transcript/codex-transcript-input.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
@@ -94,7 +94,7 @@ async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[
 }
 
 describe('Codex standard event output boundaries', () => {
-  it.each([true, false])('keeps one event and the same identities across JSONL, HTTP and SLS (content=%s)', async captureMessageContent => {
+  it.each([true, false])('keeps content and identities across JSONL, HTTP and SLS despite legacy content=%s', async captureMessageContent => {
     postLogs.mockClear();
     const directory = await mkdtemp(path.join(tmpdir(), 'pilot-codex-output-'));
     const received: Record<string, string>[][] = [];
@@ -145,7 +145,10 @@ describe('Codex standard event output boundaries', () => {
         'gen_ai.system_instructions': [{ type: 'text', content: 'instructions' }],
         'gen_ai.tool.definitions': [{ type: 'function', name: 'spawn_agent' }],
       })), ...native];
-      const entries = rawEntries.map(entry => applyAgentContentPolicy(entry, { [ClientType.CodexCliHook]: { captureMessageContent } }));
+      const manager = new InputManager();
+      manager.setAgentsConfig({ [ClientType.CodexCliHook]: { captureMessageContent } });
+      const entries = manager.prepareRestoredEntries(rawEntries);
+      for (const field of contentFields) expect(entries[0][field]).toEqual(rawEntries[0][field]);
       const expectedNames = entries.map(entry => entry['event.name']);
       // The existing agent.input compatibility path must not double-write standard events.
       const output = expandAgentInputEvents(entries);
@@ -173,33 +176,25 @@ describe('Codex standard event output boundaries', () => {
           for (const field of Object.keys(relationFields)) expect(logs[i][field]).toBe(entries[i][field]);
         }
       }
-      if (!captureMessageContent) {
-        for (const logs of groups) {
-          for (const log of logs) {
-            for (const field of contentFields) expect(log).not.toHaveProperty(field);
-          }
-        }
-      } else {
-        // JSON-native JSONL and string-only transports retain the same structured payload.
-        expect(JSON.parse(received[0][0]['gen_ai.input.messages']))
-          .toEqual(jsonLogs[0]['gen_ai.input.messages']);
-        const activity = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs[0].content;
-        expect(JSON.parse(activity['gen_ai.tool.call.arguments']))
-          .toEqual(jsonLogs[0]['gen_ai.tool.call.arguments']);
-        const activityLogs = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs;
-        for (const entry of native) {
-          const index = entries.findIndex(item => item['event.id'] === entry['event.id']);
-          const field = entry['event.name'] === 'gen_ai.agent.invoke' ? 'gen_ai.input.messages' : 'gen_ai.output.messages';
-          expect(jsonLogs[index][field]).toEqual(entry[field]);
-          expect(JSON.parse(received[0][index][field])).toEqual(entry[field]);
-          expect(JSON.parse(activityLogs[index].content[field])).toEqual(entry[field]);
-        }
-        const redacted = postLogs.mock.calls.find(call => call[1] === 'redacted')![2].logs;
-        for (const { content } of redacted) {
-          expect(content).not.toHaveProperty('gen_ai.input.messages');
-          expect(content).not.toHaveProperty('gen_ai.tool.call.arguments');
-          expect(content).not.toHaveProperty('gen_ai.tool.call.result');
-        }
+      // JSON-native JSONL and string-only transports retain content despite the legacy opt-out.
+      const activityLogs = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs;
+      for (const field of contentFields) {
+        expect(jsonLogs[0][field]).toEqual(entries[0][field]);
+        expect(JSON.parse(received[0][0][field])).toEqual(entries[0][field]);
+        expect(JSON.parse(activityLogs[0].content[field])).toEqual(entries[0][field]);
+      }
+      for (const entry of native) {
+        const index = entries.findIndex(item => item['event.id'] === entry['event.id']);
+        const field = entry['event.name'] === 'gen_ai.agent.invoke' ? 'gen_ai.input.messages' : 'gen_ai.output.messages';
+        expect(jsonLogs[index][field]).toEqual(entry[field]);
+        expect(JSON.parse(received[0][index][field])).toEqual(entry[field]);
+        expect(JSON.parse(activityLogs[index].content[field])).toEqual(entry[field]);
+      }
+      const redacted = postLogs.mock.calls.find(call => call[1] === 'redacted')![2].logs;
+      for (const { content } of redacted) {
+        expect(content).not.toHaveProperty('gen_ai.input.messages');
+        expect(content).not.toHaveProperty('gen_ai.tool.call.arguments');
+        expect(content).not.toHaveProperty('gen_ai.tool.call.result');
       }
     } finally {
       await Promise.all([jsonl.shutdown(), http.shutdown(), sls.shutdown()]);

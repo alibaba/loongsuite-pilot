@@ -164,7 +164,7 @@ Hook 继续只提供 transcript 位置、唤醒和可用环境上下文，本次
 5. OTLP 按子自身 turn 缓冲，只有原生 `task_complete/turn_aborted` 关闭；父终态不关闭子工作。
 6. 委派、结果去重、工作绑定与输入游标可恢复。启用 OTLP 时先持久化 pending-turn journal，再允许输入游标推进；已确认导出的轮次保留有界确认记录。
 7. SLS/HTTP Codex 输出等待实际成功回执。HTTP 暂时断网保留原批次等待并自动重试；最终持久接收失败冻结共享 checkpoint，同时暂停新采集和后续批次入队，修复后重启恢复。停止时取消 SLS/HTTP 在途请求与重试等待，未确认游标不推进。多输出部分成功或回执不确定仍可重复相同稳定 ID，交付语义是 at least once，不是恰好一次。
-8. 恢复重放再次应用当前 workspace/content/masking 策略；journal 按组增量读取，避免一次加载全部待完成工作。
+8. 恢复重放再次应用当前 workspace/masking 策略；journal 按组增量读取，避免一次加载全部待完成工作。
 
 源码路径、发送条件及验证命令见[Codex 实现与验证入口](codex-subagent-verification.md)。历史 fusion 文档仅用于理解迁移与旧 checkpoint，不再是新模型的行为契约。
 
@@ -196,7 +196,7 @@ OpenClaw/Hermes 已有 Trace 保留子身份、真实父工具挂载及独立生
 | 子早于关联信息 | 有界暂存或独立降级，不重发更新 | 晚到证据可补关系，不改身份 |
 | 重启/重放 | Span ID、挂载与终态稳定 | event ID/I 稳定，无额外逻辑调用 |
 | fork/复制历史 | 只构建当前线程执行 | owning session 正确，祖先事实不重复 |
-| 内容关闭/策略变化 | 拓扑保留，正文删除 | 关联元数据保留；恢复应用当前策略 |
+| workspace/脱敏策略变化 | 拓扑保留，正文按当前规则脱敏 | 关联元数据保留；恢复应用当前过滤与脱敏策略 |
 | 长短事件名 | 拓扑一致，无重复 Span/STEP/token | 六标准名不落 other，默认不双写 |
 | 仅 Log/跨 Trace/缺侧 | 不伪造同 Trace | 有两侧时等值 Join，缺侧明确不可用 |
 
