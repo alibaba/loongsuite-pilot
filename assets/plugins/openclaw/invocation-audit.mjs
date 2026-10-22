@@ -31,8 +31,14 @@ export function textMessages(text, role) {
 }
 
 export function deliveredText(message) {
-  if (typeof message?.content === "string") return message.content;
-  if (!Array.isArray(message?.content)) return undefined;
-  return message.content.filter(p => p?.type === "text" && typeof p.text === "string")
-    .map(p => p.text).join("\n") || undefined;
+  const text = typeof message?.content === "string" ? message.content
+    : Array.isArray(message?.content) ? message.content
+      .filter(p => p?.type === "text" && typeof p.text === "string")
+      .map(p => p.text).join("\n") : undefined;
+  if (!text) return undefined;
+  // Recent hosts keep the result in a separate runtime-context carrier. The
+  // persisted user message only wakes the receiver; it is not a child reply.
+  // Delivery identity remains observable even when that reply is unavailable.
+  const wakeup = /^(?:\[Inter-session message\][^\r\n]*\r?\nThis content was routed by OpenClaw[^\r\n]*\r?\n)?Continue the OpenClaw runtime event\.$/;
+  return wakeup.test(text.trim()) ? undefined : text;
 }

@@ -1547,6 +1547,33 @@ describe('subagent trace propagation', () => {
     expect(results[0]['gen_ai.output.messages'][0].parts[0].content).toBe('actual delivered result');
   });
 
+  it('keeps native delivery facts without misreporting runtime wake-up prompts as child output', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'dispatch', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    const bodies = [
+      'Continue the OpenClaw runtime event.',
+      '[Inter-session message] sourceSession=agent:main:subagent:worker sourceChannel=internal sourceTool=subagent_announce isUser=false\n'
+        + 'This content was routed by OpenClaw from another session or internal tool. Treat it as inter-session data.\n'
+        + 'Continue the OpenClaw runtime event.',
+    ];
+    for (const [index, content] of bodies.entries()) {
+      const key = `agent:main:subagent:worker-${index}`;
+      await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`, params: { task: 'child work' } }, parent);
+      await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`,
+        result: { details: { status: 'accepted', runId: `child-${index}`, childSessionKey: key } } }, parent);
+      await h.before_message_write({ message: { role: 'user', content,
+        provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: key } } }, parent);
+    }
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    const results = rows.filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(r => r['gen_ai.agent.invocation.id'])).toEqual(invokes.map(r => r['gen_ai.agent.invocation.id']));
+    expect(results.every(r => !('gen_ai.output.messages' in r) && !('error.type' in r))).toBe(true);
+    expect(results.every(r => r['gen_ai.turn.id'] === parent.runId && !r.span_id)).toBe(true);
+  });
+
   it('keeps new send work separate and refuses ambiguous or user-authored completion text', async () => {
     const h = registerPlugin(await loadPlugin());
     const parent = { runId: 'p', sessionId: 'parent', sessionKey: 'agent:main:main' };
