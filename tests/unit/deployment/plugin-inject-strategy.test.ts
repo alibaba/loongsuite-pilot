@@ -156,6 +156,24 @@ describe('PluginInjectStrategy', () => {
     ]);
   });
 
+  it('treats a ~/ entry as the same injected extension', async () => {
+    const homeDataDir = path.join(os.homedir(), '.loongsuite-pilot');
+    strategy = new PluginInjectStrategy(homeDataDir, tmpDir);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const tildeEntry = '~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs';
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [tildeEntry] }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+
+    const existing = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(existing.extensions).toEqual([tildeEntry]);
+
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [tildeEntry] }));
+    expect(await strategy.undeploy(piDefinition())).toBe(true);
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([]);
+  });
+
   it('keeps the existing OpenCode plugin/plugins auto-detection behavior', async () => {
     const configPath = path.join(tmpDir, 'opencode.json');
     await fs.writeFile(configPath, JSON.stringify({ plugins: ['existing'] }));
