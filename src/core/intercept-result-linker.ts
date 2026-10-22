@@ -36,6 +36,7 @@ export class InterceptResultLinker {
 const QODER_INTERCEPTOR_AGENT_TYPES = new Set([
   'qoder',
   'qoder-cli',
+  'qoder-app',
   'qodercli',
   'qoder-idea',
   'qoder-jetbrains',

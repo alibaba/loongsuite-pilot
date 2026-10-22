@@ -8,6 +8,7 @@ const NAMESPACE_ALIASES: Readonly<Record<string, readonly string[]>> = {
   'cursor-cli': ['cursor-cli', 'cursor_cli'],
   cursor_cli: ['cursor_cli', 'cursor-cli'],
   'qoder-cli': ['qoder-cli', 'qoder'],
+  'qoder-app': ['qoder-app', 'qoder-cli', 'qoder'],
   'qoder-idea': ['qoder-idea', 'qoder'],
   'qoder-cn': ['qoder-cn', 'qodercn', 'qoder'],
   qodercn: ['qodercn', 'qoder-cn', 'qoder'],
