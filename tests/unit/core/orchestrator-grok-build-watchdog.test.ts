@@ -57,7 +57,7 @@ function targets(orchestrator: Orchestrator) {
 describe('Grok Build watchdog target', () => {
   let isAgentDetected: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
-  let deploySingle: ReturnType<typeof vi.fn>;
+  let repairHookSettings: ReturnType<typeof vi.fn>;
   let undeployAgent: ReturnType<typeof vi.fn>;
   let orchestrator: Orchestrator;
 
@@ -65,7 +65,7 @@ describe('Grok Build watchdog target', () => {
     vi.clearAllMocks();
     isAgentDetected = vi.fn().mockResolvedValue(true);
     needsRedeploy = vi.fn().mockResolvedValue(false);
-    deploySingle = vi.fn().mockResolvedValue({
+    repairHookSettings = vi.fn().mockResolvedValue({
       success: true,
       agentId: 'grok-build',
       deployMode: 'hook',
@@ -76,7 +76,7 @@ describe('Grok Build watchdog target', () => {
       getDefinitions: () => [grokDefinition()],
       isAgentDetected,
       needsRedeploy,
-      deploySingle,
+      repairHookSettings,
       undeployAgent,
     };
   });
@@ -102,12 +102,12 @@ describe('Grok Build watchdog target', () => {
     await expect(target.check()).resolves.toBe(false);
     await expect(target.repair()).resolves.toBeUndefined();
     expect(restoreGrokBuildHookAssets).toHaveBeenCalledWith(expect.any(String), DATA_DIR);
-    expect(deploySingle).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
+    expect(repairHookSettings).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
     expect(needsRedeploy).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces failed repair and removes only the Grok definition on cleanup', async () => {
-    deploySingle.mockResolvedValue({
+    repairHookSettings.mockResolvedValue({
       success: false,
       agentId: 'grok-build',
       deployMode: 'hook',

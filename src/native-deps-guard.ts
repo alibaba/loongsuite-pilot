@@ -18,9 +18,10 @@
 // imports execute, which is only possible from a separately loaded module.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { resolveDataDir } from './utils/data-dir.js';
+import { readContainerIdentity } from './utils/container-identity.js';
 
 // esbuild emits this file as CJS (`packages: 'external'`), so this stays a
 // runtime require of the Node builtin. typeof guards the ESM test runner,
@@ -61,27 +62,6 @@ function libcInfo(): string {
 }
 
 /**
- * Identity of "this container instance", matching k8s-preload.cjs: container
- * id from the process's own cgroup (changes on every container (re)creation),
- * falling back to the host boot_id outside a container, then 'unknown'. The
- * preload compares the marker against this same identity, so writer and reader
- * must compute it the same way, or the crash-loop breaker silently disarms.
- * boot_id alone is wrong on K8s: it is the HOST's, so a fixed init image
- * restarted on the same node would stay blocked until the node reboots.
- */
-function containerIdentity(): string {
-  try {
-    const m = readFileSync('/proc/self/cgroup', 'utf8').match(/[0-9a-f]{64}/);
-    if (m) return m[0];
-  } catch { /* not containerized, or /proc unavailable */ }
-  try {
-    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || 'unknown';
-  } catch {
-    return 'unknown'; // non-Linux or /proc unavailable
-  }
-}
-
-/**
  * Record the failure so k8s-preload.cjs does not respawn the daemon. Without
  * this, the failure below is deterministic while the preload's stale-lock
  * takeover has no backoff: every node process in the container would take over
@@ -102,7 +82,7 @@ function writeFatalMarker(reasonFirstLine: string): void {
     const reason = reasonFirstLine.trim().replace(/\s+/g, ' ');
     writeFileSync(
       path.join(dir, 'daemon.fatal'),
-      `fatal ${containerIdentity()} ${new Date().toISOString()} ${reason}\n`,
+      `fatal ${readContainerIdentity().identity} ${new Date().toISOString()} ${reason}\n`,
       'utf8',
     );
   } catch { /* the stderr diagnostic is the primary channel; the marker is best-effort */ }

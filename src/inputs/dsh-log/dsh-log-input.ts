@@ -9,6 +9,7 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
   transformDshRecordEntries,
   newState,
@@ -50,7 +51,7 @@ export class DshLogInput extends BaseSessionInput {
       stateStore: opts.stateStore,
       sessionDir: opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR),
       filePattern: opts.filePattern ?? DEFAULT_FILE_PATTERN,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 

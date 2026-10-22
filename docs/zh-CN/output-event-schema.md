@@ -6,6 +6,34 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 下面的类型描述的是规范化事件的语义值。JSONL 保留原生 JSON 类型；SLS 等只接受字符串列的后端可在各自输出边界进行序列化。
 
+## Hermes / OpenClaw 的源 JSONL 写出时机
+
+Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，同步追加
+`llm.request` 到 `logs/hermes-agent/*.jsonl`；对应响应复用相同 ID。响应、工具调用和
+工具结果在各自 hook 可获得数据时追加，回合结束只补齐旧版本缺失的响应内容及结束标记，
+不会重复写出已经成功追加的事件。没有响应的请求保留请求记录，不合成成功响应。
+新版 lazy-forward streaming helper 与旧版方法签名均支持 TTFT 观测。
+
+增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`；回合结束记录为
+`event.name=other`、`agent.hermes.hook=turn_end`、`gen_ai.turn.end=true`。
+collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
+旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
+
+OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `span_id`，
+响应复用该 ID。尚未关联父上下文的子 Agent 事件仍使用有界缓冲，以维持父子 trace 关系；
+有拦截策略的工具事件也需先完成策略判定，不能承诺所有 hook 都在判定前写出。
+
+跨进程读取成功追加的行不要求每条记录 `fsync`。此处的实时性指源插件文件的可见性，
+不是规范化 `logs/output` 文件或远端 SLS/ARMS 的实时可见性。
+下游传播器应在 Pilot 对应请求 hook **之后**、实际网络发送**之前**，按
+`gen_ai.session.id`、`gen_ai.turn.id`，以及 Hermes 的 `gen_ai.request.id`
+或 OpenClaw 的 `gen_ai.step.id`（模型 call ID）选择本次请求，
+并对一轮内每次 API 请求重新读取。`pre_llm_call` 早于请求分配，缓存一次或读取全局
+最后一行可能得到空值、前一次调用或其他会话的 ID，不能由提前写盘单独解决。
+工具出站请求应关联对应的 `tool.call`，不可把一轮的 LLM SpanID 用作所有出站请求的 ID。
+
+增量 Hermes 插件和对应 collector 应一起部署；旧 collector 不理解新增的显式回合结束协议。
+
 ## Event Names
 
 OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段

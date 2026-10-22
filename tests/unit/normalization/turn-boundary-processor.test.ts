@@ -27,6 +27,21 @@ function withoutBoundaries(value: AgentActivityEntry): AgentActivityEntry {
 }
 
 describe('TurnBoundaryProcessor', () => {
+  it('waits for the incremental Hermes end marker across separate response batches', () => {
+    const processor = new TurnBoundaryProcessor();
+    const base = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1' };
+    const request = entry('request', 'llm.request', base);
+    const error = entry('retry', 'llm.response', { ...base, 'gen_ai.response.finish_reasons': ['error'] });
+    const stop = entry('stop', 'llm.response', { ...base, 'gen_ai.response.finish_reasons': ['stop'] });
+    const terminal = entry('end', 'other', { ...base, 'gen_ai.turn.end': true });
+    for (const value of [request, error, stop, terminal]) processor.enrich([value]);
+    expect(request['gen_ai.turn.start']).toBe(true);
+    expect(error['gen_ai.turn.end']).toBeUndefined();
+    expect(stop['gen_ai.turn.end']).toBeUndefined();
+    expect(terminal['gen_ai.turn.end']).toBe(true);
+    expect([request, error, stop, terminal].filter(value => value['gen_ai.turn.end'])).toHaveLength(1);
+  });
+
   it.each([
     'qoder',
     'qoder-cn',

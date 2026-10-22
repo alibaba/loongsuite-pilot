@@ -43,6 +43,7 @@ import {
   type CodexTranscriptSourceRange,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 type ReliableCodexSubagentLink = CodexSubagentLink & {
   parentTurnId: string;
@@ -74,6 +75,9 @@ const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const DYNAMIC_SESSION_FILE_MAX_IDLE_MS = 15 * 60 * 1_000;
+// Cold historical rollouts are stat'd about as often as the old 30s default.
+// Files touched within the hot window stay on the default poll path so appends stay visible.
+const HISTORICAL_ROLLOUT_RECHECK_MS = 30_000;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
 const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
@@ -193,13 +197,17 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly transcriptMetaCacheMaxEntries = MAX_LINK_DESCRIPTORS;
   private readonly transcriptMetaCacheMaxBytes = MAX_CACHED_TRANSCRIPT_META_BYTES;
   private transcriptMetaCacheBytes = 0;
+  /** Caught-up default-tree rollouts whose mtime is old enough to skip between rechecks. */
+  private readonly rolloutIdleSnapshot = new Map<string, { ino: number; size: number; mtimeMs: number }>();
+  private lastHistoricalRolloutStatAt = 0;
+  private cachedDefaultRollout: { dirMtimes: Map<string, number>; files: string[] } | null = null;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
     const includeMultimodal = opts.multimodal?.enabled === true && !!processor;
     super({
       stateStore: opts.stateStore,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();
@@ -286,13 +294,19 @@ export class CodexTranscriptInput extends BaseInput {
     await this.cleanupExpiredSpanContexts(Date.now());
     let emittedCount = 0;
     const discovered = await this.discoverSessionFiles();
-    await this.indexDiscoveredTranscriptOwners(discovered);
+    const discoveredPaths = new Set(discovered.map(file => file.filePath));
+    for (const filePath of this.rolloutIdleSnapshot.keys()) {
+      if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
+    }
+    const skipPaths = this.historicalRolloutSkipPaths(discovered, Date.now());
+    await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
     discovered.sort((left, right) => {
       const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
       return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
     });
     for (const { filePath } of discovered) {
+      if (skipPaths.has(filePath)) continue;
       emittedCount += await this.processFile(filePath);
     }
     emittedCount += await this.finalizeReadySubagentFusions();
@@ -340,6 +354,73 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   private async processFile(filePath: string): Promise<number> {
+    const observed: { stat?: RolloutStatSnapshot } = {};
+    try {
+      return await this.scanRolloutFile(filePath, observed);
+    } finally {
+      this.noteRolloutIdle(filePath, observed.stat);
+    }
+  }
+
+  private historicalRolloutSkipPaths(files: DiscoveredSessionFile[], now: number): Set<string> {
+    if (now - this.lastHistoricalRolloutStatAt >= HISTORICAL_ROLLOUT_RECHECK_MS) {
+      this.lastHistoricalRolloutStatAt = now;
+      return new Set();
+    }
+    const skip = new Set<string>();
+    for (const file of files) {
+      if (!file.baselineOnStart) continue;
+      const snap = this.rolloutIdleSnapshot.get(file.filePath);
+      if (!snap) continue;
+      if (now - snap.mtimeMs < DYNAMIC_SESSION_FILE_MAX_IDLE_MS) continue;
+      skip.add(file.filePath);
+    }
+    return skip;
+  }
+
+  private noteRolloutIdle(
+    filePath: string,
+    stat: { ino: number; size: number; mtimeMs: number } | undefined,
+  ): void {
+    if (!stat) {
+      this.rolloutIdleSnapshot.delete(filePath);
+      return;
+    }
+    const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+    if (!checkpoint || !rolloutCaughtUp(checkpoint, stat)) {
+      this.rolloutIdleSnapshot.delete(filePath);
+      return;
+    }
+    this.rolloutIdleSnapshot.set(filePath, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  private async listDefaultRolloutFiles(): Promise<string[]> {
+    const cached = this.cachedDefaultRollout;
+    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) return cached.files;
+    const files: string[] = [];
+    const dirMtimes = new Map<string, number>();
+    await collectRolloutFiles(this.sessionDir, files, dirMtimes);
+    this.cachedDefaultRollout = dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    return files;
+  }
+
+  private async rolloutDirsUnchanged(dirMtimes: Map<string, number>): Promise<boolean> {
+    if (dirMtimes.size === 0) return false;
+    for (const [dir, mtimeMs] of dirMtimes) {
+      try {
+        const stat = await fs.stat(dir);
+        if (stat.mtimeMs !== mtimeMs) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async scanRolloutFile(
+    filePath: string,
+    observed: { stat?: RolloutStatSnapshot },
+  ): Promise<number> {
     const runtime = this.getInputRuntimeAccumulator();
     let stat;
     try {
@@ -347,6 +428,7 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return 0;
     }
+    observed.stat = rolloutStatSnapshot(stat);
     const key = this.stateKey(filePath);
     // onStart()/collect() index the current inode before processFile(). Keep
     // this lookup ahead of inode recovery: forkBootstrap is intentionally
@@ -410,6 +492,7 @@ export class CodexTranscriptInput extends BaseInput {
       }
     }
     runtime?.observeBacklog(Math.max(0, stat.size - checkpoint.scanOffset));
+    if (rolloutCaughtUp(checkpoint, stat)) return 0;
 
     if (checkpoint.ownerSessionMetaOffset === null) {
       checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
@@ -1069,11 +1152,25 @@ export class CodexTranscriptInput extends BaseInput {
     if (meta) this.publishTranscriptOwnerMeta(filePath, meta);
   }
 
-  private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
+  private async indexDiscoveredTranscriptOwners(
+    files: DiscoveredSessionFile[],
+    skipPaths?: ReadonlySet<string>,
+  ): Promise<void> {
+    const kept = new Map<string, NonNullable<ReturnType<typeof extractCodexTranscriptMeta>>>();
+    if (skipPaths) {
+      for (const filePath of skipPaths) {
+        const meta = this.transcriptMetaByPath.get(filePath);
+        if (meta) kept.set(filePath, meta);
+      }
+    }
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
     this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
+    for (const [filePath, meta] of kept) {
+      this.publishTranscriptOwnerMeta(filePath, meta);
+    }
     for (const { filePath } of files) {
+      if (skipPaths?.has(filePath)) continue;
       let stat;
       try {
         stat = await fs.stat(filePath);
@@ -2087,8 +2184,7 @@ export class CodexTranscriptInput extends BaseInput {
   private async discoverSessionFiles(): Promise<DiscoveredSessionFile[]> {
     const discovered = new Map<string, DiscoveredSessionFile>();
     const canonicalDefaultSessionDir = await canonicalDirectoryPath(this.sessionDir);
-    const defaultFiles: string[] = [];
-    await collectRolloutFiles(this.sessionDir, defaultFiles);
+    const defaultFiles = await this.listDefaultRolloutFiles();
     for (const filePath of defaultFiles) {
       const canonicalPath = path.join(
         canonicalDefaultSessionDir,
@@ -2452,17 +2548,60 @@ export class CodexTranscriptInput extends BaseInput {
   }
 }
 
-async function collectRolloutFiles(dir: string, files: string[]): Promise<void> {
+interface RolloutStatSnapshot {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+function rolloutStatSnapshot(stat: {
+  ino: number | bigint;
+  size: number | bigint;
+  mtimeMs: number | bigint;
+}): RolloutStatSnapshot {
+  return {
+    ino: Number(stat.ino),
+    size: Number(stat.size),
+    mtimeMs: Number(stat.mtimeMs),
+  };
+}
+
+function rolloutCaughtUp(
+  checkpoint: CodexTranscriptCheckpoint,
+  stat: { ino: number; size: number },
+): boolean {
+  return checkpoint.inode === stat.ino
+    && checkpoint.scanOffset >= stat.size
+    && checkpoint.ownerSessionMetaOffset !== null
+    && checkpoint.activeTurn === null
+    && checkpoint.pendingTerminal === null
+    && checkpoint.pendingFusion === null
+    && checkpoint.pendingSubagent === null
+    && checkpoint.forkBootstrap === undefined;
+}
+
+async function collectRolloutFiles(
+  dir: string,
+  files: string[],
+  dirMtimes?: Map<string, number>,
+): Promise<void> {
   let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
     return;
   }
+  if (dirMtimes) {
+    try {
+      dirMtimes.set(dir, (await fs.stat(dir)).mtimeMs);
+    } catch {
+      return;
+    }
+  }
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await collectRolloutFiles(entryPath, files);
+      await collectRolloutFiles(entryPath, files, dirMtimes);
     } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
       files.push(entryPath);
     }

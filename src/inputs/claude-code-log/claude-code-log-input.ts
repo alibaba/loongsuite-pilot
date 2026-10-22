@@ -3,6 +3,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 export class ClaudeCodeLogInput extends BaseHookInput {
   readonly id = 'claude-code-log';
@@ -13,7 +14,7 @@ export class ClaudeCodeLogInput extends BaseHookInput {
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/claude-code'),
       logPrefix: opts?.logPrefix ?? 'claude-code',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 

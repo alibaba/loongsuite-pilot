@@ -22,6 +22,7 @@
 
 import fs from 'node:fs';
 import { filterWorkspaceRecords } from './workspace-privacy.mjs';
+import { withSyncFileLock } from './sync-file-lock.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
@@ -93,5 +94,9 @@ export function writeJsonlRecords(logDir, agentId, records) {
   const filePath = getJsonlFilePath(logDir, agentId);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const lines = records.map((r) => JSON.stringify(r)).join('\n') + '\n';
-  fs.appendFileSync(filePath, lines, 'utf-8');
+  // One lock per daily file. Session locks do not cover two Grok identities
+  // appending the same JSONL; a multi-line write must finish before the next.
+  withSyncFileLock(`${filePath}.lock`, 15_000, 10_000, () => {
+    fs.appendFileSync(filePath, lines, 'utf-8');
+  });
 }

@@ -143,18 +143,22 @@ vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   })),
 }));
 
-vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
-  CursorHookInput: vi.fn().mockImplementation(() => ({
-    id: 'cursor-hook',
-    agentType: 'cursor',
-    collectionMethod: 'hook-jsonl',
-    setWorkspacePolicy: vi.fn(),
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
+vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', async () => {
+  const { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } = await import('../../../src/utils/poll-interval.js');
+  return {
+    CursorHookInput: vi.fn().mockImplementation((opts?: { pollIntervalMs?: number }) => ({
+      id: 'cursor-hook',
+      agentType: 'cursor',
+      collectionMethod: 'hook-jsonl',
+      pollIntervalMs: resolvePollIntervalMs(opts?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+      setWorkspacePolicy: vi.fn(),
+      on: vi.fn(),
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      running: false,
+    })),
+  };
+});
 
 // Static methods need to be mocked on the mock class itself
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
@@ -456,6 +460,35 @@ describe('Orchestrator', () => {
       expect(input.pollIntervalMs).toBe(1000);
 
       await orch.stop();
+    });
+
+    it('applies listener poll intervals and lets the unified env override them', async () => {
+      vi.unstubAllEnvs();
+      delete process.env.LOONGSUITE_PILOT_POLL_INTERVAL_MS;
+      const config = makeConfig();
+      config.listeners['cursor-hook'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['codex-transcript'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['qoder-cn-sqlite'] = { enabled: true, pollInterval: 30_000 };
+
+      const pollInterval = (target: Orchestrator, id: string) => (
+        target.getInputManager().getInput(id) as { pollIntervalMs?: number } | undefined
+      )?.pollIntervalMs;
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+      expect(pollInterval(orch, 'cursor-hook')).toBe(30_000);
+      expect(pollInterval(orch, 'codex-transcript')).toBe(30_000);
+      expect(pollInterval(orch, 'qoder-cn-sqlite')).toBe(30_000);
+      await orch.stop();
+
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      const overridden = new Orchestrator(config);
+      await overridden.start();
+      expect(pollInterval(overridden, 'cursor-hook')).toBe(3_000);
+      expect(pollInterval(overridden, 'codex-transcript')).toBe(3_000);
+      expect(pollInterval(overridden, 'qoder-cn-sqlite')).toBe(3_000);
+      await overridden.stop();
+      vi.unstubAllEnvs();
     });
 
     it('passes the configured QoderCN trace poll interval to the input', async () => {
