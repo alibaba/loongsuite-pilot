@@ -121,6 +121,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
 
       if (this.isOpenclawNested(config)) {
+        const problem = this.openclawPolicyProblem(json, config.pluginId, host!);
+        if (problem) {
+          logger.warn(problem, { configPath });
+          return true;
+        }
         if (Array.isArray(json.plugin) || Array.isArray(json.plugins)) return true;
         const desiredEntry = this.openclawEntry(config, host!);
         const entry = (json.plugins as any)?.entries?.[config.pluginId];
@@ -440,9 +445,39 @@ export class PluginInjectStrategy implements DeployStrategy {
       && !Array.isArray(entry)
       && this.isDeepSubset(entry as Record<string, unknown>, desiredEntry);
 
-    const allowed = !Array.isArray(plugins.allow) || plugins.allow.length === 0
-      || plugins.allow.includes(pluginId);
+    const allow = Array.isArray(plugins.allow) ? plugins.allow.filter(id => typeof id === 'string' && id.trim()) : [];
+    const allowed = allow.length === 0 || allow.some(id => this.openclawIdMatches(id, pluginId));
     return hasPath && entryConfigured && allowed;
+  }
+
+  private openclawIdMatches(value: unknown, pluginId: string): boolean {
+    // OpenClaw trims custom plugin IDs before admission and deny checks.
+    return typeof value === 'string' && value.trim() === pluginId;
+  }
+
+  private openclawPolicyProblem(
+    json: Record<string, unknown>, pluginId: string, host: OpenClawHost,
+  ): string | undefined {
+    const plugins = json.plugins;
+    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return;
+    const p = plugins as Record<string, unknown>;
+    let reason: string | undefined;
+    if (p.enabled === false) reason = 'plugins.enabled=false';
+    for (const key of ['allow', 'deny']) {
+      if (p[key] !== undefined && !Array.isArray(p[key])) reason ??= `plugins.${key} must be an array`;
+    }
+    if (Array.isArray(p.deny) && p.deny.some(id => this.openclawIdMatches(id, pluginId))) reason ??= `plugins.deny contains ${pluginId}`;
+    const entries = Object.entries(p.entries ?? {}).filter(([id]) => this.openclawIdMatches(id, pluginId))
+      .map(([, entry]) => entry as {
+      enabled?: unknown; hooks?: { allowConversationAccess?: unknown };
+    } | null);
+    if (entries.some(entry => entry?.enabled === false)) reason ??= `plugins.entries.${pluginId}.enabled=false`;
+    if (host.conversationAccess && entries.some(entry => entry?.hooks?.allowConversationAccess === false)) {
+      reason ??= `plugins.entries.${pluginId}.hooks.allowConversationAccess=false`;
+    }
+    // Admission is automatic, but explicit host security policy is not Pilot's
+    // to override. Keep failed checks unhealthy so watchdog cannot claim repair.
+    return reason ? `OpenClaw plugin activation blocked: ${reason}; resolve the host policy explicitly before deploying ${pluginId}` : undefined;
   }
 
   private openclawInject(
@@ -451,6 +486,8 @@ export class PluginInjectStrategy implements DeployStrategy {
     config: PluginInjectConfig,
     host: OpenClawHost,
   ): boolean {
+    const problem = this.openclawPolicyProblem(json, config.pluginId, host);
+    if (problem) throw new Error(problem);
     let mutated = false;
     const legacyEntries: unknown[] = [];
 
@@ -472,8 +509,8 @@ export class PluginInjectStrategy implements DeployStrategy {
 
     // A non-empty host allowlist otherwise silently disables the installed
     // integration. Preserve all existing entries, including company plugins.
-    if (Array.isArray(plugins.allow) && plugins.allow.length > 0
-      && !plugins.allow.includes(config.pluginId)) {
+    if (Array.isArray(plugins.allow) && plugins.allow.some(id => typeof id === 'string' && id.trim())
+      && !plugins.allow.some(id => this.openclawIdMatches(id, config.pluginId))) {
       plugins.allow.push(config.pluginId);
       mutated = true;
     }
@@ -560,6 +597,14 @@ export class PluginInjectStrategy implements DeployStrategy {
     if (!plugins) return false;
 
     let mutated = false;
+
+    if (Array.isArray(plugins.allow)) {
+      const filtered = plugins.allow.filter(entry => !this.openclawIdMatches(entry, config.pluginId));
+      if (filtered.length !== plugins.allow.length) {
+        plugins.allow = filtered;
+        mutated = true;
+      }
+    }
 
     const load = typeof plugins.load === 'object' && plugins.load !== null && !Array.isArray(plugins.load)
       ? (plugins.load as Record<string, unknown>)

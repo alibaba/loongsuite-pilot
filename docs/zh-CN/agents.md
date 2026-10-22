@@ -187,6 +187,20 @@ PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确�
 }
 ```
 
+如果已配置非空 `plugins.allow`，安装和 watchdog 修复会保留原有成员，并补入
+`loongsuite-pilot-openclaw`；没有白名单或白名单为空时，不会新建限制列表。
+OpenClaw 2026.6.10 冷启动可能只在内存自动补入 Pilot，插件配置热重载却先按
+磁盘白名单计算加载集合，导致对话正常但采集 hook 消失；仅修改 `agents.list`
+不一定触发插件重新加载，因此相似配置的实例可能表现不同。不要依赖冷启动兜底。
+
+Pilot 不覆盖显式宿主策略：`plugins.enabled=false`、Pilot 条目 `enabled=false`、
+`plugins.deny` 包含 Pilot，或支持会话权限的宿主明确设置
+`hooks.allowConversationAccess=false` 时，部署/修复报告 activation blocked，
+保持配置不变，也不会将其判为健康。应由管理员确认后显式调整策略。
+卸载只移除 Pilot 的加载路径、插件条目及白名单 ID，保留第三方配置和 deny 策略。
+若平台会持续下发 OpenClaw 配置，其配置源也应保留已授权的 Pilot 白名单项；
+Pilot 不修改 Kubernetes ConfigMap 等平台配置源，也不主动执行 Gateway 重启命令。
+
 Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
 工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。
 run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时间按输入或最后一个工具结果

@@ -630,6 +630,8 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
           return JSON.stringify({
             plugin: [`file://${managedPath}/plugin.mjs`, '/unrelated/legacy.mjs'],
             plugins: {
+              allow: ['unrelated', 'loongsuite-pilot-openclaw', 'loongsuite-pilot-openclaw-extra', 'loongsuite-pilot-openclaw'],
+              deny: ['loongsuite-pilot-openclaw', 'company-denied-plugin'],
               load: { paths: [managedPath, `${managedPath}/plugin.mjs`, '/unrelated/plugin'] },
               entries: {
                 'loongsuite-pilot-openclaw': { enabled: true },
@@ -668,8 +670,31 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
       expect(cleaned.plugin).toEqual(['/unrelated/legacy.mjs']);
       expect(cleaned.plugins.load.paths).toEqual(['/unrelated/plugin']);
       expect(cleaned.plugins.entries).toEqual({ unrelated: { enabled: true } });
+      expect(cleaned.plugins.allow).toEqual(['unrelated', 'loongsuite-pilot-openclaw-extra']);
+      expect(cleaned.plugins.deny).toEqual(['loongsuite-pilot-openclaw', 'company-denied-plugin']);
     },
   );
+
+  it.each(extractOpenClawCleanupScripts())('%s removes a lone stale allowlist ID and is idempotent', (_platform, script) => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-oc-allow-cleanup-'));
+    try {
+      const configPath = join(root, 'openclaw.json');
+      const plugins = { allow: ['loongsuite-pilot-openclaw'], deny: ['company-denied-plugin'] };
+      writeFileSync(configPath, JSON.stringify({ plugins }));
+      const run = () => spawnSync(process.execPath, ['-e', script], {
+        encoding: 'utf8', env: { ...process.env, PILOT_OC_CONFIG: configPath, PILOT_OC_MANAGED: join(root, 'plugins/openclaw') },
+      });
+      const first = run();
+      expect(first.status, first.stderr).toBe(0);
+      expect(first.stdout).toBe('cleaned');
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({ plugins: { ...plugins, allow: [] } });
+      const before = readFileSync(configPath, 'utf8');
+      const second = run();
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stdout).toBe('nochange');
+      expect(readFileSync(configPath, 'utf8')).toBe(before);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   it('runs cleanup before installation files are removed', () => {
     const shUninstall = sh.slice(sh.indexOf('cmd_uninstall()'));

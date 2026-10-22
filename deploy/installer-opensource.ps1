@@ -2621,6 +2621,10 @@ try {
     ? data.plugins
     : null;
   if (plugins) {
+    if (Array.isArray(plugins.allow)) {
+      const filtered = plugins.allow.filter(value => typeof value !== 'string' || value.trim() !== 'loongsuite-pilot-openclaw');
+      if (filtered.length !== plugins.allow.length) { plugins.allow = filtered; changed = true; }
+    }
     if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
       const filtered = plugins.load.paths.filter(value => !isOurs(value));
       if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }

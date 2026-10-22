@@ -264,6 +264,75 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(await readConfig()).toEqual(updated);
   });
 
+  it.each([
+    ['global disable', { enabled: false }, 'plugins.enabled=false'],
+    ['denylist', { deny: ['loongsuite-pilot-openclaw'] }, 'plugins.deny contains'],
+    ['trimmed denylist', { deny: [' loongsuite-pilot-openclaw '] }, 'plugins.deny contains'],
+    ['entry disable', { entries: { 'loongsuite-pilot-openclaw': { enabled: false } } }, '.enabled=false'],
+    ['trimmed entry disable', { entries: { ' loongsuite-pilot-openclaw ': { enabled: false } } }, '.enabled=false'],
+    ['conversation permission', { entries: { 'loongsuite-pilot-openclaw': { hooks: { allowConversationAccess: false } } } }, '.allowConversationAccess=false'],
+    ['invalid allowlist', { allow: 'not-an-array' }, 'plugins.allow must be an array'],
+    ['invalid denylist', { deny: 'not-an-array' }, 'plugins.deny must be an array'],
+  ])('reports %s without overriding host policy or claiming healthy', async (_name, policy, diagnostic) => {
+    const original = '// keep policy and comments byte-for-byte\n' + JSON.stringify({ plugins: {
+      allow: ['company-plugin'], load: { paths: [`${dataDir}/plugins/openclaw`] },
+      entries: { 'loongsuite-pilot-openclaw': { enabled: true, hooks: { allowConversationAccess: true } } },
+      ...policy as object,
+    } });
+    await fs.writeFile(configPath, original);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    const result = await strategy.deploy(openclawDef());
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(diagnostic);
+    expect(await fs.readFile(configPath, 'utf8')).toBe(original);
+    await expect(fs.access(configPath + '.bak')).rejects.toThrow();
+  });
+
+  it.each([['absent', undefined], ['empty', []], ['blank', [' ', '']]])('does not make an %s allowlist restrictive', async (_name, allow) => {
+    await fs.writeFile(configPath, JSON.stringify({ plugins: { allow, deny: ['company-denied-plugin'] } }));
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    const cfg = await readConfig();
+    expect((cfg.plugins as Record<string, unknown>).allow).toEqual(allow);
+    expect((cfg.plugins as Record<string, unknown>).deny).toEqual(['company-denied-plugin']);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+  });
+
+  it('does not duplicate an already admitted whitespace-padded Pilot ID', async () => {
+    await fs.writeFile(configPath, JSON.stringify({ plugins: { allow: ['company-plugin', ' loongsuite-pilot-openclaw '] } }));
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+    expect((await readConfig()).plugins).toMatchObject({ allow: ['company-plugin', ' loongsuite-pilot-openclaw '] });
+  });
+
+  it('becomes repairable once an explicit host policy conflict is removed', async () => {
+    await fs.writeFile(configPath, JSON.stringify({ plugins: { allow: ['company-plugin'], deny: ['loongsuite-pilot-openclaw'] } }));
+    expect((await strategy.deploy(openclawDef())).success).toBe(false);
+    const cfg = await readConfig();
+    (cfg.plugins as Record<string, unknown>).deny = ['company-denied-plugin'];
+    await fs.writeFile(configPath, JSON.stringify(cfg));
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+  });
+
+  it.each([
+    ['company-plugin', 'loongsuite-pilot-openclaw', 'loongsuite-pilot-openclaw-extra', 'loongsuite-pilot-openclaw'],
+    ['loongsuite-pilot-openclaw'],
+  ])('undeploy removes only exact Pilot allowlist references: %j', async (...allow) => {
+    await fs.writeFile(configPath, JSON.stringify({ plugins: { allow } }));
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    const cfg = await readConfig();
+    (cfg.plugins as Record<string, unknown>).deny = ['loongsuite-pilot-openclaw', 'company-denied-plugin'];
+    await fs.writeFile(configPath, JSON.stringify(cfg));
+    expect(await strategy.undeploy(openclawDef())).toBe(true);
+    const cleaned = await readConfig();
+    const plugins = cleaned.plugins as Record<string, unknown>;
+    expect(plugins.allow).toEqual(allow.filter(id => id !== 'loongsuite-pilot-openclaw'));
+    expect(plugins.deny).toEqual(['loongsuite-pilot-openclaw', 'company-denied-plugin']);
+    expect(await strategy.undeploy(openclawDef())).toBe(true);
+    expect(await readConfig()).toEqual(cleaned);
+  });
+
   it('needsDeploy returns true when entry enabled but path missing', async () => {
     await fs.writeFile(configPath, JSON.stringify({
       plugins: { load: { paths: [] }, entries: { 'loongsuite-pilot-openclaw': { enabled: true, hooks: { allowConversationAccess: true } } } },
@@ -329,7 +398,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
         entries: {
           'loongsuite-pilot-openclaw': {
             enabled: true,
-            hooks: { allowConversationAccess: false, customHookSetting: 'keep-me' },
+            hooks: { customHookSetting: 'keep-me' },
             config: { captureMessageContent: false },
           },
         },

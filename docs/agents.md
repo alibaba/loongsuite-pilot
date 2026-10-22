@@ -218,6 +218,23 @@ and `OPENCLAW_STATE_DIR`. For hosts supporting conversation access, the entry is
 }
 ```
 
+Installation and watchdog repair append `loongsuite-pilot-openclaw` to an existing
+nonempty `plugins.allow`, preserving other members. An absent/empty allowlist is
+not made restrictive. In OpenClaw 2026.6.10, cold startup may auto-enable Pilot in
+memory without updating disk; a plugin-config reload can then exclude it from
+the load set and silently stop collection. Agent-list-only reloads need not reload
+plugins, so similarly configured instances can behave differently.
+
+Explicit host policy is not overridden: `plugins.enabled=false`, a disabled Pilot
+entry, a Pilot entry in `plugins.deny`, or `hooks.allowConversationAccess=false`
+on hosts supporting that permission causes deployment/repair to report
+`activation blocked`, leave the file unchanged, and remain unhealthy. Resolve
+the policy explicitly before retrying. Uninstall removes Pilot's path, entry and
+exact allowlist ID, preserving third-party settings and deny policy. Platforms
+that reconcile this file must also retain the authorized Pilot allowlist member
+in their configuration source. Pilot does not edit Kubernetes ConfigMaps or
+explicitly restart the Gateway.
+
 The legacy adapter uses `llm_input`, assistant `before_message_write`, tool hooks,
 and `llm_output` to preserve observed output, tool IDs and per-call token usage.
 Run aggregate usage is diagnostic-only, never added to model usage. LLM start
