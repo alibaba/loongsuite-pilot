@@ -69,6 +69,18 @@ import {
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 
+// P0 cross-Agent guard: when running inside TRAE-CN (env TRAE_PROJECT_DIR set
+// by TRAE's hook executor), skip processing entirely. Without this, a user who
+// enables TRAE's "import CLAUDE hooks" switch would have pilot's Claude Code
+// hook fire inside TRAE, producing gen_ai.agent.type=claude-code records for
+// TRAE sessions — duplicate collection plus wrong Agent attribution
+// (see user spec v2 §2.7 / §8.10). fail-open: emit {} and exit so the host
+// (TRAE) treats the hook as a no-op pass-through.
+if (process.env.TRAE_PROJECT_DIR) {
+  process.stdout.write('{}\n');
+  process.exit(0);
+}
+
 const AGENT_ID = 'claude-code';
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
