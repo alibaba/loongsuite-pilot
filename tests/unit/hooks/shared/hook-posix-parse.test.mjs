@@ -6,8 +6,9 @@
 // process substitution. A `done < <(...)` in the node fallback therefore made every
 // hook die with "syntax error near unexpected token `<'" before doing any work.
 //
-// These tests parse each shipped hook under both plain bash and bash --posix so that
-// class of breakage cannot reach users again.
+// These remain syntax-only checks. hook-shell-execution.test.mjs additionally
+// executes the installed wrappers under sh/dash: parsing with bash --posix does
+// not detect unsupported runtime options such as dash's `set -o pipefail`.
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
