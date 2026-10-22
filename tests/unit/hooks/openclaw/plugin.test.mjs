@@ -59,6 +59,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   delete process.env.LOONGSUITE_USER_ID;
   delete process.env.LOONGSUITE_PILOT_DEBUG;
@@ -1499,6 +1500,131 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it('emits one invocation before acceptance and records the actual parent-side delivery in its receiving turn', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'invoke-turn', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'specific child task' } }, parent);
+    let rows = readOutputRecords();
+    const invoke = rows.find(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke['gen_ai.input.messages'][0].parts[0].content).toBe('specific child task');
+    expect(invoke['gen_ai.agent.id']).toBe(parent.sessionId);
+    const child = { runId: 'work-run', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } }, parent);
+    await h.before_agent_run({ prompt: 'child task' }, child);
+    await h.llm_output({}, parent);
+    await h.llm_output({}, child);
+    rows = readOutputRecords();
+    expect(rows.filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect(rows.filter(r => r['gen_ai.session.id'] === child.sessionId).every(r =>
+      r['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+    const restarted = registerPlugin(await loadPlugin());
+    const receiver = { ...parent, runId: 'later-receive-turn' };
+    await restarted.before_agent_run({ prompt: 'receive result' }, receiver);
+    const delivery = { message: { role: 'user', content: [{ type: 'text', text: 'actual delivered result' }],
+      provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: child.sessionKey } } };
+    const append = fs.appendFileSync;
+    let failAuditOnce = true;
+    vi.spyOn(fs, 'appendFileSync').mockImplementation((file, text, ...args) => {
+      if (failAuditOnce && String(text).includes('"event.name":"gen_ai.agent.result"')) {
+        failAuditOnce = false;
+        throw new Error('synthetic temporary audit write failure');
+      }
+      return append(file, text, ...args);
+    });
+    await restarted.before_message_write(delivery, receiver);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    await restarted.before_message_write(delivery, receiver);
+    await restarted.before_message_write(delivery, receiver);
+    const results = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]['gen_ai.turn.id']).toBe(receiver.runId);
+    expect(results[0]['gen_ai.agent.invocation.id']).toBe(invoke['gen_ai.agent.invocation.id']);
+    expect(results[0]['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    expect(results[0].span_id).toBeUndefined();
+    expect(results[0]['gen_ai.output.messages'][0].parts[0].content).toBe('actual delivered result');
+  });
+
+  it('keeps native delivery facts without misreporting runtime wake-up prompts as child output', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'dispatch', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    const bodies = [
+      'Continue the OpenClaw runtime event.',
+      '[Inter-session message] sourceSession=agent:main:subagent:worker sourceChannel=internal sourceTool=subagent_announce isUser=false\n'
+        + 'This content was routed by OpenClaw from another session or internal tool. Treat it as inter-session data.\n'
+        + 'Continue the OpenClaw runtime event.',
+    ];
+    for (const [index, content] of bodies.entries()) {
+      const key = `agent:main:subagent:worker-${index}`;
+      await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`, params: { task: 'child work' } }, parent);
+      await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`,
+        result: { details: { status: 'accepted', runId: `child-${index}`, childSessionKey: key } } }, parent);
+      await h.before_message_write({ message: { role: 'user', content,
+        provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: key } } }, parent);
+    }
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    const results = rows.filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(r => r['gen_ai.agent.invocation.id'])).toEqual(invokes.map(r => r['gen_ai.agent.invocation.id']));
+    expect(results.every(r => !('gen_ai.output.messages' in r) && !('error.type' in r))).toBe(true);
+    expect(results.every(r => r['gen_ai.turn.id'] === parent.runId && !r.span_id)).toBe(true);
+  });
+
+  it('keeps new send work separate and refuses ambiguous or user-authored completion text', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'p', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const childKey = 'agent:main:subagent:reused';
+    await h.before_agent_run({ prompt: 'work' }, parent);
+    for (const index of [1, 2]) {
+      await h.before_tool_call({ toolName: 'sessions_send', toolCallId: `send-${index}`, params: { sessionKey: childKey, message: `work ${index}` } }, parent);
+      await h.after_tool_call({ toolName: 'sessions_send', toolCallId: `send-${index}`, result: {
+        details: { status: 'accepted', runId: `child-work-${index}`, sessionKey: childKey },
+      } }, parent);
+    }
+    await h.before_tool_call({ toolName: 'sessions_history', toolCallId: 'poll', params: { sessionKey: childKey } }, parent);
+    await h.before_message_write({ message: { role: 'user', content: 'subagent result' } }, parent);
+    await h.before_message_write({ message: { role: 'user', content: 'ambiguous result',
+      provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: childKey } } }, parent);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes).toHaveLength(2);
+    expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(2);
+    expect(rows.filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    const restarted = registerPlugin(await loadPlugin());
+    vi.useFakeTimers();
+    for (const index of [1, 2]) {
+      await restarted.before_agent_run({ prompt: 'continue' }, { runId: `child-work-${index}`, sessionId: 'same-child', sessionKey: childKey });
+    }
+    await vi.advanceTimersByTimeAsync(30_001);
+    const children = readOutputRecords().filter(r => r['gen_ai.session.id'] === 'same-child');
+    expect(children.map(r => r['gen_ai.agent.parent.invocation.id'])).toEqual(invokes.map(r => r['gen_ai.agent.invocation.id']));
+    expect(children.every(r => !r.parent_span_id)).toBe(true); // audit does not rebuild existing send traces
+  });
+
+  it('preserves incoming work on nested outgoing invokes and records dispatch failure without inventing a child', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'p', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'a', params: { task: 'one' } }, parent);
+    const child = { runId: 'c', sessionId: 'child', sessionKey: 'agent:main:subagent:one' };
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'a', result: { details: { status: 'accepted', runId: 'c', childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'b', params: { task: 'two' } }, child);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'b', error: 'dispatch failed' }, child);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes[1]['gen_ai.agent.parent.invocation.id']).toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    expect(invokes[1]['gen_ai.agent.invocation.id']).not.toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    const failure = rows.find(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(failure['gen_ai.agent.invocation.id']).toBe(invokes[1]['gen_ai.agent.invocation.id']);
+    expect(failure['error.type']).toBe('agent_dispatch_error');
+    expect(failure['gen_ai.agent.peer.id']).toBeUndefined();
+  });
+
   it('links an early asynchronous child to the exact spawn tool, preserving its own turn', async () => {
     delete process.env.LOONGSUITE_USER_ID;
     const handlers = registerPlugin(await loadPlugin());

@@ -16,6 +16,8 @@ export type AgentEventName =
   | 'llm.response'
   | 'tool.call'
   | 'tool.result'
+  | 'gen_ai.agent.invoke'
+  | 'gen_ai.agent.result'
   | 'skill.use'
   | 'tool.approve'
   | 'agent.input'
@@ -59,6 +61,10 @@ export interface AgentActivityEntry {
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
+  'gen_ai.agent.parent.id'?: string;
+  'gen_ai.agent.peer.id'?: string;
+  'gen_ai.agent.invocation.id'?: string;
+  'gen_ai.agent.parent.invocation.id'?: string;
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;
