@@ -7,6 +7,8 @@ const eventNameValues = [
   'llm.response',
   'tool.call',
   'tool.result',
+  'gen_ai.agent.invoke',
+  'gen_ai.agent.result',
   'skill.use',
   'tool.approve',
   'agent.input',
