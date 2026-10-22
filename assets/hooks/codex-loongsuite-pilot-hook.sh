@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-
-# Some agents invoke hooks with sh, bypassing the Bash shebang. Re-exec before
-# Bash options/syntax; exec preserves stdin, arguments, and the exit status.
-# Disable inherited POSIX mode as shared helpers require full Bash syntax.
-if [ -z "${BASH_VERSION:-}" ]; then
-  exec bash -- "$0" "$@"
-fi
-set +o posix
 set -euo pipefail
 
 # Codex hook entrypoint — delegates to codex-hook-processor.mjs.

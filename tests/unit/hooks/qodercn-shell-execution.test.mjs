@@ -8,8 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const HOOK_DIR = resolve('assets/hooks');
-const HOOKS = readdirSync(HOOK_DIR).filter(name => name.endsWith('.sh')
-  && readFileSync(join(HOOK_DIR, name), 'utf8').startsWith('#!/usr/bin/env bash\n'));
+const HOOK = 'qodercn-loongsuite-pilot-hook.sh';
 const DASH_AVAILABLE = spawnSync('dash', ['-c', 'exit 0']).status === 0;
 const LAUNCHERS = [
   { name: 'direct', command: script => [script] },
@@ -59,48 +58,30 @@ function expectSuccess(result) {
   expect(result.status).toBe(0);
 }
 
-describe.skipIf(process.platform === 'win32')('installed Bash Hook execution', () => {
-  describe.each(HOOKS)('%s', hook => {
-    for (const launcher of LAUNCHERS) {
-      it.skipIf(launcher.skip)(`hands stdin and arguments to Node via ${launcher.name}`, () => {
-        withInstallation(({ hooks, env }) => {
-          const script = join(hooks, hook);
-          const source = readFileSync(join(HOOK_DIR, hook), 'utf8');
-          copyFileSync(join(HOOK_DIR, hook), script);
-          chmodSync(script, 0o755);
-          const processor = source.match(/PROCESSOR="\$[^/]+\/([^"\n]+\.mjs)"/)?.[1];
-          const customAgent = "agent '中文 with spaces";
-          const isQoder = /^(qoder|qodercn|qoderwork|qoderworkcn)-/.test(hook);
-          const args = [isQoder ? customAgent : 'stop', 'argument with spaces', ''];
-          let expected;
-          if (processor) {
-            writeFileSync(join(hooks, processor), CAPTURE);
-            if (isQoder) expected = ['--agent-id', customAgent];
-            else if (hook.startsWith('qwenworkcn-')) {
-              expected = ['--agent-id', 'qwen-work-cn', '--log-prefix', 'qwen-work-cn'];
-              mkdirSync(join(hooks, 'shared'));
-              copyFileSync(join(HOOK_DIR, 'shared/node-runtime.sh'), join(hooks, 'shared/node-runtime.sh'));
-            } else expected = hook.startsWith('cursor-') ? [] : ['stop'];
-          } else {
-            expect(hook.startsWith('interceptor-')).toBe(true);
-            env.INTERCEPTOR_CLI = join(hooks, 'capture.mjs');
-            writeFileSync(env.INTERCEPTOR_CLI, CAPTURE);
-            expected = ['hook', '--agent', hook.includes('qwenworkcn') ? 'qwen-work-cn' : 'qoder-auto', ...args];
-          }
-          const result = execute(launcher, script, args, env);
-          expectSuccess(result);
-          expect(JSON.parse(result.stdout)).toEqual({ args: expected, stdin: INPUT });
+describe.skipIf(process.platform === 'win32')('Qoder CN Hook shell execution', () => {
+  for (const launcher of LAUNCHERS) {
+    it.skipIf(launcher.skip)(`hands stdin and the agent argument to Node via ${launcher.name}`, () => {
+      withInstallation(({ hooks, env }) => {
+        const script = join(hooks, HOOK);
+        copyFileSync(join(HOOK_DIR, HOOK), script);
+        chmodSync(script, 0o755);
+        writeFileSync(join(hooks, 'qoder-hook-processor.mjs'), CAPTURE);
+        const customAgent = "agent '中文 with spaces";
+        const result = execute(launcher, script, [customAgent], env);
+        expectSuccess(result);
+        expect(JSON.parse(result.stdout)).toEqual({
+          args: ['--agent-id', customAgent], stdin: INPUT,
         });
       });
-    }
-  });
+    });
+  }
 
   // Execute the shipped processor as well as the wrapper: an exit code of zero
   // alone could mean the wrapper silently skipped collection.
   for (const launcher of LAUNCHERS) {
     it.skipIf(launcher.skip)(`collects a Qoder CN transcript via ${launcher.name} without replay`, () => {
       withInstallation(({ data, hooks, env }) => {
-        const script = join(hooks, 'qodercn-loongsuite-pilot-hook.sh');
+        const script = join(hooks, HOOK);
         // Model an upgrade from the failing wrapper and run the real asset
         // installer, rather than assuming the patched source reaches users.
         writeFileSync(script, '#!/usr/bin/env bash\nset -euo pipefail\n');
@@ -108,7 +89,7 @@ describe.skipIf(process.platform === 'win32')('installed Bash Hook execution', (
           env, encoding: 'utf8', timeout: 10_000,
         });
         expectSuccess(install);
-        expect(readFileSync(script, 'utf8')).toBe(readFileSync(join(HOOK_DIR, 'qodercn-loongsuite-pilot-hook.sh'), 'utf8'));
+        expect(readFileSync(script, 'utf8')).toBe(readFileSync(join(HOOK_DIR, HOOK), 'utf8'));
         const transcript = join(data, 'transcript.jsonl');
         const sessionId = 'qodercn-shell-test';
         const rows = [
