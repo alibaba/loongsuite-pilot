@@ -42,6 +42,13 @@ describe('BaseInput', () => {
     vi.useRealTimers();
   });
 
+  it('uses LOONGSUITE_PILOT_POLL_INTERVAL_MS over the constructor value', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+    const overridden = new TestInput({ stateStore: stateStore as any, pollIntervalMs: 5_000 });
+    expect((overridden as { pollIntervalMs: number }).pollIntervalMs).toBe(3000);
+    vi.unstubAllEnvs();
+  });
+
   describe('start/stop lifecycle', () => {
     it('should set running to true after start', async () => {
       expect(input.running).toBe(false);

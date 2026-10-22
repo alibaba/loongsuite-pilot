@@ -12,6 +12,7 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
   parseSdkLogLine,
   resolveQoderWorkRoot,
@@ -120,7 +121,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       stateStore: opts.stateStore,
       sessionDir: path.join(dataRoot, 'logs'),
       filePattern: 'sdk-*.log',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.agentType = agentType;
     this.id = `${agentType}-trace`;

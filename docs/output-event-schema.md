@@ -8,6 +8,40 @@ The types below describe normalized semantic values. JSONL preserves native JSON
 types; string-only backends such as SLS may serialize values at their own output
 boundary.
 
+## Hermes / OpenClaw source JSONL timing
+
+Hermes allocates a stable per-request `span_id` and synchronously appends
+`llm.request` to `logs/hermes-agent/*.jsonl` at `pre_api_request`. Its response
+reuses that ID. Responses, tool calls and tool results append when their hooks
+provide the data. Turn completion fills missing legacy response content and
+appends a terminal marker without repeating successfully written events.
+Unfinished requests remain visible without a fabricated successful response.
+TTFT observation supports both the legacy method and the newer lazy streaming helper.
+
+Incremental records carry `agent.hermes.collection=realtime-v1`; the terminal
+record carries `event.name=other`, `agent.hermes.hook=turn_end` and
+`gen_ai.turn.end=true`. The collector uses this explicit boundary so retries and
+overlapping turns in one session do not truncate a trace. Legacy records retain
+their existing boundary detection. Source appends do not wait for trace export.
+
+The modern OpenClaw plugin allocates a model SpanID at `model_call_started` and
+reuses it for the response. Child events awaiting parent context still use bounded
+buffering to preserve trace relationships. Tool events subject to interception
+also wait for policy decisions.
+
+Cross-process visibility after append does not require per-event `fsync`. This
+contract concerns the source plugin file, not normalized `logs/output` or remote
+SLS/ARMS visibility. A context consumer must run **after** Pilot's request hook and
+**before** network send, matching `gen_ai.session.id` and `gen_ai.turn.id`, plus
+Hermes `gen_ai.request.id` or OpenClaw `gen_ai.step.id` (the model call ID), for
+**each** API request. A one-time `pre_llm_call` stash runs
+before request allocation; selecting the globally latest line is unsafe across
+requests and sessions. Tool outbound requests should use the matching `tool.call`
+context rather than reuse one LLM SpanID for all outbound operations in a turn.
+
+Deploy the incremental Hermes plugin and its matching collector together; older
+collectors do not understand the new explicit turn-completion protocol.
+
 ## Event Names
 
 | `event.name` | Description |

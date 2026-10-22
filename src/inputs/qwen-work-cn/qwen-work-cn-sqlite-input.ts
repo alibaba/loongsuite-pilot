@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { queryReadonly } from '../../utils/node-sqlite.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
@@ -48,7 +49,7 @@ export class QwenWorkCNSqliteInput extends BaseInput {
   constructor(opts: QwenWorkCNSqliteInputOptions) {
     super(opts);
     this.dbPath = opts.dbPath ?? path.join(opts.dataRoot ?? resolveQwenWorkCNRoot(), DB_REL_PATH);
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
   }
 
   static getWatchPaths(): string[] {
