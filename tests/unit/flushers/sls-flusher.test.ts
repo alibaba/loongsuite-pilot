@@ -92,7 +92,7 @@ describe('SlsFlusher', () => {
       expect(project).toBe('proj-a');
       expect(logstore).toBe('store-a');
       expect(logGroup.logs).toHaveLength(1);
-      expect(logGroup.source).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+      expect(logGroup.source).toBeUndefined();
     });
 
     it('sends to multiple endpoints', async () => {
