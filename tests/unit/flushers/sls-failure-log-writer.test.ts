@@ -42,7 +42,7 @@ describe('SlsFailureLogWriter', () => {
       { code: 'ETIMEDOUT', status: 503 },
     );
     const writer = new SlsFailureLogWriter(failedDir, {
-      now: () => new Date('2026-07-20T08:00:00+08:00'),
+      now: () => new Date(2026, 6, 20, 8, 0, 0),
     });
 
     expect(await writer.write(failureInput({ error }))).toBe(true);
@@ -80,7 +80,7 @@ describe('SlsFailureLogWriter', () => {
     const writer = new SlsFailureLogWriter(failedDir, {
       maxFileBytes: 650,
       maxTotalBytes: 20_000,
-      now: () => new Date('2026-07-20T08:00:00+08:00'),
+      now: () => new Date(2026, 6, 20, 8, 0, 0),
     });
 
     await Promise.all(Array.from({ length: 12 }, (_, index) => writer.write(
@@ -115,7 +115,7 @@ describe('SlsFailureLogWriter', () => {
     const writer = new SlsFailureLogWriter(failedDir, {
       maxFileBytes: 500,
       maxTotalBytes,
-      now: () => new Date('2026-07-20T08:00:00+08:00'),
+      now: () => new Date(2026, 6, 20, 8, 0, 0),
     });
 
     for (let index = 0; index < 20; index++) {
