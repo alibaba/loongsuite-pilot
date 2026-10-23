@@ -234,6 +234,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     },
     fileCollection: {
       enabled: false,
+      file: { enabled: false },
+      qoderApi: { enabled: false },
     },
     pipeline: {
       enabled: false,
@@ -525,7 +527,7 @@ describe('Orchestrator', () => {
 
     it('registers the QwenWorkCN Hook listener as a fallback when trace is disabled', async () => {
       const config = makeConfig();
-      config.listeners['qwen-work-cn-trace'] = { enabled: false };
+      config.listeners['qwen-work-cn-trace'] = { enabled: false, pollInterval: 0 };
       config.listeners['qwen-work-cn-hook'] = { enabled: true, pollInterval: 1234 };
 
       const orch = new Orchestrator(config);
@@ -753,7 +755,7 @@ describe('Orchestrator', () => {
       error: 'presign failed',
     });
 
-    let setProcessor: ReturnType<typeof vi.spyOn>;
+    let setProcessor: ReturnType<typeof vi.spyOn<InputManager.prototype, 'setMultimodalProcessor'>>;
 
     beforeEach(() => {
       mockCreateDelegatedOssUploader.mockClear();
