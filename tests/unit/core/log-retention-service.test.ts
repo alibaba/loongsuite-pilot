@@ -283,6 +283,22 @@ describe('LogRetentionService', () => {
       await expect(fs.readFile(unknownDated, 'utf8')).resolves.toBe('unknown dated\n');
     });
 
+    it('cleans the Hook latency mirror like the other metric streams', async () => {
+      const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
+      await fs.mkdir(metricDir, { recursive: true });
+      const expired = path.join(metricDir, `pilot-hook-metrics-${daysAgo(10)}.jsonl`);
+      const recent = path.join(metricDir, `pilot-hook-metrics-${daysAgo(1)}.jsonl`);
+      await fs.writeFile(expired, 'old\n');
+      await fs.writeFile(recent, 'recent\n');
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ metricAlarmDays: 7 }));
+      const result = await service.runCleanup();
+
+      expect(result).toEqual({ deleted: 1, errors: 0 });
+      await expect(fs.access(expired)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.readFile(recent, 'utf8')).resolves.toBe('recent\n');
+    });
+
     it('reduces metric_alarm pressure while preserving both today and yesterday', async () => {
       const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
       await fs.mkdir(metricDir, { recursive: true });

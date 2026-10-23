@@ -69,6 +69,11 @@ describe.runIf(process.platform === 'win32')('Codex PowerShell hook wrapper', ()
       'windows-unicode-session.json',
     );
     expect(JSON.parse(fs.readFileSync(marker, 'utf8'))).toMatchObject(payload);
+    const timing = JSON.parse(fs.readFileSync(
+      path.join(dataDir, 'state', 'hook-metrics', 'codex.jsonl'), 'utf8',
+    ).trim());
+    expect(timing.hook_event).toBe('stop');
+    expect(timing.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
   test('remains fail-open when node-bin is empty', () => {
@@ -167,6 +172,11 @@ describe.runIf(process.platform === 'win32')('Codex PowerShell hook wrapper', ()
       codex_home: codexHome,
       session_dir: path.join(codexHome, 'sessions'),
     });
+    // The Windows wrapper script must also write timing into the shared install dir.
+    const timing = JSON.parse(fs.readFileSync(
+      path.join(pilotRoot, 'state', 'hook-metrics', 'codex.jsonl'), 'utf8',
+    ).trim());
+    expect(timing.hook_event).toBe('session-start');
     expect(fs.existsSync(path.join(taskHome, '.loongsuite-pilot'))).toBe(false);
   });
 });

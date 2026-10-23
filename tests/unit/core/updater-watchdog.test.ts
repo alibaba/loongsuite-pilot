@@ -77,9 +77,14 @@ function makeAlarmManager(): AlarmManager {
   return new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test-user' });
 }
 
+// Inferred, not hand-annotated: some TS versions reject vi.spyOn<typeof process, 'kill'>.
+function makeProcessKillSpy() {
+  return vi.spyOn(process, 'kill');
+}
+
 describe('UpdaterWatchdog', () => {
   let tmpDir: string;
-  let killSpy: ReturnType<typeof vi.spyOn>;
+  let killSpy: ReturnType<typeof makeProcessKillSpy>;
 
   beforeEach(async () => {
     tmpDir = await createTempDir('updater-watchdog-test-');

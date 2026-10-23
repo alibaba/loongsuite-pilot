@@ -85,3 +85,41 @@ Qoder Trace 使用同一字段契约，但一期只统计产生事件的主 Hook
 - 已显式覆盖 `codex-transcript`：正常消费计入 `raw_in_*`，边界查找、恢复和元数据回读只计入实际发生的 `raw_read_*`；
 - `dsh-log`、`qoder-work-log`、`qoder-work-trace` 等重写了公共读取流程的 Input 暂不误报原始读取量，后续需要分别接入；
 - 不新增或修改 `pilot_trace_runtime`，不负责 session/turn 缓存、生命周期、异常或释放明细。
+
+## Codex Hook 调用耗时（`type=hook`）
+
+Codex 的 `session-start`、`user-prompt-submit`、`subagent-start`、`subagent-stop` 和 `stop` Hook 在写出 `{}` 后，用单调时钟固定本次 Node 处理部分的耗时，再受保护地加载可选计时模块。模块缺失、解析或初始化失败不影响已有上下文和唤醒处理。计时从 Node 的 `performance.timeOrigin` 开始，包含业务模块加载、stdin 读取、上下文和唤醒标记处理；不包含 Bash/PowerShell 包装脚本的启动、Node 查找及版本探测，也不包含可选计时模块加载、计时样本落盘和进程退出。因此它是 Hook 的 Node 部分耗时，不是宿主观察到的完整 Hook 延迟，更不是异步 transcript 采集耗时。
+
+Hook 只在 `<dataDir>/state/hook-metrics/codex.jsonl` 追加无正文的耗时样本，不发起网络请求。collector 在现有 L2 周期（启动、每 10 分钟、正常退出）消费样本，按固定的 `agent + hook_event` 聚合：
+
+- 远端复用 `pilot_pipeline`，行的 `type` 为 `hook`，沿用每行的 `hostname`、`ip`、`instance_id`、`run_id`、`user_id`、`window_ms` 和 `__time__`；
+- 本地镜像写入 `logs/metric_alarm/pilot-hook-metrics-YYYY-MM-DD.jsonl`，沿用 `metricAlarmDays` 保留和指标日志容量清理；
+- 当前只有 Codex Hook 生产耗时样本；没有样本的事件不生成零调用、零耗时行；忽略事件和处理失败的调用只要运行到采样点也会计入，不代表采集成功；
+- 开源版保留本地镜像，远端发送沿用现有空实现；集团版通过既有自监控 sender 上报，不新增服务端地址或配置。
+
+| 字段 | 聚合方式 | 含义 |
+|------|----------|------|
+| `agent` | 维度 | 固定为 `codex`。 |
+| `hook_event` | 维度 | Hook 子命令，例如 `stop`、`user-prompt-submit`。 |
+| `calls` | 求和 | 本次消费到的有效调用样本数，不是会话数、标准事件数或成功采集次数。 |
+| `total_duration_ms` | 求和 | 有效调用的 Node 部分耗时总和，单位毫秒。 |
+| `max_duration_ms` | 最大值 | 有效调用中最慢一次的 Node 部分耗时，单位毫秒。 |
+
+例如两次 `stop` 调用分别耗时 40 ms 和 120 ms，明细字段为：
+
+```json
+{
+  "type": "hook",
+  "agent": "codex",
+  "hook_event": "stop",
+  "calls": "2",
+  "total_duration_ms": "160",
+  "max_duration_ms": "120"
+}
+```
+
+查询平均耗时使用 `SUM(total_duration_ms) / SUM(calls)`；最慢调用使用 `MAX(max_duration_ms)`，不要对窗口平均值再做简单平均。
+
+耗时统计是 fail-open 自监控：每次调用都尝试记录，没有配置采样率；锁竞争等待预算为 50 ms，每个 Agent 的活动样本文件最多 1 MiB，一次消费最多输出 64 个 Agent/事件组合。写出 `{}` 不代表进程已退出，可选模块加载、同步等锁和落盘仍会延迟 Hook 退出；50 ms 不是整个记录函数或文件系统操作的硬超时。写入失败、锁竞争、文件满、非法样本或未运行到采样点的进程会缺少样本，不能以 `calls` 推断全部真实调用数。collector 用同一文件锁将样本文件移到 `.draining` 后消费，异常退出留下的 `.draining` 可在下次恢复；远端发送失败不保证重放。
+
+collector 停机或锁竞争期间积压的样本归入下一次消费窗口。`window_ms` 表示 collector 的本次上报间隔，不保证所有 Hook 都发生在该时间段内，尤其不能用启动短窗口计算积压调用的每秒调用率。
