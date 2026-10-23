@@ -102,6 +102,12 @@ export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
   // Codex stamps interrupted status on every record of an aborted turn.
   // Only its explicit native end marker closes a turn split across batches.
   if (agentType === 'codex') return false;
+  if (agentType === 'hermes' && entry['agent.hermes.collection'] === 'realtime-v1') {
+    // An individual API stop/error is not the end of a retry/tool turn. The
+    // incremental producer owns the explicit lifecycle marker, even when the
+    // response and marker arrive in different input batches.
+    return false;
+  }
   if (agentType === 'openclaw') {
     return entry['agent.openclaw.hook'] === 'llm_output';
   }

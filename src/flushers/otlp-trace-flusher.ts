@@ -748,6 +748,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // work item in the same thread must not truncate a still-running turn.
       if (agentType === 'codex') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
+      // Incremental Hermes turns may overlap inside one IM session. They have
+      // their own explicit completion, so a successor is not an implicit end.
+      if (agentType === 'hermes'
+        && buf.records.some(record => record['agent.hermes.collection'] === 'realtime-v1')) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -949,6 +953,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // Incremental Hermes producers emit errors/stop per API invocation. Only
+    // their explicit lifecycle marker closes a turn (which may retry or run
+    // tools after a model completion). Keep old installed producers compatible.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'hermes'
+      && entry['agent.hermes.collection'] === 'realtime-v1') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwen-code-cli'
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;

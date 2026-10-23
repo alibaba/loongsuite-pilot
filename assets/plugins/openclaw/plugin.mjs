@@ -149,6 +149,17 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+function generateSpanId() {
+  let id;
+  do { id = crypto.randomBytes(8).toString("hex"); } while (/^0+$/.test(id));
+  return id;
+}
+
+function modelSpanId(run, callId) {
+  if (!run.modelSpanIds.has(callId)) setBounded(run.modelSpanIds, callId, generateSpanId());
+  return run.modelSpanIds.get(callId);
+}
+
 let legacyClock;
 function nowNanos() {
   return legacyClock ? legacyClock() : `${Date.now()}000000`;
@@ -452,6 +463,7 @@ function getRun(runId, event, ctx) {
       currentStepCallId: null,
       lastCallId: null,
       nativeCallIds: new Map(),
+      modelSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
       completed: false,
@@ -536,6 +548,7 @@ function resetCompletedRunState(run) {
   run.currentStepCallId = null;
   run.lastCallId = null;
   run.nativeCallIds.clear();
+  run.modelSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
   run.userPromptText = null;
@@ -829,6 +842,7 @@ function emitUnmatchedModelResponse(run, callId, userId, emit) {
     ...buildCommonFields(run, run.sessionId, userId),
     time_unix_nano: ended.pilotObservedAtNanos,
     "event.name": "llm.response",
+    span_id: modelSpanId(run, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(ended.provider || run.provider, ended.model || run.model),
@@ -1027,6 +1041,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const record = {
     ...common,
     "event.name": "llm.request",
+    span_id: modelSpanId(run, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(event?.provider || run.provider, event?.model || run.model),
@@ -1112,7 +1127,7 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   if (event?.toolCallId) {
-    if (!run.toolSpanIds.has(event.toolCallId)) setBounded(run.toolSpanIds, event.toolCallId, crypto.randomBytes(8).toString("hex"));
+    if (!run.toolSpanIds.has(event.toolCallId)) setBounded(run.toolSpanIds, event.toolCallId, generateSpanId());
     if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
     setBounded(run.toolStartedAtNanos, event.toolCallId, common.time_unix_nano);
   }
@@ -1299,6 +1314,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
     const record = {
       ...buildCommonFields(run, run.sessionId, userId),
       "event.name": "llm.response",
+      span_id: modelSpanId(run, targetCallId),
       "gen_ai.step.id": targetCallId,
       "gen_ai.response.id": responseId,
       "gen_ai.response.time_to_first_token": firstTokenObserver?.take(message.api, message.responseId),
