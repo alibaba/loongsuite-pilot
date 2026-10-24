@@ -584,6 +584,21 @@ describe('Orchestrator', () => {
       expect(discoveryIdx).toBeLessThan(stateStoreIdx);
     });
 
+    it('cancels pending outputs before discovery waits for an input startup', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const manager = orch.getInputManager();
+      let cancelled = false;
+      const cancel = vi.spyOn(manager, 'cancelPendingOutputs').mockImplementation(() => { cancelled = true; });
+      // Discovery.stop drains processing, which may itself be waiting for a
+      // first input cycle's HTTP ACK. Detect the wrong order without hanging.
+      mockDiscoveryStop.mockImplementationOnce(async () => {
+        if (!cancelled) throw new Error('Discovery is waiting for uncancelled HTTP output');
+      });
+      await expect(orch.stop()).resolves.toBeUndefined();
+      expect(cancel).toHaveBeenCalled();
+    });
+
     it('emits stopped event', async () => {
       const events: string[] = [];
       const orch = new Orchestrator(makeConfig());

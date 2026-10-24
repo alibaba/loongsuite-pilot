@@ -222,7 +222,7 @@ describe('TurnBoundaryProcessor', () => {
     expect(entries[1]['gen_ai.turn.end']).toBe(true);
   });
 
-  it('uses Codex turn status rather than a model-wave stop as the end', () => {
+  it('uses only the explicit native Codex marker as the end', () => {
     const processor = new TurnBoundaryProcessor();
     const response = [entry('response', 'llm.response', {
       'gen_ai.agent.type': 'codex',
@@ -231,27 +231,43 @@ describe('TurnBoundaryProcessor', () => {
     const terminal = [entry('terminal', 'other', {
       'gen_ai.agent.type': 'codex',
       'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
     })];
 
     processor.enrich(response);
     processor.enrich(terminal);
 
-    expect(response[0]['gen_ai.turn.start']).toBe(true);
+    expect(response[0]['gen_ai.turn.start']).toBeUndefined();
     expect(response[0]['gen_ai.turn.end']).toBeUndefined();
     expect(terminal[0]['gen_ai.turn.start']).toBeUndefined();
     expect(terminal[0]['gen_ai.turn.end']).toBe(true);
   });
 
-  it('does not let a fused subagent create parent turn boundaries', () => {
+  it.each(['completed', 'interrupted'])('does not infer a Codex end from %s status', status => {
+    const entries = [entry('status-only', 'llm.response', {
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.agent.scope': 'subagent',
+      'agent.codex.turn_status': status,
+      'gen_ai.response.finish_reasons': ['stop'],
+    })];
+    new TurnBoundaryProcessor().enrich(entries);
+    expect(entries[0]['gen_ai.turn.end']).toBeUndefined();
+    expect(isTerminalTurnEntry(entries[0])).toBe(false);
+  });
+
+  it('maintains independent Codex child turn boundaries after the parent ends', () => {
     const processor = new TurnBoundaryProcessor();
     const child = [entry('child-response', 'llm.response', {
       'gen_ai.agent.type': 'codex',
+      'gen_ai.session.id': 'child-session',
+      'gen_ai.turn.id': 'child-session:turn',
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.response.finish_reasons': ['stop'],
     })];
     const root = [entry('root-terminal', 'other', {
       'gen_ai.agent.type': 'codex',
       'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
     })];
 
     processor.enrich(child);
@@ -259,8 +275,39 @@ describe('TurnBoundaryProcessor', () => {
 
     expect(child[0]['gen_ai.turn.start']).toBeUndefined();
     expect(child[0]['gen_ai.turn.end']).toBeUndefined();
-    expect(root[0]['gen_ai.turn.start']).toBe(true);
+    expect(root[0]['gen_ai.turn.start']).toBeUndefined();
     expect(root[0]['gen_ai.turn.end']).toBe(true);
+    const terminal = entry('child-terminal', 'other', {
+      'gen_ai.agent.type': 'codex', 'gen_ai.agent.scope': 'subagent',
+      'gen_ai.session.id': 'child-session', 'gen_ai.turn.id': 'child-session:turn',
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
+    });
+    processor.enrich([terminal]);
+    expect(terminal['gen_ai.turn.start']).toBeUndefined();
+    expect(terminal['gen_ai.turn.end']).toBe(true);
+  });
+
+  it('keeps the native Codex start while a fresh process sees only its suffix', () => {
+    const first = entry('native-prompt', 'other', {
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.turn.start': true,
+    });
+    new TurnBoundaryProcessor().enrich([first]);
+    const suffix = entry('restored-request', 'llm.request', {
+      'gen_ai.agent.type': 'codex',
+    });
+    const terminal = entry('native-terminal', 'other', {
+      'gen_ai.agent.type': 'codex',
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
+    });
+    new TurnBoundaryProcessor().enrich([suffix, terminal]);
+
+    expect(first['gen_ai.turn.start']).toBe(true);
+    expect(suffix['gen_ai.turn.start']).toBeUndefined();
+    expect(terminal['gen_ai.turn.start']).toBeUndefined();
+    expect(terminal['gen_ai.turn.end']).toBe(true);
   });
 
   it('does not repeat end for duplicate terminal signals', () => {
@@ -315,6 +362,10 @@ describe('isTerminalTurnEntry', () => {
     expect(isTerminalTurnEntry(entry('codex', 'other', {
       'gen_ai.agent.type': 'codex',
       'agent.codex.turn_status': 'interrupted',
+    }))).toBe(false);
+    expect(isTerminalTurnEntry(entry('codex-native-terminal', 'other', {
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.turn.end': true,
     }))).toBe(true);
     expect(isTerminalTurnEntry(entry('openclaw', 'other', {
       'gen_ai.agent.type': 'openclaw',

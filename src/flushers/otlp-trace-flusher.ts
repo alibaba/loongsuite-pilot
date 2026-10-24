@@ -15,6 +15,9 @@ import {
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
+import { convertCodexTurn } from './codex-turn-converter.js';
+import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
@@ -128,6 +131,7 @@ interface AgentConvertState {
   inMem: InMemorySpanExporter;
   toolSpanIds: SpanIdReservations;
   llmSpanIds: SpanIdReservations;
+  idGenerator: ReservedSpanIdGenerator;
   active: number;
 }
 
@@ -546,17 +550,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
+  private journalRestore?: Promise<void>;
 
-  // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
-  // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
+  // 批量调用计数：大于 0 时 send() 中 Signal A（finish_reason=stop）只标记
+  // completed，不立即 flush；最后一个批量调用完成 append 后统一 flush。
+  // 同时覆盖单条持久化、journal 恢复和不同 Input 的并发调用。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
-  private _deferSignalA = false;
+  private batchDepth = 0;
 
   constructor(
     cfg: OtlpTraceFlusherConfig,
     globalAttributesProvider?: GlobalAttributesProvider,
     exporterFactory?: OtlpExporterFactory,
+    private readonly codexJournal?: CodexTurnJournal,
+    private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
   ) {
     super();
     if (!cfg.endpoints || cfg.endpoints.length === 0) {
@@ -685,6 +693,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    await this.start();
+    // A public call always owns durable acceptance, even while another call
+    // is replaying or appending. Keep its resident prefix until I/O completes.
+    this.batchDepth++;
+    try {
+      await this.persistCodexEntries([entry]);
+    } finally { this.batchDepth--; }
+    await this.appendEntry(entry, logicalBytes);
+    if (this.batchDepth === 0) await this.flushCompleted();
+  }
+
+  private async appendEntry(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    // Audit delegation/result records describe an existing tool/work boundary.
+    // They must not create, close or reopen a model turn buffer.
+    if (isAgentAuditEvent(entry)) return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -721,6 +744,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
+      // Native Codex task_complete/turn_aborted is authoritative. A second
+      // work item in the same thread must not truncate a still-running turn.
+      if (agentType === 'codex') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -731,20 +757,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.triggerFlush(buf, false);
     }
 
-    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
-    // case where neither Signal A, same-session successor, nor idle timeout ever
-    // fires for many turns), flush oldest incomplete buffers to bound memory.
-    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
-      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
-      const candidates = [...this.turnBuffers.values()]
-        .filter((b) => !b.completed)
-        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
-        .slice(0, overflow);
-      for (const b of candidates) {
-        b.completed = true;
-        this.triggerFlush(b, false);
-      }
-    }
+    // Preparation has already checked/restored this prefix. Do not evict it
+    // before appending the continuation, or evict a later turn in this batch.
+    if (this.batchDepth === 0) this.trimTurnBuffers(key);
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -778,34 +793,64 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
     // OpenClaw has a dedicated run-level terminal hook because each ReAct
     // model call carries its own finish reason.
-    // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
+    // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
       buf.completed = true;
-      if (!this._deferSignalA) {
+      if (this.batchDepth === 0) {
         this.triggerFlush(buf);
       }
     }
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
-    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
-    // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
-    // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
-    this._deferSignalA = true;
+    await this.start();
+    this.batchDepth++;
     try {
-      for (let i = 0; i < entries.length; i++) {
-        await this.send(entries[i], sizes?.[i]);
-      }
-    } finally {
-      this._deferSignalA = false;
+      await this.persistCodexEntries(entries);
+      await this.appendBatch(entries, logicalBytes);
+    } finally { this.batchDepth--; }
+    await this.finishBatch();
+  }
+
+  private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
+    for (let i = 0; i < entries.length; i++) {
+      await this.appendEntry(entries[i], sizes?.[i]);
     }
-    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
-    await this.flushCompleted();
+  }
+
+  private async finishBatch(): Promise<void> {
+    // Another caller may still be preparing a prefix or appending records.
+    if (this.batchDepth === 0) {
+      await this.flushCompleted();
+      // Another Input may begin a batch while completed exports are awaited.
+      if (this.batchDepth === 0) this.trimTurnBuffers();
+    }
+  }
+
+  private trimTurnBuffers(incomingKey?: string): void {
+    if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
+    const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+    const candidates = [...this.turnBuffers.values()]
+      .filter((buf) => !buf.completed && buf.key !== incomingKey)
+      .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+      .slice(0, overflow);
+    for (const buf of candidates) {
+      if (buf.agentType === 'codex' && this.codexJournal) {
+        // The durable prefix can be rehydrated when this native turn resumes.
+        this.turnBuffers.delete(buf.key);
+        this.recordBufferRemoval(buf);
+      } else {
+        buf.completed = true;
+        this.triggerFlush(buf, false);
+      }
+    }
   }
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
+      if (buf.agentType === 'codex' && this.codexJournal && !buf.completed) continue;
       buf.completed = true;
     }
     await this.flushCompleted();
@@ -814,6 +859,56 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await Promise.allSettled(batch);
     }
     this.flushedTurnKeys.clear();
+  }
+
+  override async start(): Promise<void> {
+    if (!this.codexJournal) return;
+    this.journalRestore ??= this.replayCodexJournal(this.codexJournal.load()).catch(cause => {
+      const error = new Error('Codex pending trace could not be restored', { cause });
+      error.name = 'CodexTurnJournalError';
+      throw error;
+    });
+    await this.journalRestore;
+  }
+
+  private async replayCodexJournal(groups: AsyncIterable<AgentActivityEntry[]>): Promise<void> {
+    for await (const group of groups) {
+      const prepared = this.prepareCodexReplay ? this.prepareCodexReplay(group) : group;
+      if (prepared.length === 0) {
+        await this.codexJournal!.remove(group);
+        continue;
+      }
+      // Replay has already been persisted. Use the internal append path, so
+      // public calls can always await start() without recursion or bypasses.
+      this.batchDepth++;
+      try { await this.appendBatch(prepared); }
+      finally { this.batchDepth--; }
+      await this.finishBatch();
+    }
+  }
+
+  private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
+    if (!this.codexJournal) return;
+    try {
+      const codex = entries.filter(entry => normalizeAgentType(String(entry['gen_ai.agent.type'])) === 'codex'
+        && !isAgentAuditEvent(entry));
+      const checked = new Set<string>();
+      for (const entry of codex) {
+        const key = this.resolveGroupKey(entry).key;
+        if (checked.has(key) || this.turnBuffers.has(key) || this.flushedTurnKeys.has(key)) continue;
+        checked.add(key);
+        if (await this.codexJournal.isAcknowledged(entry)) {
+          this.flushedTurnKeys.add(key);
+          continue;
+        }
+        await this.replayCodexJournal(this.codexJournal.load(codexTurnJournalGroupKey(entry)));
+      }
+      await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
+    } catch (cause) {
+      const error = new Error('Codex pending trace could not be persisted', { cause });
+      error.name = 'CodexTurnJournalError';
+      throw error;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -869,10 +964,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
     }
-    // A fused child shares the parent's turn buffer. Its stop closes only the
-    // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
-      if (entry['gen_ai.agent.scope'] === 'subagent') return false;
       // A `stop` closes one Codex model wave, not necessarily the surrounding
       // transcript turn. The transcript input stamps this status only when it
       // has observed task_complete / turn_aborted, which is the lifecycle
@@ -924,6 +1016,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   } {
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
+        return { source: 'turn_id', value: turnId,
+          key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
+            .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
 
@@ -979,14 +1076,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    await this.convertAndExport(buf.agentType, buf.records);
+    const exported = await this.convertAndExport(buf.agentType, buf.records);
+    if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
+      await this.codexJournal.acknowledge(buf.records);
+    }
   }
 
   private async convertAndExport(
     agentType: string,
     records: AgentActivityEntry[],
-  ): Promise<void> {
-    if (records.length === 0) return;
+  ): Promise<boolean> {
+    if (records.length === 0) return true;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
@@ -995,7 +1095,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const serviceNames = [...new Set(
       this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
-    await Promise.all(
+    const results = await Promise.all(
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
         const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
@@ -1007,10 +1107,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
           resourceIdentity,
           convertKey,
         ));
-        this.convertLocks.set(convertKey, current.catch(() => {}));
+        this.convertLocks.set(convertKey, current.then(() => undefined, () => undefined));
         return current;
       }),
     );
+    return results.every(Boolean);
   }
 
   private async doConvertAndExport(
@@ -1020,7 +1121,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const convertState = this.getOrCreateConvertState(
       agentType,
       serviceName,
@@ -1028,7 +1129,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resourceIdentity,
       convertKey,
     );
-    const { handler, provider, inMem, toolSpanIds, llmSpanIds } = convertState;
+    const { handler, provider, inMem, toolSpanIds, llmSpanIds, idGenerator } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
@@ -1092,9 +1193,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // Keep it in the normal OTLP flusher path, but exclude it at the
         // EventLog-to-Trace boundary so the converter does not emit an extra
         // empty STEP for the duplicate input boundary.
-        const traceConversionRecords = recordsForConversion.filter(
-          record => record['event.name'] !== 'agent.input',
-        );
+        const traceConversionRecords = prepareTraceEvents(recordsForConversion);
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
@@ -1111,11 +1210,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let succeeded = false;
         try {
           const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+            : agentType === 'codex' ? convertCodexTurn
             : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
             : convertEventLogToTrace;
           result = convert(
             sanitized as unknown as EventLogRecord[],
-            { handler, strict: false, passthroughKeys },
+            { handler, strict: false, passthroughKeys, idGenerator },
           );
           succeeded = true;
         } finally {
@@ -1140,14 +1240,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // not exported, pollutes subsequent sessions". Resetting here keeps
         // each convert attempt's span set isolated.
         inMem.reset();
-        return;
+        return false;
       }
 
       await provider.forceFlush();
       let spans = inMem.getFinishedSpans();
       inMem.reset();
 
-      if (spans.length === 0) return;
+      if (spans.length === 0) return true;
       applyQoderWorkStepTiming(records, spans);
       this.enrichToolSkillAttributes(records, spans);
       if (agentType === 'openclaw') {
@@ -1170,9 +1270,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         await this.writeDebugLog(agentType, spans);
       }
 
-      await this.exportInBatches(exportState, agentType, spans);
+      return await this.exportInBatches(exportState, agentType, spans);
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
+      return false;
     } finally {
       convertState.active -= 1;
       this.evictConvertStates();
@@ -1183,7 +1284,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exportState: AgentExportState,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const maxBytes = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
     const batches: ReadableSpan[][] = [];
     let current: ReadableSpan[] = [];
@@ -1208,11 +1309,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out per-endpoint in parallel: each backend drains its own batches
     // sequentially, but backends run concurrently — so a slow/hung backend
     // only delays itself, not the healthy ones (no head-of-line blocking).
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       exportState.exporters.map(({ name, exporter }) =>
         this.exportBatchesToEndpoint(exporter, name, agentType, batches),
       ),
     );
+    return results.every(result => result.status === 'fulfilled' && result.value);
   }
 
   private async exportBatchesToEndpoint(
@@ -1220,10 +1322,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     batches: ReadableSpan[][],
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let succeeded = true;
     for (const batch of batches) {
-      await this.doExport(exporter, endpointName, agentType, batch);
+      if (!await this.doExport(exporter, endpointName, agentType, batch)) succeeded = false;
     }
+    return succeeded;
   }
 
   private doExport(
@@ -1231,7 +1335,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const counter = this.endpointCounters.get(endpointName);
     const startMs = Date.now();
     // Sized once and reused on the success path: in and out must measure the
@@ -1244,7 +1348,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
     // Never rejects: a failing backend is isolated + persisted, not propagated.
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       exporter.export(spans, (result) => {
         if (counter) counter.totalDelayMs += Date.now() - startMs;
         if (result.code !== ExportResultCode.SUCCESS) {
@@ -1260,7 +1364,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           counter.outBytes += batchBytes;
           counter.lastFlushTime = formatTime(new Date());
         }
-        resolve();
+        resolve(result.code === ExportResultCode.SUCCESS);
       });
     });
   }
@@ -1298,7 +1402,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
     const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, idGenerator, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
@@ -1917,10 +2021,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0) return;
+    if (timeout <= 0 || this.batchDepth > 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.agentType === 'codex' && this.codexJournal) {
+          this.turnBuffers.delete(buf.key);
+          this.recordBufferRemoval(buf);
+          continue;
+        }
         buf.completed = true;
         this.triggerFlush(buf);
       }

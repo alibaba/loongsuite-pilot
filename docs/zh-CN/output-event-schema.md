@@ -54,6 +54,10 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `llm.response` | 一次 LLM 响应，包含文本、reasoning、tool-call 意图、finish reason、token 用量和费用等可用信息。 |
 | `tool.call` | Agent 发起的一次实际工具执行。 |
 | `tool.result` | 工具执行返回的结果。 |
+| `gen_ai.model.request` / `gen_ai.model.response` | 标准模型事件名；与 `llm.request` / `llm.response` 同等识别，保留输入名称。 |
+| `gen_ai.tool.call` / `gen_ai.tool.result` | 标准工具事件名；与 `tool.call` / `tool.result` 同等识别，保留输入名称。 |
+| `gen_ai.agent.invoke` | 向另一个 Agent 提交一次逻辑工作；批量工作逐项记录。 |
+| `gen_ai.agent.result` | 实际收到的 Agent 结果或派发失败；工具受理回执不等于 Agent 完成。 |
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
@@ -75,6 +79,15 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `llm.response` | `gen_ai.model.response` |
 | `tool.call` | `gen_ai.tool.call` |
 | `tool.result` | `gen_ai.tool.result` |
+
+六个标准名不会归为 `other`。已有四类短名输出不改名，也不因支持标准名而双写。
+OTLP 转换在入口适配名称并排除委派审计视角，避免重复 Span、STEP 和 token。
+
+Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多个 session。
+父 invoke/result 使用 `gen_ai.agent.invocation.id`，实际子工作使用相等的
+`gen_ai.agent.parent.invocation.id`。复用子 session 接受新工作时换新 invocation；
+嵌套事件同时保留 incoming 与 outgoing。父子会话定位以两侧事件的 invocation
+及自身 session/turn 为准；缺侧不猜测。详见[子 Agent 数据模型](subagent-data-model.md)。
 
 ## 字段说明
 
@@ -107,6 +120,10 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
 | `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder` 或 `qoder-work`。 |
 | `gen_ai.agent.id` | string | Recommended | Agent 运行实例 ID。 |
+| `gen_ai.agent.parent.id` | string | 有可靠来源时 Recommended | 当前工作的上游 Agent 身份，不替代 invocation。 |
+| `gen_ai.agent.peer.id` | string | 有可靠来源时 Recommended | 本次 invoke/result 的直接交互 Agent。 |
+| `gen_ai.agent.invocation.id` | string | 委派事件 Required | 当前向外逻辑委派的稳定 ID；批量逐工作唯一。 |
+| `gen_ai.agent.parent.invocation.id` | string | 已确认接受委派的工作 Required | 当前事件/轮次所接受的上游委派 ID；不是子 session 的永久属性。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
 | `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |

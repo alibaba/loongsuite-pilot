@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { ClientType } from '../types/index.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import type {
   AgentActivityEntry,
@@ -79,6 +80,7 @@ export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
+  private readonly entryAbortControllers = new Map<string, AbortController>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -153,6 +155,9 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
+    if (input.agentType === ClientType.CodexCliHook) {
+      this.entryAbortControllers.set(input.id, new AbortController());
+    }
     this.counters.set(input.id, {
       sourceKind: 'primary',
       rawReadCalls: 0,
@@ -180,13 +185,17 @@ export class InputManager extends EventEmitter {
       this.handleInputRuntimeDelta(input.id, delta);
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
+      // Streaming inputs can emit again inside a collect that was already in
+      // flight when an earlier output failed. Keep the cursor frozen for recovery.
+      if (input.checkpointFailed) return;
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
-      const next = previous
+      const handling = previous
         .catch(() => undefined)
-        .then(() => this.handleEntries(input.id, entries))
-        .catch(err => {
-          logger.error('entry handling failed', { inputId: input.id, error: String(err) });
-        });
+        .then(() => this.handleEntries(input.id, entries));
+      if (input.agentType === ClientType.CodexCliHook) input.holdCheckpointUntil(handling);
+      const next = handling.catch(err => {
+        logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+      });
       this.entryQueues.set(input.id, next);
       void next.finally(() => {
         if (this.entryQueues.get(input.id) === next) this.entryQueues.delete(input.id);
@@ -234,6 +243,9 @@ export class InputManager extends EventEmitter {
       logger.warn('cannot start unknown input', { id });
       return;
     }
+    if (this.entryAbortControllers.get(id)?.signal.aborted) {
+      this.entryAbortControllers.set(id, new AbortController());
+    }
     await input.start();
     logger.info('input started', { id });
   }
@@ -241,12 +253,19 @@ export class InputManager extends EventEmitter {
   async stopInput(id: string): Promise<void> {
     const input = this.inputs.get(id);
     if (!input) return;
+    this.entryAbortControllers.get(id)?.abort();
     await input.stop();
     await this.drainInputQueue(id);
     logger.info('input stopped', { id });
   }
 
+  /** Called before discovery drains starts that may themselves await output. */
+  cancelPendingOutputs(): void {
+    for (const controller of this.entryAbortControllers.values()) controller.abort();
+  }
+
   async stopAll(): Promise<void> {
+    this.cancelPendingOutputs();
     for (const [id, input] of this.inputs) {
       if (input.running) {
         await input.stop();
@@ -455,6 +474,11 @@ export class InputManager extends EventEmitter {
     }
   }
 
+  /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
+  prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    return this.applyMask(this.workspacePolicy.filter(entries));
+  }
+
   private applyMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
     if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
       return entries;
@@ -484,12 +508,14 @@ export class InputManager extends EventEmitter {
 
     const counter = this.counters.get(inputId);
     try {
-      await this.flusher.sendBatch(entries, logicalBytes);
+      const signal = this.entryAbortControllers.get(inputId)?.signal;
+      await (signal ? this.flusher.sendBatch(entries, logicalBytes, signal) : this.flusher.sendBatch(entries, logicalBytes));
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) throw err;
     }
   }
 }

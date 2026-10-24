@@ -6,6 +6,26 @@ Trace 输出会将 GenAI 活动导出为 OpenTelemetry Trace。适用于在 Trac
 
 Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录；OTLP Trace 输出会将这些记录转换为 Trace spans。
 
+## Codex 子 Agent
+
+Codex 按实际子 session/turn 独立缓冲和导出，确认父工具上下文后生成
+`父 AGENT → 委派 TOOL → 子 AGENT → 子 STEP → LLM/TOOL`。子虚拟 ENTRY
+透明，LLM/TOOL 使用日志预留的实际 Span ID，session/turn/step 不改为父值。
+父 turn 完成不关闭后台子工作，也不延长工具时间；同一 Trace 可以跨多个 session。
+未确认挂载或已独立输出的轮次保留独立根结构，不重发旧 Span 冒充更新。
+
+incoming invocation 随实际工作传播，outgoing invocation 仅属于对应委派工具，
+不会复制到同 turn 的所有 Span。标准模型/工具事件在转换入口兼容短名；
+Agent invoke/result 是审计事件，不额外生成 Span、STEP 或 token。
+启用 OTLP 时，待终态 Codex 轮次保存在 `logs/codex-pending-turns/`，输入
+checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近 10,000 轮；网络
+回执不确定时仍可能重试相同稳定 ID。journal 读失败阻止启动，写失败后需修复
+存储并重启，从最后持久游标恢复。Codex 的 SLS/HTTP 日志发送等待实际网络成功回执，
+而非仅进入内存队列，才允许保存输入游标；失败会冻结共享 checkpoint，修复输出后
+需重启恢复。多目标部分成功或回执不确定仍可能重发相同 ID，不能保证恰好一次。
+校验器按各 AGENT 自身执行范围检查身份、步骤和用量，允许异步子工作晚于父工具结束。
+源码能力与安装态、云端验收分开，见[Codex 验证记录](codex-subagent-verification.md)。
+
 ## 通用 OTLP Trace 输出
 
 ```json

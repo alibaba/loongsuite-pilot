@@ -6,6 +6,31 @@ Trace output exports GenAI activity as OpenTelemetry traces. Use it when you wan
 
 Trace output is separate from log output. SLS, JSONL, and HTTP receive event records; OTLP trace output converts those records into trace spans.
 
+## Codex subagents
+
+Codex child turns buffer and export independently with their own session, turn
+and step IDs. Confirmed delegation attaches the child AGENT under the actual
+reserved parent TOOL span, followed by the child's STEP and LLM/TOOL spans.
+Only the child's virtual ENTRY is transparent. Parent completion neither ends
+background child work nor stretches the tool interval.
+
+An unresolved or already independently emitted turn keeps its own root; late
+correlation does not replay exported spans as updates. Incoming invocation is
+scoped to actual work; outgoing invocation belongs to its delegation tool.
+Standard and short model/tool event names are adapted at the trace boundary;
+Agent invoke/result audit records do not add spans, steps or usage.
+With OTLP enabled, pending Codex turns persist in `logs/codex-pending-turns/`
+before input checkpoints advance; shutdown does not export partial turns.
+Export acknowledgements retain the latest 10,000 turns. Uncertain network
+delivery may still retry stable IDs. Journal read failures prevent startup;
+after a write failure, repair storage and restart from the durable cursor.
+Codex SLS/HTTP log sends await actual network success before allowing input
+checkpoints to advance. A failed delivery holds the shared checkpoint until
+the output is repaired and the collector restarts. Partial multi-output success
+or uncertain acknowledgements can still repeat stable IDs; this is at least once.
+See [verification status](zh-CN/codex-subagent-verification.md) for separate
+source, output, installed-runtime and cloud evidence.
+
 ## Generic OTLP Trace Output
 
 ```json
