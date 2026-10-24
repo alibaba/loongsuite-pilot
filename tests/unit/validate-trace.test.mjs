@@ -174,9 +174,7 @@ describe('delegated trace validation scopes', () => {
         expect(generatedMeta).toEqual(checkedInMeta);
       }
       expect(generated.timeRules).toEqual(traceRules.timeRules);
-      for (const rule of traceRules.semanticRules.filter(rule => rule.scope)) {
-        expect(generated.semanticRules.find(candidate => candidate.id === rule.id)).toEqual(rule);
-      }
+      expect(generated.semanticRules).toEqual(traceRules.semanticRules);
     } finally {
       for (const file of [specPath, outputPath]) {
         try { unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }

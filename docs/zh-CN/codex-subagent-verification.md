@@ -14,6 +14,8 @@
 
 invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCallId, workIndex]`) 的前 32 个十六进制字符。批量每项使用不同 workIndex；重放同一原生事实 ID 不变。新工作、重试采集、取消/等待是不同语义，不能都当成新委派。
 
+同一 Agent path 发生多次创建后，仅有路径的 followup/send_input 不从唯一已登记的旧子会话猜测 peer；新子会话元数据可能晚到。显式 child ID 和已确认的工作绑定仍有效，没有或只有一次创建记录时保留原有无歧义路径关联。
+
 `FINAL_ANSWER` 是 Codex 内部结果交付消息类型，解析成标准 `gen_ai.agent.result` 前仍需唯一 invocation 关联与去重。工具受理、子本地完成、父实际收到结果不是同一边界。暂时无法关联的 FINAL_ANSWER 保存文件范围，后续只重试结果审计，不重复模型/工具日志。
 
 ## Agent 名称

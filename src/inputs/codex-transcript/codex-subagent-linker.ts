@@ -178,8 +178,8 @@ export class CodexSubagentLinker {
       if (spawn.childThreadId || spawn.dispatchFailed || spawn.associationConflict) return copy;
       if (spawn.resolvedChildThreadId) return { ...copy, childThreadId: spawn.resolvedChildThreadId };
       const path = descriptorPath(spawn);
-      if (path && isCreation(spawn)
-        && this.creationsByParentPath.get(parentPathKey(spawn.parentThreadId, path))?.size !== 1) return copy;
+      // A released path can be recreated before the new child's metadata arrives.
+      if (path && (this.creationsByParentPath.get(parentPathKey(spawn.parentThreadId, path))?.size ?? 0) > 1) return copy;
       const children = path ? this.childrenByParentPath.get(parentPathKey(spawn.parentThreadId, path)) : undefined;
       const child = children?.size === 1 ? children.values().next().value : undefined;
       return { ...copy, ...(child ? {

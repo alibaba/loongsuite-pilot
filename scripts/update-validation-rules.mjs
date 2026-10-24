@@ -379,7 +379,7 @@ function buildRulesJson(sections, operationKindMapping) {
       { id: 'semantic.consistent_turn_id', severity: 'error', scope: 'own_agent_execution_excluding_delegated_agents' },
       { id: 'semantic.consistent_user_id', severity: 'error' },
       { id: 'semantic.consistent_agent_name', severity: 'warn', scope: 'own_agent_execution_excluding_delegated_agents' },
-      { id: 'semantic.llm_has_input_output', severity: 'warn', requiresMessageContent: true },
+      { id: 'semantic.llm_has_input_output', severity: 'error', requiresMessageContent: true },
       { id: 'semantic.operation_kind_mapping', severity: 'error' },
       { id: 'semantic.span_name_pattern', severity: 'warn' },
       { id: 'semantic.tool_response_role', severity: 'error', requiresMessageContent: true },

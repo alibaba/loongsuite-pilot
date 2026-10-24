@@ -681,6 +681,37 @@ describe('CodexSubagentLinker', () => {
       .toEqual([undefined, undefined]);
   });
 
+  it.each(['followup', 'input'] as const)('does not guess a path-only %s peer after path reuse, including after restore', dispatchKind => {
+    const original = new CodexSubagentLinker();
+    original.registerSpawns([
+      spawn({ parentToolCallId: 'old-creation', taskName: 'same', childThreadId: 'old-child' }),
+      spawn({ parentToolCallId: 'new-creation', taskName: '/root/same' }),
+      spawn({ parentToolCallId: 'new-work', agentPath: '/root/same', dispatchKind }),
+      spawn({ parentToolCallId: 'explicit-work', agentPath: '/root/same', dispatchKind, childThreadId: 'new-child' }),
+    ]);
+    original.registerChild(childMeta({ threadId: 'old-child', agentPath: '/root/same' }));
+    const restored = new CodexSubagentLinker();
+    restored.restore(JSON.parse(JSON.stringify(original.serialize())));
+    for (const linker of [original, restored]) {
+      const lookup = () => linker.getDelegationsForParent('parent-thread');
+      const invocation = lookup().find(value => value.parentToolCallId === 'new-work')!.invocationId;
+      expect(lookup().find(value => value.parentToolCallId === 'new-work')?.childThreadId).toBeUndefined();
+      expect(lookup().find(value => value.parentToolCallId === 'explicit-work')?.childThreadId).toBe('new-child');
+      linker.registerChild(childMeta({ threadId: 'new-child', agentPath: '/root/same' }));
+      expect(lookup().find(value => value.parentToolCallId === 'new-work')).toMatchObject({ invocationId: invocation });
+      expect(lookup().find(value => value.parentToolCallId === 'new-work')?.childThreadId).toBeUndefined();
+    }
+  });
+
+  it.each([0, 1])('keeps a unique path followup when %i creation records are available', creations => {
+    const linker = new CodexSubagentLinker();
+    if (creations) linker.registerSpawns([spawn({ parentToolCallId: 'creation', taskName: 'same' })]);
+    linker.registerSpawns([spawn({ parentToolCallId: 'work', agentPath: '/root/same', dispatchKind: 'followup' })]);
+    linker.registerChild(childMeta({ threadId: 'known-child', agentPath: '/root/same' }));
+    expect(linker.getDelegationsForParent('parent-thread').find(value => value.parentToolCallId === 'work')?.childThreadId)
+      .toBe('known-child');
+  });
+
   it('uses child indexes for work and parent indexes for result peers without enumerating global state', () => {
     const linker = new CodexSubagentLinker();
     linker.registerSpawns([
