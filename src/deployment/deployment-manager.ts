@@ -72,7 +72,7 @@ export class DeploymentManager {
     this.directoryPluginStrategy = new DirectoryPluginStrategy(opts.dataDir);
     this.detectionOnlyStrategy = new DetectionOnlyStrategy();
     this.dshYamlPatchStrategy = new DshYamlPatchStrategy(opts.dataDir);
-    this.copilotPluginStrategy = new CopilotPluginStrategy();
+    this.copilotPluginStrategy = new CopilotPluginStrategy({ dataDir: opts.dataDir });
 
     const loaderOpts: AgentDefLoaderOptions = {
       builtinDir: opts.builtinAgentsDir ?? path.join(opts.pilotDir, 'agents.d'),
@@ -132,7 +132,7 @@ export class DeploymentManager {
    * no record, so we never touch its settings file (matching the "does not
    * detect or deploy disabled agents" contract).
    *
-   * Scope remains limited to hook and dsh-yaml-patch. Other deployment modes
+   * Scope includes hook, dsh-yaml-patch and copilot-plugin. Other deployment modes
    * retain their existing lifecycle behavior.
    *
    * The record is dropped only once cleanup succeeds. Hook uninstall is
@@ -151,7 +151,7 @@ export class DeploymentManager {
     };
 
     if (
-      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch')
+      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin')
       || !this.state[def.id]
     ) {
       logger.debug('agent excluded from deployment', { agentId: def.id });
@@ -167,7 +167,9 @@ export class DeploymentManager {
       const target = applyPersistedDeployTargets(def, this.state[def.id]);
       ok = target.deployMode === 'hook'
         ? await this.hookStrategy.undeploy(target)
-        : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
+        : target.deployMode === 'copilot-plugin'
+          ? await this.copilotPluginStrategy.undeploy(target)
+          : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }

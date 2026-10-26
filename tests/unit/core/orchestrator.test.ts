@@ -466,6 +466,7 @@ describe('Orchestrator', () => {
       vi.unstubAllEnvs();
       delete process.env.LOONGSUITE_PILOT_POLL_INTERVAL_MS;
       const config = makeConfig();
+      config.listeners['copilot-log'] = { enabled: true, pollInterval: 30_000 };
       config.listeners['cursor-hook'] = { enabled: true, pollInterval: 30_000 };
       config.listeners['codex-transcript'] = { enabled: true, pollInterval: 30_000 };
       config.listeners['qoder-cn-sqlite'] = { enabled: true, pollInterval: 30_000 };
@@ -476,6 +477,7 @@ describe('Orchestrator', () => {
 
       const orch = new Orchestrator(config);
       await orch.start();
+      expect(pollInterval(orch, 'copilot-log')).toBe(30_000);
       expect(pollInterval(orch, 'cursor-hook')).toBe(30_000);
       expect(pollInterval(orch, 'codex-transcript')).toBe(30_000);
       expect(pollInterval(orch, 'qoder-cn-sqlite')).toBe(30_000);

@@ -238,15 +238,19 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
   });
 });
 
-// Regression for the 2026-07-29 bug where two orphan `}` survived after
-// Remove-MimoCodePlugin's closing brace (rebase artifact), throwing the
-// whole .ps1 brace balance off and breaking PowerShell parsing. The brace
-// counts must match across the entire file — PowerShell is whitespace- and
-// brace-sensitive, so even one orphan brace aborts the uninstall flow.
+// Lightweight structural guard, not a PowerShell parser. Braces inside strings,
+// comments and embedded Node here-strings are data and must not be counted.
+function structuralBraces(source) {
+  const code = source.replace(/@['"][\s\S]*?^['"]@|'(?:''|[^'])*'|"(?:`[\s\S]|[^"`])*"|<#[\s\S]*?#>|#[^\r\n]*/gm, '');
+  return { open: (code.match(/\{/g) || []).length, close: (code.match(/\}/g) || []).length };
+}
 describe('installer-opensource.ps1 brace balance', () => {
+  it('ignores quoted regex braces but detects orphan code braces', () => {
+    expect(structuralBraces("function f { $pattern = '(?=[}\\]])' }")).toEqual({ open: 1, close: 1 });
+    expect(structuralBraces('function f { } }')).toEqual({ open: 1, close: 2 });
+  });
   it('open { count equals close } count across the whole file', () => {
-    const open = (ps1.match(/\{/g) || []).length;
-    const close = (ps1.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(ps1);
     expect(open).toBe(close);
   });
 
@@ -260,8 +264,7 @@ describe('installer-opensource.ps1 brace balance', () => {
     expect(end).toBeGreaterThan(start);
     const body = ps1.slice(start, end);
     // The function body must be brace-balanced on its own.
-    const open = (body.match(/\{/g) || []).length;
-    const close = (body.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(body);
     expect(open).toBe(close);
   });
 });

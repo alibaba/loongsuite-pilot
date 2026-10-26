@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveHome } from '../utils/fs-utils.js';
+import { readCopilotFile, writeCopilotFile } from './copilot-config-file.js';
 
 const BEGIN = '# >>> loongsuite-pilot copilot otel >>>';
 const END = '# <<< loongsuite-pilot copilot otel <<<';
@@ -37,15 +38,14 @@ function profiles(homeDir = resolveHome('~')): string[] {
     : ['~/.bashrc', '~/.zshrc'].map(p => path.join(homeDir, p.slice(2)));
 }
 export async function installCopilotShellIntegration(dataDir: string, homeDir?: string): Promise<void> {
+  if (process.platform === 'win32') throw new Error('Copilot automatic deployment currently supports Unix shells only');
   const dir = path.join(dataDir, 'state', 'copilot');
   await fs.mkdir(path.join(dir, 'otel'), { recursive: true, mode: 0o700 });
   await fs.writeFile(path.join(dir, 'otel-enabled'), '', { mode: 0o600 });
   for (const profile of profiles(homeDir)) {
-    let existing = '';
-    try { existing = await fs.readFile(profile, 'utf8'); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-    const next = existing.replace(blockPattern, '\n').replace(/\n*$/, '\n') + copilotShellBlock(dataDir, process.platform === 'win32');
-    await fs.mkdir(path.dirname(profile), { recursive: true });
-    await fs.writeFile(profile, next, { mode: 0o600 });
+    const snapshot = await readCopilotFile(profile);
+    const next = snapshot.content.replace(blockPattern, '\n').replace(/\n*$/, '\n') + copilotShellBlock(dataDir);
+    await writeCopilotFile(snapshot, next);
   }
 }
 export async function needsCopilotShellIntegration(dataDir: string, homeDir?: string): Promise<boolean> {
@@ -59,9 +59,8 @@ export async function removeCopilotShellIntegration(dataDir: string, homeDir?: s
   await fs.rm(path.join(dataDir, 'state', 'copilot', 'otel-enabled'), { force: true });
   for (const profile of profiles(homeDir)) {
     try {
-      const before = await fs.readFile(profile, 'utf8');
-      const after = before.replace(blockPattern, '\n');
-      if (before !== after) await fs.writeFile(profile, after);
+      const snapshot = await readCopilotFile(profile);
+      if (snapshot.exists) await writeCopilotFile(snapshot, snapshot.content.replace(blockPattern, '\n'));
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
 }

@@ -14,7 +14,7 @@ const READ_BUDGET = 4 * 1024 * 1024;
  */
 export class CopilotSourceIndex {
     private db?: sqlite3.Database;
-    constructor(private readonly file: string) { }
+    constructor(private readonly file: string, private readonly onMalformed?: (file: string, offset: number) => void) { }
     async open(): Promise<void> {
         if (this.db)
             return;
@@ -22,19 +22,27 @@ export class CopilotSourceIndex {
         this.db = await new Promise<sqlite3.Database>((resolve, reject) => {
             const db = new sqlite3.Database(this.file, e => e ? reject(e) : resolve(db));
         });
-        await fsp.chmod(this.file, 0o600);
-        this.db.configure('busyTimeout', 5000);
-        await this.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-      PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
+        try {
+            await fsp.chmod(this.file, 0o600);
+            this.db.configure('busyTimeout', 5000);
+            await this.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+          PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
       CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY, kind TEXT, identity TEXT, offset INTEGER, session TEXT, active TEXT, anchor TEXT);
       CREATE TABLE IF NOT EXISTS records(kind TEXT, session TEXT, id TEXT, interaction TEXT, type TEXT, trace TEXT, stamp TEXT, body TEXT,
-        PRIMARY KEY(kind,session,id));
+            PRIMARY KEY(kind,session,id));
       CREATE INDEX IF NOT EXISTS record_interaction ON records(session,interaction,kind);
       CREATE INDEX IF NOT EXISTS record_trace ON records(session,trace,kind);
       CREATE INDEX IF NOT EXISTS record_history ON records(session,kind,type,stamp);
       CREATE TABLE IF NOT EXISTS interactions(session TEXT, id TEXT, checked INTEGER DEFAULT 0, PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS delivered(key TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS partial_sources(path TEXT PRIMARY KEY, position INTEGER, anchor TEXT);
+      CREATE TABLE IF NOT EXISTS partial_chunks(path TEXT, position INTEGER, body BLOB, PRIMARY KEY(path,position));
+      CREATE TABLE IF NOT EXISTS native_wait(session TEXT, interaction TEXT, since INTEGER, PRIMARY KEY(session,interaction));
       CREATE TABLE IF NOT EXISTS sequence(value INTEGER); INSERT INTO sequence SELECT 0 WHERE NOT EXISTS(SELECT 1 FROM sequence);`);
+        } catch (err) {
+            await this.close().catch(() => {});
+            throw err;
+        }
     }
     exec(sql: string): Promise<void> { return new Promise((resolve, reject) => this.db!.exec(sql, e => e ? reject(e) : resolve())); }
     run(sql: string, args: unknown[] = []): Promise<void> {
@@ -54,86 +62,116 @@ export class CopilotSourceIndex {
         const handle = await fsp.open(file, 'r');
         try {
             const stat = await handle.stat();
-            if (!stat.isFile() || stat.size === 0)
-                return;
+            if (!stat.isFile()) return;
             const identity = `${stat.dev}:${stat.ino}`;
             const previous = (await this.all('SELECT * FROM sources WHERE path=?', [file]))[0];
+            const partial = (await this.all('SELECT * FROM partial_sources WHERE path=?', [file]))[0];
             const anchorAt = async (end: number) => {
                 const buffer = Buffer.alloc(Math.min(64, end));
-                await handle.read(buffer, 0, buffer.length, end - buffer.length);
-                return createHash('sha256').update(buffer).digest('hex');
+                const { bytesRead } = await handle.read(buffer, 0, buffer.length, end - buffer.length);
+                return createHash('sha256').update(buffer.subarray(0, bytesRead)).digest('hex');
             };
             const reset = !previous || previous.identity !== identity || stat.size < previous.offset
-                || previous.anchor !== await anchorAt(previous.offset);
+                || previous.anchor !== await anchorAt(previous.offset)
+                || (partial && (stat.size < partial.position || partial.anchor !== await anchorAt(partial.position)));
             let offset = reset ? 0 : previous.offset;
             let session = reset ? '' : previous.session;
             let active = reset ? '' : previous.active;
-            if (offset === stat.size)
-                return;
-            const begin = offset;
-            // Stop at a complete record boundary. A line may cross any number of
-            // 64 KiB chunks; a partial EOF is re-read, never committed as a record.
-            let position = offset;
-            let fragments: Buffer[] = [];
+            let position = reset ? 0 : partial?.position ?? offset;
+            if (!reset && position === stat.size) return;
+            // Persist unfinished line fragments on disk, separately from complete
+            // record offsets. Each poll reads at most READ_BUDGET, including tails.
+            // Only a completed record is materialized for JSON parsing.
+            const limit = Math.min(stat.size, position + READ_BUDGET);
             await this.exec('BEGIN IMMEDIATE');
             try {
-                outer: while (position < stat.size) {
-                    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, stat.size - position));
+                if (reset) {
+                    await this.run('DELETE FROM partial_chunks WHERE path=?', [file]);
+                    await this.run('DELETE FROM partial_sources WHERE path=?', [file]);
+                }
+                while (position < limit) {
+                    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, limit - position));
                     const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
-                    if (!bytesRead)
-                        break;
+                    if (!bytesRead) break;
+                    const chunkStart = position;
                     position += bytesRead;
                     const buffer = chunk.subarray(0, bytesRead);
                     let start = 0;
-                    for (let end = buffer.indexOf(10, start); end >= 0; end = buffer.indexOf(10, start)) {
+                    for (let end = buffer.indexOf(10); end >= 0; end = buffer.indexOf(10, start)) {
                         const tail = buffer.subarray(start, end + 1);
-                        const line = fragments.length ? Buffer.concat([...fragments, tail]) : tail;
-                        fragments = [];
+                        let line = tail;
+                        if (offset < chunkStart + start) {
+                            const stored = await this.all<{body: Buffer}>('SELECT body FROM partial_chunks WHERE path=? ORDER BY position', [file]);
+                            line = Buffer.concat([...stored.map(r => r.body), tail]);
+                            await this.run('DELETE FROM partial_chunks WHERE path=?', [file]);
+                        }
                         const raw = line.toString('utf8').trim();
+                        let record: any;
                         if (raw) {
-                            const record = JSON.parse(raw);
-                            if (kind === 'event') {
-                                if (record.type === 'session.start')
-                                    session = record.data?.sessionId || session;
-                                if (record.data?.interactionId)
-                                    active = record.data.interactionId;
-                                else if (record.type === 'user.message')
-                                    active = record.id;
-                                if (session && EVENT_TYPES.has(record.type) && typeof record.id === 'string') {
-                                    const interaction = record.type === 'session.shutdown' ? `summary:${record.id}` : active;
-                                    await this.run('INSERT OR IGNORE INTO records VALUES(?,?,?,?,?,?,?,?)', [kind, session, record.id, interaction, record.type, '', record.timestamp || '', raw]);
-                                    if (interaction)
-                                        await this.run('INSERT OR IGNORE INTO interactions(session,id) VALUES(?,?)', [session, interaction]);
-                                }
-                            }
-                            else if (record.type === 'span' && record.attributes?.['gen_ai.conversation.id'] && record.spanId) {
-                                const a = record.attributes;
-                                const sid = a['gen_ai.conversation.id'];
-                                const interaction = a['github.copilot.interaction_id'] || '';
-                                await this.run('INSERT OR IGNORE INTO records VALUES(?,?,?,?,?,?,?,?)', [kind, sid, record.spanId, interaction, a['gen_ai.operation.name'] || '', record.traceId || '', '', raw]);
-                                if (interaction)
-                                    await this.run('INSERT OR IGNORE INTO interactions(session,id) VALUES(?,?)', [sid, interaction]);
+                            try {
+                                record = JSON.parse(raw);
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('not an object');
+                            } catch {
+                                // Complete malformed records are isolated. Never log raw prompts.
+                                this.onMalformed?.(file, offset);
+                                record = undefined;
+                                // An unreadable event may have been a session/user boundary.
+                                // Do not attach later records to the preceding interaction.
+                                if (kind === 'event') active = '';
                             }
                         }
-                        offset += line.length;
+                        if (record && kind === 'event') {
+                            if (record.type === 'session.start') {
+                                session = typeof record.data?.sessionId === 'string' ? record.data.sessionId : '';
+                                active = '';
+                            }
+                            if (typeof record.data?.interactionId === 'string') active = record.data.interactionId;
+                            else if (record.type === 'user.message') active = typeof record.id === 'string' ? record.id : '';
+                            if (session && EVENT_TYPES.has(record.type) && typeof record.id === 'string') {
+                                const interaction = record.type === 'session.shutdown' ? `summary:${record.id}` : active;
+                                if (interaction || record.type === 'session.start') {
+                                    await this.run('INSERT OR IGNORE INTO records VALUES(?,?,?,?,?,?,?,?)', [kind, session, record.id, interaction, record.type, '', typeof record.timestamp === 'string' ? record.timestamp : '', raw]);
+                                    if (interaction) await this.run('INSERT OR IGNORE INTO interactions(session,id) VALUES(?,?)', [session, interaction]);
+                                }
+                            }
+                        } else if (record?.type === 'span' && typeof record.attributes?.['gen_ai.conversation.id'] === 'string' && typeof record.spanId === 'string') {
+                            const a = record.attributes;
+                            const sid = a['gen_ai.conversation.id'];
+                            const interaction = typeof a['github.copilot.interaction_id'] === 'string' ? a['github.copilot.interaction_id'] : '';
+                            await this.run('INSERT OR IGNORE INTO records VALUES(?,?,?,?,?,?,?,?)', [kind, sid, record.spanId, interaction, typeof a['gen_ai.operation.name'] === 'string' ? a['gen_ai.operation.name'] : '', typeof record.traceId === 'string' ? record.traceId : '', '', raw]);
+                            if (interaction) await this.run('INSERT OR IGNORE INTO interactions(session,id) VALUES(?,?)', [sid, interaction]);
+                        }
+                        offset = chunkStart + end + 1;
                         start = end + 1;
-                        if (offset - begin >= READ_BUDGET)
-                            break outer;
                     }
-                    if (start < buffer.length)
-                        fragments.push(buffer.subarray(start));
+                    if (start < buffer.length) {
+                        await this.run('INSERT OR REPLACE INTO partial_chunks VALUES(?,?,?)', [file, chunkStart + start, buffer.subarray(start)]);
+                    }
                 }
                 await this.run('INSERT OR REPLACE INTO sources VALUES(?,?,?,?,?,?,?)', [file, kind, identity, offset, session, active, await anchorAt(offset)]);
+                if (position > offset) {
+                    await this.run('INSERT OR REPLACE INTO partial_sources VALUES(?,?,?)', [file, position, await anchorAt(position)]);
+                } else await this.run('DELETE FROM partial_sources WHERE path=?', [file]);
                 await this.exec('COMMIT');
-            }
-            catch (e) {
+            } catch (err) {
                 await this.exec('ROLLBACK');
-                throw e;
+                throw err;
             }
+        } finally { await handle.close(); }
+    }
+    /** Persist the unknown-capability grace window across collector restarts. */
+    async awaitingNative(session: string, interaction: string, now: number, graceMs: number): Promise<boolean> {
+        await this.run('INSERT OR IGNORE INTO native_wait VALUES(?,?,?)', [session, interaction, now]);
+        const [row] = await this.all<{since:number}>('SELECT since FROM native_wait WHERE session=? AND interaction=?', [session, interaction]);
+        return now - row.since < graceMs;
+    }
+    async hasUnreadSource(): Promise<boolean> {
+        const sources = await this.all('SELECT s.path,s.offset,p.position FROM sources s LEFT JOIN partial_sources p ON p.path=s.path');
+        for (const source of sources) {
+            try { if ((await fsp.stat(source.path)).size > (source.position ?? source.offset)) return true; }
+            catch { /* Temporary source failure is handled by its ingest call. */ }
         }
-        finally {
-            await handle.close();
-        }
+        return false;
     }
     async pending(): Promise<Array<{
         session: string;
@@ -199,6 +237,9 @@ export class CopilotSourceIndex {
                     await this.run('DELETE FROM records WHERE session=?', [source.session]);
                     await this.run('DELETE FROM interactions WHERE session=?', [source.session]);
                     await this.run('DELETE FROM delivered WHERE substr(key,1,?)=?', [`copilot:${source.session}:`.length, `copilot:${source.session}:`]);
+                    await this.run('DELETE FROM partial_chunks WHERE path=?', [source.path]);
+                    await this.run('DELETE FROM partial_sources WHERE path=?', [source.path]);
+                    await this.run('DELETE FROM native_wait WHERE session=?', [source.session]);
                     await this.run('DELETE FROM sources WHERE path=?', [source.path]);
                     await this.exec('COMMIT');
                 }

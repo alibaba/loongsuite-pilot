@@ -352,6 +352,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
@@ -871,6 +872,26 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  private buildCopilotPluginInterceptTargets(): InterceptCheckTarget[] {
+    if (process.platform === 'win32') return [];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => def.deployMode === 'copilot-plugin' && def.copilotPlugin)
+      .map(def => ({
+        id: `copilot-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success || result.skipped) throw new Error(result.error ?? 'Copilot disappeared before plugin repair');
+        },
+        cleanup: async () => {
+          if (!this.deploymentManager.hasRecord(def.id)) return;
+          if (!(await this.deploymentManager.undeployAgent(def))) throw new Error('Copilot plugin cleanup incomplete');
+        },
+      }));
   }
 
   /** Self-heal managed native plugin directories, such as Hermes plugins. */
@@ -1621,6 +1642,7 @@ export class Orchestrator extends EventEmitter {
     // --- Copilot CLI (session events.jsonl polling) ---
     const copilotLogInput = new CopilotLogInput({
       stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
       dataDir: this.config.dataDir,
     });
     this.inputManager.registerInput(copilotLogInput);

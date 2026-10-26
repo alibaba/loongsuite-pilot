@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { parse } from 'jsonc-parser';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
@@ -124,7 +125,7 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     expect(Object.keys(hooksFile.hooks).sort()).toEqual([...EVENTS].sort());
     expect(hooksFile.hooks['sessionStart'][0].command).toBe(`${HOOK_COMMAND} session-start`);
 
-    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const settings = parse(await fs.readFile(settingsPath, 'utf-8'));
     expect(settings.enabledPlugins).toEqual({ 'loongsuite-pilot@loongsuite-pilot': true });
 
     const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
@@ -148,10 +149,19 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     expect(needs).toBe(true);
   });
 
+  it('repairs a valid JSON hooks file with missing hooks structure', async () => {
+    const def = buildDef(pluginRoot, settingsPath, configPath);
+    await strategy.deploy(def);
+    await fs.writeFile(path.join(pluginRoot, 'hooks', 'hooks.json'), '{"version":1}');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
   it('needsDeploy returns true when settings.json lacks enabledPlugins entry', async () => {
     const def = buildDef(pluginRoot, settingsPath, configPath);
     await strategy.deploy(def);
-    const raw = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const raw = parse(await fs.readFile(settingsPath, 'utf-8'));
     delete raw.enabledPlugins;
     await fs.writeFile(settingsPath, JSON.stringify(raw), 'utf-8');
     const needs = await strategy.needsDeploy(def);
@@ -165,7 +175,7 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     expect(ok).toBe(true);
     expect(fsSync.existsSync(pluginRoot)).toBe(false);
 
-    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const settings = parse(await fs.readFile(settingsPath, 'utf-8'));
     expect(settings.enabledPlugins?.['loongsuite-pilot@loongsuite-pilot'] ?? false).toBe(false);
 
     const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
@@ -177,7 +187,7 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     const def = buildDef(pluginRoot, settingsPath, configPath);
     await strategy.deploy(def);
     await strategy.deploy(def);
-    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const settings = parse(await fs.readFile(settingsPath, 'utf-8'));
     const count = Object.keys(settings.enabledPlugins ?? {})
       .filter(k => k === 'loongsuite-pilot@loongsuite-pilot').length;
     expect(count).toBe(1);
@@ -198,7 +208,7 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     );
     const result = await strategy.deploy(def);
     expect(result.success).toBe(true);
-    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const settings = parse(await fs.readFile(settingsPath, 'utf-8'));
     expect(settings.enabledPlugins['spark@copilot-plugins']).toBe(true);
     expect(settings.enabledPlugins['loongsuite-pilot@loongsuite-pilot']).toBe(true);
   });
@@ -218,11 +228,50 @@ describe('CopilotPluginStrategy — deploy / needsDeploy / undeploy', () => {
     );
     const result = await strategy.deploy(def);
     expect(result.success).toBe(true);
-    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    const settings = parse(await fs.readFile(settingsPath, 'utf-8'));
     expect(settings.enabledPlugins['spark@copilot-plugins']).toBe(true);
     expect(settings.enabledPlugins['loongsuite-pilot@loongsuite-pilot']).toBe(true);
   });
 
+  it('preserves trailing-comma JSONC, comments, other plugins and file modes', async () => {
+    const def = buildDef(pluginRoot, settingsPath, configPath);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, '{// keep comment\n"user": 42, "enabledPlugins": {"other@store": true,},}\n', { mode: 0o640 });
+    await fs.writeFile(configPath, '{"userConfig":"keep", "installedPlugins":[{"name":"other"},],}');
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await fs.readFile(settingsPath, 'utf8')).toContain('// keep comment');
+    expect((await fs.stat(settingsPath)).mode & 0o777).toBe(0o640);
+    expect(parse(await fs.readFile(settingsPath, 'utf8'))).toMatchObject({ user: 42, enabledPlugins: { 'other@store': true } });
+    expect(parse(await fs.readFile(configPath, 'utf8'))).toMatchObject({ userConfig: 'keep' });
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(parse(await fs.readFile(settingsPath, 'utf8'))).toEqual({ user: 42, enabledPlugins: { 'other@store': true } });
+  });
+  it('leaves both configs untouched when either config is malformed and retains assets on failed cleanup', async () => {
+    const def = buildDef(pluginRoot, settingsPath, configPath);
+    await strategy.deploy(def);
+    await fs.writeFile(configPath, '{broken');
+    const before = await fs.readFile(settingsPath, 'utf8');
+    expect((await strategy.deploy(def)).success).toBe(false);
+    expect(await fs.readFile(settingsPath, 'utf8')).toBe(before);
+    expect(await fs.readFile(configPath, 'utf8')).toBe('{broken');
+    expect(await strategy.undeploy(def)).toBe(false);
+    expect(fsSync.existsSync(path.join(pluginRoot, 'plugin.json'))).toBe(true);
+  });
+  it('detects missing/incorrect installed registration and repairs it without deleting third-party entries', async () => {
+    const def = buildDef(pluginRoot, settingsPath, configPath);
+    await strategy.deploy(def);
+    await fs.writeFile(configPath, '{"installedPlugins":[{"name":"other"}]}');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(parse(await fs.readFile(configPath, 'utf8')).installedPlugins).toContainEqual({ name: 'other' });
+  });
+  it('does not automatically deploy Copilot on Windows', async () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    try { expect((await strategy.deploy(buildDef(pluginRoot, settingsPath, configPath))).success).toBe(false); }
+    finally { platform.mockRestore(); }
+    expect(fsSync.existsSync(pluginRoot)).toBe(false);
+  });
   it('deploy with missing copilotPlugin config fails cleanly', async () => {
     const def: AgentDefinition = {
       id: 'copilot',

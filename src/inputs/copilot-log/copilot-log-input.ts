@@ -18,6 +18,8 @@ export interface CopilotLogInputOptions extends Omit<SessionInputOptions, 'sessi
   dataDir?: string;
   otelDir?: string;
   multimodal?: unknown;
+  /** Wait for native evidence when session exporter capability is unknown. */
+  nativeGraceMs?: number;
 }
 
 /** Incrementally index source files; checkpoint only complete queued interactions.
@@ -32,12 +34,16 @@ export class CopilotLogInput extends BaseSessionInput {
   private readonly index: CopilotSourceIndex;
   private queuedKeys: string[] = [];
   private watcher?: fsSync.FSWatcher;
+  private readonly nativeGraceMs: number;
 
   constructor(opts: CopilotLogInputOptions) {
     super({ stateStore: opts.stateStore, sessionDir: opts.sessionDir ?? path.join(copilotHome(), 'session-state'),
-      filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: opts.pollIntervalMs ?? 5_000 });
+      filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: Number.isFinite(opts.pollIntervalMs) && opts.pollIntervalMs! > 0 ? opts.pollIntervalMs! : 5_000 });
     const dataDir = opts.dataDir || resolveDataDir();
-    this.index = new CopilotSourceIndex(path.join(dataDir, 'state', 'copilot', 'source-index.sqlite'));
+    this.nativeGraceMs = opts.nativeGraceMs ?? 30_000;
+    this.index = new CopilotSourceIndex(path.join(dataDir, 'state', 'copilot', 'source-index.sqlite'), (file, offset) => {
+      this.logger.warn('Skipping malformed complete Copilot record', { file, offset });
+    });
     this.otelDir = opts.otelDir || path.join(dataDir, 'state', 'copilot', 'otel');
     this.wakeupDir = path.join(dataDir, 'state', 'copilot', 'session-wakeups');
   }
@@ -45,7 +51,14 @@ export class CopilotLogInput extends BaseSessionInput {
   static getWatchPaths(): string[] { return [copilotHome()]; }
   protected override async onStart(): Promise<void> {
     await fs.mkdir(this.wakeupDir, { recursive: true, mode: 0o700 });
-    try { this.watcher = fsSync.watch(this.wakeupDir, () => this.requestCollection()); } catch { /* polling fallback */ }
+    try {
+      const watcher = fsSync.watch(this.wakeupDir, () => this.requestCollection());
+      this.watcher = watcher;
+      watcher.on('error', err => {
+        this.logger.warn('Copilot wakeup watcher failed; using polling', { error: String(err) });
+        watcher.close(); if (this.watcher === watcher) this.watcher = undefined;
+      });
+    } catch { /* polling fallback */ }
   }
   protected override async onStop(): Promise<void> { this.watcher?.close(); this.watcher = undefined; await this.index.close(); }
   protected async discoverSessionFiles(): Promise<string[]> {
@@ -70,7 +83,7 @@ export class CopilotLogInput extends BaseSessionInput {
     try { for (const n of await fs.readdir(this.otelDir)) if (n.endsWith('.jsonl')) otelFiles.add(path.join(this.otelDir, n)); } catch { /* first launch */ }
     const externalOtel = new Map<string, string>();
     const markerSessions = new Set<string>();
-    const managedOtel = fsSync.existsSync(path.join(this.otelDir, '..', 'otel-enabled'));
+
     try {
       for (const name of await fs.readdir(this.wakeupDir)) {
         if (!name.endsWith('.json')) continue;
@@ -93,8 +106,16 @@ export class CopilotLogInput extends BaseSessionInput {
     }
     for (const pending of await this.index.pending()) {
       const sid = pending.session;
-      const requireOtel = (managedOtel && !markerSessions.has(sid)) || externalOtel.has(sid) || await this.index.hasNative(sid);
+      const requireOtel = externalOtel.has(sid) || await this.index.hasNative(sid);
       const source = await this.index.load(sid, pending.id);
+      // Global installation state says nothing about an already-open terminal.
+      // Unknown sessions wait for delayed native evidence before transcript-only
+      // degradation; explicit no-file markers do not wait. Never degrade while
+      // a discovered source is still being drained.
+      if (!requireOtel && !markerSessions.has(sid) && !pending.id.startsWith('summary:')) {
+        const closed = parseInteractions(source.events, [], { requireOtel: false, contextEvents: [] }).length > 0;
+        if (!closed || await this.index.awaitingNative(sid, pending.id, Date.now(), this.nativeGraceMs) || await this.index.hasUnreadSource()) continue;
+      }
       const key = `copilot:${sid}:${pending.id}`;
       const ready = parseInteractions(source.events, source.spans, { requireOtel, contextEvents: [] }).some(b => b.key === key);
       if (!ready) continue;
@@ -102,7 +123,7 @@ export class CopilotLogInput extends BaseSessionInput {
       const batch = parseInteractions(source.events, source.spans, { requireOtel, contextEvents: context }).find(b => b.key === key);
       if (batch?.records.length) {
         this.queuedKeys = [key];
-        return batch.records; // one materialized interaction at a time
+        return batch.records.map(record => ({ ...record, 'gen_ai.copilot.telemetry.source': requireOtel ? 'native-otel' : 'transcript-only' })); // explicit degradation, never invented usage
       }
     }
     return [];

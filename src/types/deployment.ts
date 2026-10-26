@@ -148,11 +148,11 @@ export interface AgentHookConfig {
  * package's `hooks/hooks.json`. This config tells CopilotPluginStrategy:
  *
  *   - `pluginRoot`: directory where the plugin package lives
- *     (default `~/.copilot/plugins/loongsuite-pilot/com.github.copilot`).
+ *     (default `~/.copilot/installed-plugins/loongsuite-pilot/loongsuite-pilot`).
  *   - `pluginId`: stable identifier registered in `~/.copilot/settings.json`
  *     `enabledPlugins` (default `loongsuite-pilot`).
  *   - `settingsPath`: `~/.copilot/settings.json` (JSONC) — we update its
- *     `enabledPlugins` array to point at the deployed plugin package.
+ *     `enabledPlugins` object map to enable the deployed plugin package.
  *
  * `hookCommand` / `events` / `format` / `eventSubcommand` have the same
  * semantics as AgentHookConfig — they are written into the plugin's

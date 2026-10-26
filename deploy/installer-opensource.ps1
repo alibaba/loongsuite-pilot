@@ -3543,13 +3543,22 @@ function Remove-CopilotPlugin {
 }
 
 function Remove-CopilotOtelEnvironment {
+    # Best-effort legacy cleanup: Copilot automatic deployment is Unix-only.
+    # A profile access/CLM failure must not interrupt other agents or -Purge.
     foreach ($relative in @('Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1')) {
-        $profilePath = Join-Path $env:USERPROFILE $relative
-        if (Test-Path -LiteralPath $profilePath) {
-            $before = [System.IO.File]::ReadAllText($profilePath)
-            $after = [regex]::Replace($before, '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n")
-            if ($before -ne $after) { [System.IO.File]::WriteAllText($profilePath, $after, (New-Object System.Text.UTF8Encoding($false))) }
-        }
+        $tmp = $null
+        try {
+            $profilePath = Join-Path $env:USERPROFILE $relative
+            if (-not (Test-Path -LiteralPath $profilePath)) { continue }
+            $before = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8
+            $after = $before -replace '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n"
+            if ($before -ne $after) {
+                $tmp = "$profilePath.pilot-$PID.tmp"
+                Set-Content -LiteralPath $tmp -Value $after -Encoding UTF8 -NoNewline
+                Move-Item -LiteralPath (Get-PilotLongPath $tmp) -Destination (Get-PilotLongPath $profilePath) -Force
+            }
+        } catch { Write-Warning "Copilot profile cleanup incomplete; continuing uninstall" }
+        finally { if ($tmp) { Remove-PilotPathQuietly $tmp } }
     }
     Remove-Item -LiteralPath (Join-Path $DATA_DIR 'state/copilot/otel-enabled') -Force -ErrorAction SilentlyContinue
 }
@@ -3606,8 +3615,8 @@ function Cmd-Uninstall {
     # pinned runtime can disappear, matching the POSIX uninstall ordering.
     Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
     Remove-GrokBuildHookConfig
-    Remove-CopilotOtelEnvironment
-    Remove-CopilotPlugin
+    try { Remove-CopilotOtelEnvironment } catch { Write-Warning "Copilot environment cleanup failed; continuing uninstall" }
+    try { Remove-CopilotPlugin } catch { Write-Warning "Copilot plugin cleanup failed; continuing uninstall" }
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."

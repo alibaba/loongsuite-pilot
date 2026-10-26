@@ -63,6 +63,16 @@ describe('OtlpTraceFlusher - event.id dedup across re-parses', () => {
     await flusher.shutdown();
   });
 
+  it('retains non-Copilot updates with a repeated event ID', async () => {
+    const flusher = new OtlpTraceFlusher(makeConfig(), undefined, () => ({export:(_spans, cb)=>cb({code:0}),shutdown:async()=>{}}));
+    await flusher.send(makeEntry('shared-id', 'other-turn', { 'gen_ai.agent.type':'openclaw', 'gen_ai.response.model':'first' }));
+    await flusher.send(makeEntry('shared-id', 'other-turn', { 'gen_ai.agent.type':'openclaw', 'gen_ai.response.model':'corrected' }));
+    const buffers=(flusher as any).turnBuffers as Map<string, {records:AgentActivityEntry[]}>;
+    const records=[...buffers.values()].flatMap(b=>b.records);
+    expect(records.map(r=>r['gen_ai.response.model'])).toEqual(['first','corrected']);
+    await flusher.shutdown();
+  });
+
   it('does not dedup records with different event.id (distinct events)', async () => {
     const flusher = makeFlusher();
     await flusher.send(makeEntry('evt-1', 'turn-1'));

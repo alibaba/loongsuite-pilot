@@ -118,14 +118,8 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
-  // Dedup index: event.id → position in `records`. Copilot session files are
-  // re-parsed in full on every poll (parser is stateless over the whole file),
-  // so without dedup the buffer accumulates N× duplicates of the same record
-  // across polls when Signal A doesn't fire mid-session (LLMs with tool_calls
-  // have finish_reasons=['tool_calls'], non-terminal). On flush, converter
-  // would then see N× records and emit N× TOOL / ENTRY / AGENT spans.
-  // Copilot dedup merges missing fields (later polls may carry richer fields
-  // like tool.result's success/error_code/permission.* that arrive late).
+  // Copilot source event IDs are stable across legacy replays. This index
+  // intentionally leaves other producers' update semantics unchanged.
   recordIndex: Map<string, number>;
   completed: boolean;
   lastActivityMs: number;
@@ -461,7 +455,6 @@ function estimateSpanSize(span: ReadableSpan): number {
   return size;
 }
 
-/**
 /**
  * Apply QoderWork's explicit loop.iteration boundaries to STEP spans without
  * changing the enclosed LLM timestamps. The converter otherwise derives STEP
@@ -823,13 +816,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
-    // Dedup by event.id: if the same event.id was already pushed (from a prior
-    // re-parse of the same session file), deep-merge fields so earlier polls'
-    // fields (e.g. gen_ai.llm.reasoning.text that only appears on the first
-    // poll) are preserved when a later poll's record lacks them. Replace
-    // semantics (v7) lost reasoning.text + gen_ai.session.resolved_model —
-    // deep merge keeps first-non-empty value per field. Records without
-    // event.id fall through to normal append.
+    // Copilot-only duplicate merge: preserve known fields on partial replay.
+    // Other agents retain the main branch's append/update behavior.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
       ? (entry['event.id'] as string | undefined) : undefined;
     if (typeof eventId === 'string' && eventId.length > 0) {
@@ -1222,7 +1210,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
               ),
             )];
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
-          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
+          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
+          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
@@ -1467,6 +1456,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     spans: ReadableSpan[],
     records: AgentActivityEntry[],
   ): void {
+    records = records.filter(record => record['gen_ai.agent.type'] === 'copilot');
+    if (!records.length) return;
     const interactionError = records.find(r => r['gen_ai.copilot.interaction.error'])?.['gen_ai.copilot.interaction.error'];
     if (interactionError) for (const span of spans) {
       if (span.attributes['gen_ai.operation.name'] === 'invoke_agent') {

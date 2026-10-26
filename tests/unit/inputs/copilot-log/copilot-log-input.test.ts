@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -8,7 +8,7 @@ import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
 const dirs:string[]=[];
 const inputs:CopilotLogInput[]=[];
 const tracked=(i:CopilotLogInput)=>{inputs.push(i);return i;};
-afterEach(async()=>{for(const i of inputs.splice(0))await (i as any).onStop();await Promise.all(dirs.splice(0).map(d=>fs.rm(d,{recursive:true,force:true})));});
+afterEach(async()=>{vi.restoreAllMocks();for(const i of inputs.splice(0))await (i as any).onStop();await Promise.all(dirs.splice(0).map(d=>fs.rm(d,{recursive:true,force:true})));});
 const lines=(xs:any[])=>xs.map(x=>JSON.stringify(x)).join('\n')+'\n';
 async function setup(){
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'copilot-hybrid-'));dirs.push(dir);
@@ -20,6 +20,51 @@ async function setup(){
 const collect=(i:CopilotLogInput)=>(i as any).collect();
 const queued=(i:CopilotLogInput)=>(i as any).onEntriesQueued();
 describe('Copilot incremental recovery',()=>{
+ it('degrades unknown old-shell sessions after a durable grace window, regardless of global installation',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));
+  await fs.writeFile(path.join(x.dir,'otel-enabled'),'managed');
+  const now=vi.spyOn(Date,'now').mockReturnValue(100_000);
+  expect(await collect(x.input)).toEqual([]);await (x.input as any).onStop();
+  const next=tracked(new CopilotLogInput({stateStore:x.state,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel}));
+  now.mockReturnValue(129_999);expect(await collect(next)).toEqual([]);
+  now.mockReturnValue(130_000);const records=await collect(next);
+  expect(records.some((r:any)=>r['event.name']==='llm.response')).toBe(true);
+  expect(records.every((r:any)=>r['gen_ai.copilot.telemetry.source']==='transcript-only')).toBe(true);
+  expect(records.find((r:any)=>r['event.name']==='llm.response')['gen_ai.usage.input_tokens']).toBeUndefined();
+  await queued(next);const later=conversation({interaction:'interaction-b',base:10});
+  await fs.appendFile(x.file,lines(later.events.slice(1)));
+  expect(await collect(next)).toEqual([]);
+  now.mockReturnValue(160_000);expect((await collect(next)).length).toBeGreaterThan(0);
+ });
+ it('accepts delayed native data within grace with exact per-call usage',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));
+  const now=vi.spyOn(Date,'now').mockReturnValue(100_000);expect(await collect(x.input)).toEqual([]);
+  now.mockReturnValue(125_000);await fs.writeFile(x.native,lines(f.spans));
+  const records=await collect(x.input);expect(records.find((r:any)=>r['event.name']==='llm.response')['gen_ai.usage.input_tokens']).toBe(100);
+  expect(records[0]['gen_ai.copilot.telemetry.source']).toBe('native-otel');
+ });
+ it('uses explicit per-session no-exporter evidence without waiting and keeps known exporters pending',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));
+  const markers=path.join(x.dir,'state/copilot/session-wakeups');await fs.mkdir(markers,{recursive:true});
+  await fs.writeFile(path.join(markers,'session-test.json'),JSON.stringify({session_id:'session-test',otel_file:x.native}));
+  expect(await collect(x.input)).toEqual([]);
+  await fs.writeFile(path.join(markers,'session-test.json'),JSON.stringify({session_id:'session-test'}));
+  expect((await collect(x.input)).length).toBeGreaterThan(0);
+ });
+ it('falls back to polling after an asynchronous watcher error',async()=>{
+  const x=await setup();await (x.input as any).onStart();
+  expect(()=> (x.input as any).watcher.emit('error',new Error('watch failed'))).not.toThrow();
+  expect((x.input as any).watcher).toBeUndefined();
+  const f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));
+  expect((await collect(x.input)).length).toBeGreaterThan(0);
+ });
+ it('uses a valid configured polling interval and defaults invalid values',async()=>{
+  const x=await setup();
+  for(const [value,expected] of [[1234,1234],[0,5000],[-1,5000],[NaN,5000]]){
+   const input=tracked(new CopilotLogInput({stateStore:x.state,dataDir:x.dir,pollIntervalMs:value}));
+   expect((input as any).pollIntervalMs).toBe(expected);
+  }
+ });
  it('reconstructs read-but-not-queued data after restart',async()=>{
   const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));
   const first=await collect(x.input);expect(first.length).toBeGreaterThan(0);await x.state.save();
@@ -69,7 +114,8 @@ describe('Copilot incremental recovery',()=>{
   await handle.write(lines(f.spans)+'{"type":');await handle.close();
   expect(await collect(x.input)).toEqual([]);
   const indexed=(await (x.input as any).index.all('SELECT offset FROM sources WHERE path=?',[x.native]))[0].offset;
-  expect(indexed).toBeGreaterThan(4*1024*1024);
+  expect(indexed).toBeGreaterThan(0);expect(indexed).toBeLessThanOrEqual(4*1024*1024);
+  expect((await (x.input as any).index.all('SELECT position FROM partial_sources WHERE path=?',[x.native]))[0].position).toBe(4*1024*1024);
   await (x.input as any).onStop();
   const next=tracked(new CopilotLogInput({stateStore:x.state,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel}));
   let result:any[]=[];for(let n=0;n<40&&!result.length;n++)result=await collect(next);
