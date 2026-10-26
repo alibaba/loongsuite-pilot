@@ -120,6 +120,7 @@ describe('Doubao native persisted sandbox execution contract', () => {
           'loongsuite.doubao_work.native_execution_id': `00000000-0000-4000-8000-00000000000${i}`,
           'loongsuite.doubao_work.native_query_message_id': '00000000-0000-4000-8000-000000000001',
           'loongsuite.doubao_work.native_sandbox_id': 'native-sandbox', 'loongsuite.doubao_work.native_creation_call_id': `create-${i}`,
+          'loongsuite.doubao_work.native_thread_id': String(100 + i),
           'loongsuite.doubao_work.parent_resolution': i === 2 ? 'root_request_ancestor' : 'same_query_native_execution',
           ...(i === 3 ? { 'loongsuite.doubao_work.native_parent_execution_id': '00000000-0000-4000-8000-000000000002' } : {}),
         } : {}),
@@ -142,11 +143,24 @@ describe('Doubao native persisted sandbox execution contract', () => {
     ['loongsuite.doubao_work.relation_basis', 'temporal_proximity'],
     ['loongsuite.doubao_work.native_ancestor_ids', ['unrelated']],
     ['loongsuite.doubao_work.root_turn_id', 'another'],
+    ['loongsuite.doubao_work.native_thread_id', 'missing'],
+    ['loongsuite.doubao_work.parent_resolution', 'guess'],
   ])('rejects unproven execution evidence: %s', (key, value) => {
     const trace = sample(); trace.spans[2].attributes[key] = value;
     expect(isDoubaoNativeExecution(trace.spans[2], trace.spans[1])).toBe(false);
     expect(validateStructure(trace).some(c => c.status === 'error')).toBe(true);
     expect(validateTime(trace, traceRules).some(c => c.status === 'error')).toBe(true);
+  });
+  test('accepts only canonical bounded CMS ancestry array encoding', () => {
+    const trace = sample();
+    trace.spans[2].attributes['loongsuite.doubao_work.native_ancestor_ids'] = '["m_native"]';
+    trace.spans[3].attributes['loongsuite.doubao_work.native_ancestor_ids'] = '["o_native","m_native"]';
+    expect(isDoubaoNativeExecution(trace.spans[2], trace.spans[1])).toBe(true);
+    expect(isDoubaoNativeExecution(trace.spans[3], trace.spans[2])).toBe(true);
+    for (const bad of ['m_native', '["m_native",123]', '[ "m_native" ]', '{"parent":"m_native"}']) {
+      trace.spans[2].attributes['loongsuite.doubao_work.native_ancestor_ids'] = bad;
+      expect(isDoubaoNativeExecution(trace.spans[2], trace.spans[1])).toBe(false);
+    }
   });
   test('requires matching parent execution, query, sandbox and actual containment', () => {
     for (const [key, value] of [
