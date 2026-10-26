@@ -1021,6 +1021,11 @@ export function validateSemantic(trace, rules) {
     for (const t of toolSpans) {
       const args = t.attributes?.['gen_ai.tool.call.arguments'];
       if (args === undefined || args === null || args === '') {
+        if (isDoubaoLocalTool(t, trace.spanMap.get(t.parentSpanId))) {
+          checks.push(skipped('semantic.tool_has_arguments', 'Doubao local execution source does not expose payloads', t.spanId, t.name));
+          allHaveArgs = false;
+          continue;
+        }
         checks.push(error('semantic.tool_has_arguments',
           `TOOL ${t.attributes?.['gen_ai.tool.name'] || t.name} missing gen_ai.tool.call.arguments`,
           t.spanId, t.name));

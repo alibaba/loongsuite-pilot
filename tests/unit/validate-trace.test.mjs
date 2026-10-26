@@ -118,11 +118,14 @@ describe('Doubao local execution observation contract', () => {
     const trace = sample();
     expect(isDoubaoLocalTool(trace.spans[2], trace.spans[1])).toBe(true);
     expect(validateStructure(trace).filter(c => c.status === 'error')).toEqual([]);
+    expect(validateSemantic(trace, traceRules).filter(c => c.id === 'semantic.tool_has_arguments'))
+      .toContainEqual(expect.objectContaining({ status: 'skipped' }));
   });
   test.each([['codex', true], ['doubao-work', false]])('does not exempt ordinary or unmarked tools (%s)', (framework, marker) => {
     const trace = sample(framework, marker);
     expect(isDoubaoLocalTool(trace.spans[2], trace.spans[1])).toBe(false);
     expect(validateStructure(trace).some(c => c.id === 'structure.tool_under_step' && c.status === 'error')).toBe(true);
+    expect(validateSemantic(trace, traceRules).some(c => c.id === 'semantic.tool_has_arguments' && c.status === 'error')).toBe(true);
   });
 });
 
