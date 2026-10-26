@@ -100,7 +100,7 @@ export function buildNativeToolFragment(
   if (!rootEvents.length || BigInt(pair.start.timeNano) < BigInt(root.queryMs) * 1_000_000n) return [];
   const traceId = rootEvents[0].trace_id!;
   const fragment = doubaoDigest(JSON.stringify([scope, traceId, call.sandboxId, actor, call.id]));
-  const fragmentPending = { ...root, selectedSkills: undefined, selectedPartners: undefined,
+  const fragmentPending = { ...root, firstOutput: undefined, selectedSkills: undefined, selectedPartners: undefined,
     turnId: actor, queryMs: Number(BigInt(pair.start.timeNano) / 1_000_000n) };
   const terminal = { ...root.terminal, queryMs: fragmentPending.queryMs, timeNano: pair.end.timeNano, clientOutcome: 'ended' as const };
   // The shared builder's millisecond guard cannot represent a sub-ms fragment;

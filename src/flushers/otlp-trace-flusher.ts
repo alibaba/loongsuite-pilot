@@ -17,7 +17,7 @@ import {
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertCodexTurn } from './codex-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
-import { convertDoubaoWorkTurn, enrichDoubaoWorkTools, enrichDoubaoNativeFragments } from './doubao-work-converter.js';
+import { convertDoubaoWorkTurn, enrichDoubaoWorkTools, enrichDoubaoNativeFragments, enrichDoubaoFirstOutput } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
@@ -1273,6 +1273,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         this.enrichDoubaoWorkSpans(records, spans);
         enrichDoubaoWorkTools(records, spans);
         enrichDoubaoNativeFragments(records, spans);
+        enrichDoubaoFirstOutput(records, spans);
       }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });

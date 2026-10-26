@@ -5,9 +5,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { DoubaoWorkInput } from '../../../src/inputs/doubao-work/doubao-work-input.js';
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
+import * as executionReader from '../../../src/inputs/doubao-work/doubao-work-execution.js';
 
-class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
+class ProbeInput extends DoubaoWorkInput {
+  constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
+  poll() { return this.collect(); }
+}
 const temporary: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(temporary.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 
@@ -30,6 +34,44 @@ async function setup(initial = '') {
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it('retains a unique native first output across restart and emits it once with source time', async () => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
+    await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + doubaoFirstOutputLine({ prompt: 'SYNTHETIC_PRIVATE' }));
+    expect(await input.poll()).toEqual([]);
+    await stateStore.save(); const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    await appendFile(file, doubaoFirstOutputLine({}, 1100) + doubaoLine('on_message_session_end'));
+    const events = await restarted.poll();
+    const llm = events.filter(e => e['event.name'].startsWith('llm.'));
+    expect(llm).toHaveLength(2);
+    expect(llm.map(e => e.time_unix_nano)).toEqual([DOUBAO_EPOCH, DOUBAO_EPOCH + 1000].map(ms => (BigInt(ms) * 1_000_000n).toString()));
+    expect(llm.every(e => e['loongsuite.doubao_work.llm_completeness'] === 'first_output_only')).toBe(true);
+    expect(JSON.stringify(events)).not.toMatch(/SYNTHETIC_PRIVATE|gen_ai\.request\.model|gen_ai\.usage|finish_reason/);
+    expect(await restarted.poll()).toEqual([]);
+  });
+
+  it.each(['conflict', 'ambiguous-task', 'no-start', 'future-receipt', 'after-terminal', 'different-task'])('does not invent a model observation for %s', async mode => {
+    const { file, input } = await setup();
+    const start = mode === 'no-start' ? '' : doubaoLine('on_message_session_start', {}, 10);
+    const extra = mode === 'ambiguous-task' ? doubaoLine('on_message_session_start', { query_send_timestamp: DOUBAO_EPOCH + 20 }, 30) : '';
+    const first = doubaoFirstOutputLine(mode === 'different-task' ? { task_session_id: 'other', event_instance_id: 'other:sync:6:1' }
+      : mode === 'future-receipt' ? { duration: 2000 } : mode === 'after-terminal' ? { duration: 3500 } : {}, mode === 'after-terminal' ? 3600 : 1002);
+    const conflict = mode === 'conflict' ? doubaoFirstOutputLine({ duration: 1001 }, 1100) : '';
+    await appendFile(file, start + extra + first + conflict + doubaoLine('on_message_session_end'));
+    expect((await input.poll()).filter(e => e['event.name'].startsWith('llm.'))).toEqual([]);
+  });
+
+  it('caps native metadata scans independently of repeated log polls', async () => {
+    const { stateStore, logs, sessionsRoot, snapshotRoot, file } = await setup();
+    const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot, snapshotRoot, nativeScanIntervalMs: 10_000 });
+    const reader = vi.spyOn(executionReader, 'readNativeExecutions').mockResolvedValue([]);
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
+    await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + doubaoLine('on_message_session_end'));
+    await input.poll(); expect(reader).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 20; i++) await input.poll();
+    expect(reader).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(11_000); await input.poll(); expect(reader).toHaveBeenCalledTimes(2);
+  });
   it.each([['success', true], ['error', false], ['cancelled', false]] as const)('preserves native parent evidence across restart (Write status=%s)', async (status, mutationExpected) => {
     const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
     const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';

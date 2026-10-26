@@ -40,7 +40,11 @@ interface Checkpoint {
   nativeMutationActors?: Record<string, { callId: string; updatedMs: number }>;
 }
 
-export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string; sessionsRoot?: string; snapshotRoot?: string }
+export interface DoubaoWorkInputOptions extends InputOptions {
+  logDir?: string; sessionsRoot?: string; snapshotRoot?: string;
+  /** Native metadata has no watcher. Limit scans independently of log wakeups. */
+  nativeScanIntervalMs?: number;
+}
 
 /** Read-only macOS adapter for Doubao Work 2.33.10's frontend message lifecycle. */
 export class DoubaoWorkInput extends BaseInput {
@@ -54,6 +58,8 @@ export class DoubaoWorkInput extends BaseInput {
   private watcher: FSWatcher | undefined;
   private wakeup: ReturnType<typeof setTimeout> | undefined;
   private warnedFileLimit = false;
+  private readonly nativeScanIntervalMs: number;
+  private nextNativeScanAt = 0;
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
@@ -61,6 +67,7 @@ export class DoubaoWorkInput extends BaseInput {
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
     this.sessionsRoot = opts.sessionsRoot ?? (this.logDir ? path.resolve(this.logDir, '../../Default/.doubaowork/agent_mode/workspace/.sessions') : undefined);
     this.snapshotRoot = opts.snapshotRoot ?? (this.logDir ? path.resolve(this.logDir, '../../coding/snapshot') : undefined);
+    this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
   }
 
   static defaultLogDir(): string | undefined {
@@ -90,7 +97,7 @@ export class DoubaoWorkInput extends BaseInput {
         this.wakeup = setTimeout(() => {
           this.wakeup = undefined;
           this.requestCollection();
-        }, 100);
+        }, 1000);
         this.wakeup.unref();
       });
       this.watcher.on('error', () => {
@@ -236,8 +243,11 @@ export class DoubaoWorkInput extends BaseInput {
     // records. A partial scan must not finalize requests ahead of unread tools.
     if (drained) {
       for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
-      await this.completeNative(next, entries);
-      await this.completeNativeExecutions(next, entries);
+      if (performance.now() >= this.nextNativeScanAt) {
+        this.nextNativeScanAt = performance.now() + this.nativeScanIntervalMs;
+        await this.completeNative(next, entries);
+        await this.completeNativeExecutions(next, entries);
+      }
     }
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
@@ -261,6 +271,17 @@ export class DoubaoWorkInput extends BaseInput {
   private consume(
     state: Checkpoint, event: DoubaoLogEvent,
   ): void {
+    if (event.firstOutput) {
+      // Native task UUID is the join key. Ambiguous/replayed tasks are never
+      // joined by time proximity, directory order, answer text or polling time.
+      const matches = Object.values(state.pending).filter(p => p.turnId === event.turnId && p.startObserved
+        && p.queryMs >= state.sinceMs && BigInt(p.queryMs) * 1_000_000n <= BigInt(event.timeNano));
+      if (matches.length !== 1) return;
+      const pending = matches[0];
+      if (pending.firstOutput && JSON.stringify(pending.firstOutput.firstOutput) !== JSON.stringify(event.firstOutput)) pending.firstOutputConflict = true;
+      pending.firstOutput ??= event;
+      return;
+    }
     if (event.command) {
       if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;
       const box = state.sandboxes![event.command.sandboxId] ?? { actors: [], updatedMs: Date.now() };
@@ -338,7 +359,7 @@ export class DoubaoWorkInput extends BaseInput {
       const pairs = matched.flatMap(([, tool]) => !tool.conflict && tool.start && tool.end ? [{ start: tool.start, end: tool.end }] : []);
       const complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
       if (complete.length === 0) return;
-      const omitted = matched.length - (complete.length - 2) / 2;
+      const omitted = matched.length - complete.filter(entry => entry['event.name'] === 'tool.call').length;
       if (omitted) this.logger.warn('Doubao Work local tools lack a complete unambiguous in-request boundary; omitted', { tools: omitted });
       entries.push(...complete);
       // Keep the actual root boundary for late child fragments. The sandbox

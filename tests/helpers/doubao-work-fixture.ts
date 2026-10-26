@@ -19,6 +19,14 @@ export function doubaoLine(name: string, meta: Record<string, unknown> = {}, ela
   return `[100:200:${clock}:INFO:FRONTEND(0)] [neotix] [office-api-logger] "[webview][unknown][flow-web][logifier-report]: ${JSON.stringify(payload)}", source: (0)\n`;
 }
 
+export function doubaoFirstOutputLine(meta: Record<string, unknown> = {}, elapsedMs = 1002): string {
+  return doubaoLine('flow_message_time', {
+    task_session_id: 'synthetic-turn', metric_scene: 'sse', ev_name: 'cot_first_token', ev_type: 'query_duration',
+    event_instance_id: 'synthetic-turn:sync:6:1', task_stage: 'sync', is_recovery: false, occurrence_index: 1,
+    duration: 1000, answer_id: 'synthetic-answer', message_id: 'synthetic-query', ...meta,
+  }, elapsedMs);
+}
+
 export function doubaoToolLine(
   data: Record<string, unknown>, elapsedMs: number, extraMicros = 123,
 ): string {

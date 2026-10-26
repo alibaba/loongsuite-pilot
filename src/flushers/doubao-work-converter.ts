@@ -1,4 +1,4 @@
-import { convertEventLogToTrace, type EventLogRecord, type ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
+import { convertEventLogToTrace, createLLMInvocation, createReactStepInvocation, type EventLogRecord, type ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { ROOT_CONTEXT, SpanStatusCode, trace, TraceFlags } from '@opentelemetry/api';
 import type { AgentActivityEntry } from '../types/index.js';
@@ -7,12 +7,11 @@ import { doubaoDigest, doubaoRootAgentSpanId } from '../inputs/doubao-work/douba
 type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]>;
 const BOUNDARY = 'client_received_to_execution_settled';
 
-/** Local execution logs contain no model/React step. Make only the converter's
- * implicit STEP transparent; actual tools remain children of the request AGENT. */
+/** Only the native first-output pair has a known model boundary. Subsequent
+ * tools keep their own native AGENT parent rather than acquiring a fake round. */
 export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Options & { handler: ExtendedTelemetryHandler }) {
-  if (records.some(record => record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response')) {
-    return convertEventLogToTrace(records, options);
-  }
+  const model = records.filter(record => record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response');
+  const base = records.filter(record => record['event.name'] !== 'llm.request' && record['event.name'] !== 'llm.response');
   let steps = 0;
   let entries = 0;
   const fragment = records.find(record => ['native_local_tool_fragment', 'native_sandbox_execution'].includes(String(record['loongsuite.doubao_work.observation_scope'])));
@@ -34,9 +33,38 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  const local = parent ? records.map(record => { const copy = { ...record }; delete copy['gen_ai.agent.scope']; return copy; }) : records;
+  const local = parent ? base.map(record => { const copy = { ...record }; delete copy['gen_ai.agent.scope']; return copy; }) : base;
   const result = convertEventLogToTrace(local, { ...options, handler: wrapped });
-  return { ...result, spanCount: result.spanCount - steps - entries };
+  const request = model.find(record => record['event.name'] === 'llm.request');
+  const response = model.find(record => record['event.name'] === 'llm.response');
+  let observed = 0;
+  if (!fragment && model.length === 2 && request && response
+    && request['loongsuite.doubao_work.observation_scope'] === 'native_first_model_output'
+    && response['loongsuite.doubao_work.observation_scope'] === 'native_first_model_output'
+    && request['gen_ai.step.id'] === response['gen_ai.step.id']
+    && /^[0-9a-f]{64}$/.test(String(request['gen_ai.step.id']))
+    && /^[0-9a-f]{32}$/.test(String(request.trace_id))
+    && request.trace_id === response.trace_id
+    && typeof request.time_unix_nano === 'string' && /^\d{19}$/.test(request.time_unix_nano)
+    && typeof response.time_unix_nano === 'string' && /^\d{19}$/.test(response.time_unix_nano)
+    && BigInt(response.time_unix_nano) > BigInt(request.time_unix_nano)) {
+    const attributes: Record<string, unknown> = { 'gen_ai.framework': 'doubao-work' };
+    for (const [key, value] of Object.entries(request)) {
+      if (key.startsWith('loongsuite.doubao_work.') || key === 'gen_ai.turn.id' || key === 'gen_ai.step.id') attributes[key] = value;
+    }
+    const common = { attributes, sessionId: String(request['gen_ai.session.id']), userId: String(request['user.id']), agentName: 'Doubao Work' };
+    const ctx = trace.setSpanContext(ROOT_CONTEXT, { traceId: String(request.trace_id),
+      spanId: doubaoRootAgentSpanId(String(request.trace_id)), traceFlags: TraceFlags.SAMPLED });
+    const start = Number(BigInt(request.time_unix_nano) / 1_000_000n), end = Number(BigInt(response.time_unix_nano) / 1_000_000n);
+    const step = createReactStepInvocation(common);
+    options.handler.startReactStep(step, ctx, start);
+    const llm = createLLMInvocation({ ...common, provider: 'bytedance.doubao' });
+    options.handler.startLlm(llm, step.contextToken ?? ctx, start);
+    options.handler.stopLlm(llm, end);
+    options.handler.stopReactStep(step, end);
+    observed = 2;
+  }
+  return { ...result, spanCount: result.spanCount - steps - entries + observed };
 }
 
 function reserveSpanId(span: ReadableSpan, id: string): void {
@@ -132,6 +160,25 @@ function setTimes(span: ReadableSpan, start: string, end: string): void {
     endTime: { value: nanoTime(end), configurable: true },
     duration: { value: nanoTime((BigInt(end) - BigInt(start)).toString()), configurable: true },
   });
+}
+
+/** Explicitly label the partial observation and reserve source-derived IDs.
+ * Native answer IDs are message IDs, so they never become model response IDs. */
+export function enrichDoubaoFirstOutput(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+  const request = records.find(record => record['event.name'] === 'llm.request'
+    && record['loongsuite.doubao_work.observation_scope'] === 'native_first_model_output');
+  const response = records.find(record => record['event.name'] === 'llm.response'
+    && record['gen_ai.step.id'] === request?.['gen_ai.step.id']);
+  if (!request || !response || typeof request.span_id !== 'string') return;
+  const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+  const llm = spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+  if (!step || !llm) return;
+  const stepId = doubaoDigest(`${request['gen_ai.step.id']}:step`).slice(0, 16);
+  reserveSpanId(step, stepId);
+  reserveSpanId(llm, request.span_id);
+  Object.assign(llm, { parentSpanId: stepId, name: 'chat (first reasoning output only)' });
+  Object.assign(step, { name: 'react (first output observation)' });
+  for (const span of [step, llm]) setTimes(span, request.time_unix_nano, response.time_unix_nano);
 }
 
 /** Preserve native microsecond boundaries even for tools shorter than one ms.

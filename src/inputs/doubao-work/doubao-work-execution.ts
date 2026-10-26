@@ -133,7 +133,7 @@ export function buildNativeExecutionEvents(
   const parent = parents.length === 1 && parents[0].startedAtMs <= e.startedAtMs && parents[0].endedAtMs >= e.endedAtMs
     ? parents[0] : undefined;
   const identity = doubaoDigest(JSON.stringify([scope, traceId, e.executionKey]));
-  const pending = { ...root, turnId: e.agentId, queryMs: e.startedAtMs, selectedSkills: undefined, selectedPartners: undefined };
+  const pending = { ...root, firstOutput: undefined, turnId: e.agentId, queryMs: e.startedAtMs, selectedSkills: undefined, selectedPartners: undefined };
   const terminal = { ...root.terminal, queryMs: e.startedAtMs, timeNano: (BigInt(e.endedAtMs) * 1_000_000n).toString(), clientOutcome: 'ended' as const };
   return buildDoubaoTaskEvents(scope, pending, terminal, observedMs).map((event, index) => ({
     ...event, trace_id: traceId, 'event.id': doubaoDigest(`${identity}:event:${index}`),

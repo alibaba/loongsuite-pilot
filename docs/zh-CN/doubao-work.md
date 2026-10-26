@@ -6,7 +6,15 @@
 
 Pilot 关联客户端消息提交和结束事件，输出同一会话、轮次下的一对任务边界事件（`other`）和 ENTRY → AGENT Trace。边界采用源提交时间和客户端会话结束日志时间；提交时间保留源毫秒精度，日志时间保留源微秒精度。它表示客户端请求轮次，不能用来声称云端任务及其内部步骤已全部完成。
 
-不提取 Prompt、回答、reasoning、工具参数/结果，也不生成 LLM Span、模型、Token、成本或模型 TTFT。`自动` 模型选项不是真实模型 ID。日志里的 SSE/render 首输出延迟不是模型原生 TTFT。
+不提取 Prompt、回答、reasoning、工具参数/结果。满足下述原生依据时，可生成首输出观测的 STEP → LLM；模型、Token、成本和模型 TTFT 仍不可得。`自动` 模型选项不是真实模型 ID。
+
+## 首次模型输出观测
+
+只接受 `flow_message_time` 中 `metric_scene=sse`、`ev_name=cot_first_token`、`ev_type=query_duration`、同步且非恢复的首次标记。原生任务 ID 必须唯一关联已观察到提交的新请求。起点为原生 `query_send_timestamp`，终点为该时间加原生 `duration`；客户端生产者定义此 duration 为 SSE 接收时间减提交时间。日志写出时间只作为上界，读取时间、渲染时间和文件 mtime 均不参与推断。
+
+导出 `chat (first reasoning output only)`，标记 `observation_scope=native_first_model_output`、`llm_boundary=client_submit_to_first_cot_receipt`、`llm_completeness=first_output_only`。这段时间包含排队、上下文处理与网络等待，不能当作完整模型调用耗时或模型 TTFT；后续 ReAct 轮次、完整流式输出及子 Agent 的 LLM 仍无覆盖。没有该标记、只有答复/加载/结束标记、恢复/异步标记、冲突或缺少提交关联时，不生成 LLM。已导出请求之后才到的标记不补推。
+
+模型名、模型响应 ID、finish reason、Token 以及思考正文均不猜测；native answer ID 保留为原生消息属性。源事件 ID 只用于观测去重，不解释为模型调用 ID。首次输出之后用户取消任务，不会把已观察到的 LLM 首输出改成失败。该区间的 STEP 是局部观测，后续本地 TOOL 仍直接挂在有原生归属证据的 AGENT 下。
 
 客户端可在返回算力/订阅限制通知后仍记录 `session_success=1`。因此对所有轮次保留 `business_outcome=unknown`，正常接收的根 Span 使用 UNSET 状态；源端明确报告客户端失败或取消时，根 Span 标为 ERROR。这不是对业务任务成功率的推断。
 
@@ -33,7 +41,7 @@ Agent type/framework 为 `doubao-work`，Agent system 为 `doubao`，provider �
 
 本地工具时间表示客户端收到调用到本地执行结算的观察区间，包含分发/确认等待，不等于云端模型发起到接收结果的全链路耗时。原生工具名、调用 ID、受限状态与正的毫秒耗时被保留；不读取命令、参数、输出或原始错误。`success` 只表示原生本地执行结算状态，不推断业务结果或 Bash 命令退出码。
 
-TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识这个边界。由于未观察到模型与 React 步骤，Trace 为 ENTRY → AGENT → TOOL，不补造 STEP/LLM。通用 validator 仅针对这个明确标识和 Doubao framework 接受 TOOL 直接挂 AGENT；其他 Agent 的 STEP/LLM 检查保持严格。该边界也明确不包含工具参数，缺少参数按源不适用记录。旧 validator 若要求 STEP → TOOL 或无条件要求参数，会报告契约不兼容；验收同时保留原始失败结果与本候选公开契约校验，普通工具的参数检查不放宽。
+TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识这个边界。由于没有后续模型轮次边界，工具分支保持 ENTRY → AGENT → TOOL。通用 validator 仅针对这个明确标识和 Doubao framework 接受 TOOL 直接挂 AGENT；其他 Agent 的 STEP/LLM 检查保持严格。该边界也明确不包含工具参数，缺少参数按源不适用记录。旧 validator 若要求 STEP → TOOL 或无条件要求参数，会报告契约不兼容；验收同时保留原始失败结果与本候选公开契约校验，普通工具的参数检查不放宽。
 
 普通任务内工具缺少一端、ID/工具名冲突、没有唯一请求归属或超出客户端请求时间时省略。能以原生 sandbox 与委派图唯一关联的子工具，可独立导出晚到片段；其他后台调用不补推归属。云端 `calculator`、`web.fetch`、`create_agent` 等仅在无时间的轨迹中出现时不生成工具耗时。子 Agent 验收需分别覆盖复用、嵌套、晚到与重启，不能仅由普通任务 Trace 证明。
 
@@ -74,7 +82,7 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 `listeners.doubao-work.logDir` 可覆盖只读源日志目录（支持 `~`），用于自定义本机安装目录。该目录与 Pilot 的输出 `dataDir` 不同。`agents.d` 使用 `detection-only`，没有需要安装、修复或卸载的宿主 Hook；停用 listener 或 Agent 即停止采集。
 
-使用目录变更唤醒和轮询兜底。checkpoint 保留完整行 offset、文件边界指纹、待关联请求和已完成轮次。支持半行、重启、轮转、原地截断后增长和临时不可读；首次启用前的请求不从单独结束事件重建。单次读取最多 1 MiB，每轮最多 8 MiB，最多读取最新 128 个日志文件；超长行跳过至换行。待关联请求最多 512 个/24 小时，工具配对状态最多 4096 个/24 小时，完成去重最多 4096 个/7 天。超出边界不承诺完整采集或 exactly-once。
+使用目录变更唤醒和轮询兜底；日志唤醒合并到每秒最多一次，原生图和快照扫描独立限制为每 10 秒最多一轮，避免高频日志反复触发大文件读取。首输出复用已有日志增量读取，不新增数据源或客户端回调；无关 SDK 事件在 JSON 解析前过滤。checkpoint 保留完整行 offset、文件边界指纹、待关联请求和已完成轮次。支持半行、重启、轮转、原地截断后增长和临时不可读；首次启用前的请求不从单独结束事件重建。单次读取最多 1 MiB，每轮最多 8 MiB，最多读取最新 128 个日志文件；超长行跳过至换行。待关联请求最多 512 个/24 小时，工具配对状态最多 4096 个/24 小时，完成去重最多 4096 个/7 天。超出边界不承诺完整采集或 exactly-once。
 
 日志缺失、协议变更或无稳定关联/时间时，不生成猜测的 Trace。适配器只提取受限身份、状态与原生委派关系，不读取浏览器 Cookie、认证缓存或消息数据库；原生轨迹中的 Prompt、命令、输出及错误正文不进入事件或 Span。仍遵循统一身份处理与脱敏配置。
 

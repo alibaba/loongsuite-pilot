@@ -2,13 +2,48 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { buildDoubaoTaskEvents, parseDoubaoLogLine } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine, doubaoToolLine } from '../../../helpers/doubao-work-fixture.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../../helpers/doubao-work-fixture.js';
 import { DOUBAO_NATIVE_FILES } from '../../../helpers/doubao-work-fixture.js';
 import { buildNativeToolFragment, parseNativeGraph } from '../../../../src/inputs/doubao-work/doubao-work-native.js';
 import { doubaoRootAgentSpanId } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
 import { buildNativeExecutionEvents, nativeExecutionSpanId, type NativeExecution } from '../../../../src/inputs/doubao-work/doubao-work-execution.js';
 
 describe('Doubao Work task-level OTLP', () => {
+  it.each([false, true])('exports only the evidenced first LLM interval while later tools retain native parents (cancelled=%s)', async cancelled => {
+    const terminal = parseDoubaoLogLine(doubaoLine('on_message_session_end', cancelled ? { cancel_source: 'stop_button' } : {}), DOUBAO_FILE)!;
+    const firstOutput = parseDoubaoLogLine(doubaoFirstOutputLine(), DOUBAO_FILE)!;
+    const pair = {
+      start: parseDoubaoLogLine(doubaoToolLine({}, 2000).trimEnd(), DOUBAO_FILE)!,
+      end: parseDoubaoLogLine(doubaoToolLine({ toolCallID: 'synthetic-call', phase: 'execution_settled', status: 'success' }, 2100).trimEnd(), DOUBAO_FILE)!,
+    };
+    const events = buildDoubaoTaskEvents('test', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
+      conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH, firstOutput }, terminal, Date.now(), [pair])
+      .map(e => ({ ...e, 'user.id': 'synthetic-user' }));
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-first-output' }, undefined, () => ({
+      export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
+    }));
+    try {
+      await flusher.sendBatch(events); await vi.waitFor(() => expect(spans).toHaveLength(5));
+      const get = (kind: string) => spans.find(s => s.attributes['gen_ai.span.kind'] === kind)!;
+      expect(get('STEP').parentSpanId).toBe(get('AGENT').spanContext().spanId);
+      expect(get('LLM').parentSpanId).toBe(get('STEP').spanContext().spanId);
+      expect(get('TOOL').parentSpanId).toBe(get('AGENT').spanContext().spanId);
+      for (const span of [get('STEP'), get('LLM')]) {
+        expect(span.startTime).toEqual([DOUBAO_EPOCH / 1000, 0]);
+        expect(span.endTime).toEqual([DOUBAO_EPOCH / 1000 + 1, 0]);
+        expect(span.duration).toEqual([1, 0]);
+        expect(span.status.code).toBe(0);
+        expect(span.attributes['loongsuite.doubao_work.llm_completeness']).toBe('first_output_only');
+        expect(span.attributes['gen_ai.user.id']).toBe('synthetic-user');
+      }
+      expect(get('AGENT').status.code).toBe(cancelled ? 2 : 0);
+      expect(get('LLM').spanContext().spanId).toBe(events.find(e => e['event.name'] === 'llm.request')!.span_id);
+      expect(get('LLM').name).toBe('chat (first reasoning output only)');
+      expect(JSON.stringify([get('LLM').attributes, get('STEP').attributes])).not.toMatch(/gen_ai\.(usage|request\.model|response\.(model|id)|react\.finish_reason)|time_to_first_token/);
+      await flusher.flush(); expect(spans).toHaveLength(5);
+    } finally { await flusher.shutdown(); }
+  });
   it('exports one independent AGENT per native execution with exact own time and observed parent run', async () => {
     const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: conv, localMessageId: query, updatedMs: DOUBAO_EPOCH,
