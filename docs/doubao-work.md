@@ -47,6 +47,16 @@ Each settled local tool is an immutable fragment: ENTRY → root AGENT → organ
 
 Native scans are limited to one known conversation per cycle, 64 Agents, 2 MiB per file, 8 MiB total and depth 8. Transient/incomplete graph reads retain pending tools. Root/sandbox contexts retain up to 512 items/24 hours and fragment deduplication 4096 items/7 days. The validator permits asynchronous direct AGENT ancestry only for this explicit native fragment contract; ordinary topology/timing checks remain strict.
 
+## Native sandbox executions
+
+The native `entry-moa` execution manager generates an execution UUID and persists metadata under `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json`. Its `execution.startedAtMs` is recorded after the native `getOrCreateSandbox` callback; `endedAtMs` is recorded during release after modified-file capture. These exact millisecond fields produce one independent AGENT with `observation_scope=native_sandbox_execution`, `agent_boundary=native_sandbox_get_or_create_to_release`, and `timing_basis=native_execution_startedAtMs_endedAtMs`. Polling time, mtime and tool intervals do not supply these boundaries.
+
+The native query message ID must match a newly observed root local message ID, with consistent native sandbox actors. Creation trajectories establish native Agent ancestry. A parent execution is selected only when exactly one enclosing execution has the native parent Agent identity, the same query and the same sandbox. A checkpointed 30-second grace period allows a late parent snapshot to arrive. Otherwise the span links to the observed root request with `parent_resolution=root_request_ancestor`; native parent identity and ancestry remain explicit, without invented intermediate spans. Already exported edges are immutable.
+
+The client persists these snapshots only for executions with tracked file mutations. Pure Read/Bash, cloud-only Agents and missing snapshots have no complete execution coverage. This is a local sandbox lifetime, including release-time capture, not a full cloud inference lifetime or proof of each cloud dispatch. Tool fragments remain a separate observation scope and must not be counted as additional complete invocations.
+
+Only a known fresh conversation is read, with limits of eight account directories, 128 execution files, 2 MiB per file and 8 MiB per cycle. Symlinks are not followed. Account identity, file paths and file contents are never projected into events. Partial/transient reads defer completion; execution deduplication retains 4096 IDs for seven days. Checkpoints acknowledge the InputManager queue boundary, not end-to-end output delivery.
+
 ## Configuration
 
 The default source is `~/Library/Application Support/DoubaoWork/sdk_storage/log/saman_frontend_YYYY.MMDD.N.log`. The client must already produce frontend logs; Pilot does not enable debug logging. On first activation, existing logs are baselined; only subsequently observed request boundaries are collected.

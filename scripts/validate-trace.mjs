@@ -63,6 +63,7 @@ export function isDoubaoLocalTool(tool, parent) {
 // Native create_agent ancestry is observable without a timed dispatch TOOL.
 // These AGENTs explicitly describe a local tool fragment, not a full invocation.
 export function isDoubaoNativeAgent(child, parent) {
+  if (isDoubaoNativeExecution(child, parent)) return true;
   const attrs = child?.attributes || {};
   const parentAttrs = parent?.attributes || {};
   const parentScope = parentAttrs['loongsuite.doubao_work.observation_scope']
@@ -83,6 +84,45 @@ export function isDoubaoNativeAgent(child, parent) {
     && attrs['gen_ai.agent.parent.id'] === attrs['loongsuite.doubao_work.root_agent_id']
     && Boolean(attrs['loongsuite.doubao_work.root_agent_id'])
     && attrs['loongsuite.doubao_work.root_turn_id'] === parentAttrs['gen_ai.turn.id'];
+}
+
+function hasDoubaoExecutionIdentity(attrs) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const ancestors = attrs['loongsuite.doubao_work.native_ancestor_ids'];
+  return attrs['gen_ai.framework'] === 'doubao-work'
+    && attrs['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
+    && attrs['loongsuite.doubao_work.agent_boundary'] === 'native_sandbox_get_or_create_to_release'
+    && attrs['loongsuite.doubao_work.timing_basis'] === 'native_execution_startedAtMs_endedAtMs'
+    && attrs['loongsuite.doubao_work.relation_basis'] === 'native_create_agent_ancestry'
+    && uuid.test(attrs['loongsuite.doubao_work.native_execution_id'] || '')
+    && uuid.test(attrs['loongsuite.doubao_work.native_query_message_id'] || '')
+    && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
+    && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_sandbox_id'] || '')
+    && Array.isArray(ancestors) && ancestors.length > 0 && ancestors.length <= 8
+    && ancestors.every(value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value))
+    && ancestors[0] === attrs['gen_ai.agent.parent.id']
+    && ancestors.at(-1) === attrs['loongsuite.doubao_work.root_agent_id']
+    && Boolean(attrs['loongsuite.doubao_work.root_turn_id']);
+}
+
+// These timestamps cover a persisted local sandbox execution, including release
+// capture. They never assert a whole cloud invocation or manufacture ancestors.
+export function isDoubaoNativeExecution(child, parent) {
+  const attrs = child?.attributes || {}, p = parent?.attributes || {};
+  if (child?._kind !== 'AGENT' || parent?._kind !== 'AGENT' || !hasDoubaoExecutionIdentity(attrs)
+    || p['gen_ai.framework'] !== 'doubao-work') return false;
+  if (attrs['loongsuite.doubao_work.parent_resolution'] === 'same_query_native_execution') {
+    return hasDoubaoExecutionIdentity(p)
+      && attrs['gen_ai.agent.parent.id'] === p['gen_ai.agent.id']
+      && attrs['loongsuite.doubao_work.native_parent_execution_id'] === p['loongsuite.doubao_work.native_execution_id']
+      && attrs['loongsuite.doubao_work.native_query_message_id'] === p['loongsuite.doubao_work.native_query_message_id']
+      && attrs['loongsuite.doubao_work.native_sandbox_id'] === p['loongsuite.doubao_work.native_sandbox_id']
+      && attrs['loongsuite.doubao_work.root_turn_id'] === p['loongsuite.doubao_work.root_turn_id'];
+  }
+  return attrs['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'
+    && !attrs['loongsuite.doubao_work.native_parent_execution_id']
+    && (p['loongsuite.doubao_work.observation_scope'] ?? parent.resource?.['loongsuite.doubao_work.observation_scope']) === 'client_message'
+    && attrs['loongsuite.doubao_work.root_turn_id'] === p['gen_ai.turn.id'];
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -232,6 +272,7 @@ function hasExternalDelegationParent(span, spanMap) {
     !spanMap.has(span.parentSpanId) &&
     Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
       span.attributes?.['gen_ai.subagent.parent_tool_call.id'] ||
+      (hasDoubaoExecutionIdentity(span.attributes || {}) && span.attributes?.['agent.pilot.parent.turn.id']) ||
       (span.attributes?.['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment'
         && span.attributes?.['loongsuite.doubao_work.relation_basis'] === 'native_create_agent_ancestry'
         && /^[0-9a-f]{64}$/.test(span.attributes?.['loongsuite.doubao_work.fragment_id'] || '')
@@ -509,7 +550,10 @@ export function validateTime(trace, rules) {
     for (const c of children) {
       const cStart = BigInt(c.startTimeUnixNano);
       const cEnd = BigInt(c.endTimeUnixNano);
-      const delegatedAgent = (s._kind === 'TOOL' && c._kind === 'AGENT') || isDoubaoNativeAgent(c, s);
+      const nativeAgent = isDoubaoNativeAgent(c, s);
+      const delegatedAgent = (s._kind === 'TOOL' && c._kind === 'AGENT') || (nativeAgent
+        && (c.attributes?.['loongsuite.doubao_work.observation_scope'] !== 'native_sandbox_execution'
+          || c.attributes?.['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'));
       if (cStart < pStart || (!delegatedAgent && cEnd > pEnd)) {
         checks.push(error('time.parent_contains_children',
           `child ${c.name} [${cStart}-${cEnd}] outside parent ${s.name} [${pStart}-${pEnd}]`,

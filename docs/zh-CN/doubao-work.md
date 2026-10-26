@@ -51,6 +51,16 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 每轮最多扫描一个已知会话、64 个 Agent、每文件 2 MiB、总计 8 MiB，最大祖先深度 8；源失败不删除已完成配对。主请求与 sandbox 上下文各保留 512 项/24 小时，片段去重最多 4096 项/7 天。缺少原生证据则不生成子 Span。
 
+## 原生 sandbox 独立执行
+
+客户端 `entry-moa` 的执行管理器为本地 Agent 上下文生成独立 UUID，并在 `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json` 的 `execution` 中保存 `startedAtMs`、`endedAtMs`、`queryMessageId` 和 `sandboxId`。这是另一类可验证的数据源：开始是 `getOrCreateSandbox` 返回后的原生回调，结束是释放上下文时完成文件捕获后的原生回调。起止直接取这两个毫秒字段；文件 mtime、首次读到时间和工具区间均不参与计算。
+
+只有客户端实际落盘的完整记录才能生成 `observation_scope=native_sandbox_execution` 的独立 AGENT Span。`native_execution_id` 区分同一 Agent 的不同执行；`native_query_message_id` 必须精确匹配新采集主请求的 local message ID，同一 sandbox 的原生命令 actor 也必须一致。创建轨迹提供原生父 Agent 身份；同一 query、sandbox 中只有一个覆盖子执行的父执行记录时，才链接其独立 Span。为父执行落盘最多等待 30 秒（等待状态可恢复）；仍缺失或有歧义时链接已观察的主请求，标记 `parent_resolution=root_request_ancestor` 并保留真实父 Agent ID 与祖先链，不制造中间 Span。已导出的父边不因后续落盘而重写。
+
+该记录的边界为 `agent_boundary=native_sandbox_get_or_create_to_release`，时间依据为 `timing_basis=native_execution_startedAtMs_endedAtMs`。客户端只持久化具有被跟踪文件变更的执行；纯 Read/Bash、无本地工具或未保存记录的云端子 Agent 没有完整执行覆盖。此 Span 表达本地 sandbox 生命周期，包含释放时的捕获开销，不能视为云端完整推理耗时或逐次云端 dispatch 证明。现有 `native_local_tool_fragment` 继续表达工具观测；两种 scope 不可混为调用次数或累计耗时。
+
+只扫描新请求已确认的 conversation，每轮最多一个会话、8 个账户目录、128 个执行/文件，每文件 2 MiB、总计 8 MiB；不沿符号链接读其他目录。只投影 execution 的受限身份与时间，账户 ID、文件路径和文件正文不输出。半写、临时不可读或冲突保留 checkpoint 重试；执行 ID 去重最多 4096 项/7 天，恢复不回放已完成执行。该 checkpoint 仍遵循 InputManager 的队列接收边界，不承诺输出端 exactly-once。
+
 ## 配置与发现
 
 默认数据源：`~/Library/Application Support/DoubaoWork/sdk_storage/log/saman_frontend_YYYY.MMDD.N.log`。客户端须已产生该日志；Pilot 不自动启用调试日志。首次启用跳过已有历史，此后仅采集新增且起止均被观察到的轮次。

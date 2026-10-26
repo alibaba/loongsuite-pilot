@@ -7,6 +7,7 @@ import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
 import { buildNativeToolFragment, readNativeGraph } from './doubao-work-native.js';
+import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
 
 const FILE_PATTERN = /^saman_frontend_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -17,6 +18,7 @@ const MAX_COMPLETED = 4096;
 const MAX_TOOLS = 4096;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPLETED_TTL_MS = 7 * PENDING_TTL_MS;
+const EXECUTION_PARENT_GRACE_MS = 30_000;
 
 interface FileCursor { identity: string; offset: number; anchor?: string; skippingLine?: boolean }
 interface PendingTurn extends DoubaoPendingTurn { startObserved: boolean; terminal?: DoubaoLogEvent }
@@ -32,9 +34,12 @@ interface Checkpoint {
   sandboxes?: Record<string, { actors: string[]; conflict?: boolean; updatedMs: number }>;
   nativeCompleted?: Record<string, number>;
   nativeScanCursor?: string;
+  executionsCompleted?: Record<string, { digest: string; updatedMs: number }>;
+  executionScanCursor?: string;
+  executionFirstSeen?: Record<string, number>;
 }
 
-export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string; sessionsRoot?: string }
+export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string; sessionsRoot?: string; snapshotRoot?: string }
 
 /** Read-only macOS adapter for Doubao Work 2.33.10's frontend message lifecycle. */
 export class DoubaoWorkInput extends BaseInput {
@@ -44,6 +49,7 @@ export class DoubaoWorkInput extends BaseInput {
   private readonly logDir: string | undefined;
   private readonly scope: string;
   private readonly sessionsRoot: string | undefined;
+  private readonly snapshotRoot: string | undefined;
   private watcher: FSWatcher | undefined;
   private wakeup: ReturnType<typeof setTimeout> | undefined;
   private warnedFileLimit = false;
@@ -53,6 +59,7 @@ export class DoubaoWorkInput extends BaseInput {
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : DoubaoWorkInput.defaultLogDir();
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
     this.sessionsRoot = opts.sessionsRoot ?? (this.logDir ? path.resolve(this.logDir, '../../Default/.doubaowork/agent_mode/workspace/.sessions') : undefined);
+    this.snapshotRoot = opts.snapshotRoot ?? (this.logDir ? path.resolve(this.logDir, '../../coding/snapshot') : undefined);
   }
 
   static defaultLogDir(): string | undefined {
@@ -144,6 +151,8 @@ export class DoubaoWorkInput extends BaseInput {
     next.roots ??= {};
     next.sandboxes ??= {};
     next.nativeCompleted ??= {};
+    next.executionsCompleted ??= {};
+    next.executionFirstSeen ??= {};
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
     let remainingBytes = CYCLE_BYTES;
@@ -226,6 +235,7 @@ export class DoubaoWorkInput extends BaseInput {
     if (drained) {
       for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
       await this.completeNative(next, entries);
+      await this.completeNativeExecutions(next, entries);
     }
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
@@ -239,6 +249,8 @@ export class DoubaoWorkInput extends BaseInput {
     compact(next.roots, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
     compact(next.sandboxes, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
     compact(next.nativeCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
+    compact(next.executionsCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item.updatedMs);
+    compact(next.executionFirstSeen, MAX_COMPLETED, PENDING_TTL_MS, item => item);
     this.setState({ extra: { doubaoWork: next } });
     return entries;
   }
@@ -361,6 +373,56 @@ export class DoubaoWorkInput extends BaseInput {
       entries.push(...fragment);
       state.nativeCompleted![key] = Date.now();
       delete state.tools![key];
+    }
+  }
+
+  private async completeNativeExecutions(state: Checkpoint, entries: AgentActivityEntry[]): Promise<void> {
+    if (!this.sessionsRoot || !this.snapshotRoot) return;
+    const roots = Object.values(state.roots ?? {}).filter(root => root.conversationId && root.localMessageId);
+    const conversations = [...new Set(roots.map(root => root.conversationId!))].sort();
+    if (!conversations.length) return;
+    const after = conversations.indexOf(state.executionScanCursor ?? '');
+    const conversationId = conversations[(after + 1) % conversations.length];
+    state.executionScanCursor = conversationId;
+    let executions, graph;
+    try {
+      // One conversation per cycle, with independent byte/file limits on each
+      // native source. No cursor, mtime or polling time becomes a span boundary.
+      executions = await readNativeExecutions(this.snapshotRoot, conversationId);
+      if (!executions.length) return;
+      graph = await readNativeGraph(this.sessionsRoot, conversationId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.logger.warn('Doubao Work native execution metadata unavailable; preserving checkpoint');
+      return;
+    }
+    if (!graph) return;
+    for (const execution of executions) {
+      if (execution.startedAtMs < state.sinceMs) continue;
+      const matched = roots.filter(root => root.conversationId === execution.conversationId && root.localMessageId === execution.queryMessageId);
+      if (matched.length !== 1) continue;
+      const root = matched[0], box = state.sandboxes?.[execution.sandboxId];
+      // Independent native actors and the root request must agree on the same
+      // sandbox. Never correlate by wall-clock proximity or directory mtime.
+      if (!box || box.conflict || !box.actors.includes(root.turnId) || !box.actors.includes(execution.agentId)
+        || box.actors.filter(actor => !/^[mos]_[a-zA-Z0-9]+$/.test(actor)).length !== 1) continue;
+      const digest = doubaoDigest(JSON.stringify(execution)), prior = state.executionsCompleted![execution.executionKey];
+      if (prior) {
+        if (prior.digest !== digest) this.logger.warn('Doubao Work completed native execution changed; not exporting a conflicting span');
+        continue;
+      }
+      const eligible = executions.filter(candidate => candidate.startedAtMs >= state.sinceMs && box.actors.includes(candidate.agentId));
+      const events = buildNativeExecutionEvents(this.scope, root, graph, execution, eligible, Date.now());
+      if (!events.length) continue;
+      const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
+      // Child snapshots may persist before their parent's release. Give the
+      // native parent a bounded opportunity to arrive, across collector restarts.
+      // This affects emission latency only, never either execution timestamp.
+      if (graph.edges[execution.agentId]?.parent !== graph.main
+        && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'
+        && Date.now() - firstSeen < EXECUTION_PARENT_GRACE_MS) continue;
+      entries.push(...events);
+      state.executionsCompleted![execution.executionKey] = { digest, updatedMs: Date.now() };
+      delete state.executionFirstSeen![execution.executionKey];
     }
   }
 }

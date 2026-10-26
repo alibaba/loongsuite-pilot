@@ -6,8 +6,46 @@ import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine, doubaoToolLine } from '../../../
 import { DOUBAO_NATIVE_FILES } from '../../../helpers/doubao-work-fixture.js';
 import { buildNativeToolFragment, parseNativeGraph } from '../../../../src/inputs/doubao-work/doubao-work-native.js';
 import { doubaoRootAgentSpanId } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
+import { buildNativeExecutionEvents, nativeExecutionSpanId, type NativeExecution } from '../../../../src/inputs/doubao-work/doubao-work-execution.js';
 
 describe('Doubao Work task-level OTLP', () => {
+  it('exports one independent AGENT per native execution with exact own time and observed parent run', async () => {
+    const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
+    const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: conv, localMessageId: query, updatedMs: DOUBAO_EPOCH,
+      terminal: { ...parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, conversationId: conv } };
+    const parent: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv, queryMessageId: query,
+      agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 9000 };
+    const leaf: NativeExecution = { ...parent, executionKey: '00000000-0000-4000-8000-000000000003', agentId: 's_nativeLeaf', agentType: 'sub_agent',
+      startedAtMs: DOUBAO_EPOCH + 5000, endedAtMs: DOUBAO_EPOCH + 8000 };
+    const reused: NativeExecution = { ...leaf, executionKey: '00000000-0000-4000-8000-000000000004', startedAtMs: DOUBAO_EPOCH + 10000, endedAtMs: DOUBAO_EPOCH + 11000 };
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-execution-unit' }, undefined, () => ({
+      export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
+    }));
+    try {
+      await flusher.sendBatch(buildDoubaoTaskEvents('scope', root, root.terminal, Date.now()));
+      await vi.waitFor(() => expect(spans).toHaveLength(2));
+      for (const execution of [parent, leaf, reused]) await flusher.sendBatch(buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, execution, [parent, leaf, reused], Date.now()));
+      await vi.waitFor(() => expect(spans).toHaveLength(5));
+      const native = spans.filter(s => s.attributes['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution');
+      expect(native).toHaveLength(3);
+      const nano = (t: number[]) => BigInt(t[0]) * 1_000_000_000n + BigInt(t[1]);
+      for (const e of [parent, leaf, reused]) {
+        const span = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === e.executionKey)!;
+        expect(span.spanContext().spanId).toBe(nativeExecutionSpanId('scope', e.executionKey));
+        expect(nano(span.startTime)).toBe(BigInt(e.startedAtMs) * 1_000_000n);
+        expect(nano(span.endTime)).toBe(BigInt(e.endedAtMs) * 1_000_000n);
+        expect(nano(span.duration)).toBe(BigInt(e.endedAtMs - e.startedAtMs) * 1_000_000n);
+        expect(span.attributes['gen_ai.span.kind']).toBe('AGENT'); expect(span.status.code).toBe(0);
+      }
+      const child = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === leaf.executionKey)!;
+      expect(child.parentSpanId).toBe(nativeExecutionSpanId('scope', parent.executionKey));
+      const repeat = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === reused.executionKey)!;
+      expect(repeat.parentSpanId).toBe(doubaoRootAgentSpanId(child.spanContext().traceId));
+      expect(repeat.attributes['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
+      expect(spans.some(s => ['LLM', 'STEP', 'TOOL'].includes(String(s.attributes['gen_ai.span.kind'])))).toBe(false);
+    } finally { await flusher.shutdown(); }
+  });
   it('exports late nested AGENT fragments with precise real tool intervals and native parents', async () => {
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH,
       terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
