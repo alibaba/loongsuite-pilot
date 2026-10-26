@@ -962,7 +962,6 @@ export default {
     const userId = resolveUserId(cfg);
     return setupV2(ctx, {
       writeRecord, writeError, inferProviderName, recordUpstreamEnvOnce,
-      captureMessageContent: cfg.agents?.opencode?.captureMessageContent !== false,
       common: (sessionID, session) => buildCommonFields(sessionID, session, userId, ctx.location.directory),
     });
   },

@@ -17,7 +17,10 @@
 // bare node startup instead of the daemon's full module graph.
 //
 // It deliberately reuses HookStrategy/PluginInjectStrategy verbatim instead of
-// reimplementing injection synchronously. The hookCommand string those produce
+// reimplementing injection synchronously. `hook install` deploys through the
+// same strategies. This path does not write the hook-install result file, so an
+// eager inject cannot flip the container into recorded scope. The hookCommand
+// string those produce
 // must match the daemon's byte for byte, because the daemon's later pass asks
 // `isHookInstalled` — a one-character divergence reads as "not installed" and
 // appends a SECOND hook entry, making every event fire twice. Sharing the code

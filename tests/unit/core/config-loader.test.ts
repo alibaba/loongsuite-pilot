@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -9,7 +10,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -26,6 +27,13 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('loads workspace exclusions and rejects invalid privacy rules', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
+    expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['relative'] } });
+    await expect(loadConfig()).rejects.toThrow('absolute local directories');
+  });
+
   it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
     vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
     mockReadJsonFile.mockResolvedValueOnce({
@@ -307,19 +315,19 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(true);
       expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
-      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
-      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -356,6 +364,53 @@ describe('ConfigLoader', () => {
       // at it; leaving it on the removed sqlite/session listeners would make the
       // env var silently inert.
       expect(config.listeners['qoder-trace'].pollInterval).toBe(45000);
+    });
+
+    it('applies one poll interval env to every listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          qoder: { enabled: false, pollInterval: 120_000 },
+          'kiro-cli-session': { enabled: true, pollInterval: 60_000 },
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
+
+      const config = await loadConfig();
+
+      expect(config.listeners.qoder).toEqual({ enabled: false, pollInterval: 3000 });
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(3000);
+      expect(config.listeners['cursor-hook'].pollInterval).toBe(3000);
+      expect(config.listeners['codex-transcript'].pollInterval).toBe(3000);
+      expect(config.listeners['hermes-agent-log'].pollInterval).toBe(3000);
+      expect(config.listeners['kiro-cli-session']).toEqual({ enabled: true, pollInterval: 3000 });
+      expect(config.listeners.workbuddy.pollInterval).toBe(3000);
+    });
+
+    it('ignores a non-positive or non-numeric unified poll interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '0');
+
+      const zero = await loadConfig();
+      expect(zero.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', 'nope');
+
+      const invalid = await loadConfig();
+      expect(invalid.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      for (const raw of ['0.4', '3', '1e5', '0x10', '2147483648']) {
+        mockReadJsonFile.mockResolvedValueOnce(null);
+        vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', raw);
+        const ignored = await loadConfig();
+        expect(ignored.listeners['cursor-hook'].pollInterval).toBe(10_000);
+      }
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '1000');
+      const accepted = await loadConfig();
+      expect(accepted.listeners['cursor-hook'].pollInterval).toBe(1_000);
     });
   });
 
@@ -495,7 +550,7 @@ describe('ConfigLoader', () => {
       expect(config.agents).toEqual({});
     });
 
-    it('loads per-agent captureMessageContent overrides', async () => {
+    it('ignores legacy per-agent captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: false },
@@ -504,12 +559,19 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(false);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.qoder).toEqual({});
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('deprecated and ignored'),
+        { locations: [
+          'agents.cursor.captureMessageContent',
+          'agents.qoder.captureMessageContent',
+        ] },
+      );
     });
 
-    it('parses string boolean captureMessageContent values', async () => {
+    it('ignores legacy string captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'false' },
@@ -518,11 +580,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(false);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.qoder).toEqual({});
     });
 
-    it('falls back to capturing message content for invalid or omitted values', async () => {
+    it('does not expose legacy captureMessageContent in resolved agent config', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'sometimes' },
@@ -531,8 +593,8 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(true);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.agents.cursor).not.toHaveProperty('captureMessageContent');
+      expect(config.agents.qoder).not.toHaveProperty('captureMessageContent');
     });
 
     it('ignores unsupported agent fields for this stage', async () => {
@@ -546,7 +608,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+      expect(config.agents.cursor).toEqual({});
     });
 
     it('parses agents with enabled field', async () => {
@@ -559,9 +621,9 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents['claude-code']).toEqual({ enabled: true, captureMessageContent: true });
-      expect(config.agents['cursor']).toEqual({ enabled: false, captureMessageContent: true });
-      expect(config.agents['codex']).toEqual({ enabled: true, captureMessageContent: false });
+      expect(config.agents['claude-code']).toEqual({ enabled: true });
+      expect(config.agents['cursor']).toEqual({ enabled: false });
+      expect(config.agents['codex']).toEqual({ enabled: true });
     });
 
     it('backward compat: empty agents config means no gate', async () => {
@@ -584,10 +646,9 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.agents.codex).toEqual({
-        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       });
-      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+      expect(config.agents.cursor).toEqual({});
     });
 
     it('parses agent multimodal allowedRootPaths and expands ~', async () => {
@@ -1749,6 +1810,7 @@ describe('ConfigLoader', () => {
         collectTrace: true,
         otlpTrace: {
           endpoint: 'http://jaeger:4318',
+          captureMessageContent: false,
           headers: { 'X-Custom': 'val' },
           resourceAttributes: { 'team': 'infra' },
           serviceName: 'my-svc',
@@ -1773,6 +1835,12 @@ describe('ConfigLoader', () => {
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
+      expect(config.otlpTrace).not.toHaveProperty('captureMessageContent');
+      expect(result).not.toHaveProperty('captureMessageContent');
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('deprecated and ignored'),
+        { locations: ['otlpTrace.captureMessageContent'] },
+      );
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {

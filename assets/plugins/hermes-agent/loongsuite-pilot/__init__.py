@@ -51,9 +51,35 @@ _PROCESS_FILE_TOKEN = "%s-%s-%s" % (
     secrets.token_hex(4),
 )
 _STATE_LOCK = threading.RLock()
+# Never hold this lock during file I/O or native callbacks. Closing an API and
+# observing its first delta must be atomic without waiting for another turn's
+# synchronous JSONL append. Lock order is STATE -> TTFT, never the reverse.
+_TTFT_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
+# Detached retry snapshots retain no other active turns/session state.
+_EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+
+
+def _stream_api_for_agent(agent: Any) -> Optional[Dict[str, Any]]:
+    # New Hermes executes each hook in an isolated copy_context worker: setting
+    # a ContextVar there cannot update the caller. Match the native agent's
+    # explicit turn/task identity, never the latest request in a session.
+    session_id = getattr(agent, "session_id", None)
+    turn_id = getattr(agent, "_current_turn_id", None)
+    task_id = getattr(agent, "_current_task_id", None)
+    if not session_id or not (turn_id or task_id):
+        return None
+    with _STATE_LOCK:
+        candidates = []
+        for turn in _SESSIONS.get(session_id, {}).get("turns", {}).values():
+            if turn_id and turn.get("observer_turn_id") != turn_id:
+                continue
+            if task_id and turn.get("task_id") != task_id:
+                continue
+            candidates.extend(api for api in turn["apis"] if api.get("post_ns") is None)
+        return candidates[0] if len(candidates) == 1 else None
 
 
 def _install_first_delta_observer() -> None:
@@ -66,12 +92,24 @@ def _install_first_delta_observer() -> None:
     try:
         module = sys.modules.get("run_agent") or sys.modules.get("__main__")
         agent_class = getattr(module, "AIAgent", None)
+        owner, attribute = agent_class, "_interruptible_streaming_api_call"
         original = getattr(agent_class, "_interruptible_streaming_api_call", None)
         if not callable(original):
             return
+        # New Hermes facades lazily forward (*args, **kwargs). Wrap the known
+        # native helper instead; guessing a generic wrapper's argument layout
+        # would change callbacks on unrelated/older hosts.
+        if (getattr(original, "__module__", "") == "agent.lazy_forward"
+                and "on_first_delta" not in inspect.signature(original).parameters):
+            owner = importlib.import_module("agent.chat_completion_helpers")
+            attribute = "interruptible_streaming_api_call"
+            original = getattr(owner, attribute, None)
+            if not callable(original):
+                return
         if hasattr(original, "_pilot_ttft_context"):
             # Plugin rediscovery must use the new module's request context.
             original._pilot_ttft_context = _TTFT_API
+            original._pilot_ttft_resolve = _stream_api_for_agent
             return
         signature = inspect.signature(original)
         parameter = signature.parameters.get("on_first_delta")
@@ -84,6 +122,8 @@ def _install_first_delta_observer() -> None:
         def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
             api = observed._pilot_ttft_context.get()
             observed._pilot_ttft_context.set(None)
+            if api is None:
+                api = observed._pilot_ttft_resolve(agent)
             # Other wire protocols do not share the same first-output semantics.
             if (
                 api is None or api.get("post_ns") is not None
@@ -100,7 +140,7 @@ def _install_first_delta_observer() -> None:
             def first_delta(*callback_args: Any, **callback_kwargs: Any) -> Any:
                 try:
                     first_ns = time.perf_counter_ns()
-                    with _STATE_LOCK:
+                    with _TTFT_LOCK:
                         if (
                             not getattr(agent, "_disable_streaming", False)
                             and api.get("post_ns") is None
@@ -117,7 +157,8 @@ def _install_first_delta_observer() -> None:
             return original(*bound.args, **bound.kwargs)
 
         observed._pilot_ttft_context = _TTFT_API
-        agent_class._interruptible_streaming_api_call = observed
+        observed._pilot_ttft_resolve = _stream_api_for_agent
+        setattr(owner, attribute, observed)
     except Exception:
         # Older Hermes versions retain event collection without TTFT.
         pass
@@ -265,21 +306,6 @@ def _report_internal_error(operation: str, error: Exception) -> None:
         "[loongsuite-pilot] %s failed: %s" % (operation, type(error).__name__),
         file=sys.stderr,
     )
-
-
-def _capture_message_content(config: Dict[str, Any]) -> bool:
-    agents = config.get("agents")
-    if not isinstance(agents, dict):
-        return True
-    agent_config = agents.get("hermes-agent")
-    if not isinstance(agent_config, dict):
-        agent_config = agents.get("hermes")
-    if not isinstance(agent_config, dict):
-        return True
-    value = agent_config.get("captureMessageContent")
-    if value is False:
-        return False
-    return not (isinstance(value, str) and value.strip().lower() == "false")
 
 
 def _hostname() -> str:
@@ -600,6 +626,7 @@ def _session(session_id: str) -> Dict[str, Any]:
                     try:
                         _flush_turn(evicted, turn, {})
                     except Exception as error:
+                        _defer_evicted_turn(evicted, turn)
                         _report_internal_error("session eviction flush", error)
     else:
         _SESSIONS.pop(session_id, None)
@@ -620,6 +647,12 @@ def _new_turn(
     parent = _read_parent_context(session_id)
     if parent and user_identity["source"] in ("config", "hostname"):
         user_identity = {"user_id": parent["user_id"], "source": "parent"}
+    elif not normalized_sender_id and user_identity["source"] in ("config", "hostname"):
+        previous = _SESSIONS.get(session_id, {}).get("sender_identity")
+        if previous:
+            user_identity = dict(previous)
+    if normalized_sender_id and user_identity["source"] == "sender":
+        _session(session_id)["sender_identity"] = dict(user_identity)
     return {
         "session_id": session_id,
         "task_id": None,
@@ -633,7 +666,6 @@ def _new_turn(
         "user_id": user_identity["user_id"],
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
-        "capture_content": _capture_message_content(config),
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
         "history_length": max(1, history_length),
         "apis": [],
@@ -674,14 +706,43 @@ def _remember_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[st
         state["turn_count"] = min(2, state["turn_count"] + 1)
     state["turns"][turn["fallback_turn_id"]] = turn
     while len(state["turns"]) > MAX_ACTIVE_TURNS:
-        oldest = next(iter(state["turns"].values()))
-        _flush_turn(state, oldest, {})
+        oldest = next(candidate for candidate in state["turns"].values() if candidate is not turn)
+        try:
+            _flush_turn(state, oldest, {})
+        except Exception as error:
+            # A failing lifecycle flush remains retryable in the active map;
+            # capacity eviction must still make room for this hook's turn.
+            _defer_evicted_turn(state, oldest)
+            _report_internal_error("turn eviction flush", error)
+
+
+def _defer_evicted_turn(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
+    key = turn["fallback_turn_id"]
+    state["turns"].pop(key, None)
+    _EVICTED_TURNS[key] = ({
+        "model": state.get("model"), "platform": state.get("platform"),
+        "turns": {key: turn}, "finalize_requested": False,
+    }, turn)
+    while len(_EVICTED_TURNS) > MAX_ACTIVE_TURNS:
+        _EVICTED_TURNS.pop(next(iter(_EVICTED_TURNS)))
+        _report_internal_error("eviction retry capacity", RuntimeError("dropping oldest evicted turn"))
 
 
 def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    state["turns"].pop(turn["fallback_turn_id"], None)
     if any(api.get("post_ns") is not None for api in turn["apis"]):
-        _write_records(_build_records(turn, state, payload))
+        _write_new_records(turn, _build_records(turn, state, payload, final=True))
+    if turn["apis"]:
+        api = turn["apis"][-1]
+        step_id, _ = _api_ids(turn, api)
+        terminal = _common_fields(turn, state, "other", time.time_ns(), step_id, api["span_id"])
+        terminal.update({
+            "gen_ai.provider.name": _provider_name((api.get("pre") or {}).get("provider")),
+            "agent.hermes.hook": "turn_end",
+            "gen_ai.turn.end": True,
+        })
+        _write_new_records(turn, [terminal])
+    # A failed append must leave the turn available for lifecycle/exit retry.
+    state["turns"].pop(turn["fallback_turn_id"], None)
     if state["finalize_requested"] and not state["turns"]:
         session_id = turn["session_id"]
         if _SESSIONS.get(session_id) is state:
@@ -720,7 +781,7 @@ def _numeric(value: Any) -> Optional[int]:
     return None
 
 
-def _tool_calls(message: Dict[str, Any], capture_content: bool) -> List[Dict[str, Any]]:
+def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     calls = message.get("tool_calls")
     if not isinstance(calls, list):
@@ -736,13 +797,13 @@ def _tool_calls(message: Dict[str, Any], capture_content: bool) -> List[Dict[str
             "id": str(call_id) if call_id else None,
             "name": str(name),
         }
-        if capture_content and "arguments" in function:
+        if "arguments" in function:
             part["arguments"] = _bounded_value(_decode_json(function.get("arguments")))
         output.append(part)
     return output
 
 
-def _message(message: Any, capture_content: bool) -> Optional[Dict[str, Any]]:
+def _message(message: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "unknown")
@@ -751,7 +812,7 @@ def _message(message: Any, capture_content: bool) -> Optional[Dict[str, Any]]:
 
     if role == "tool":
         call_id = message.get("tool_call_id") or message.get("call_id")
-        response = _bounded_value(_decode_json(content)) if capture_content else ""
+        response = _bounded_value(_decode_json(content))
         parts.append({
             "type": "tool_call_response",
             "id": str(call_id) if call_id else None,
@@ -760,21 +821,21 @@ def _message(message: Any, capture_content: bool) -> Optional[Dict[str, Any]]:
     else:
         if isinstance(content, str):
             if content or not message.get("tool_calls"):
-                parts.append({"type": "text", "content": _truncate(content) if capture_content else ""})
+                parts.append({"type": "text", "content": _truncate(content)})
         elif isinstance(content, list):
             for item in content[:MAX_PARTS]:
                 if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
                     text = item.get("text", item.get("content", ""))
                     parts.append({
                         "type": "text",
-                        "content": _truncate(str(text or "")) if capture_content else "",
+                        "content": _truncate(str(text or "")),
                     })
         elif content is not None:
             parts.append({
                 "type": "text",
-                "content": _truncate(str(content)) if capture_content else "",
+                "content": _truncate(str(content)),
             })
-        parts.extend(_tool_calls(message, capture_content))
+        parts.extend(_tool_calls(message))
 
     if not parts:
         parts.append({"type": "text", "content": ""})
@@ -785,10 +846,10 @@ def _message(message: Any, capture_content: bool) -> Optional[Dict[str, Any]]:
     return output
 
 
-def _messages(messages: List[Any], capture_content: bool) -> List[Dict[str, Any]]:
+def _messages(messages: List[Any]) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for item in messages[-MAX_TURN_MESSAGES:]:
-        converted = _message(item, capture_content)
+        converted = _message(item)
         if converted is not None:
             output.append(converted)
     return output
@@ -836,6 +897,7 @@ def _common_fields(
         "gen_ai.turn.id": _turn_id(turn),
         "gen_ai.step.id": step_id,
         "gen_ai.agent.type": AGENT_TYPE,
+        "agent.hermes.collection": "realtime-v1",
     }
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
@@ -919,10 +981,87 @@ def _match_api(
     return None
 
 
+def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
+    if not api.get("span_id"):
+        api["span_id"] = _new_span_id()
+    if not api.get("step_id"):
+        index = next(i for i, item in enumerate(turn["apis"]) if item is api)
+        api["step_id"] = "%s:s%s" % (_turn_id(turn), index + 1)
+    return api["step_id"], "%s:r" % api["step_id"]
+
+
+def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+    emitted = turn.setdefault("emitted", set())
+    event_ids = turn.setdefault("event_ids", {})
+    for record in records:
+        key = (record["event.name"], record["gen_ai.step.id"], record.get("gen_ai.tool.call.id"))
+        if key in emitted:
+            continue
+        record["event.id"] = event_ids.setdefault(key, record["event.id"])
+        _write_records([record])
+        emitted.add(key)
+
+
+def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if isinstance(payload.get("conversation_history"), list):
+        return _current_turn_messages(turn, payload)
+    # Older hooks omit request history. Retain only observed boundaries; never
+    # invent response text. Tool hooks still supply their actual call/result.
+    messages = list(turn.get("initial_messages") or [{"role": "user", "content": turn["user_message"]}])
+    for previous in turn["apis"]:
+        if previous is api:
+            break
+        assistant = (previous.get("post") or {}).get("assistant_message")
+        tools = [(cid, tool) for cid, tool in turn["tools"].items()
+                 if tool.get("api") is previous]
+        if assistant:
+            messages.append(assistant)
+        elif tools:
+            messages.append({"role": "assistant", "tool_calls": [
+                {"id": cid, "type": "function", "function": {
+                    "name": tool.get("tool_name"), "arguments": tool.get("args", {})}}
+                for cid, tool in tools]})
+        for cid, tool in tools:
+            if tool.get("end_ns") is not None:
+                messages.append({"role": "tool", "tool_call_id": cid,
+                                 "content": tool.get("result", "")})
+    return messages[-MAX_TURN_MESSAGES:]
+
+
+def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    step_id, response_id = _api_ids(turn, api)
+    messages = _request_messages(turn, api, payload)
+    index = next(i for i, item in enumerate(turn["apis"]) if item is api)
+    delta_start = 0
+    if index:
+        positions = [i for i, item in enumerate(messages) if item.get("role") == "assistant"]
+        if positions:
+            delta_start = positions[-1]
+    pre = api.get("pre") or {}
+    inputs = _messages(messages)
+    record = _common_fields(turn, state, "llm.request", api["pre_ns"], step_id, api["span_id"])
+    record.update({
+        "gen_ai.provider.name": _provider_name(pre.get("provider")),
+        "gen_ai.request.id": api.get("api_request_id") or "%s:a%s" % (_turn_id(turn), index + 1),
+        "gen_ai.response.id": response_id,
+        "gen_ai.request.model": pre.get("model") or turn.get("model") or "unknown",
+        "gen_ai.input.messages": inputs,
+        "gen_ai.input.messages_delta": _messages(messages[delta_start:]),
+        "gen_ai.input.messages_hash": hashlib.sha256(
+            json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "agent.hermes.hook": "pre_api_request",
+    })
+    for key in ("tool_definitions", "system_instructions"):
+        if pre.get(key):
+            record["gen_ai.tool.definitions" if key == "tool_definitions" else "gen_ai.system_instructions"] = pre[key]
+    _write_new_records(turn, [record])
+
+
 def _build_records(
     turn: Dict[str, Any],
     session_state: Dict[str, Any],
     payload: Dict[str, Any],
+    final: bool = False,
 ) -> List[Dict[str, Any]]:
     apis = [api for api in turn["apis"] if api.get("post_ns") is not None]
     if not apis:
@@ -932,7 +1071,6 @@ def _build_records(
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
     ]
-    capture = bool(turn["capture_content"])
     turn_id = _turn_id(turn)
     records: List[Dict[str, Any]] = []
     tool_step: Dict[str, int] = {}
@@ -941,9 +1079,8 @@ def _build_records(
     assistant_cursor = 0
     for index, api in enumerate(apis):
         step_number = index + 1
-        step_id = "%s:s%s" % (turn_id, step_number)
-        span_id = _new_span_id()
-        response_id = "%s:r" % step_id
+        step_id, response_id = _api_ids(turn, api)
+        span_id = api["span_id"]
         post = api.get("post") or {}
         is_error = bool(post.get("error_type"))
         assistant_position: Optional[int] = None
@@ -980,7 +1117,13 @@ def _build_records(
             delta_source = current_messages[delta_start:assistant_position]
             previous_assistant_position = assistant_position
 
-        for call in _tool_calls(assistant_message, capture):
+        # Current Hermes exposes the normalized response at post_api_request.
+        # Legacy hooks recover missing content at the final history boundary.
+        known_assistant = post.get("assistant_message")
+        if isinstance(known_assistant, dict):
+            assistant_message = known_assistant
+
+        for call in _tool_calls(assistant_message):
             call_id = call.get("id")
             if call_id:
                 tool_step[str(call_id)] = index
@@ -991,9 +1134,9 @@ def _build_records(
         # System instructions are provider configuration, not turn messages.
         # Keep them in their dedicated field so they do not alter the existing
         # input, delta, or input-hash semantics.
-        input_messages = _messages(input_source, capture)
-        input_delta = _messages(delta_source, capture)
-        output_message = _message(assistant_message, capture)
+        input_messages = _messages(input_source)
+        input_delta = _messages(delta_source)
+        output_message = _message(assistant_message)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or turn.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -1040,11 +1183,7 @@ def _build_records(
         error_type = post.get("error_type")
         if error_type:
             response["error.type"] = str(error_type)
-            response["error.message"] = (
-                str(post.get("error_message") or "provider request failed")
-                if capture
-                else "provider request failed"
-            )
+            response["error.message"] = str(post.get("error_message") or "provider request failed")
             status_code = _numeric(post.get("status_code"))
             if status_code is not None:
                 response["http.status_code"] = status_code
@@ -1053,11 +1192,10 @@ def _build_records(
         started_ns = api.get("started_perf_ns")
         if isinstance(first_ns, int) and isinstance(started_ns, int) and first_ns > started_ns:
             response["gen_ai.response.time_to_first_token"] = first_ns - started_ns
-        records.append(response)
+        if final or is_error or known_assistant is not None or assistant_position is not None:
+            records.append(response)
 
     for call_id, tool in turn["tools"].items():
-        if tool.get("end_ns") is None:
-            continue
         api_index = tool_step.get(call_id)
         if api_index is None:
             api_index = 0
@@ -1065,8 +1203,11 @@ def _build_records(
                 if int(api["post_ns"]) <= int(tool["start_ns"]):
                     api_index = index
         api_index = min(api_index, len(apis) - 1)
-        step_id = "%s:s%s" % (turn_id, api_index + 1)
+        owner_api = tool.get("api") or apis[api_index]
+        tool["api"] = owner_api
+        step_id, _ = _api_ids(turn, owner_api)
         span_id = tool.get("span_id") or _new_span_id()
+        tool["span_id"] = span_id
         tool_name = str(tool.get("tool_name") or "unknown")
         call = _common_fields(
             turn, session_state, "tool.call", int(tool["start_ns"]), step_id, span_id
@@ -1080,10 +1221,13 @@ def _build_records(
             "gen_ai.tool.call.id": call_id,
             "gen_ai.tool.call.exec.id": call_id,
         })
-        if capture and "args" in tool:
+        if "args" in tool:
             call["gen_ai.tool.call.arguments"] = tool["args"]
         call.update(tool.get("skill_attributes") or {})
         records.append(call)
+
+        if tool.get("end_ns") is None:
+            continue
 
         duration_ms = _numeric(tool.get("duration_ms"))
         if duration_ms is None:
@@ -1100,7 +1244,7 @@ def _build_records(
             "gen_ai.tool.call.duration": duration_ms,
             "tool.result.status": tool.get("status") or "success",
         })
-        if capture and "result" in tool:
+        if "result" in tool:
             result["gen_ai.tool.call.result"] = tool["result"]
         result.update(tool.get("skill_attributes") or {})
         records.append(result)
@@ -1181,6 +1325,7 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
         payload.get("sender_id", ""),
         payload.get("turn_id", ""),
     )
+    turn["initial_messages"] = _bounded_value(_current_turn_messages(turn, payload))
     _remember_turn(state, turn, payload)
 
 
@@ -1217,20 +1362,13 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
-            "tool_definitions": (
-                _tool_definitions(payload.get("request"))
-                if turn["capture_content"]
-                else []
-            ),
-            "system_instructions": (
-                _system_instructions(payload.get("request"))
-                if turn["capture_content"]
-                else []
-            ),
+            "tool_definitions": _tool_definitions(payload.get("request")),
+            "system_instructions": _system_instructions(payload.get("request")),
         },
         "post": {},
     }
     turn["apis"].append(api)
+    _emit_request(turn, state, api, payload)
     try:
         api["started_perf_ns"] = time.perf_counter_ns()
         _install_first_delta_observer()
@@ -1270,7 +1408,8 @@ def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         turn["apis"].append(api)
     elif not api.get("api_request_id") and payload.get("api_request_id"):
         api["api_request_id"] = payload.get("api_request_id")
-    api["post_ns"] = now_ns
+    with _TTFT_LOCK:
+        api["post_ns"] = now_ns
     api["post"] = {
         "provider": payload.get("provider"),
         "model": payload.get("model"),
@@ -1278,6 +1417,10 @@ def _handle_post_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "finish_reason": payload.get("finish_reason"),
         "usage": _bounded_value(payload.get("usage")),
     }
+    response = payload.get("response")
+    if isinstance(response, dict) and isinstance(response.get("assistant_message"), dict):
+        api["post"]["assistant_message"] = _bounded_value(response["assistant_message"])
+    _write_new_records(turn, _build_records(turn, state, payload))
 
 
 def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1317,7 +1460,8 @@ def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
         error = {}
     error_type = error.get("type") or payload.get("reason") or "_OTHER"
     error_message = error.get("message") or payload.get("reason") or "provider request failed"
-    api["post_ns"] = now_ns
+    with _TTFT_LOCK:
+        api["post_ns"] = now_ns
     api["post"] = {
         "provider": payload.get("provider"),
         "model": payload.get("model"),
@@ -1329,6 +1473,7 @@ def _handle_api_request_error(now_ns: int, payload: Dict[str, Any]) -> None:
         "retryable": payload.get("retryable"),
         "retry_count": payload.get("retry_count"),
     }
+    _write_new_records(turn, _build_records(turn, state, payload))
 
 
 def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1352,13 +1497,14 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
             "span_id": _new_span_id(),
             "start_ns": now_ns,
             "end_ns": None,
+            "api": turn["apis"][-1] if turn["apis"] else None,
             "skill_attributes": _skill_attributes(
                 payload.get("tool_name"), payload.get("args")
             ),
         }
-        if turn["capture_content"]:
-            tool["args"] = _bounded_value(payload.get("args"))
+        tool["args"] = _bounded_value(payload.get("args"))
         turn["tools"][call_id] = tool
+        _write_new_records(turn, _build_records(turn, state, payload))
     if payload.get("tool_name") == "delegate_task":
         _ACTIVE_DELEGATION.set((session_id, _turn_id(turn), call_id))
 
@@ -1392,13 +1538,13 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     duration_ms = _numeric(payload.get("duration_ms"))
     if duration_ms is not None:
         tool["duration_ms"] = duration_ms
-    if turn["capture_content"]:
-        if "args" not in tool:
-            tool["args"] = _bounded_value(payload.get("args"))
-        tool["result"] = _bounded_value(_decode_json(payload.get("result")))
+    if "args" not in tool:
+        tool["args"] = _bounded_value(payload.get("args"))
+    tool["result"] = _bounded_value(_decode_json(payload.get("result")))
     tool["skill_attributes"] = _skill_attributes(
         tool.get("tool_name"), payload.get("args"), payload.get("result")
     ) or tool.get("skill_attributes", {})
+    _write_new_records(turn, _build_records(turn, state, payload))
 
 
 def _handle_post_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1512,4 +1658,10 @@ def _flush_at_exit() -> None:
                     _flush_turn(state, turn, {})
                 except Exception as error:
                     _report_internal_error("process exit flush", error)
+        for state, turn in list(_EVICTED_TURNS.values()):
+            try:
+                _flush_turn(state, turn, {})
+            except Exception as error:
+                _report_internal_error("process exit eviction retry", error)
+        _EVICTED_TURNS.clear()
         _SESSIONS.clear()

@@ -77,6 +77,7 @@ MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
 MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
@@ -133,6 +134,19 @@ while [[ $# -gt 0 ]]; do
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
+        --exclude-workspace)
+            if [ "$#" -lt 2 ] || [[ "$2" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$2"); shift 2 ;;
+        --exclude-workspace=*)
+            excluded_workspace="${1#*=}"
+            if [[ "$excluded_workspace" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$excluded_workspace"); shift ;;
         --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
         --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
         --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
@@ -1125,7 +1139,12 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
+    local excluded_workspaces_json=""
+    if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
+        excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
+    fi
     printf '%s' "$PROBE_RESULT" | \
+        LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
@@ -1147,6 +1166,9 @@ const config = {
 };
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
+}
+if (process.env.LP_EXCLUDE_WORKSPACES) {
+  config.privacy = { ...config.privacy, excludeWorkspaces: JSON.parse(process.env.LP_EXCLUDE_WORKSPACES) };
 }
 const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
 const enableStatusBarApp = process.env.LP_ENABLE_STATUS_BAR_APP || '';
@@ -1787,11 +1809,10 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Remove OTel Claude plugin
+# Remove legacy Claude OTel plugin
 # ============================================================
 remove_otel_plugin() {
     local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
-    local OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
     # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
     # after the Claude plugin directory (and intercept.js) is deleted
@@ -1872,137 +1893,7 @@ try {
         fi
     fi
 
-    # --- Codex OTel plugin cleanup ---
-    if [ -f "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" ]; then
-        bash "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" 2>/dev/null || true
-        msg "    ✅ Codex 插件 hooks 已清理" \
-            "    ✅ Codex plugin hooks cleaned"
-    else
-        # Clean hooks.json (new format)
-        local codex_hooks_json="$HOME/.codex/hooks.json"
-        if [ -f "$codex_hooks_json" ] && grep -qE "otel-codex-hook|hook-entry\.sh" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
-            node -e "
-const fs = require('fs');
-const f = process.argv[1];
-const isOurs = c => c.includes('otel-codex-hook') || c.includes('hook-entry.sh');
-try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (d && d.hooks) {
-    for (const ev of Object.keys(d.hooks)) {
-      d.hooks[ev] = d.hooks[ev].filter(g => {
-        if (!g.hooks) return true;
-        g.hooks = g.hooks.filter(h => !(h.command && isOurs(h.command)));
-        return g.hooks.length > 0;
-      });
-      if (d.hooks[ev].length === 0) delete d.hooks[ev];
-    }
-    if (Object.keys(d.hooks).length === 0) {
-      fs.unlinkSync(f);
-    } else {
-      fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
-    }
-  }
-} catch {}
-" "$codex_hooks_json" 2>/dev/null || true
-        fi
 
-        # Clean config.toml (legacy hooks + trust block)
-        local codex_config="$HOME/.codex/config.toml"
-        if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-            # Remove legacy hook block (# OpenTelemetry instrumentation hooks ... stop)
-            local marker="# OpenTelemetry instrumentation hooks"
-            local end_str='command = "otel-codex-hook stop"'
-            if grep -q "$marker" "$codex_config" 2>/dev/null && grep -qF "$end_str" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v m="$marker" -v e="$end_str" '
-                    BEGIN { skip=0 }
-                    skip==0 && index($0, m) { skip=1; next }
-                    skip==1 { if (index($0, e)) { skip=2 }; next }
-                    skip==2 && /^[[:space:]]*$/ { next }
-                    { skip=0; print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Remove trust entries (逐条精确删除,不用 BEGIN/END 范围删以免误伤用户数据)
-            # Step a: 删 BEGIN/END marker 注释行(仅注释行本身)
-            if grep -qE "# (BEGIN|END) otel-codex-hook trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "# BEGIN otel-codex-hook trust\|# END otel-codex-hook trust" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step b: 删 bypass_hook_trust 行
-            if grep -q "bypass_hook_trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*bypass_hook_trust\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step c: 逐条删 [hooks.state."<hooks.json path>:<event>:<group>:0"] section
-            # 匹配 key 中包含 hooks.json 路径的条目(pilot 写的),不动其他 path 的条目
-            local codex_hooks_json_path
-            codex_hooks_json_path="$(cd "$HOME/.codex" 2>/dev/null && pwd)/hooks.json"
-            if grep -q "$codex_hooks_json_path" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v owned_path="$codex_hooks_json_path" '
-                    /^\[hooks\.state\."/ {
-                        if (index($0, owned_path) > 0) { skip=1; next }
-                    }
-                    /^\[/ && !/^\[hooks\.state\."/ { skip=0 }
-                    skip { next }
-                    { print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Step d: 删 otel-codex-hook 相关的剩余行(legacy catch-all,不删 hooks.state section)
-            if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up codex_hooks = true
-            if grep -q "codex_hooks" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*codex_hooks\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up multiple blank lines
-            if [ -f "$codex_config" ]; then
-                local tmp; tmp=$(mktemp)
-                awk 'NF{blank=0} !NF{blank++} blank<=1' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            msg "    ✅ Codex hooks 已从 config.toml 清理" \
-                "    ✅ Codex hooks cleaned from config.toml"
-        fi
-    fi
-
-    local codex_otel_config="$HOME/.codex/otel-config.json"
-    if [ -f "$codex_otel_config" ] && command -v node &>/dev/null; then
-        node -e "
-const fs = require('fs');
-try {
-  const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
-  delete cfg.log_enabled;
-  delete cfg.log_dir;
-  delete cfg.log_filename_format;
-  fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2) + '\n');
-} catch {}
-" "$codex_otel_config" 2>/dev/null || true
-    fi
-
-    if [ -d "$OTEL_CODEX_DIR" ]; then
-        if [ "$PURGE" -eq 1 ]; then
-            rm -rf "$OTEL_CODEX_DIR"
-            msg "    ✅ Codex 插件目录已完全删除 (--purge): $OTEL_CODEX_DIR" \
-                "    ✅ Codex plugin directory fully removed (--purge): $OTEL_CODEX_DIR"
-        else
-            find "$OTEL_CODEX_DIR" -maxdepth 1 \
-              ! -name sessions \
-              ! -name "$(basename "$OTEL_CODEX_DIR")" \
-              -exec rm -rf {} + 2>/dev/null || true
-            msg "    ✅ Codex 插件文件已删除（sessions/ 已保留）" \
-                "    ✅ Codex plugin files removed (sessions/ preserved)"
-        fi
-    fi
 }
 
 print_summary() {
@@ -2417,9 +2308,21 @@ try {
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
+  const isCodex = cfg.endsWith('/.codex/hooks.json');
+  const isPilotCodex = c => typeof c === 'string' && c.includes(marker)
+    && new RegExp('(^|[ /])codex-loongsuite-pilot-hook[.](sh|mjs|ps1)([^A-Za-z0-9_.-]|$)', 'i').test(c);
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
-    const filtered = entries.filter(e => {
+    const candidates = isCodex ? entries.flatMap(e => {
+      if (!e || typeof e !== 'object') return [e];
+      if (isPilotCodex(e.command)) { changed = true; return []; }
+      if (!Array.isArray(e.hooks)) return [e];
+      const nested = e.hooks.filter(h => !isPilotCodex(h && h.command));
+      if (nested.length === e.hooks.length) return [e];
+      changed = true;
+      return nested.length ? [{ ...e, hooks: nested }] : [];
+    }) : entries;
+    const filtered = isCodex ? candidates : candidates.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
       const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
@@ -3138,7 +3041,7 @@ cmd_uninstall() {
     echo ""
 
     # Remove OTel Claude plugin
-    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     remove_otel_plugin
     echo ""
 

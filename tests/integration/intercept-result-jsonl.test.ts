@@ -13,6 +13,7 @@ class StubInput extends EventEmitter {
   readonly id = 'qoder-trace';
   readonly agentType = ClientType.Qoder;
   readonly collectionMethod = CollectionMethod.HookJsonl;
+  setWorkspacePolicy() {}
   async start() {}
   async stop() {}
 }

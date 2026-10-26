@@ -324,6 +324,14 @@ export interface DeployedAgentRecord {
   dshPatchPath?: string;
   /** Resolved Grok hook settings file written during deploy. */
   hookSettingsPath?: string;
+  /**
+   * Every Grok hook settings file this agent has been installed into.
+   * One identity directory is one file; later installs append, they do not
+   * replace the list.
+   */
+  hookSettingsPaths?: string[];
+  /** Who last wrote this record. Absent on records from older builds. */
+  installedBy?: 'hook-install' | 'daemon' | 'build';
   /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
   pluginInjectConfigPath?: string;
 }

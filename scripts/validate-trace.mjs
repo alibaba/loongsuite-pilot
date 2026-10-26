@@ -143,7 +143,7 @@ function loadRules(rulesPath) {
 
 // ─── Trace Tree Builder ─────────────────────────────────────────────────────
 
-function buildTraces(spans, traceIdFilter) {
+export function buildTraces(spans, traceIdFilter) {
   const grouped = new Map();
   for (const span of spans) {
     if (traceIdFilter && span.traceId !== traceIdFilter) continue;
@@ -183,11 +183,40 @@ function buildTraces(spans, traceIdFilter) {
 function pass(id, detail) { return { id, status: 'pass', ...(detail ? { detail } : {}) }; }
 function error(id, detail, spanId, spanName) { return { id, status: 'error', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
 function warn(id, detail, spanId, spanName) { return { id, status: 'warn', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
-function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'captureMessageContent not enabled' }; }
+function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'message content not observed' }; }
 
 // ─── 5a. Structure Validation ───────────────────────────────────────────────
 
-function validateStructure(trace) {
+// Independently exported delegated turns can be the only local fragment of a
+// trace. Require explicit delegation metadata before accepting a missing parent.
+function hasExternalDelegationParent(span, spanMap) {
+  return span._kind === 'AGENT' &&
+    /^[0-9a-f]{16}$/.test(span.parentSpanId || '') &&
+    !/^0+$/.test(span.parentSpanId) &&
+    !spanMap.has(span.parentSpanId) &&
+    Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
+      span.attributes?.['gen_ai.subagent.parent_tool_call.id']);
+}
+
+// Stop at delegated AGENT boundaries: their identity, usage and STEP sequence
+// belong to their own execution even when they share a trace with the caller.
+function agentExecutionSpans(trace, agent) {
+  const result = [];
+  const visited = new Set();
+  const queue = [agent];
+  while (queue.length > 0) {
+    const span = queue.shift();
+    if (visited.has(span.spanId)) continue;
+    visited.add(span.spanId);
+    result.push(span);
+    for (const child of trace.childrenMap.get(span.spanId) || []) {
+      if (child._kind !== 'AGENT') queue.push(child);
+    }
+  }
+  return result;
+}
+
+export function validateStructure(trace) {
   const checks = [];
   const { spans, spanMap, childrenMap } = trace;
 
@@ -195,14 +224,17 @@ function validateStructure(trace) {
   const parentKind = (s) => s.parentSpanId && spanMap.has(s.parentSpanId) ? spanMap.get(s.parentSpanId)._kind : null;
 
   const entries = byKind('ENTRY');
-  checks.push(entries.length === 1
-    ? pass('structure.single_entry')
-    : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1`));
-
   const agents = byKind('AGENT');
-  checks.push(agents.length === 1
+  const externalAgents = agents.filter(a => hasExternalDelegationParent(a, spanMap));
+  checks.push(entries.length === 1 || (entries.length === 0 && externalAgents.length > 0)
+    ? pass('structure.single_entry')
+    : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1 (or an explicitly delegated external fragment)`));
+
+  const entryAgents = entries.flatMap(e => (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT'));
+  checks.push(agents.length > 0 && entries.every(e =>
+    (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT').length === 1)
     ? pass('structure.single_agent')
-    : error('structure.single_agent', `found ${agents.length} AGENT spans, expected 1`));
+    : error('structure.single_agent', `found ${agents.length} AGENT spans and ${entryAgents.length} directly under ENTRY; expected one root AGENT per ENTRY and optional delegated AGENTs`));
 
   if (entries.length === 1) {
     const e = entries[0];
@@ -213,9 +245,14 @@ function validateStructure(trace) {
   }
 
   for (const a of agents) {
-    checks.push(parentKind(a) === 'ENTRY'
+    const external = hasExternalDelegationParent(a, spanMap);
+    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external
       ? pass('structure.agent_under_entry')
-      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY`, a.spanId, a.name));
+      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, or explicit external delegation context`, a.spanId, a.name));
+    if (external) {
+      checks.push(warn('structure.external_parent_context',
+        `delegation parent ${a.parentSpanId} is outside this local trace fragment`, a.spanId, a.name));
+    }
   }
 
   const steps = byKind('STEP');
@@ -283,9 +320,9 @@ function validateStructure(trace) {
     checks.push(pass('structure.llm_before_tools'));
   }
 
-  if (entries.length === 1) {
+  if (entries.length === 1 || externalAgents.length > 0) {
     const visited = new Set();
-    const queue = [entries[0].spanId];
+    const queue = [...entries, ...externalAgents].map(s => s.spanId);
     while (queue.length > 0) {
       const id = queue.shift();
       if (visited.has(id)) continue;
@@ -386,7 +423,7 @@ function shortKey(key) {
 
 // ─── 5c. Time Validation ────────────────────────────────────────────────────
 
-function validateTime(trace, rules) {
+export function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
 
@@ -401,14 +438,14 @@ function validateTime(trace, rules) {
   }
   if (allNonZero) checks.push(pass('time.non_zero_duration'));
 
-  const steps = spans.filter(s => s._kind === 'STEP');
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan && steps.length > 1) {
-    const sorted = [...steps].sort((a, b) => {
+  const stepGroups = spans.filter(s => s._kind === 'AGENT').map(agent =>
+    (childrenMap.get(agent.spanId) || []).filter(s => s._kind === 'STEP'));
+  let overlap = false;
+  for (const agentSteps of stepGroups) {
+    const sorted = [...agentSteps].sort((a, b) => {
       const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
       return d < 0n ? -1 : d > 0n ? 1 : 0;
     });
-    let overlap = false;
     for (let i = 0; i < sorted.length - 1; i++) {
       const curEnd = BigInt(sorted[i].endTimeUnixNano);
       const nextStart = BigInt(sorted[i + 1].startTimeUnixNano);
@@ -419,10 +456,8 @@ function validateTime(trace, rules) {
         overlap = true;
       }
     }
-    if (!overlap) checks.push(pass('time.no_step_overlap'));
-  } else if (steps.length <= 1) {
-    checks.push(pass('time.no_step_overlap'));
   }
+  if (!overlap) checks.push(pass('time.no_step_overlap'));
 
   let allContained = true;
   for (const s of spans) {
@@ -433,7 +468,8 @@ function validateTime(trace, rules) {
     for (const c of children) {
       const cStart = BigInt(c.startTimeUnixNano);
       const cEnd = BigInt(c.endTimeUnixNano);
-      if (cStart < pStart || cEnd > pEnd) {
+      const delegatedAgent = s._kind === 'TOOL' && c._kind === 'AGENT';
+      if (cStart < pStart || (!delegatedAgent && cEnd > pEnd)) {
         checks.push(error('time.parent_contains_children',
           `child ${c.name} [${cStart}-${cEnd}] outside parent ${s.name} [${pStart}-${pEnd}]`,
           c.spanId, c.name));
@@ -454,8 +490,8 @@ function validateTime(trace, rules) {
   }
   if (allReasonable) checks.push(pass('time.reasonable_duration'));
 
-  if (steps.length > 1) {
-    const withRound = steps.filter(s => s.attributes?.['gen_ai.react.round'] !== undefined);
+  for (const agentSteps of stepGroups) {
+    const withRound = agentSteps.filter(s => s.attributes?.['gen_ai.react.round'] !== undefined);
     if (withRound.length > 1) {
       const byTime = [...withRound].sort((a, b) => {
         const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
@@ -466,7 +502,7 @@ function validateTime(trace, rules) {
         const r1 = byTime[i].attributes['gen_ai.react.round'];
         const r2 = byTime[i + 1].attributes['gen_ai.react.round'];
         if (r1 >= r2) {
-          checks.push(warn('time.chronological_steps', `round ${r1} before round ${r2} but starts later`));
+          checks.push(warn('time.chronological_steps', `round ${r1} before round ${r2} but starts later`, byTime[i].spanId, byTime[i].name));
           chrono = false;
           break;
         }
@@ -475,8 +511,6 @@ function validateTime(trace, rules) {
     } else {
       checks.push(pass('time.chronological_steps'));
     }
-  } else {
-    checks.push(pass('time.chronological_steps'));
   }
 
   return checks;
@@ -738,27 +772,33 @@ function isObject(value) {
 
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────
 
-function validateSemantic(trace, rules) {
+export function validateSemantic(trace, rules) {
   const checks = [];
   const { spans, childrenMap, hasMessageContent } = trace;
 
-  // consistent_session_id
-  const sessionIds = new Set(spans.map(s => s.attributes?.['gen_ai.session.id']).filter(Boolean));
-  checks.push(sessionIds.size <= 1
-    ? pass('semantic.consistent_session_id')
-    : error('semantic.consistent_session_id', `found ${sessionIds.size} distinct session IDs: ${[...sessionIds].join(', ')}`));
+  const agents = spans.filter(s => s._kind === 'AGENT');
+  const executions = agents.map(agent => ({ agent, spans: agentExecutionSpans(trace, agent) }));
+  for (const execution of executions) {
+    const parent = trace.spanMap.get(execution.agent.parentSpanId);
+    const identitySpans = parent?._kind === 'ENTRY' ? [parent, ...execution.spans] : execution.spans;
+    for (const [key, ruleId, severity] of [
+      ['gen_ai.session.id', 'semantic.consistent_session_id', error],
+      ['gen_ai.turn.id', 'semantic.consistent_turn_id', error],
+      ['gen_ai.agent.name', 'semantic.consistent_agent_name', warn],
+    ]) {
+      const values = new Set(identitySpans.map(s => s.attributes?.[key]).filter(Boolean));
+      checks.push(values.size <= 1
+        ? pass(ruleId)
+        : severity(ruleId, `AGENT execution has ${values.size} distinct ${key}: ${[...values].join(', ')}`,
+            execution.agent.spanId, execution.agent.name));
+    }
+  }
 
   // consistent_user_id
   const userIds = new Set(spans.map(s => s.attributes?.['gen_ai.user.id']).filter(Boolean));
   checks.push(userIds.size <= 1
     ? pass('semantic.consistent_user_id')
     : error('semantic.consistent_user_id', `found ${userIds.size} distinct user IDs`));
-
-  // consistent_agent_name
-  const agentNames = new Set(spans.map(s => s.attributes?.['gen_ai.agent.name']).filter(Boolean));
-  checks.push(agentNames.size <= 1
-    ? pass('semantic.consistent_agent_name')
-    : warn('semantic.consistent_agent_name', `found ${agentNames.size} distinct agent names: ${[...agentNames].join(', ')}`));
 
   // operation_kind_mapping
   const mapping = rules.operationKindMapping || {};
@@ -790,9 +830,8 @@ function validateSemantic(trace, rules) {
   if (allNamesOk) checks.push(pass('semantic.span_name_pattern'));
 
   // agent_token_sum
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan) {
-    const llmSpans = spans.filter(s => s._kind === 'LLM');
+  for (const { agent: agentSpan, spans: executionSpans } of executions) {
+    const llmSpans = executionSpans.filter(s => s._kind === 'LLM');
     for (const tokenKey of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
       const agentVal = agentSpan.attributes?.[tokenKey];
       if (agentVal === undefined || agentVal === null) continue;
@@ -900,7 +939,8 @@ function validateSemantic(trace, rules) {
     checks.push(skipped('semantic.entry_output_matches'));
   } else {
     const entry = spans.find(s => s._kind === 'ENTRY');
-    const llmSpans = spans.filter(s => s._kind === 'LLM');
+    const rootExecution = executions.find(e => e.agent.parentSpanId === entry?.spanId);
+    const llmSpans = (rootExecution?.spans || []).filter(s => s._kind === 'LLM');
     if (entry && llmSpans.length > 0) {
       const lastLlm = llmSpans.sort((a, b) => {
         const d = BigInt(a.endTimeUnixNano) - BigInt(b.endTimeUnixNano);
@@ -984,40 +1024,42 @@ function validateSemantic(trace, rules) {
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
-    const stepSpans = spans.filter(s => s._kind === 'STEP');
-    if (stepSpans.length > 0) {
-      const sorted = [...stepSpans].sort((a, b) => {
-        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-        return d < 0n ? -1 : d > 0n ? 1 : 0;
-      });
-      const lastStep = sorted[sorted.length - 1];
-      const children = childrenMap.get(lastStep.spanId) || [];
-      const llm = children.find(c => c._kind === 'LLM');
-      if (llm) {
-        const raw = llm.attributes?.['gen_ai.output.messages'];
-        if (raw) {
-          try {
-            const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            let hasToolCall = false;
-            if (Array.isArray(msgs)) {
-              for (const msg of msgs) {
-                if (Array.isArray(msg.parts)) {
-                  for (const part of msg.parts) {
-                    if (part.type === 'tool_call') hasToolCall = true;
+    for (const { spans: executionSpans } of executions) {
+      const stepSpans = executionSpans.filter(s => s._kind === 'STEP');
+      if (stepSpans.length > 0) {
+        const sorted = [...stepSpans].sort((a, b) => {
+          const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
+          return d < 0n ? -1 : d > 0n ? 1 : 0;
+        });
+        const lastStep = sorted[sorted.length - 1];
+        const children = childrenMap.get(lastStep.spanId) || [];
+        const llm = children.find(c => c._kind === 'LLM');
+        if (llm) {
+          const raw = llm.attributes?.['gen_ai.output.messages'];
+          if (raw) {
+            try {
+              const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+              let hasToolCall = false;
+              if (Array.isArray(msgs)) {
+                for (const msg of msgs) {
+                  if (Array.isArray(msg.parts)) {
+                    for (const part of msg.parts) {
+                      if (part.type === 'tool_call') hasToolCall = true;
+                    }
                   }
                 }
               }
+              checks.push(hasToolCall
+                ? error('semantic.last_step_no_tool_call',
+                    'last STEP LLM output contains tool_call, expected final answer without tool calls',
+                    llm.spanId, llm.name)
+                : pass('semantic.last_step_no_tool_call'));
+            } catch {
+              checks.push(pass('semantic.last_step_no_tool_call'));
             }
-            checks.push(hasToolCall
-              ? error('semantic.last_step_no_tool_call',
-                  'last STEP LLM output contains tool_call, expected final answer without tool calls',
-                  llm.spanId, llm.name)
-              : pass('semantic.last_step_no_tool_call'));
-          } catch {
+          } else {
             checks.push(pass('semantic.last_step_no_tool_call'));
           }
-        } else {
-          checks.push(pass('semantic.last_step_no_tool_call'));
         }
       }
     }
@@ -1084,6 +1126,7 @@ function buildReport(traces, inputFile, rules, severityFilter) {
       rulesVersion: rules.version,
       timestamp: new Date().toISOString(),
       input: path.basename(inputFile),
+      // Compatibility key: this now reports observed evidence, not a config switch.
       captureMessageContent: traces.some(t => t.hasMessageContent),
     },
     summary: {
@@ -1125,7 +1168,7 @@ function filterBySeverity(checks, severity) {
 
 function formatText(report) {
   const lines = [];
-  const mc = report.meta.captureMessageContent ? 'enabled' : 'disabled';
+  const mc = report.meta.captureMessageContent ? 'observed' : 'not observed';
   lines.push('');
   lines.push('╔' + '═'.repeat(62) + '╗');
   lines.push('║  GenAI Trace Validation Report' + ' '.repeat(32) + '║');

@@ -14,6 +14,7 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -68,7 +69,7 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly segmentDirBySession: Map<string, CachedSegmentDir> = new Map();
 
   constructor(opts: QoderWorkTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
     this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();

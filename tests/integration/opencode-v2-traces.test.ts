@@ -3,7 +3,7 @@ import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { setupV2 } from '../../assets/plugins/opencode/v2.mjs';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
-import { applyAgentContentPolicy } from '../../src/normalization/agent-content-policy.js';
+import { maskAgentActivityEntry } from '../../src/mask/entry-masker.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
 
@@ -18,6 +18,7 @@ describe('OpenCode V2 event-to-trace contract', () => {
     const events: Record<string, unknown>[] = [];
     const now = Date.now() - 20000;
     const model = { id: 'gpt-test', providerID: 'openai' };
+    const secret = 'sk-1234567890abcdefghijklmnop';
     const add = (type: string, data: Record<string, unknown> = {}) => events.push({
       id: `evt_synthetic_${events.length}`, type, created: now + events.length * 100,
       data: { sessionID: 'ses_synthetic', ...data },
@@ -29,11 +30,11 @@ describe('OpenCode V2 event-to-trace contract', () => {
       add('session.tool.called', { assistantMessageID: 'msg_first', id, input: { path: 'synthetic.txt' } });
     }
     add('session.step.streamed', { assistantMessageID: 'msg_first' });
-    for (const id of ['tool_b', 'tool_a']) add('session.tool.success', { assistantMessageID: 'msg_first', id, content: [{ type: 'text', text: 'synthetic result' }] });
+    for (const id of ['tool_b', 'tool_a']) add('session.tool.success', { assistantMessageID: 'msg_first', id, content: [{ type: 'text', text: `synthetic result ${secret}` }] });
     const tokens = { input: 10, output: 5, reasoning: 0, ...(cache === undefined ? {} : { cache }) };
     add('session.step.ended', { assistantMessageID: 'msg_first', finish: 'tool-calls', tokens, cost: 0 });
     add('session.step.started', { assistantMessageID: 'msg_last', model, agent: 'build', started: now + events.length * 100 });
-    add('session.text.ended', { assistantMessageID: 'msg_last', ordinal: 0, text: 'synthetic answer' });
+    add('session.text.ended', { assistantMessageID: 'msg_last', ordinal: 0, text: `synthetic answer ${secret}` });
     add('session.step.ended', { assistantMessageID: 'msg_last', finish: 'stop', tokens, cost: 0 });
     add('session.execution.succeeded');
     let done!: () => void;
@@ -53,9 +54,10 @@ describe('OpenCode V2 event-to-trace contract', () => {
     await drained; cleanup();
     const normalized = (await Promise.all(raw.map(record => transformHookRecord(record, ClientType.OpenCode, 'opencode')))).filter((r): r is AgentActivityEntry => r !== null);
     expect(normalized.every(r => r['agent.opencode.collection'] === 'v2')).toBe(true);
-    const privateOff = normalized.map(r => applyAgentContentPolicy(r, { opencode: { enabled: true, captureMessageContent: false } }));
-    expect(JSON.stringify(privateOff)).not.toContain('synthetic answer');
-    expect(JSON.stringify(privateOff)).not.toContain('synthetic result');
+    const masked = normalized.map(r => maskAgentActivityEntry(r, { mode: 'all', types: [], replacementMode: 'placeholder' }));
+    expect(JSON.stringify(masked)).toContain('synthetic answer');
+    expect(JSON.stringify(masked)).toContain('synthetic result');
+    expect(JSON.stringify(masked)).not.toContain(secret);
     const spans: ReadableSpan[] = [];
     const flusher = new OtlpTraceFlusher({ enabled: true,
       endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }], protocol: 'http/protobuf', serviceName: 'synthetic-v2',
@@ -63,7 +65,9 @@ describe('OpenCode V2 event-to-trace contract', () => {
       export(batch, callback) { spans.push(...batch); callback({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {},
     }));
     try {
-      await flusher.sendBatch(normalized);
+      await flusher.sendBatch(masked);
+      expect(JSON.stringify(spans.map(s => s.attributes))).toContain('synthetic answer');
+      expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain(secret);
       expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
       expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
       const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
@@ -81,7 +85,7 @@ describe('OpenCode V2 event-to-trace contract', () => {
         expect(ids.has(span.parentSpanId), JSON.stringify(spans.map(s => ({ kind: s.attributes['gen_ai.span.kind'], id: s.spanContext().spanId, parent: s.parentSpanId })))).toBe(true);
       }
       const count = spans.length;
-      await flusher.sendBatch(normalized);
+      await flusher.sendBatch(masked);
       expect(spans).toHaveLength(count);
     } finally { await flusher.shutdown(); }
   });

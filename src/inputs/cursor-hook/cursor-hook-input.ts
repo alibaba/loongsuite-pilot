@@ -6,6 +6,7 @@ import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { getTodayDateString, resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const CLI_VERSION_PATTERN = /^\d{4}\.\d{2}\.\d{2}/;
 
@@ -36,7 +37,7 @@ export class CursorHookInput extends BaseHookInput {
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/cursor/history'),
       logPrefix: opts?.logPrefix ?? 'cursor',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
   static async checkAvailability(): Promise<boolean> {

@@ -60,6 +60,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
+| `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | 所有 Agent 采集器的轮询间隔，单位毫秒。默认 `10000`。覆盖 `listeners.*.pollInterval` 和 `QODER_ANALYTICS_POLL_INTERVAL`。只接受 `1000` 到 `2147483647` 的十进制整数，其余值会被忽略。未设置该变量时，Wukong 和 Kiro CLI session 仍使用各自 60 秒的内置间隔。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
 | `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
 | `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |
@@ -116,7 +117,6 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
   "agents": {
     "codex": {
       "enabled": true,
-      "captureMessageContent": true,
       "multimodal": { "uploadMode": "all" }
     }
   }
@@ -308,3 +308,42 @@ loongsuite-pilot info
 ```
 
 最快的验证方式是启用 [本地 JSONL 输出](local-jsonl-output.md)，检查是否有新事件写入。
+
+## Workspace 采集黑名单
+
+安装时可排除 Agent 会话的本地工作目录。macOS/Linux 支持重复参数：
+
+```bash
+curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && \
+bash /tmp/loongsuite-pilot-installer.sh install \
+  --exclude-workspace "/Users/alice/private" \
+  --exclude-workspace "/Users/alice/company-secret"
+```
+
+从源码仓库安装时使用 `bash deploy/installer-opensource.sh install --exclude-workspace "/绝对路径/private"`。
+
+Windows 在仓库 `deploy` 目录下使用目录数组：
+
+```powershell
+.\installer-opensource.ps1 install -ExcludeWorkspace "C:\private", "D:\company-secret"
+```
+
+参数必须是绝对目录；再次安装并指定参数会替换整个列表，不指定则保留已有配置。升级保留配置。也可以编辑 `config.json` 后重启 Pilot：
+
+```json
+{
+  "privacy": {
+    "excludeWorkspaces": ["/Users/alice/private", "/Users/alice/company-secret"]
+  }
+}
+```
+
+将列表改为 `[]` 并重启可关闭过滤。此设置不使用环境变量覆盖。修改后必须执行 `loongsuite-pilot restart` 才能保证所有采集路径使用新规则；Hook 可能在下一次调用时提前读取新配置，但运行中的 collector 不热加载，因此修改至重启之间不能视为新规则已全局生效。
+
+- workspace 指 Agent 明确提供的会话 `cwd`、`workspace.path` 或 IDE `workspace_roots`，不要求 Git 仓库。不会通过仓库远端地址、工具访问路径、日志存放位置或对话内容猜测目录。
+- 匹配目录本身及所有子目录，规范化 `..`、分隔符并解析符号链接；`/code/private-copy` 不会命中 `/code/private`。Windows 按不区分大小写的本地路径匹配。
+- 多根 workspace 任一命中就屏蔽整个会话的后续事件，包括对话、工具调用和 token 事件。未知目录正常采集；稍后识别命中时停止后续采集，已输出的数据不撤回。
+- 命中状态按 Agent 和原生会话 ID 保存。即使切回其他目录或 Pilot 重启，也不会恢复该会话。不同黑名单列表使用独立状态，恢复原列表会复用其屏蔽记录；没有会话 ID 时只能按当前事件判断。状态目录不可写时仍在当前进程中屏蔽命中会话，正常会话继续采集，并输出不含目录信息的限频告警、在后续事件中重试；持久化成功前无法保证跨进程或重启后仍记住该会话。
+- 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口（`writeJsonlRecords` / `appendRowsToHistory`）及 Cursor 正式 history 的 stop、延迟响应路径也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
+
+这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，Cursor event journal、插件自行写入的原生/中间 JSONL 等文件可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。

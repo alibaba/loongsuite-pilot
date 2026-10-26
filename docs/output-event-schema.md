@@ -8,6 +8,40 @@ The types below describe normalized semantic values. JSONL preserves native JSON
 types; string-only backends such as SLS may serialize values at their own output
 boundary.
 
+## Hermes / OpenClaw source JSONL timing
+
+Hermes allocates a stable per-request `span_id` and synchronously appends
+`llm.request` to `logs/hermes-agent/*.jsonl` at `pre_api_request`. Its response
+reuses that ID. Responses, tool calls and tool results append when their hooks
+provide the data. Turn completion fills missing legacy response content and
+appends a terminal marker without repeating successfully written events.
+Unfinished requests remain visible without a fabricated successful response.
+TTFT observation supports both the legacy method and the newer lazy streaming helper.
+
+Incremental records carry `agent.hermes.collection=realtime-v1`; the terminal
+record carries `event.name=other`, `agent.hermes.hook=turn_end` and
+`gen_ai.turn.end=true`. The collector uses this explicit boundary so retries and
+overlapping turns in one session do not truncate a trace. Legacy records retain
+their existing boundary detection. Source appends do not wait for trace export.
+
+The modern OpenClaw plugin allocates a model SpanID at `model_call_started` and
+reuses it for the response. Child events awaiting parent context still use bounded
+buffering to preserve trace relationships. Tool events subject to interception
+also wait for policy decisions.
+
+Cross-process visibility after append does not require per-event `fsync`. This
+contract concerns the source plugin file, not normalized `logs/output` or remote
+SLS/ARMS visibility. A context consumer must run **after** Pilot's request hook and
+**before** network send, matching `gen_ai.session.id` and `gen_ai.turn.id`, plus
+Hermes `gen_ai.request.id` or OpenClaw `gen_ai.step.id` (the model call ID), for
+**each** API request. A one-time `pre_llm_call` stash runs
+before request allocation; selecting the globally latest line is unsafe across
+requests and sessions. Tool outbound requests should use the matching `tool.call`
+context rather than reuse one LLM SpanID for all outbound operations in a turn.
+
+Deploy the incremental Hermes plugin and its matching collector together; older
+collectors do not understand the new explicit turn-completion protocol.
+
 ## Event Names
 
 | `event.name` | Description |
@@ -16,6 +50,10 @@ boundary.
 | `llm.response` | One LLM response, including text, reasoning, tool-call intent, finish reason, token usage, and cost when available. |
 | `tool.call` | An actual tool execution started by the agent. |
 | `tool.result` | The result returned by a tool execution. |
+| `gen_ai.model.request` / `gen_ai.model.response` | Standard model event names; accepted alongside the legacy short names and preserved in logs. |
+| `gen_ai.tool.call` / `gen_ai.tool.result` | Standard tool event names; accepted alongside the legacy short names and preserved in logs. |
+| `gen_ai.agent.invoke` | One logical delegation to another Agent; one event per work item in a batch. |
+| `gen_ai.agent.result` | An observed Agent result or failed dispatch. Tool acceptance alone is not Agent completion. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
 | `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
@@ -26,8 +64,8 @@ During the compatibility period, an `other` carrying `gen_ai.input.messages` or
 The compatibility copy preserves the input content and context, but has a
 deterministically derived `event.id` and omits `gen_ai.turn.start` and
 `gen_ai.turn.end`; the legacy `other` remains the sole owner of Turn boundaries.
-Expansion runs after the content policy, so no `agent.input` is generated when
-that policy removes both canonical input fields. SLS, JSONL, and HTTP retain both
+Expansion runs after masking, so both events carry the same masked content.
+Records without canonical input fields do not generate `agent.input`. SLS, JSONL, and HTTP retain both
 events when a copy is generated. OTLP Trace conversion continues to consume the
 legacy `other` and excludes the compatibility copy, so the Span tree does not
 gain an empty STEP.
@@ -41,6 +79,17 @@ The four core `event.name` values map to GenAI audit events as follows:
 | `tool.call` | `gen_ai.tool.call` |
 | `tool.result` | `gen_ai.tool.result` |
 
+All six standard names are recognized without falling back to `other`. Existing
+short-name output is preserved, without automatically duplicating events under
+both names. The trace boundary adapts model/tool names and excludes Agent audit
+events from span construction to avoid duplicate spans, steps and usage.
+
+Codex children retain their own session/turn/step identities. Parent invoke/result
+events carry `gen_ai.agent.invocation.id`; the corresponding child work carries
+the equal `gen_ai.agent.parent.invocation.id`. New work in a reused session gets
+a new invocation; nested delegations retain both incoming and outgoing IDs.
+See the [subagent data model](zh-CN/subagent-data-model.md).
+
 ## Field Reference
 
 Required levels follow OpenTelemetry wording:
@@ -48,7 +97,8 @@ Required levels follow OpenTelemetry wording:
 - `Required` - always provided.
 - `Conditionally Required` - provided when the condition applies.
 - `Recommended` - provided when the source agent exposes the data.
-- `Opt-In` - optional and usually sensitive; enable only when needed.
+- `When available` - reported whenever the integration provides the field.
+- `Opt-In` - requires an independently enabled feature, such as multimodal upload.
 
 | Field | Type | Required Level | Description |
 |-------|------|----------------|-------------|
@@ -57,6 +107,8 @@ Required levels follow OpenTelemetry wording:
 | `event.id` | string | Required | Globally unique event ID generated by the collector. |
 | `event.name` | string | Required | Event name. See [Event Names](#event-names). |
 | `user.id` | string | Required | User identity, such as an employee ID, local account, or machine-level identity. |
+| `user.name` | string | Recommended when exposed by the source agent | Short name or login of the agent account. Qoder IDE uses the Stop hook's `extra.user.name`; Qoder CLI uses `username` from `qodercli status`. |
+| `user.email` | string | Recommended when exposed by the source agent | Agent account email. Qoder IDE uses the Stop hook's `extra.user.email`; Qoder CLI uses `email` from `qodercli status`. A missing, logged-out, or failed CLI lookup omits both fields. |
 | `trace_id` | string | Recommended | W3C Trace ID, used to correlate a full request chain across systems. |
 | `span_id` | string | Recommended | Current Span ID. |
 | `parent_span_id` | string | Recommended | Parent Span ID. Empty for root spans. |
@@ -70,6 +122,10 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
 | `gen_ai.agent.type` | string | Required | Agent product type, such as `claude-code`, `codex`, `cursor`, `qoder`, or `qoder-work`. |
 | `gen_ai.agent.id` | string | Recommended | Unique runtime instance ID for the agent. |
+| `gen_ai.agent.parent.id` | string | Recommended when known | Upstream Agent identity for this work; does not replace invocation correlation. |
+| `gen_ai.agent.peer.id` | string | Recommended when known | Direct peer in an invoke/result event. |
+| `gen_ai.agent.invocation.id` | string | Required on delegation events | Stable outgoing work ID, unique per delegated work item. |
+| `gen_ai.agent.parent.invocation.id` | string | Required on confirmed incoming work | Upstream delegation accepted by this event/turn, not a permanent session property. |
 | `gen_ai.agent.name` | string | Recommended | Human-readable agent instance name. |
 | `gen_ai.provider.name` | string | Required | Model provider name. See [Provider Names](#provider-names). |
 | `gen_ai.request.id` | string | Recommended | Client-side request ID used to correlate with gateway or provider logs. |
@@ -87,19 +143,19 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | Cache-read token cost in USD. |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | Cache-creation token cost in USD. |
 | `gen_ai.usage.total_cost` | double | Recommended | Total event cost in USD. |
-| `gen_ai.input.messages` | json array | Opt-In | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
+| `gen_ai.input.messages` | json array | When available | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media; stripped when `captureMessageContent` is false. |
-| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | Summary of `uri` media on this event's `messages_delta` and `tool.call.result`. Same item shape as `gen_ai.input.multimodal_metadata`. Excludes cumulative `gen_ai.input.messages`; omitted when those surfaces have no media; stripped when `captureMessageContent` is false. |
-| `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on input and tool output; items include `uri`, `mime_type`, and optional `modality`. Written when multimodal is enabled and those surfaces contain media. |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | Summary of `uri` media on this event's `messages_delta` and `tool.call.result`. Same item shape as `gen_ai.input.multimodal_metadata`. Excludes cumulative `gen_ai.input.messages`; omitted when those surfaces have no media. |
+| `gen_ai.output.messages` | json array | When available | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
 | `gen_ai.output.multimodal_metadata` | json array | Opt-In | Summary of `uri` media on output and tool calls. Same item shape as the input summary; omitted when those surfaces have no media. |
-| `gen_ai.system_instructions` | json array | Opt-In | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
+| `gen_ai.system_instructions` | json array | When available | System prompt sent to the model on `llm.request`, as `text` parts. May contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
-| `gen_ai.tool.call.arguments` | json | Opt-In | Tool call arguments. May contain sensitive content. |
-| `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
+| `gen_ai.tool.call.arguments` | json | When available | Tool call arguments. May contain sensitive content. |
+| `gen_ai.tool.call.result` | json | When available | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
@@ -116,7 +172,7 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
-Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
 ## OpenClaw Session Key
 
@@ -134,7 +190,7 @@ not automatically create an SLS index or a dedicated ARMS UI column.
 
 ## System Instructions
 
-`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It rides the existing message-content controls (Opt-In requirement level, per-agent `captureMessageContent`, and the masking pipeline), so it is omitted entirely when content capture is disabled.
+`gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It enters the same masking pipeline as other message content before output.
 
 For `hermes` the prompt is read from the provider request body observed at `pre_api_request`, because `conversation_history` never replays system messages. Provider shapes are normalized to the same parts array: OpenAI-compatible `messages[]` entries with role `system` / `developer`, Responses API top-level `instructions`, Anthropic and Bedrock top-level `system` (string or block list), and Gemini `systemInstruction.parts[].text`. A blank or absent prompt yields no field.
 

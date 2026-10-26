@@ -21,7 +21,7 @@ describe('interceptor access log', () => {
         toolName: 'Bash',
         toolResponse: { stdout: 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot' },
       },
-      result: { action: 'block', reason: '[DATABASEURL_MASKED]', ruleId: 'databaseUrl' },
+      result: { action: 'block', reason: '[DATABASEURL_BLOCKED]', ruleId: 'databaseUrl' },
     }));
     const parsed = JSON.parse(line) as Record<string, unknown>;
     expect(parsed.event).toBe('PostToolUse');
@@ -32,7 +32,7 @@ describe('interceptor access log', () => {
     });
     expect(parsed.result).toMatchObject({
       action: 'block',
-      reason: '[DATABASEURL_MASKED]',
+      reason: '[DATABASEURL_BLOCKED]',
     });
     expect(typeof parsed.ts).toBe('string');
   });

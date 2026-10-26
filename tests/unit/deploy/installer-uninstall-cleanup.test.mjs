@@ -443,11 +443,10 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(cleanup).toContain('function Remove-CodexHookConfig');
     expect(cleanup).toContain('.codex\\hooks.json');
     expect(cleanup).toContain('codex-loongsuite-pilot-hook');
-    expect(cleanup).toContain('otel-codex-hook');
-    expect(cleanup).toContain('Pilot Codex nested hook command is still present');
-    expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
-    expect(cleanup).toContain('$null -eq $entry');
-    expect(cleanup).toContain('$verifyEventProperties');
+    expect(cleanup).not.toContain('otel-codex-hook');
+    expect(cleanup).toContain('$keptNestedHooks');
+    expect(cleanup).toContain('Write-FileUtf8NoBom -Path $configPath');
+    expect(cleanup).not.toContain('codex-hook-cleanup.cjs');
   });
 
   it('keeps Codex cleanup separate from the generic hook cleaner', () => {
@@ -461,14 +460,18 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('calls dedicated Codex cleanup from uninstall', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toContain('Remove-CodexHookConfig');
-    expect(uninstall.indexOf('Remove-CodexHookConfig'))
-      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+  });
+
+  it('does not restore broad marker-based trust deletion', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(ps1).not.toContain('function Remove-CodexTrustState');
+    expect(uninstall).not.toContain('Remove-CodexTrustState');
   });
 
   it('passes a valid fs module literal to node when rewriting Codex files', () => {
     const writer = ps1.slice(
       ps1.indexOf('function Write-FileUtf8NoBom'),
-      ps1.indexOf('function Remove-CodexTrustState'),
+      ps1.indexOf('function Test-IsPilotCodexHookCommand'),
     );
     expect(writer).toContain("$rewriteScript = @'");
     expect(writer).toContain("const fs = require('fs');");
@@ -490,11 +493,64 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     }
   });
 
-  it('continues uninstall when dedicated Codex cleanup fails', () => {
+  it('preserves the existing best-effort uninstall policy', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+    expect(uninstall.indexOf('Remove-CodexHookConfig')).toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(sh).not.toContain('remove_codex_hook_config || return 1');
+    expect(sh).not.toContain('upgrade Pilot before uninstalling');
+    expect(ps1).not.toContain('upgrade Pilot before uninstalling');
+    const generic = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+    expect(generic).toContain('$HOME/.codex/hooks.json');
+  });
+});
+
+describe('Unix Codex uninstall preserves third-party assets', () => {
+  it.each(['sh', 'mjs'])('removes only Pilot handlers from mixed groups (%s)', extension => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-assets-'));
+    try {
+      mkdirSync(join(root, '.codex'), { recursive: true });
+      const cache = join(root, '.cache', 'opentelemetry.instrumentation.codex');
+      mkdirSync(join(cache, 'sessions'), { recursive: true });
+      const config = join(root, '.codex', 'hooks.json');
+      const agentTrack = { type: 'command', command: 'otel-codex-hook stop', timeout: 17 };
+      const cached = { type: 'command', command: `bash ${cache}/hook-entry.sh stop` };
+      const unrelated = { type: 'command', command: `${root}/.loongsuite-pilot/third-party.sh` };
+      const pilot = { type: 'command', command: `bash ${root}/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.${extension} stop` };
+      writeFileSync(config, JSON.stringify({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, pilot, cached, unrelated] }, pilot, null, { hooks: [] }],
+        SessionStart: [{ hooks: [pilot] }],
+      } }));
+      const retainedFiles = [join(cache, 'sessions', 'trace.jsonl'), join(root, '.codex', 'config.toml'), join(root, '.codex', 'otel-config.json')];
+      for (const file of retainedFiles) writeFileSync(file, 'agenttrack-original');
+      const cleanup = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+      const run = spawnSync('/bin/bash', ['-c', `${cleanup}\nmsg() { :; }\nremove_hook_configs\nremove_hook_configs`], {
+        encoding: 'utf8', env: { ...process.env, HOME: root },
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, cached, unrelated] }, null, { hooks: [] }],
+      } });
+      for (const file of retainedFiles) expect(readFileSync(file, 'utf8')).toBe('agenttrack-original');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('legacy OTel uninstall leaves non-Pilot Codex assets untouched', () => {
+  it('shell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = sh.slice(sh.indexOf('remove_otel_plugin()'), sh.indexOf('\nprint_summary()'));
+    expect(cleanup).not.toContain('.cache/opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex/otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
+  });
+
+  it('PowerShell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = ps1.slice(ps1.indexOf('function Remove-OtelPlugin'), ps1.indexOf('\nfunction Start-PilotAndWait'));
+    expect(cleanup).not.toContain('.cache\\opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex\\otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
   });
 });
 
@@ -566,7 +622,7 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
     );
     const psCleanup = ps1.slice(
       ps1.indexOf('function Remove-OpenClawPlugin'),
-      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+      ps1.indexOf('function Remove-OtelPlugin', ps1.indexOf('function Remove-OpenClawPlugin')),
     );
 
     expect(shCleanup).not.toMatch(/node\s+-e/);

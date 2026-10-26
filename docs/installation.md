@@ -219,6 +219,8 @@ check Pilot's status if the browser cannot open the expected page.
 
 ## Uninstall
 
+Pilot leaves third-party legacy Codex OTel hooks, configuration, and the `~/.cache/opentelemetry.instrumentation.codex` directory untouched during startup and uninstall, including `--purge`.
+
 Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., and the injected plugin spec in OpenCode's config). Add `--purge` (`-Purge` on Windows) to also delete the local data directory.
 
 Keep data on Linux/macOS:

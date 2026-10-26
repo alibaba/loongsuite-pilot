@@ -16,6 +16,12 @@ export type AgentEventName =
   | 'llm.response'
   | 'tool.call'
   | 'tool.result'
+  | 'gen_ai.model.request'
+  | 'gen_ai.model.response'
+  | 'gen_ai.tool.call'
+  | 'gen_ai.tool.result'
+  | 'gen_ai.agent.invoke'
+  | 'gen_ai.agent.result'
   | 'skill.use'
   | 'tool.approve'
   | 'agent.input'
@@ -42,6 +48,8 @@ export interface AgentActivityEntry {
   observed_time_unix_nano?: string;
   'event.id': string;
   'user.id': string;
+  'user.name'?: string;
+  'user.email'?: string;
   'event.name': AgentEventName;
   trace_id?: string;
   span_id?: string;
@@ -57,6 +65,14 @@ export interface AgentActivityEntry {
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
+  /** Upstream Agent identity when observed; this is not a session join key. */
+  'gen_ai.agent.parent.id'?: string;
+  /** The directly interacting Agent, e.g. the target of an invoke. */
+  'gen_ai.agent.peer.id'?: string;
+  /** Outgoing delegation described by this event. Stable across replay. */
+  'gen_ai.agent.invocation.id'?: string;
+  /** Incoming delegation for this event's work, independently of outgoing calls. */
+  'gen_ai.agent.parent.invocation.id'?: string;
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;

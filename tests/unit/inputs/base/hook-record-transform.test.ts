@@ -82,6 +82,24 @@ describe('canonical hook custom top-level field passthrough', () => {
     });
   });
 
+  it('preserves canonical user identity fields', () => {
+    const entry = buildCanonicalHookEntry(
+      {
+        ...canonicalRecord,
+        'user.name': 'qoder-user',
+        'user.email': 'qoder-user@example.com',
+      },
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
+
+    expect(entry).toMatchObject({
+      'user.name': 'qoder-user',
+      'user.email': 'qoder-user@example.com',
+    });
+  });
+
   it('drops unsafe custom fields when passthrough is enabled', () => {
     const entry = buildCanonicalHookEntry(
       {

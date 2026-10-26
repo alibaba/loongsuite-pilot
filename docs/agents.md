@@ -2,14 +2,14 @@
 
 English | [简体中文](zh-CN/agents.md)
 
-Use this guide to choose which AI coding agents Pilot should collect from and whether sensitive message content should be captured.
+Use this guide to choose which AI coding agents Pilot should collect from and configure collection and masking.
 
 ## Hermes TTFT
 
 For Hermes OpenAI-compatible streaming chat completions, Pilot records
 `gen_ai.response.time_to_first_token` in nanoseconds, from `pre_api_request`
 to Hermes' first non-empty text, reasoning, or tool-name delta. Role-only and
-usage frames do not count. Timing does not require message-content capture.
+usage frames do not count. Timing is measured independently of message content.
 
 This uses Hermes' native `on_first_delta` callback (verified with Hermes 0.19.0).
 Older runtimes without that callback, other API modes, non-streaming responses,
@@ -34,7 +34,7 @@ type differences are called out in the notes.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
-| Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
+| Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. |
 | DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). |
 | Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. Detection and hook config follow Grok's `GROK_HOME` (default `~/.grok`). |
 | Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
@@ -45,7 +45,7 @@ type differences are called out in the notes.
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. Detection and `settings.json` follow Pi's `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
-| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
+| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; emitted records use `qoder-idea`. |
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
@@ -84,9 +84,7 @@ Each completed turn is reconstructed from three Grok-owned JSONL sources:
 Collection starts with the turn observed after installation and does not replay
 older session history. Because Grok persists cancellation asynchronously, a
 cancelled turn can be emitted on the next `user_prompt_submit` or
-`session_end`. Setting `agents["grok-build"].captureMessageContent` to `false`
-removes user, assistant, and system content as well as tool arguments, tool
-results, and raw error details.
+`session_end`.
 
 The installed assets include POSIX and PowerShell launchers. The Grok-specific
 watchdog check repairs missing or changed Pilot Hook assets and configuration;
@@ -118,8 +116,7 @@ The plugin writes append-only native events to
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`. On POSIX systems, the directory
 is mode `0700` and files are mode `0600`. These source files contain the native
 message and tool data needed for normalization, so treat them as sensitive;
-credential-shaped keys are filtered before writing. `captureMessageContent`
-controls normalized output and does not remove content from these source logs.
+credential-shaped keys are filtered before writing.
 Pilot derives LLM TTFT from the native request boundary to the first reasoning,
 text, or tool-call stream delta and reports it in nanoseconds as
 `gen_ai.response.time_to_first_token`.
@@ -271,13 +268,13 @@ The injected plugin writes append-only source events below
 `~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
 mode `0600` on POSIX systems. Provider errors or cancelled calls can legitimately
 have no output message or token usage; Pilot reports the native finish reason
-and available timing without inventing content or zero token counts. Content-off
-also removes error messages because provider/tool errors can contain user content.
+and available timing without inventing content or zero token counts. Available
+provider and tool error messages enter the reporting and masking pipeline.
 
 The [real-provider Gateway acceptance harness](../scripts/e2e/openclaw-compat.md)
 runs only in a disposable Linux container and uses the actual Pilot installer and
 collector. It checks native token parity, trace topology, worker identity, restart
-deduplication, content-off, watchdog repair, reinstall and uninstall. The exact
+deduplication, ignored legacy content config, watchdog repair, reinstall and uninstall. The exact
 OpenClaw version is a test assertion, not an input to Pilot version detection.
 Local acceptance does not replace independent SLS/ARMS readback or customer EDR testing.
 
@@ -319,18 +316,18 @@ Restart Pilot after changing this file:
 loongsuite-pilot restart
 ```
 
-## Configure Content Capture Per Agent
+## Configure Agents
 
-Use `config.json` when you need to control message content capture:
+Use `config.json` when you need to enable or disable individual agents:
 
 ```json
 {
   "agents": {
-    "claude-code": { "enabled": true, "captureMessageContent": false },
-    "codex": { "enabled": true, "captureMessageContent": false },
-    "dsh": { "enabled": true, "captureMessageContent": false },
-    "openclaw": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "claude-code": { "enabled": true },
+    "codex": { "enabled": true },
+    "dsh": { "enabled": true },
+    "openclaw": { "enabled": true },
+    "cursor": { "enabled": true }
   }
 }
 ```
@@ -338,11 +335,12 @@ Use `config.json` when you need to control message content capture:
 | Setting | Description |
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
-| `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md). To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+
+Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 
 ## Verify Agent Collection
 

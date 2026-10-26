@@ -1721,6 +1721,37 @@ cmd_inject() {
     exec "$node_bin" "$version_dir/dist/index.js" inject "$@"
 }
 
+cmd_hook() {
+    local node_bin version_dir entry
+    node_bin=$(resolve_node) || {
+        echo "loongsuite-pilot hook: Node runtime not found" >&2
+        return 1
+    }
+    version_dir=$(resolve_current_version) || {
+        echo "loongsuite-pilot hook: No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    # Prefer the sqlite-free bundle. Fall back to the daemon entry when an
+    # older install has not shipped hook-cli.cjs yet.
+    if [ -r "$version_dir/dist/hook-cli.cjs" ]; then
+        entry="$version_dir/dist/hook-cli.cjs"
+    else
+        entry="$version_dir/dist/index.js"
+        [ -r "$entry" ] || {
+            echo "loongsuite-pilot hook: Pilot entrypoint is missing or unreadable" >&2
+            return 1
+        }
+        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+        export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+        export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+        exec "$node_bin" "$entry" hook "$@"
+    fi
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$entry" hook "$@"
+}
+
 cmd_deploy() {
     ensure_dirs
     sync_bootstrap_scripts
@@ -2892,6 +2923,8 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  hook install    Install hooks before the agent starts"
+    echo "  hook status     Check whether installed hooks are still present"
     echo "  inject --agents=claude-code [--config-dir PATH] [--json]"
     echo "                  Prepare session hooks once (Linux/macOS)"
     echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
@@ -2920,6 +2953,7 @@ case "${1:-status}" in
     status)      cmd_status ;;
     info)        cmd_info ;;
     inject)      shift; cmd_inject "$@" ;;
+    hook)        shift; cmd_hook "$@" ;;
     deploy)      shift; cmd_deploy "$@" ;;
     dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;

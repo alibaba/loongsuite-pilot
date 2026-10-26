@@ -656,20 +656,19 @@ export class HookStrategy implements DeployStrategy {
     // Make pilot-kiro the default agent so users can run `kiro-cli` without
     // `--agent pilot-kiro`. Only set when missing — don't override a user's
     // explicit choice (they can still pass --agent for a one-off override).
-    await this.setKiroDefaultAgentIfMissing(agent.name);
+    await this.setKiroDefaultAgentIfMissing(agent.name, resolveHome(hookConfig.settingsPath));
   }
 
   /**
-   * Set `chat.defaultAgent = <agentName>` in ~/.kiro/settings/cli.json when not
+   * Set `chat.defaultAgent = <agentName>` in `<home>/settings/cli.json` when not
    * already set, so kiro-cli launches with the pilot agent by default.
+   * Home is the parent of the agent file's `agents/` directory, so `--home`
+   * and the default `~/.kiro` stay on the same tree.
    */
-  private async setKiroDefaultAgentIfMissing(agentName: string): Promise<void> {
-    // NOTE: distinct from hookConfig.settingsPath (~/.kiro/agents/pilot-kiro.json).
-    // This is Kiro's CLI-level settings file — a different concern (default-agent
-    // selection, not the agent definition). Kiro fixes both paths; if the config
-    // root ever moves, update this literal alongside settingsPath rather than
-    // coupling them via a new config field (they're not 1:1 related).
-    const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
+  private async setKiroDefaultAgentIfMissing(agentName: string, agentSettingsPath: string): Promise<void> {
+    const agentsDir = path.dirname(agentSettingsPath);
+    const kiroRoot = path.basename(agentsDir) === 'agents' ? path.dirname(agentsDir) : path.dirname(agentSettingsPath);
+    const cliSettingsPath = path.join(kiroRoot, 'settings', 'cli.json');
     try {
       await ensureDir(path.dirname(cliSettingsPath));
       const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};

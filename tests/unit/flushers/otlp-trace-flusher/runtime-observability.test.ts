@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 vi.mock('@loongsuite/otel-util-genai', () => ({
@@ -18,11 +22,11 @@ function entry(turn = 'turn', agent = 'codex', session = 'session'): AgentActivi
 }
 
 const active: OtlpTraceFlusher[] = [];
-function createFlusher() {
+function createFlusher(journal?: CodexTurnJournal, turnIdleTimeoutMs?: number) {
   const flusher = new OtlpTraceFlusher({
-    enabled: true, serviceName: 'test', protocol: 'http/protobuf',
+    enabled: true, serviceName: 'test', protocol: 'http/protobuf', turnIdleTimeoutMs,
     endpoints: [{ endpoint: 'http://unused:4318', headers: {} }],
-  });
+  }, undefined, undefined, journal);
   active.push(flusher);
   return flusher;
 }
@@ -59,7 +63,7 @@ describe('Trace runtime scalar snapshots', () => {
 
   it('accounts bytes before a same-batch successor can remove the previous buffer', async () => {
     const flusher = createFlusher();
-    await flusher.sendBatch([entry('first'), ...Array.from({ length: 64 }, () => entry('next'))],
+    await flusher.sendBatch([entry('first', 'claude-code'), ...Array.from({ length: 64 }, () => entry('next', 'claude-code'))],
       [123, ...Array(64).fill(10)]);
     expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
       removed_buffers_total: 1, removed_logical_bytes_total: 123,
@@ -91,14 +95,26 @@ describe('Trace runtime scalar snapshots', () => {
     const conversion = new Promise<void>(resolve => { finish = resolve; });
     vi.spyOn(flusher as any, 'convertAndExport').mockReturnValue(conversion);
     try {
-      await flusher.send(entry('first'), 12);
-      await flusher.send(entry('next'), 34);
+      await flusher.send(entry('first', 'claude-code'), 12);
+      await flusher.send(entry('next', 'claude-code'), 34);
       expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
         pending_buffers: 1, pending_logical_bytes: 34, removed_logical_bytes_total: 12,
       });
     } finally { finish(); }
     await flusher.flush();
     expect(flusher.getTraceRuntimeSnapshot()[0].pending_buffers).toBe(0);
+  });
+
+  it('keeps concurrent Codex native turns until their own terminal evidence', async () => {
+    const flusher = createFlusher();
+    await flusher.send(entry('first'), 12);
+    await flusher.send(entry('next'), 34);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
+      pending_buffers: 2, pending_logical_bytes: 46, removed_buffers_total: 0,
+    });
+    await flusher.send({ ...entry('first'), 'gen_ai.turn.end': true,
+      'agent.codex.turn_status': 'completed' }, 0);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({ pending_buffers: 1, pending_logical_bytes: 34 });
   });
 
   it('keeps counters cumulative across idle reports and preserves existing buffer eviction', async () => {
@@ -122,4 +138,199 @@ describe('Trace runtime scalar snapshots', () => {
     expect((flusher as any).turnBuffers.size).toBe(0);
     expect(flusher.getTraceRuntimeSnapshot()).toHaveLength(64);
   });
+
+  it.each(['single', 'batch', 'batch-restored'])('retains the Codex prefix when its %s continuation arrives at capacity', async mode => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-resident-capacity-'));
+    const journal = new CodexTurnJournal(root);
+    const flusher = createFlusher(journal);
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => ++clock);
+    const durable = (turn: string, id: string, terminal = false): AgentActivityEntry => ({
+      ...entry(turn, 'codex', turn), 'user.id': 'owner', 'event.id': id,
+      ...(terminal ? { 'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' } : {}),
+    });
+    const prefix = { ...durable('turn-0', 'prefix'), 'gen_ai.step.id': 'step-1',
+      'gen_ai.response.id': 'response-1', 'gen_ai.usage.input_tokens': 11,
+      'gen_ai.usage.output_tokens': 7 };
+    await flusher.send(prefix);
+    for (let i = 1; i < 65; i++) await flusher.send(durable(`turn-${i}`, `prefix-${i}`));
+    expect(flusher.getTraceRuntimeSnapshot()[0].pending_buffers).toBe(65);
+    expect(converted).not.toHaveBeenCalled();
+    expect(await journal.isAcknowledged(prefix)).toBe(false);
+
+    if (mode === 'batch-restored') await flusher.send(durable('turn-65', 'prefix-65'));
+    const terminal = durable('turn-0', 'terminal', true);
+    if (mode === 'single') await flusher.send(terminal);
+    else await flusher.sendBatch([
+      ...Array.from({ length: mode === 'batch-restored' ? 65 : 1 }, (_, i) => durable(`new-turn-${i}`, `new-prefix-${i}`)),
+      terminal,
+    ]);
+    await flusher.flush();
+
+    expect(converted).toHaveBeenCalledTimes(1);
+    expect(converted.mock.calls[0][1]).toEqual([prefix, terminal]);
+    const submitted = converted.mock.calls[0][1] as AgentActivityEntry[];
+    expect(submitted.reduce((total, record) => total + Number(record['gen_ai.usage.input_tokens'] ?? 0)
+      + Number(record['gen_ai.usage.output_tokens'] ?? 0), 0)).toBe(18);
+    expect(flusher.getTraceRuntimeSnapshot()[0].pending_buffers).toBeLessThanOrEqual(64);
+    expect(await journal.isAcknowledged(prefix)).toBe(true);
+  });
+
+  it('keeps terminal flushing deferred until overlapping batches both finish appending', async () => {
+    const flusher = createFlusher();
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let enteredFirst!: () => void;
+    let enteredSecond!: () => void;
+    const firstEntered = new Promise<void>(resolve => { enteredFirst = resolve; });
+    const secondEntered = new Promise<void>(resolve => { enteredSecond = resolve; });
+    const firstReady = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondReady = new Promise<void>(resolve => { releaseSecond = resolve; });
+    vi.spyOn(flusher as any, 'persistCodexEntries').mockImplementation(async (...args: unknown[]) => {
+      const records = args[0] as AgentActivityEntry[];
+      if (records[0]['gen_ai.turn.id'] === 'first') { enteredFirst(); await firstReady; }
+      else { enteredSecond(); await secondReady; }
+    });
+    const terminal = (turn: string): AgentActivityEntry => ({ ...entry(turn),
+      'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' });
+    const first = flusher.sendBatch([terminal('first')]);
+    await firstEntered;
+    const second = flusher.sendBatch([terminal('second')]);
+    await secondEntered;
+    try {
+      releaseFirst();
+      await first;
+      expect.soft(converted).not.toHaveBeenCalled();
+    } finally {
+      releaseSecond();
+      await second;
+    }
+    expect(converted).toHaveBeenCalledTimes(2);
+    await flusher.send(terminal('next'));
+    expect(converted).toHaveBeenCalledTimes(3);
+  });
+
+  it('restores terminal flushing when batch preparation fails', async () => {
+    const flusher = createFlusher();
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    vi.spyOn(flusher as any, 'persistCodexEntries').mockRejectedValueOnce(new Error('journal unavailable'));
+    await expect(flusher.sendBatch([entry('failed')])).rejects.toThrow('journal unavailable');
+    await flusher.send({ ...entry('next'), 'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' });
+    expect(converted).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for startup replay before durably accepting a live Codex batch', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-live-'));
+    const journal = new CodexTurnJournal(root);
+    const prefix = { ...entry('restored'), 'user.id': 'owner', 'event.id': 'restored-prefix' };
+    const live = { ...entry('live'), 'user.id': 'owner', 'event.id': 'live-prefix' };
+    await journal.append([prefix]);
+    const load = journal.load.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'load').mockImplementationOnce(async function* () {
+      entered();
+      await ready;
+      yield* load();
+    });
+    const flusher = createFlusher(journal);
+    const restoring = flusher.start();
+    await waiting;
+    let accepted = false;
+    const sending = flusher.sendBatch([live]).then(() => { accepted = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect.soft(accepted).toBe(false);
+    } finally { release(); }
+    await Promise.all([restoring, sending]);
+    const groups = [];
+    for await (const group of load()) groups.push(...group);
+    expect(groups.map(record => record['event.id'])).toContain('live-prefix');
+    expect(flusher.getTraceRuntimeSnapshot()[0].pending_records).toBe(2);
+  });
+
+  it('journals an external single send while another Codex batch is appending', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-batch-single-'));
+    const journal = new CodexTurnJournal(root);
+    const flusher = createFlusher(journal);
+    const batchEntry = { ...entry('batch'), 'user.id': 'owner', 'event.id': 'batch-prefix' };
+    const singleEntry = { ...entry('single'), 'user.id': 'owner', 'event.id': 'single-prefix' };
+    const append = journal.append.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'append').mockImplementation(async records => {
+      if (records.some(record => record['event.id'] === 'batch-prefix')) { entered(); await ready; }
+      await append(records);
+    });
+    const batch = flusher.sendBatch([batchEntry]);
+    await waiting;
+    try {
+      await flusher.send(singleEntry);
+      const groups = [];
+      for await (const group of journal.load()) groups.push(...group);
+      expect(groups.map(record => record['event.id'])).toContain('single-prefix');
+    } finally { release(); await batch; }
+  });
+
+  it('retains a resident Codex prefix when an idle tick overlaps journal append', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-idle-append-'));
+    const journal = new CodexTurnJournal(root);
+    const flusher = createFlusher(journal, 1000);
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let clock = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const prefix = { ...entry(), 'user.id': 'owner', 'event.id': 'prefix',
+      'gen_ai.step.id': 'original-step', 'gen_ai.usage.input_tokens': 11 };
+    const terminal = { ...entry(), 'user.id': 'owner', 'event.id': 'terminal',
+      'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' };
+    await flusher.send(prefix);
+    clock = 3000;
+    const append = journal.append.bind(journal);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(journal, 'append').mockImplementationOnce(async records => {
+      entered(); await ready; await append(records);
+    });
+    const sending = flusher.send(terminal);
+    await waiting;
+    try {
+      (flusher as any).tickIdleTimeout();
+      expect.soft(flusher.getTraceRuntimeSnapshot()[0].pending_records).toBe(1);
+    } finally { release(); await sending; }
+    await flusher.flush();
+    expect(converted).toHaveBeenCalledTimes(1);
+    expect(converted.mock.calls[0][1]).toEqual([prefix, terminal]);
+    expect(await journal.isAcknowledged(prefix)).toBe(true);
+  });
+
+
+  it('flushes a terminal single send after an overlapping preparation completes', async () => {
+    const flusher = createFlusher();
+    const converted = vi.spyOn(flusher as any, 'convertAndExport').mockResolvedValue(true);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(flusher as any, 'persistCodexEntries').mockImplementationOnce(async () => {
+      entered(); await ready;
+    });
+    const pending = flusher.send(entry('pending'));
+    await waiting;
+    try {
+      await flusher.send({ ...entry('terminal'), 'gen_ai.turn.end': true,
+        'agent.codex.turn_status': 'completed' });
+      expect(converted).not.toHaveBeenCalled();
+    } finally { release(); await pending; }
+    expect(converted).toHaveBeenCalledTimes(1);
+    expect(converted.mock.calls[0][1][0]['gen_ai.turn.id']).toBe('terminal');
+  });
+
 });

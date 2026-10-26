@@ -104,10 +104,6 @@ export async function setupV2(ctx, shared) {
       ...fields,
     };
     if (Number.isFinite(sourceTime)) record.time_unix_nano = String(BigInt(Math.round(sourceTime)) * 1000000n);
-    if (shared.captureMessageContent === false) {
-      for (const key of ["gen_ai.input.messages", "gen_ai.input.messages_delta", "gen_ai.output.messages",
-        "gen_ai.system_instructions", "gen_ai.tool.call.arguments", "gen_ai.tool.call.result", "error.message"]) delete record[key];
-    }
     shared.writeRecord(record);
   }
 

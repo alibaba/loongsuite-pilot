@@ -149,6 +149,17 @@ function generateTraceId() {
   return crypto.randomBytes(16).toString("hex");
 }
 
+function generateSpanId() {
+  let id;
+  do { id = crypto.randomBytes(8).toString("hex"); } while (/^0+$/.test(id));
+  return id;
+}
+
+function modelSpanId(run, callId) {
+  if (!run.modelSpanIds.has(callId)) setBounded(run.modelSpanIds, callId, generateSpanId());
+  return run.modelSpanIds.get(callId);
+}
+
 let legacyClock;
 function nowNanos() {
   return legacyClock ? legacyClock() : `${Date.now()}000000`;
@@ -289,17 +300,6 @@ function resolveUserId(cfg) {
   return resolveUserIdentity(cfg).userId;
 }
 
-function isExplicitlyFalse(value) {
-  return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
-}
-
-let openClawPluginConfig = {};
-
-function shouldCaptureContent(pilotConfig) {
-  return !isExplicitlyFalse(openClawPluginConfig?.captureMessageContent)
-    && !isExplicitlyFalse(pilotConfig?.agents?.openclaw?.captureMessageContent);
-}
-
 // Working directory of the OpenClaw instance, captured once at register().
 // Emitted as agent.openclaw.cwd so the pilot pipeline can enrich git context.
 let agentCwd;
@@ -330,26 +330,6 @@ function appendPrivateFile(filePath, content) {
   }
 }
 
-const CONTENT_RECORD_FIELDS = [
-  "gen_ai.input.messages",
-  "gen_ai.input.messages_delta",
-  "gen_ai.output.messages",
-  "gen_ai.tool.call.arguments",
-  "gen_ai.tool.call.result",
-  "gen_ai.system_instructions",
-  "gen_ai.tool.definitions",
-  "agent.openclaw.persisted_message",
-  "agent.openclaw.message",
-  "agent.openclaw.last_assistant_message",
-  "error.message",
-];
-
-function redactRecordContent(record) {
-  const redacted = { ...record };
-  for (const field of CONTENT_RECORD_FIELDS) delete redacted[field];
-  return redacted;
-}
-
 const childContexts = createSubagentContexts(resolveDataDir, writeError);
 
 function releasePendingChild(run, parent) {
@@ -364,17 +344,16 @@ function releasePendingChild(run, parent) {
   });
 }
 
-function writeRecord(record, captureContent = true) {
+function writeRecord(record) {
   const run = runs.get(record["agent.openclaw.run_id"] || record["gen_ai.turn.id"]);
-  const safeRecord = captureContent ? record : redactRecordContent(record);
-  if (run?.parentContext) return persistRecord(stampSubagent(safeRecord, run.parentContext));
+  if (run?.parentContext) return persistRecord(stampSubagent(record, run.parentContext));
   // sessions_spawn may start its child before returning the native runId. Hold
   // that child's early records until the exact tool result supplies the join.
   // Never guess from an active tool, timestamps or task text under concurrency.
   if (isSessionKey(run?.sessionKey) && /:subagent:[^:]+$/.test(run.sessionKey) && !run.childUnlinked) {
     run.pendingChildRecords ||= [];
-    run.pendingChildRecords.push(safeRecord);
-    run.pendingChildBytes = (run.pendingChildBytes || 0) + Buffer.byteLength(safeStringify(safeRecord));
+    run.pendingChildRecords.push(record);
+    run.pendingChildBytes = (run.pendingChildBytes || 0) + Buffer.byteLength(safeStringify(record));
     if (!run.pendingChildTimer) {
       run.pendingChildTimer = setTimeout(() => releasePendingChild(run), 30_000);
       run.pendingChildTimer.unref?.();
@@ -383,7 +362,7 @@ function writeRecord(record, captureContent = true) {
     if (run.pendingChildRecords.length >= 512 || run.pendingChildBytes >= 4 * 1024 * 1024) releasePendingChild(run);
     return;
   }
-  persistRecord(safeRecord);
+  persistRecord(record);
 }
 
 function persistRecord(record) {
@@ -393,8 +372,7 @@ function persistRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `openclaw-${todayStamp()}.jsonl`);
-    const persistedRecord = record;
-    appendPrivateFile(filePath, safeStringify(persistedRecord) + "\n");
+    appendPrivateFile(filePath, safeStringify(record) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -485,6 +463,7 @@ function getRun(runId, event, ctx) {
       currentStepCallId: null,
       lastCallId: null,
       nativeCallIds: new Map(),
+      modelSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
       completed: false,
@@ -569,6 +548,7 @@ function resetCompletedRunState(run) {
   run.currentStepCallId = null;
   run.lastCallId = null;
   run.nativeCallIds.clear();
+  run.modelSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
   run.userPromptText = null;
@@ -862,6 +842,7 @@ function emitUnmatchedModelResponse(run, callId, userId, emit) {
     ...buildCommonFields(run, run.sessionId, userId),
     time_unix_nano: ended.pilotObservedAtNanos,
     "event.name": "llm.response",
+    span_id: modelSpanId(run, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(ended.provider || run.provider, ended.model || run.model),
@@ -1060,6 +1041,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const record = {
     ...common,
     "event.name": "llm.request",
+    span_id: modelSpanId(run, callId),
     "gen_ai.step.id": callId,
     "gen_ai.response.id": callId,
     "gen_ai.provider.name": inferProviderName(event?.provider || run.provider, event?.model || run.model),
@@ -1145,7 +1127,7 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   if (event?.toolCallId) {
-    if (!run.toolSpanIds.has(event.toolCallId)) setBounded(run.toolSpanIds, event.toolCallId, crypto.randomBytes(8).toString("hex"));
+    if (!run.toolSpanIds.has(event.toolCallId)) setBounded(run.toolSpanIds, event.toolCallId, generateSpanId());
     if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
     setBounded(run.toolStartedAtNanos, event.toolCallId, common.time_unix_nano);
   }
@@ -1332,6 +1314,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
     const record = {
       ...buildCommonFields(run, run.sessionId, userId),
       "event.name": "llm.response",
+      span_id: modelSpanId(run, targetCallId),
       "gen_ai.step.id": targetCallId,
       "gen_ai.response.id": responseId,
       "gen_ai.response.time_to_first_token": firstTokenObserver?.take(message.api, message.responseId),
@@ -1366,10 +1349,9 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       return;
     }
     // A new call flushes the previous pending response, so this map is bounded
-    // by the existing per-run call lifecycle. Apply privacy at observation as
-    // well as emission so a later config change cannot expose withheld content.
-    setBounded(run.pendingAssistantResponses, targetCallId,
-      shouldCaptureContent(cfg) ? record : redactRecordContent(record));
+    // by the existing per-run call lifecycle. Legacy content settings do not
+    // affect either buffered or immediately emitted responses.
+    setBounded(run.pendingAssistantResponses, targetCallId, record);
     if (ended) emitPendingAssistantResponse(run, targetCallId, emit);
     return;
   }
@@ -1425,7 +1407,7 @@ function handleAgentEnd(event, ctx, userId, emit) {
 // ---------------------------------------------------------------------------
 
 function emitRecord(record) {
-  writeRecord(record, shouldCaptureContent(loadPilotConfig()));
+  writeRecord(record);
 }
 
 function makeHandler(fn, interceptHook) {
@@ -1578,9 +1560,6 @@ export default {
     }
 
     agentCwd = process.cwd() || undefined;
-    openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
-      ? api.pluginConfig
-      : {};
     try {
       ensureDir(logDir());
       _logDirReady = true;

@@ -266,6 +266,8 @@ describe('OtlpTraceFlusher - conversion', () => {
         'git.branch',
         'git.domain',
         'workspace.current_root',
+        'user.name',
+        'user.email',
       ]),
     );
   });

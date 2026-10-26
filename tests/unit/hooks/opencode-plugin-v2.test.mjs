@@ -205,7 +205,7 @@ describe('OpenCode V2 adapter', () => {
     expect(h.errors).toHaveLength(1);
   });
 
-  it('omits all content and error text from the V2 spool when capture is disabled', async () => {
+  it('reports content and error text despite the obsolete capture flag', async () => {
     const h = await harness({ captureMessageContent: false });
     h.hooks.get('context')({ sessionID: 'ses_a', system: [{ text: 'PRIVATE_SYSTEM' }], messages: [{ role: 'user', content: 'PRIVATE_INPUT' }] });
     await h.start();
@@ -214,7 +214,10 @@ describe('OpenCode V2 adapter', () => {
     await h.send('session.tool.called', { assistantMessageID: 'msg_one', id: 'call_one', input: { path: 'PRIVATE_PATH' } });
     await h.send('session.tool.failed', { assistantMessageID: 'msg_one', id: 'call_one', error: { name: 'ReadError', message: 'PRIVATE_ERROR' } });
     await h.send('session.step.ended', { assistantMessageID: 'msg_one', finish: 'stop', tokens: usage });
-    expect(JSON.stringify(h.records)).not.toContain('PRIVATE_');
+    const output = JSON.stringify(h.records);
+    for (const content of ['PRIVATE_SYSTEM', 'PRIVATE_INPUT', 'PRIVATE_OUTPUT', 'PRIVATE_PATH', 'PRIVATE_ERROR']) {
+      expect(output).toContain(content);
+    }
     expect(h.records.find(r => r['event.name'] === 'llm.response')['gen_ai.usage.total_tokens']).toBe(38);
   });
 

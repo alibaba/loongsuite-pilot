@@ -11,6 +11,7 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_QODERWORK_ROOT_MAC = '~/Library/Application Support/QoderWork';
 const DEFAULT_QODERWORK_ROOT_LINUX = '~/.config/QoderWork';
@@ -185,7 +186,7 @@ export class QoderWorkLogInput extends BaseSessionInput {
       stateStore: opts.stateStore,
       sessionDir: path.join(dataRoot, 'logs'),
       filePattern: 'sdk-*.log',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.agentType = agentType;
     this.id = `${agentType}-log`;

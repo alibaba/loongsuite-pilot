@@ -81,7 +81,146 @@ describe('SlsFlusher', () => {
     vi.useRealTimers();
   });
 
+  describe('Codex cancellation', () => {
+    it('does not send or enqueue an already cancelled Codex batch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      await expect((flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal)).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockPostLogStoreLogs).not.toHaveBeenCalled();
+    });
+
+    it('cancels retry backoff and skips later endpoint waves without retaining abort listeners', async () => {
+      const { getEventListeners } = await import('node:events');
+      flusher = new SlsFlusher(makeConfig({
+        flushConcurrency: 1,
+        retry: { retryMaxAttempts: 3, retryBaseDelayMs: 10_000, retryJitter: false },
+        endpoints: ['first', 'second'].map(name => ({
+          name, endpoint: 'https://example.invalid', project: 'p', logstore: name,
+          kind: 'agentActivity', mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk',
+        })),
+      }), '/tmp/data');
+      mockPostLogStoreLogs.mockRejectedValue(new Error('ECONNRESET'));
+      const controller = new AbortController();
+      const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal);
+      const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('cancels a webtracking request before later chunks and clears its timeout', async () => {
+      const { getEventListeners } = await import('node:events');
+      const fetchSpy = vi.fn((_url, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }));
+      vi.stubGlobal('fetch', fetchSpy);
+      try {
+        flusher = new SlsFlusher(makeConfig({ endpoints: [{
+          name: 'web', endpoint: 'https://example.invalid', project: '', logstore: 'events',
+          kind: 'agentActivity', mode: 'webtracking',
+        }] }), '/tmp/data');
+        const controller = new AbortController();
+        const entries = Array.from({ length: 4097 }, (_, index) => buildTestEntry({
+          'event.id': `chunk-${index}`, 'gen_ai.agent.type': 'codex',
+        }));
+        const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch(entries, undefined, controller.signal);
+        const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        controller.abort();
+        await rejected;
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.unstubAllGlobals(); }
+    });
+
+    it('releases the cancellable retry sleep after network recovery', async () => {
+      const { getEventListeners } = await import('node:events');
+      flusher = new SlsFlusher(makeConfig({ retry: { retryMaxAttempts: 3, retryBaseDelayMs: 100, retryJitter: false } }), '/tmp/data');
+      mockPostLogStoreLogs.mockRejectedValueOnce(new Error('ECONNRESET')).mockResolvedValueOnce(undefined);
+      const controller = new AbortController();
+      const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await sending;
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   describe('send and flush — multi endpoint routing (T012)', () => {
+    it('waits for a single network acknowledgement per Codex endpoint below the buffer threshold', async () => {
+      let acknowledge!: () => void;
+      mockPostLogStoreLogs.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const entries = [1, 2, 3].map(index => buildTestEntry({
+        'event.id': `codex-${index}`, 'gen_ai.agent.type': 'codex',
+      }));
+      let accepted = false;
+      const sending = flusher.sendBatch(entries).then(() => { accepted = true; });
+      await Promise.resolve();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(mockPostLogStoreLogs.mock.calls[0][2].logs).toHaveLength(3);
+      expect(accepted).toBe(false);
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 0 });
+      acknowledge();
+      await sending;
+      await flusher.flush();
+      expect(accepted).toBe(true);
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 3, outFailed: 0 });
+    });
+
+    it('rejects Codex output failure after every endpoint settles without sending ordinary queued entries', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        retry: { retryMaxAttempts: 1 },
+        endpoints: [
+          { name: 'good', endpoint: 'https://example.invalid', project: 'p', logstore: 'good', kind: 'agentActivity', mode: 'ak' },
+          { name: 'bad', endpoint: 'https://example.invalid', project: 'p', logstore: 'bad', kind: 'agentTelemetry', mode: 'ak', redact: true },
+        ],
+      }), '/tmp/data');
+      mockPostLogStoreLogs.mockImplementation(async (_project, logstore) => {
+        if (logstore === 'bad') throw new Error('synthetic transport failure');
+      });
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary-queued' }));
+      await expect(flusher.sendBatch([buildTestEntry({
+        'event.id': 'codex-failed', 'gen_ai.agent.type': 'codex',
+        'gen_ai.tool.call.arguments': { prompt: 'body' },
+      })])).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(mockPostLogStoreLogs.mock.calls.every(call => call[2].logs[0].content['event.id'] === 'codex-failed')).toBe(true);
+      expect(mockPostLogStoreLogs.mock.calls.find(call => call[1] === 'bad')![2].logs[0].content)
+        .not.toHaveProperty('gen_ai.tool.call.arguments');
+      expect(flusher.getEndpointCounters().get('good')).toMatchObject({ inEntries: 2, outEntries: 1, outFailed: 0 });
+      expect(flusher.getEndpointCounters().get('bad')).toMatchObject({ inEntries: 2, outEntries: 0, outFailed: 1 });
+      expect(mockFailureWrite).toHaveBeenCalledOnce();
+      mockPostLogStoreLogs.mockResolvedValue(undefined);
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      expect(mockPostLogStoreLogs.mock.calls.slice(2).every(call => call[2].logs[0].content['event.id'] === 'ordinary-queued')).toBe(true);
+    });
+
+    it('also waits for Codex single-entry output and does not retain a second timer copy', async () => {
+      await flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
+
     it('enqueues per endpoint and flushes grouped by project/logstore', async () => {
       const entry = buildTestEntry();
       await flusher.send(entry);

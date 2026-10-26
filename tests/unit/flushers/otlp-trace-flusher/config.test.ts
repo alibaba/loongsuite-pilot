@@ -45,10 +45,27 @@ describe('OtlpTraceFlusher - config validation', () => {
       protocol: 'http/protobuf',
       serviceName: 'loongsuite-pilot',
       debug: true,
-      captureMessageContent: true,
       turnIdleTimeoutMs: 0,
     });
     expect(flusher.name).toBe('otlp-trace');
+  });
+
+  it('ignores legacy captureMessageContent=false and enables OTLP content capture by default', () => {
+    const previous = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    try {
+      new OtlpTraceFlusher({
+        enabled: true,
+        endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+        protocol: 'http/protobuf',
+        serviceName: 'test',
+        captureMessageContent: false,
+      });
+      expect(process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT).toBe('SPAN_ONLY');
+    } finally {
+      if (previous === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previous;
+    }
   });
 
   it('constructs successfully with multiple endpoints', () => {

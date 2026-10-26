@@ -20,6 +20,8 @@ export class StateStore {
   private revision = 0;
   private persistedRevision = 0;
   private savePromise: Promise<void> | null = null;
+  private readonly saveHolds = new Set<Promise<void>>();
+  private saveFailure: { error: unknown } | null = null;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -42,8 +44,27 @@ export class StateStore {
     this.persistedRevision = 0;
   }
 
+  get waitingForOutput(): boolean { return this.saveHolds.size > 0; }
+
+  get saveFailed(): boolean { return this.saveFailure !== null; }
+
+  /** Do not checkpoint source progress before its output has been durably accepted. */
+  holdSaveUntil(promise: Promise<void>): void {
+    this.saveHolds.add(promise);
+    // Keep one failure until restart without retaining every settled promise.
+    // Later saves must not advance offsets that recovery still needs to replay.
+    void promise.then(
+      () => { this.saveHolds.delete(promise); },
+      error => {
+        this.saveFailure ??= { error };
+        this.saveHolds.delete(promise);
+      },
+    );
+  }
+
   save(): Promise<void> {
-    if (this.persistedRevision === this.revision) {
+    if (this.saveFailure) return Promise.reject(this.saveFailure.error);
+    if (this.persistedRevision === this.revision && this.saveHolds.size === 0) {
       return Promise.resolve();
     }
 
@@ -102,7 +123,13 @@ export class StateStore {
   }
 
   private async flushPendingRevisions(): Promise<void> {
-    while (this.persistedRevision < this.revision) {
+    while (true) {
+      if (this.saveFailure) throw this.saveFailure.error;
+      if (this.saveHolds.size > 0) {
+        await Promise.all([...this.saveHolds]);
+        continue;
+      }
+      if (this.persistedRevision >= this.revision) return;
       const targetRevision = this.revision;
       const out: StateFileShape = {};
       for (const [k, v] of this.states) {

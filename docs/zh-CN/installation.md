@@ -256,6 +256,8 @@ loongsuite-pilot dashboard shortcut uninstall
 
 ## 卸载
 
+Pilot 启动和卸载时保留第三方旧 Codex OTel Hook、配置及 `~/.cache/opentelemetry.instrumentation.codex` 目录，`--purge` 也不删除这些资产。
+
 卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。
 
 Linux/macOS 保留数据：

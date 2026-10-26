@@ -5,6 +5,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
 const SESSION_LIFECYCLE_HOOKS = new Set(['session_start', 'session_end']);
@@ -42,7 +43,7 @@ export class OpenClawPluginInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolveOpenClawPluginLogDir(opts.dataDir),
       logPrefix: opts?.logPrefix ?? 'openclaw',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 

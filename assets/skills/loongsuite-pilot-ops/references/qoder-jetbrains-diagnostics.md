@@ -197,7 +197,7 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-idea)?'
 - `qoder-trace` 被禁用或 Qoder 桌面版/CLI 的共享 hook 从未注入 → 参照 `qoder-diagnostics.md` 排查共享链路
 - Qoder for JetBrains 插件本身从未产生过完整对话（Stop hook 未触发）
 
-### 5.1 agent-control / content policy 中的 ID 差异
+### 5.1 agent-control / Agent 配置中的 ID 差异
 
 `Qoder for JetBrains` 在不同配置文件中使用不同 ID，容易混淆：
 
@@ -205,10 +205,7 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-idea)?'
 |---|---|---|
 | `agents.d/qoder-jetbrains.json` | `qoder-jetbrains` | 部署/检测专用 ID |
 | `~/.loongsuite-pilot/agent-control.json` | `qoder` | 采集开关复用 Qoder 的开关（因为共享 hook） |
-| `~/.loongsuite-pilot/config.json` 的 `agents` 段 | `qoder-idea` | 内容采集策略（`captureMessageContent` 等）单独配置 |
-
-若用户想单独关闭 JetBrains 场景下的内容采集，但不影响 Qoder 桌面版，应修改 `config.json` 中
-`agents["qoder-idea"]` 而不是 `agents["qoder"]`。
+| `~/.loongsuite-pilot/config.json` 的 `agents` 段 | `qoder-idea` | 启用状态和多模态策略单独配置 |
 
 ---
 
@@ -224,7 +221,7 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-idea)?'
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `qoder-trace` 游标 |
 | `~/.loongsuite-pilot/logs/output/` | 规范化输出，relabel 后的记录 `gen_ai.agent.type: "qoder-idea"` |
 | `~/.loongsuite-pilot/agent-control.json` | 采集开关（用 `qoder` ID） |
-| `~/.loongsuite-pilot/config.json` | 内容策略（用 `qoder-idea` ID） |
+| `~/.loongsuite-pilot/config.json` | Agent 配置（用 `qoder-idea` ID） |
 
 ---
 
@@ -235,6 +232,5 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-idea)?'
 | 插件检测不到 | 确认插件安装路径匹配 `IntelliJIdea*` / `IdeaIC*` / `PyCharm*` / `WebStorm*` / `GoLand*` 模式，或产品未被列入检测范围 |
 | 有共享 hook 数据但一直标记为 `qoder`，从未出现 `qoder-idea` | 检查 `~/.qoder/shared_client/cache/db/local.db` 是否存在及有无 token 数据；确认 `qoder-trace` 未被禁用 |
 | 同时使用 Qoder 桌面版和 JetBrains 插件，数据混在一起 | 不会混。两者共享 hook 但各自的 SQLite DB 独立，`QoderTraceInput` 按 `session_id` 精确匹配对应 DB 后分别 relabel |
-| 想单独关闭 JetBrains 场景的内容采集 | 修改 `config.json` 中 `agents["qoder-idea"]`，不要改 `agents["qoder"]`（会连带影响桌面版） |
 | 想单独关闭 JetBrains 场景的采集开关 | `agent-control.json` 复用 `qoder` ID，无法单独关闭 JetBrains 而不影响桌面版/CLI（属设计限制） |
 | IntelliJ 专属 DB 不存在 | 用户从未在插件里完成过一次完整对话，或插件版本过低未使用该 DB 结构，升级插件 |
