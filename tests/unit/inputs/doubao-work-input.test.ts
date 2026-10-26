@@ -160,6 +160,23 @@ describe('Doubao Work passive client-message input', () => {
     await input.poll();
     expect(await DoubaoWorkInput.checkAvailability(logs)).toBe(false);
   });
+
+  it('bounds saved file cursors and keeps the newest numeric rotation suffixes', async () => {
+    const { logs, input, stateStore } = await setup();
+    const name = (index: number) => DOUBAO_FILE.replace('.0.log', `.${index}.log`);
+    for (let index = 1; index < 130; index++) await writeFile(path.join(logs, name(index)), '');
+    expect(await input.poll()).toEqual([]);
+    let files = (stateStore.get('doubao-work').extra?.doubaoWork as any).files;
+    expect(Object.keys(files)).toHaveLength(128);
+    expect(files[name(1)]).toBeUndefined();
+    expect(files[name(129)]).toBeDefined();
+    await writeFile(path.join(logs, name(130)), '');
+    expect(await input.poll()).toEqual([]);
+    files = (stateStore.get('doubao-work').extra?.doubaoWork as any).files;
+    expect(Object.keys(files)).toHaveLength(128);
+    expect(files[name(2)]).toBeUndefined();
+    expect(files[name(130)]).toBeDefined();
+  });
 });
 
 describe('Doubao Work log protocol', () => {
