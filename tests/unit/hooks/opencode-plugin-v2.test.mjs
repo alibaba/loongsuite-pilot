@@ -74,6 +74,108 @@ describe('OpenCode V2 adapter', () => {
     expect(results.every(r => r['gen_ai.tool.call.duration'] > 0)).toBe(true);
   });
 
+  it.each(['session.execution.interrupted', 'session.execution.failed', 'session.deleted'])(
+    'gives each pending step/tool a distinct replay-stable ID on %s', async type => {
+      const replay = async () => {
+        const h = await harness();
+        for (const step of ['step_one', 'step_two']) {
+          await h.start(step);
+          for (const id of ['call_one', 'call_two']) {
+            await h.send('session.tool.input.started', { assistantMessageID: step, id, name: 'read' });
+            await h.send('session.tool.called', { assistantMessageID: step, id, input: {} });
+          }
+        }
+        const terminal = await h.send(type, { reason: 'user', error: { name: 'APIError' } });
+        await h.send(type, {}, terminal);
+        expect(h.records.filter(r => r['event.name'] === 'tool.result')).toHaveLength(4);
+        expect(h.records.filter(r => r['event.name'] === 'llm.response')).toHaveLength(2);
+        expect(new Set(h.records.map(r => r['event.id'])).size).toBe(h.records.length);
+        expect(h.errors).toEqual([]);
+        return h.records.map(r => r['event.id']);
+      };
+      expect(await replay()).toEqual(await replay());
+    },
+  );
+
+  it('keeps the start and input records distinct when inbox delivery begins a turn', async () => {
+    const h = await harness();
+    await h.send('session.inbox.enqueued', { inboxID: 'prompt_one', item: { type: 'user', payload: { text: 'hello' } } });
+    await h.send('session.inbox.delivered', { inboxID: 'prompt_one' });
+    expect(h.records).toHaveLength(2);
+    expect(new Set(h.records.map(r => r['event.id'])).size).toBe(2);
+  });
+
+  it.each([20, 200000])('bounds a %s-character tool argument consistently without changing small JSON types', async size => {
+    const h = await harness(); await h.start();
+    const input = { content: 'x'.repeat(size) };
+    await h.send('session.tool.input.started', { assistantMessageID: 'msg_one', id: 'call_one', name: 'write' });
+    await h.send('session.tool.called', { assistantMessageID: 'msg_one', id: 'call_one', input });
+    input.content = 'mutated after the event';
+    await h.send('session.tool.success', { assistantMessageID: 'msg_one', id: 'call_one', content: [{ type: 'text', text: 'written' }] });
+    await h.send('session.step.ended', { assistantMessageID: 'msg_one', finish: 'tool-calls', tokens: usage });
+    const call = h.records.find(r => r['event.name'] === 'tool.call');
+    const intent = h.records.find(r => r['event.name'] === 'llm.response')['gen_ai.output.messages'][0].parts[0];
+    const args = call['gen_ai.tool.call.arguments'];
+    if (size < 65536) {
+      expect(args).toEqual({ content: 'x'.repeat(size) });
+      expect(JSON.parse(intent.arguments)).toEqual(args);
+      expect(call['agent.opencode.tool.arguments_truncated']).toBeUndefined();
+    } else {
+      expect(typeof args).toBe('string');
+      expect(args.length).toBeLessThanOrEqual(65536 + '...[truncated]'.length);
+      expect(args.endsWith('...[truncated]')).toBe(true);
+      expect(intent.arguments).toBe(args);
+      expect(call['agent.opencode.tool.arguments_truncated']).toBe(true);
+    }
+    expect(h.errors).toEqual([]);
+  });
+
+  it('carries native tool result parts into the next request without stringifying the parts array', async () => {
+    const h = await harness(); await h.start();
+    await h.send('session.tool.input.started', { assistantMessageID: 'msg_one', id: 'call_one', name: 'read' });
+    await h.send('session.tool.called', { assistantMessageID: 'msg_one', id: 'call_one', input: {} });
+    await h.send('session.tool.success', { assistantMessageID: 'msg_one', id: 'call_one', content: [{ type: 'text', text: 'actual tool output' }] });
+    await h.send('session.step.ended', { assistantMessageID: 'msg_one', finish: 'tool-calls', tokens: usage });
+    await h.start('msg_two');
+    const next = h.records.filter(r => r['event.name'] === 'llm.request')[1];
+    const result = h.records.find(r => r['event.name'] === 'tool.result')['gen_ai.tool.call.result'];
+    expect(next['gen_ai.input.messages_delta'].find(m => m.role === 'tool').parts).toEqual([
+      { type: 'tool_call_response', id: 'call_one', response: result },
+    ]);
+    expect(h.errors).toEqual([]);
+  });
+
+  it('does not evict an active session while more than 100 other turns complete', async () => {
+    const h = await harness(); await h.start();
+    const originalTurn = h.records[0]['gen_ai.turn.id'];
+    for (let n = 0; n < 101; n++) {
+      await h.start(`msg_${n}`, `ses_${n}`);
+      await h.send('session.execution.interrupted', { sessionID: `ses_${n}`, reason: 'user' });
+    }
+    await h.send('session.text.ended', { assistantMessageID: 'msg_one', ordinal: 0, text: 'retained answer' });
+    await h.send('session.step.ended', { assistantMessageID: 'msg_one', finish: 'stop', tokens: usage });
+    const response = h.records.find(r => r['gen_ai.session.id'] === 'ses_a' && r['event.name'] === 'llm.response');
+    expect(response['gen_ai.turn.id']).toBe(originalTurn);
+    expect(response['gen_ai.output.messages'][0].parts[0].content).toBe('retained answer');
+    expect(h.errors).toEqual([]);
+  });
+
+  it('preserves admitted active sessions at capacity and diagnoses overflow without fabricating completion', async () => {
+    const h = await harness();
+    for (let n = 0; n < 100; n++) await h.start(`msg_${n}`, `ses_${n}`);
+    const originalTurn = h.records.find(r => r['gen_ai.session.id'] === 'ses_0')['gen_ai.turn.id'];
+    await h.start('msg_overflow', 'ses_overflow');
+    await h.start('msg_overflow_two', 'ses_overflow_two');
+    expect(h.errors).toHaveLength(1);
+    expect(h.errors[0][0]).toBe('v2-session-capacity');
+    expect(h.records.some(r => r['gen_ai.turn.end'])).toBe(false);
+    await h.send('session.step.ended', { sessionID: 'ses_0', assistantMessageID: 'msg_0', finish: 'stop', tokens: usage });
+    await h.send('session.execution.succeeded', { sessionID: 'ses_0' });
+    expect(h.records.find(r => r['gen_ai.session.id'] === 'ses_0' && r['event.name'] === 'llm.response')['gen_ai.turn.id']).toBe(originalTurn);
+    await h.start('msg_after_capacity', 'ses_after_capacity');
+    expect(h.records.some(r => r['gen_ai.session.id'] === 'ses_after_capacity' && r['event.name'] === 'llm.request')).toBe(true);
+  });
+
   describe.each(['session.step.ended', 'session.step.failed'])('%s token tolerance', (type) => {
     it.each([
       ['missing cache', { input: 10, output: 5 }, 10, 0, 0],

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 const LIMIT = 100;
+const MAX_ACTIVE_SESSIONS = 100;
 const MAX_CONTENT = 64 * 1024;
 const MAX_STEPS = 256;
 const MAX_PARTS = 512;
@@ -87,18 +88,31 @@ export async function setupV2(ctx, shared) {
   const controller = new AbortController();
   const registrations = [];
   let stopped = false;
+  let capacityWarned = false;
 
   function session(id) {
     const existing = sessions.get(id);
     if (existing) return existing;
-    return boundedSet(sessions, id, { currentTurn: null, steps: new Map(), inputs: [] });
+    if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+      if (!capacityWarned) {
+        capacityWarned = true;
+        shared.writeError("v2-session-capacity", new Error("OpenCode V2 active session limit reached; untracked sessions are skipped until capacity is available"));
+      }
+      return undefined;
+    }
+    const state = { currentTurn: null, steps: new Map(), inputs: [] };
+    sessions.set(id, state);
+    return state;
   }
 
   function emit(event, state, name, fields = {}, sourceTime = event.created) {
     const record = {
       ...shared.common(event.data.sessionID, state),
       "agent.opencode.collection": "v2",
-      "event.id": crypto.createHash("sha256").update(`${event.id}:${name}`).digest("hex"),
+      "event.id": crypto.createHash("sha256").update(JSON.stringify([
+        event.id, name, fields["gen_ai.step.id"], fields["gen_ai.tool.call.id"],
+        fields["gen_ai.turn.start"] === true ? "start" : fields["gen_ai.turn.end"] === true ? "end" : "event",
+      ])).digest("hex"),
       "event.name": name,
       observed_time_unix_nano: String(BigInt(Date.now()) * 1000000n),
       ...fields,
@@ -145,6 +159,11 @@ export async function setupV2(ctx, shared) {
     state.currentTurn = null;
     state.steps.clear();
     state.inputs = [];
+    // Completed sessions must not displace still-running turns. Retain only
+    // active state and admit new sessions again as soon as a slot is released.
+    sessions.delete(event.data.sessionID);
+    contexts.delete(event.data.sessionID);
+    capacityWarned = false;
   }
 
   function onEvent(event) {
@@ -153,13 +172,21 @@ export async function setupV2(ctx, shared) {
     if (seen.has(event.id)) return;
     boundedSet(seen, event.id, true, 8192);
     const data = event.data;
-    const state = session(data.sessionID);
     const type = event.type;
     if (type === "session.inbox.enqueued") {
       if (data.item?.type === "user") boundedSet(prompts, data.inboxID, text(data.item.payload?.text));
       return;
     }
     if (type === "session.inbox.cancelled") { prompts.delete(data.inboxID); return; }
+    // Metadata and straggler events do not allocate empty session state.
+    const state = sessions.get(data.sessionID) ?? (
+      ["session.execution.started", "session.inbox.delivered", "session.step.started"].includes(type)
+        ? session(data.sessionID) : undefined
+    );
+    if (!state) {
+      if (type === "session.deleted") contexts.delete(data.sessionID);
+      return;
+    }
     if (type === "session.execution.started") { begin(event, state); return; }
     if (type === "session.inbox.delivered") {
       const prompt = prompts.get(data.inboxID);
@@ -219,10 +246,16 @@ export async function setupV2(ctx, shared) {
     if (type === "session.tool.called") {
       const tool = step.tools.get(data.id);
       if (!tool || tool.called) return;
-      tool.called = true; tool.input = data.input; tool.started = event.created;
+      const serialized = JSON.stringify(data.input);
+      const truncated = serialized !== undefined && serialized.length > MAX_CONTENT;
+      // Snapshot once before marking the call: subsequent source mutation and
+      // the model-intent record must see the same bounded arguments.
+      tool.input = truncated ? text(serialized) : serialized === undefined ? undefined : JSON.parse(serialized);
+      tool.called = true; tool.started = event.created;
       emit(event, state, "tool.call", {
         ...step.fields, "gen_ai.tool.name": tool.name, "gen_ai.tool.call.id": data.id,
-        "gen_ai.tool.call.arguments": data.input,
+        "gen_ai.tool.call.arguments": tool.input,
+        ...(truncated ? { "agent.opencode.tool.arguments_truncated": true } : {}),
       });
       return;
     }
@@ -264,7 +297,7 @@ export async function setupV2(ctx, shared) {
       // The next model step sees the actual preceding output and tool results.
       state.inputs = output.length ? [{ role: "assistant", parts: output }] : [];
       for (const [id, tool] of step.tools) {
-        if (tool.ended && tool.result?.length) state.inputs.push({ role: "tool", parts: [{ type: "tool_call_response", id, response: json(tool.result) }] });
+        if (tool.ended && tool.result?.length) state.inputs.push({ role: "tool", parts: [{ type: "tool_call_response", id, response: tool.result }] });
       }
       step.content.clear(); step.tools.clear();
     }

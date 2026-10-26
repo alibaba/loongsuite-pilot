@@ -196,14 +196,63 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
     const scriptStart = source.indexOf(marker, start) + marker.length;
     const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
-    const script = source.slice(scriptStart, end);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
     const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-uninstall-'));
     try {
       const config = join(root, 'opencode.json');
       writeFileSync(config, JSON.stringify({ plugin: ['file:///pilot/plugins/opencode/plugin.mjs', 'third-party'], plugins: [{ package: 'file:///pilot/plugins/opencode' }, '/other/plugins/opencode-extra'] }));
-      const result = spawnSync(process.execPath, ['-e', script, config], { encoding: 'utf8' });
+      const result = spawnSync(process.execPath, ['-e', script, config, '/pilot'], { encoding: 'utf8' });
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['third-party'], plugins: ['/other/plugins/opencode-extra'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes only exact owned paths or package IDs, including encoded paths', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
+    for (const dataDir of ['/custom/pilot data', 'C:\\custom\\pilot data']) {
+      const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-owned-'));
+      try {
+        const managed = dataDir.replace(/\\/g, '/') + '/plugins/opencode';
+        const url = (managed.startsWith('/') ? 'file://' : 'file:///') + managed.replace(/ /g, '%20');
+        const thirdParty = [
+          '/third-party/plugins/opencode', 'file:///third-party/plugins/opencode/',
+          '/third-party/plugins/opencode/plugin.mjs', '/other/pilot data/plugins/opencode',
+          '/third-party/loongsuite-pilot-opencode-custom', 'loongsuite-pilot-opencode-extra',
+          `${managed}-extra`, `${url}/child-plugin.mjs`,
+          { package: '/third-party/plugins/opencode' }, ['file:///third-party/plugins/opencode/plugin.mjs', {}],
+        ];
+        const config = join(root, 'opencode.jsonc');
+        writeFileSync(config, '// original comment\n' + JSON.stringify({
+          plugin: [managed, `${url}/`, [url + '/plugin.mjs', {}], ...thirdParty],
+          plugins: [{ package: url }, `${managed}/plugin.mjs`, 'loongsuite-pilot-opencode', 'loongsuite-pilot-opencode@1.0.0', ...thirdParty],
+        }));
+        const result = spawnSync(process.execPath, ['-e', script, config, dataDir], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: thirdParty, plugins: thirdParty });
+        expect(readFileSync(`${config}.bak`, 'utf8')).toContain('// original comment');
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+
+  it('the actual shell function passes a custom data directory and preserves third-party plugins', () => {
+    const start = sh.indexOf('remove_opencode_plugin()');
+    const end = sh.indexOf('\n# Remove only the Hermes', start);
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-shell-'));
+    try {
+      const configDir = join(root, '.config', 'opencode');
+      const dataDir = join(root, 'pilot data');
+      mkdirSync(configDir, { recursive: true });
+      const config = join(configDir, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: [`${dataDir}/plugins/opencode`, '/third-party/plugins/opencode'] }));
+      const result = spawnSync('/bin/bash', ['-c', 'msg() { :; }\n' + sh.slice(start, end) + '\nremove_opencode_plugin'], {
+        encoding: 'utf8', env: { HOME: root, DATA_DIR: dataDir, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['/third-party/plugins/opencode'] });
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

@@ -5,6 +5,7 @@ import { setupV2 } from '../../assets/plugins/opencode/v2.mjs';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
 import { maskAgentActivityEntry } from '../../src/mask/entry-masker.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
+import { prepareTraceEvents } from '../../src/flushers/trace-event-compat.js';
 import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
 
 describe('OpenCode V2 event-to-trace contract', () => {
@@ -58,6 +59,15 @@ describe('OpenCode V2 event-to-trace contract', () => {
     expect(JSON.stringify(masked)).toContain('synthetic answer');
     expect(JSON.stringify(masked)).toContain('synthetic result');
     expect(JSON.stringify(masked)).not.toContain(secret);
+    const nextRequest = masked.filter(r => r['event.name'] === 'llm.request')[1];
+    const deltas = nextRequest['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<{ id?: string; response?: unknown }> }>;
+    for (const message of deltas.filter(m => m.role === 'tool')) {
+      const part = message.parts[0];
+      const result = masked.find(r => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === part.id);
+      expect(part.response).toEqual(result!['gen_ai.tool.call.result']);
+      expect(Array.isArray(part.response)).toBe(true);
+    }
+    expect(deltas.filter(m => m.role === 'tool')).toHaveLength(2);
     const spans: ReadableSpan[] = [];
     const flusher = new OtlpTraceFlusher({ enabled: true,
       endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }], protocol: 'http/protobuf', serviceName: 'synthetic-v2',
@@ -89,4 +99,62 @@ describe('OpenCode V2 event-to-trace contract', () => {
       expect(spans).toHaveLength(count);
     } finally { await flusher.shutdown(); }
   });
+
+  it.each(['session.execution.interrupted', 'session.execution.failed', 'session.deleted'])(
+    'keeps both parallel tool pairs through real trace preparation/conversion on %s', async terminal => {
+      const raw: Record<string, unknown>[] = [];
+      const events: Record<string, unknown>[] = [];
+      const now = Date.now() - 20000;
+      const add = (type: string, data: Record<string, unknown> = {}) => events.push({
+        id: `evt_parallel_${events.length}`, type, created: now + events.length * 100,
+        data: { sessionID: 'ses_parallel', ...data },
+      });
+      add('session.execution.started');
+      add('session.step.started', { assistantMessageID: 'msg_parallel', model: { id: 'gpt-test', providerID: 'openai' }, agent: 'build', started: now + 100 });
+      for (const id of ['tool_a', 'tool_b']) {
+        add('session.tool.input.started', { assistantMessageID: 'msg_parallel', id, name: 'read' });
+        add('session.tool.called', { assistantMessageID: 'msg_parallel', id, input: { path: 'synthetic.txt' } });
+      }
+      add(terminal, terminal.endsWith('failed') ? { error: { name: 'APIError' } } : { reason: 'user' });
+      let done!: () => void;
+      const drained = new Promise<void>(resolve => { done = resolve; });
+      const cleanup = await setupV2({
+        location: { directory: '/synthetic/project' },
+        session: { hook: async () => ({ dispose() {} }) },
+        event: { async *subscribe() { for (const event of events) yield event; done(); } },
+      }, {
+        common: (id: string, state: { currentTurn?: { turnId: string; traceId: string } }) => ({
+          'user.id': 'synthetic-user', 'gen_ai.agent.type': 'opencode', 'gen_ai.session.id': id,
+          'gen_ai.turn.id': state.currentTurn?.turnId, trace_id: state.currentTurn?.traceId,
+        }),
+        writeRecord: (record: Record<string, unknown>) => raw.push(record),
+        writeError: (where: string, error: unknown) => { throw new Error(`${where}: ${error}`); },
+        inferProviderName: (id: string) => id, recordUpstreamEnvOnce() {},
+      });
+      await drained; cleanup();
+      const normalized = (await Promise.all(raw.map(r => transformHookRecord(r, ClientType.OpenCode, 'opencode'))))
+        .filter((r): r is AgentActivityEntry => r !== null);
+      const prepared = prepareTraceEvents(normalized);
+      expect(prepared.filter(r => r['event.name'] === 'tool.result')).toHaveLength(2);
+      expect(new Set(normalized.map(r => r['event.id'])).size).toBe(normalized.length);
+      const spans: ReadableSpan[] = [];
+      const flusher = new OtlpTraceFlusher({ enabled: true,
+        endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }], protocol: 'http/protobuf', serviceName: 'parallel-v2',
+      }, undefined, () => ({
+        export(batch, callback) { spans.push(...batch); callback({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {},
+      }));
+      try {
+        await flusher.sendBatch(normalized);
+        const tools = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL');
+        expect(tools.map(s => s.attributes['gen_ai.tool.call.id']).sort()).toEqual(['tool_a', 'tool_b']);
+        expect(tools.every(s => s.duration[0] * 1e9 + s.duration[1] > 0)).toBe(true);
+        expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(1);
+        expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
+        expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+        const count = spans.length;
+        await flusher.sendBatch(normalized);
+        expect(spans).toHaveLength(count);
+      } finally { await flusher.shutdown(); }
+    },
+  );
 });
