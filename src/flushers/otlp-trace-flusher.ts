@@ -1291,9 +1291,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
     const terminal = [...records].reverse().find(record => record['gen_ai.turn.end'] === true);
     const outcome = terminal?.['loongsuite.doubao_work.client_outcome'];
+    const hasUpstreamParent = records.some(record => record['event.name'] === 'other'
+      && typeof record.parent_span_id === 'string'
+      && /^[0-9a-f]{16}$/.test(record.parent_span_id)
+      && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
+      span.attributes['gen_ai.framework'] = 'doubao-work';
+      // util beta.13 preserves trace_id via a virtual parent. A locally
+      // identified turn has no external parent; retain only explicit linking.
+      if (kind === 'ENTRY' && !hasUpstreamParent) {
+        Object.assign(span, { parentSpanId: undefined });
+      }
       // A received reply (including capacity/entitlement notices) says nothing
       // about business success. No native model finish reason is synthesized.
       const failed = outcome === 'error' || outcome === 'cancelled';
