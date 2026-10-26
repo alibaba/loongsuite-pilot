@@ -325,6 +325,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
@@ -335,6 +336,7 @@ describe('ConfigLoader', () => {
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
           'opencode-log': { pollInterval: 1000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
         },
       });
 
@@ -342,6 +344,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -371,6 +374,7 @@ describe('ConfigLoader', () => {
         listeners: {
           qoder: { enabled: false, pollInterval: 120_000 },
           'kiro-cli-session': { enabled: true, pollInterval: 60_000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
         },
       });
       vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
@@ -382,6 +386,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-trace'].pollInterval).toBe(3000);
       expect(config.listeners['cursor-hook'].pollInterval).toBe(3000);
       expect(config.listeners['codex-transcript'].pollInterval).toBe(3000);
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 3000 });
       expect(config.listeners['hermes-agent-log'].pollInterval).toBe(3000);
       expect(config.listeners['kiro-cli-session']).toEqual({ enabled: true, pollInterval: 3000 });
       expect(config.listeners.workbuddy.pollInterval).toBe(3000);

@@ -10,7 +10,7 @@ import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
 const dirs:string[]=[];
 const inputs:CopilotLogInput[]=[];
 const tracked=(i:CopilotLogInput)=>{inputs.push(i);return i;};
-afterEach(async()=>{vi.restoreAllMocks();for(const i of inputs.splice(0))await (i as any).onStop();await Promise.all(dirs.splice(0).map(d=>fs.rm(d,{recursive:true,force:true})));});
+afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();for(const i of inputs.splice(0))await (i as any).onStop();await Promise.all(dirs.splice(0).map(d=>fs.rm(d,{recursive:true,force:true})));});
 const lines=(xs:any[])=>xs.map(x=>JSON.stringify(x)).join('\n')+'\n';
 async function setup(){
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'copilot-hybrid-'));dirs.push(dir);
@@ -61,11 +61,20 @@ describe('Copilot incremental recovery',()=>{
   expect((await collect(x.input)).length).toBeGreaterThan(0);
  });
  it('uses a valid configured polling interval and defaults invalid values',async()=>{
+  vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS','');
   const x=await setup();
-  for(const [value,expected] of [[1234,1234],[0,5000],[-1,5000],[NaN,5000]]){
+  expect((x.input as any).pollIntervalMs).toBe(10_000);
+  for(const [value,expected] of [[1234,1234],[0,10_000],[-1,10_000],[NaN,10_000],[Infinity,10_000]]){
    const input=tracked(new CopilotLogInput({stateStore:x.state,dataDir:x.dir,pollIntervalMs:value}));
    expect((input as any).pollIntervalMs).toBe(expected);
   }
+ });
+ it('lets the unified polling interval override the Copilot default and listener value',async()=>{
+  vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS','3000');
+  const x=await setup();
+  expect((x.input as any).pollIntervalMs).toBe(3000);
+  const input=tracked(new CopilotLogInput({stateStore:x.state,dataDir:x.dir,pollIntervalMs:45_000}));
+  expect((input as any).pollIntervalMs).toBe(3000);
  });
  it('reconstructs read-but-not-queued data after restart',async()=>{
   const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));

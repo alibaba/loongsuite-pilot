@@ -56,6 +56,7 @@ Pilot is designed to answer practical questions:
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- |
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| GitHub Copilot CLI | Native plugin + transcript / native OTel | Yes | Yes | Yes (native OTel) | Yes |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
@@ -76,6 +77,8 @@ Pilot is designed to answer practical questions:
 | Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
+
+GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 
 OpenClaw integration supports 2026.3.8 or later with automatic version detection. Before 2026.5.12, model-call timing is inferred from legacy hooks; see [compatibility details](docs/agents.md#openclaw-compatibility-and-lifecycle).
 

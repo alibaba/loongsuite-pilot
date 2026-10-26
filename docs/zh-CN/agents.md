@@ -30,6 +30,7 @@
 |-------|----|------|
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
+| GitHub Copilot CLI | `copilot` | 原生插件与 transcript/native OTel 混合采集；单次调用的准确 Token 依赖 native OTel。自动部署支持 Unix shell，暂不支持 Windows 和子 Agent。详见[遥测说明](copilot-native-telemetry.md)。 |
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook。 |
 | DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。检测路径遵循 DSH 官方的 `DSH_HOME`（默认 `~/.dsh`）。 |

@@ -7,6 +7,7 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { resolveDataDir } from '../../utils/data-dir.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
 import { CopilotSourceIndex } from './source-index.js';
 import { parseInteractions } from '../../../assets/hooks/copilot/interaction-parser.mjs';
@@ -38,7 +39,7 @@ export class CopilotLogInput extends BaseSessionInput {
 
   constructor(opts: CopilotLogInputOptions) {
     super({ stateStore: opts.stateStore, sessionDir: opts.sessionDir ?? path.join(copilotHome(), 'session-state'),
-      filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: Number.isFinite(opts.pollIntervalMs) && opts.pollIntervalMs! > 0 ? opts.pollIntervalMs! : 5_000 });
+      filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: Number.isFinite(opts.pollIntervalMs) && opts.pollIntervalMs! > 0 ? opts.pollIntervalMs! : DEFAULT_POLL_INTERVAL_MS });
     const dataDir = opts.dataDir || resolveDataDir();
     this.nativeGraceMs = opts.nativeGraceMs ?? 30_000;
     this.index = new CopilotSourceIndex(path.join(dataDir, 'state', 'copilot', 'source-index.sqlite'), (file, offset) => {

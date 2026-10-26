@@ -817,6 +817,7 @@ function buildListenersConfig(
     'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'codex-transcript': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'copilot-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'opencode-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
