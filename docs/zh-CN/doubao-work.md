@@ -32,7 +32,7 @@ Agent type/framework 为 `doubao-work`，Agent system 为 `doubao`，provider �
 
 本地工具时间表示客户端收到调用到本地执行结算的观察区间，包含分发/确认等待，不等于云端模型发起到接收结果的全链路耗时。原生工具名、调用 ID、受限状态与正的毫秒耗时被保留；不读取命令、参数、输出或原始错误。`success` 只表示原生本地执行结算状态，不推断业务结果或 Bash 命令退出码。
 
-TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识这个边界。由于未观察到模型与 React 步骤，Trace 为 ENTRY → AGENT → TOOL，不补造 STEP/LLM。通用 validator 仅针对这个明确标识和 Doubao framework 接受 TOOL 直接挂 AGENT；其他 Agent 的 STEP/LLM 检查保持严格。旧 validator 若只允许 STEP → TOOL，会报告结构不兼容；验收同时保留原始结果与本候选公开契约校验。
+TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识这个边界。由于未观察到模型与 React 步骤，Trace 为 ENTRY → AGENT → TOOL，不补造 STEP/LLM。通用 validator 仅针对这个明确标识和 Doubao framework 接受 TOOL 直接挂 AGENT；其他 Agent 的 STEP/LLM 检查保持严格。该边界也明确不包含工具参数，缺少参数按源不适用记录。旧 validator 若要求 STEP → TOOL 或无条件要求参数，会报告契约不兼容；验收同时保留原始失败结果与本候选公开契约校验，普通工具的参数检查不放宽。
 
 缺少一端、ID/工具名冲突、没有唯一请求归属、超出客户端请求时间的后台调用均省略，记录有界告警。云端 `calculator`、`web.fetch`、`create_agent` 等仅在无时间的轨迹中出现时不生成工具耗时。子 Agent 的复用、嵌套、晚到完成和重启不能由普通任务 Trace 证明。
 
