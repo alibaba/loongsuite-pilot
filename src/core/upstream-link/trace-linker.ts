@@ -55,8 +55,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  *
  * Stateful across collect batches: a turn's events may arrive in separate
  * batches, so the resolved context is cached by (sessionId, turnId). The
- * `other` (user-input) event — always the first event of a turn — triggers
- * resolution; later events of the same turn reuse the cache.
+ * `other` event carrying user input triggers resolution. Metadata-only events
+ * can precede it: resolve input-bearing events first within each batch, then
+ * stamp the whole batch without changing source order. Empty-text misses stay
+ * unresolved so a later batch can still supply the input.
  *
  * Precedence: turn-level record (adapter) > session-level record (env, first
  * turn only) > existing value. On hit the record's value overrides whatever
@@ -78,12 +80,34 @@ export class TraceLinker {
   }
 
   async stamp(entries: AgentActivityEntry[]): Promise<void> {
+    // Establish the first turn from source order, before the input-first pass.
+    // Otherwise a later turn with text could consume the first-turn env fallback.
     for (const entry of entries) {
-      try {
-        await this.stampEntry(entry);
-      } catch (err) {
-        logger.warn('stamp entry failed (skipped)', { error: String(err) });
+      const sessionId = entry['gen_ai.session.id'] as string | undefined;
+      const turnId = entry['gen_ai.turn.id'] as string | undefined;
+      if (!sessionId || !turnId) continue;
+      this.sessionLastAccess.set(sessionId, Date.now());
+      if (!this.firstTurnBySession.has(sessionId)) {
+        this.firstTurnBySession.set(sessionId, turnId);
       }
+    }
+
+    // Resolve before applying, so leading metadata/LLM events in this batch
+    // cannot escape with the local trace id or prematurely claim an env fallback.
+    for (const entry of entries) {
+      if (entry['event.name'] !== 'other' || !extractUserText(entry)) continue;
+      await this.tryStampEntry(entry);
+    }
+    for (const entry of entries) {
+      await this.tryStampEntry(entry);
+    }
+  }
+
+  private async tryStampEntry(entry: AgentActivityEntry): Promise<void> {
+    try {
+      await this.stampEntry(entry);
+    } catch (err) {
+      logger.warn('stamp entry failed (skipped)', { error: String(err) });
     }
   }
 
@@ -92,11 +116,6 @@ export class TraceLinker {
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (!sessionId || !turnId) return;
 
-    this.sessionLastAccess.set(sessionId, Date.now());
-    if (!this.firstTurnBySession.has(sessionId)) {
-      this.firstTurnBySession.set(sessionId, turnId);
-    }
-
     const key = `${sessionId}|${turnId}`;
     const cached = this.cache.get(key);
     if (cached) {
@@ -104,7 +123,7 @@ export class TraceLinker {
       return; // already resolved or already attempted (miss)
     }
 
-    // Only the `other` (user-input) event carries the text needed to resolve.
+    // Other events may be metadata-only; their empty text is not a final miss.
     if (entry['event.name'] !== 'other') return;
 
     const text = extractUserText(entry);
@@ -112,12 +131,12 @@ export class TraceLinker {
     const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn);
 
     if (!tp) {
-      this.cache.set(key, { resolved: false });
+      if (text) this.cache.set(key, { resolved: false });
       return;
     }
     const parsed = parseTraceparent(tp);
     if (!parsed) {
-      this.cache.set(key, { resolved: false });
+      if (text) this.cache.set(key, { resolved: false });
       return;
     }
     const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId };

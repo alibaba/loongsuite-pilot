@@ -18,7 +18,11 @@ appends a terminal marker without repeating successfully written events.
 Unfinished requests remain visible without a fabricated successful response.
 TTFT observation supports both the legacy method and the newer lazy streaming helper.
 
-Incremental records carry `agent.hermes.collection=realtime-v1`; the terminal
+Incremental records carry `agent.hermes.collection=realtime-v1`.
+Before the first `llm.request` is appended, the plugin appends one user-input
+`other` event with `agent.hermes.hook=turn_start` for per-turn upstream trace
+linking. It uses the resolved native turn/task ID and the observed first API
+request start time, and carries no token usage. The terminal
 record carries `event.name=other`, `agent.hermes.hook=turn_end` and
 `gen_ai.turn.end=true`. The collector uses this explicit boundary so retries and
 overlapping turns in one session do not truncate a trace. Legacy records retain

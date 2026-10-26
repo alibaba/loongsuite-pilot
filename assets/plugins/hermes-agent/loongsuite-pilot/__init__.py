@@ -994,12 +994,40 @@ def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> N
     emitted = turn.setdefault("emitted", set())
     event_ids = turn.setdefault("event_ids", {})
     for record in records:
-        key = (record["event.name"], record["gen_ai.step.id"], record.get("gen_ai.tool.call.id"))
+        if record["event.name"] == "llm.request":
+            _write_turn_input(turn, record)
+        key = (record["event.name"], record.get("gen_ai.step.id"), record.get("gen_ai.tool.call.id"))
         if key in emitted:
             continue
         record["event.id"] = event_ids.setdefault(key, record["event.id"])
         _write_records([record])
         emitted.add(key)
+
+
+def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
+    # Wait until the first API request has bound the native turn/task id, then
+    # append input before any LLM record can be collected on a different trace.
+    # The input has no step id: it is once per turn and must not collide with
+    # the step-scoped turn_end marker or repeat on retries/lifecycle flushes.
+    if ("other", None, None) in turn.get("emitted", set()):
+        return
+    if not turn.get("input_span_id"):
+        turn["input_span_id"] = _new_span_id()
+    first_api_ns = int(turn["apis"][0]["pre_ns"])
+    record = _common_fields(
+        turn, {}, "other", first_api_ns, "", turn["input_span_id"]
+    )
+    record.pop("gen_ai.step.id", None)
+    record.update({
+        "agent.hermes.hook": "turn_start",
+        "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
+        "gen_ai.input.messages_delta": _messages([
+            {"role": "user", "content": turn.get("user_message", "")}
+        ]),
+    })
+    # Reuse stable event ids and append acknowledgement. If this write fails,
+    # leave the input retryable and do not let the request overtake it.
+    _write_new_records(turn, [record])
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:

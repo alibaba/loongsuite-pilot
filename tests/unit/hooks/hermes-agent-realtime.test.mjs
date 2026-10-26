@@ -28,10 +28,14 @@ emit('pre_llm_call', **base, sender_id='im-user', user_message='hello', conversa
 before_api = read()
 emit('pre_api_request', **base, api_call_count=1, api_request_id='request1')
 first = read()
-assert len(first) == 1 and first[0]['event.name'] == 'llm.request'
-assert first[0]['gen_ai.request.id'] == 'request1'
-assert first[0]['gen_ai.session.id'] == 's1'
-assert 'gen_ai.output.messages' not in first[0]
+assert [r['event.name'] for r in first] == ['other', 'llm.request']
+assert first[0]['agent.hermes.hook'] == 'turn_start'
+assert first[0]['gen_ai.input.messages_delta'] == [dict(role='user', parts=[dict(type='text', content='hello')])]
+assert first[0]['gen_ai.turn.id'] == 'turn1'
+assert first[0]['time_unix_nano'] == first[1]['time_unix_nano']
+assert first[1]['gen_ai.request.id'] == 'request1'
+assert first[1]['gen_ai.session.id'] == 's1'
+assert 'gen_ai.output.messages' not in first[1]
 emit('post_api_request', **base, api_call_count=1, api_request_id='request1', finish_reason='tool_calls', usage=dict(input_tokens=10, output_tokens=3), response=dict(assistant_message=dict(role='assistant', content='', tool_calls=[dict(id='tool1', type='function', function=dict(name='terminal', arguments='{}'))])))
 after_response = read()
 emit('pre_tool_call', **base, tool_call_id='tool1', tool_name='terminal', args=dict(command='echo hi'))
@@ -73,6 +77,48 @@ print(json.dumps(dict(before_api=before_api, first=first, after_response=after_r
 `;
 
 describe('Hermes request-boundary JSONL visibility', () => {
+  it('retries the turn input before the request without changing its identity', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-hermes-input-retry-'));
+    try {
+      const scenario = String.raw`
+import importlib.util, json, pathlib, sys, types
+spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
+hooks = {}
+p.register(types.SimpleNamespace(register_hook=lambda name, cb: hooks.update({name: cb})))
+base = dict(session_id='s', task_id='t', turn_id='t', model='m', provider='openai')
+hooks['pre_llm_call'](**base, user_message='hello')
+failed = []
+writer = p._write_records
+def fail_input(records):
+    failed.extend(records)
+    raise OSError('injected input write failure')
+p._write_records = fail_input
+hooks['pre_api_request'](**base, api_call_count=1, api_request_id='request')
+assert len(failed) == 1 and failed[0]['agent.hermes.hook'] == 'turn_start'
+assert not p._find_turn(p._SESSIONS['s'], base)['emitted']
+p._write_records = writer
+hooks['post_api_request'](**base, api_call_count=1, api_request_id='request', finish_reason='stop',
+    response=dict(assistant_message=dict(role='assistant', content='ok')))
+hooks['post_llm_call'](**base)
+hooks['on_session_finalize'](session_id='s')
+records = [json.loads(line) for f in pathlib.Path(sys.argv[2]).glob('logs/hermes-agent/*.jsonl')
+    for line in f.read_text().splitlines()]
+assert [r['event.name'] for r in records] == ['other', 'llm.request', 'llm.response', 'other']
+assert records[0]['event.id'] == failed[0]['event.id']
+assert records[0]['span_id'] == failed[0]['span_id']
+assert records[-1]['gen_ai.turn.end'] is True
+`;
+      const result = spawnSync('python3', ['-c', scenario, plugin, root], {
+        encoding: 'utf8', env: {
+          ...process.env, LOONGSUITE_PILOT_DATA_DIR: root, PYTHONDONTWRITEBYTECODE: '1',
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('bounds failed evictions, keeps the current request active, and retries detached turns at exit', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-hermes-eviction-'));
     try {
@@ -138,7 +184,7 @@ print(json.dumps({'terminal': len(terminal)}))
       expect(result.status, result.stderr).toBe(0);
       const out = JSON.parse(result.stdout);
       expect(out.before_api).toEqual([]); // pre_llm_call is not a request boundary.
-      expect(out.after_response.map(r => r['event.name'])).toEqual(['llm.request', 'llm.response']);
+      expect(out.after_response.map(r => r['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
       expect(out.after_call.at(-1)['event.name']).toBe('tool.call');
       expect(out.after_result.at(-1)['event.name']).toBe('tool.result');
       expect(out.second.at(-1)['gen_ai.request.id']).toBe('request2');
@@ -159,13 +205,14 @@ print(json.dumps({'terminal': len(terminal)}))
         expect(response.trace_id).toBe(request.trace_id);
       }
       expect(turn.filter(r => r['gen_ai.turn.end'])).toHaveLength(1);
+      expect(turn.filter(r => r['agent.hermes.hook'] === 'turn_start')).toHaveLength(1);
       const postOnly = turn.filter(r => r['gen_ai.tool.call.id'] === 'post-only');
       expect(postOnly.map(r => r['event.name'])).toEqual(['tool.call', 'tool.result']);
       expect(postOnly[0].span_id).toBe(postOnly[1].span_id);
       expect(new Set(out.retry_final.map(r => r['event.id'])).size).toBe(out.retry_final.length);
       expect(out.retained).toBe(1);
       const unfinished = out.retry_final.filter(r => r['gen_ai.turn.id'] === 'turn2');
-      expect(unfinished.map(r => r['event.name'])).toEqual(['llm.request', 'other']);
+      expect(unfinished.map(r => r['event.name'])).toEqual(['other', 'llm.request', 'other']);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

@@ -82,6 +82,51 @@ describe('TraceLinker', () => {
     expect(llm.trace_id).toBe(UP_TRACE);
   });
 
+  it('links an entire batch when a metadata-only other precedes the user input', async () => {
+    writeTurn('do X', TP);
+    const metadata = otherEvent('t1', '');
+    const llm = llmEvent('t1');
+    const input = otherEvent('t1', 'do X');
+    await linker().stamp([metadata, llm, input]);
+    expect([metadata, llm, input].map(entry => entry.trace_id)).toEqual([
+      UP_TRACE, UP_TRACE, UP_TRACE,
+    ]);
+    expect(metadata.parent_span_id).toBe(UP_SPAN);
+    expect(input.parent_span_id).toBe(UP_SPAN);
+    expect(llm.parent_span_id).toBe('dddddddddddddddd');
+  });
+
+  it('does not cache an empty-text miss before input arrives in a later batch', async () => {
+    writeTurn('do X', TP);
+    const tl = linker();
+    await tl.stamp([otherEvent('t1', '')]);
+    const input = otherEvent('t1', 'do X');
+    const llm = llmEvent('t1');
+    await tl.stamp([input, llm]);
+    expect(input.trace_id).toBe(UP_TRACE);
+    expect(input.parent_span_id).toBe(UP_SPAN);
+    expect(llm.trace_id).toBe(UP_TRACE);
+  });
+
+  it('prefers a turn match over the session fallback even with an empty leading event', async () => {
+    writeTurn('do X', TP);
+    writeSession(TP_SESS);
+    const metadata = otherEvent('t1', '');
+    const input = otherEvent('t1', 'do X');
+    await linker().stamp([metadata, input]);
+    expect(metadata.trace_id).toBe(UP_TRACE);
+    expect(input.trace_id).toBe(UP_TRACE);
+  });
+
+  it('uses source order to identify the first turn when resolving a batch', async () => {
+    writeSession(TP_SESS);
+    const first = otherEvent('t1', '');
+    const second = otherEvent('t2', 'later');
+    await linker().stamp([first, second]);
+    expect(first.trace_id).toBe(SESS_TRACE);
+    expect(second.trace_id).not.toBe(SESS_TRACE);
+  });
+
   it('turn-level record takes priority over session-level on the first turn', async () => {
     writeTurn('first', TP);
     writeSession(TP_SESS);

@@ -14,7 +14,10 @@ Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，
 不会重复写出已经成功追加的事件。没有响应的请求保留请求记录，不合成成功响应。
 新版 lazy-forward streaming helper 与旧版方法签名均支持 TTFT 观测。
 
-增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`；回合结束记录为
+增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`。首条 `llm.request`
+落盘前会先追加一次 `event.name=other`、`agent.hermes.hook=turn_start` 的用户输入事件，
+用于逐轮上游 Trace 关联；它使用已确定的原生 turn/task ID，不参与 Token 统计，
+并与首个 API 请求共用观测到的请求起始时间。回合结束记录为
 `event.name=other`、`agent.hermes.hook=turn_end`、`gen_ai.turn.end=true`。
 collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
 旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
