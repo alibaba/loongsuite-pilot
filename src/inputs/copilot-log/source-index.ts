@@ -1,6 +1,6 @@
 // Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
-import sqlite3 from 'sqlite3';
+import { loadDatabaseSync, type DatabaseSyncInstance } from '../../utils/node-sqlite.js';
 import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -13,19 +13,18 @@ const READ_BUDGET = 4 * 1024 * 1024;
  * delivery checkpoint. SQLite keeps historical records and IDs out of JS memory.
  */
 export class CopilotSourceIndex {
-    private db?: sqlite3.Database;
+    private db?: DatabaseSyncInstance;
     constructor(private readonly file: string, private readonly onMalformed?: (file: string, offset: number) => void) { }
     async open(): Promise<void> {
         if (this.db)
             return;
         await fsp.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-        this.db = await new Promise<sqlite3.Database>((resolve, reject) => {
-            const db = new sqlite3.Database(this.file, e => e ? reject(e) : resolve(db));
-        });
+        const DatabaseSync = loadDatabaseSync();
+        if (!DatabaseSync) throw new Error('Copilot source indexing requires unflagged node:sqlite (Node.js >= 22.13 or >= 23.4)');
+        this.db = new DatabaseSync(this.file);
         try {
             await fsp.chmod(this.file, 0o600);
-            this.db.configure('busyTimeout', 5000);
-            await this.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            await this.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
           PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
       CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY, kind TEXT, identity TEXT, offset INTEGER, session TEXT, active TEXT, anchor TEXT);
       CREATE TABLE IF NOT EXISTS records(kind TEXT, session TEXT, id TEXT, interaction TEXT, type TEXT, trace TEXT, stamp TEXT, body TEXT,
@@ -44,19 +43,13 @@ export class CopilotSourceIndex {
             throw err;
         }
     }
-    exec(sql: string): Promise<void> { return new Promise((resolve, reject) => this.db!.exec(sql, e => e ? reject(e) : resolve())); }
-    run(sql: string, args: unknown[] = []): Promise<void> {
-        return new Promise((resolve, reject) => this.db!.run(sql, args, e => e ? reject(e) : resolve()));
-    }
-    all<T = any>(sql: string, args: unknown[] = []): Promise<T[]> {
-        return new Promise((resolve, reject) => this.db!.all(sql, args, (e, rows) => e ? reject(e) : resolve(rows as T[])));
-    }
+    async exec(sql: string): Promise<void> { this.db!.exec(sql); }
+    async run(sql: string, args: unknown[] = []): Promise<void> { this.db!.prepare(sql).run(...args); }
+    async all<T = any>(sql: string, args: unknown[] = []): Promise<T[]> { return this.db!.prepare(sql).all(...args) as T[]; }
     async close(): Promise<void> {
-        if (!this.db)
-            return;
         const db = this.db;
         this.db = undefined;
-        await new Promise<void>((resolve, reject) => db.close(e => e ? reject(e) : resolve()));
+        db?.close();
     }
     async ingest(file: string, kind: 'event' | 'span'): Promise<void> {
         const handle = await fsp.open(file, 'r');
@@ -101,7 +94,7 @@ export class CopilotSourceIndex {
                         const tail = buffer.subarray(start, end + 1);
                         let line = tail;
                         if (offset < chunkStart + start) {
-                            const stored = await this.all<{body: Buffer}>('SELECT body FROM partial_chunks WHERE path=? ORDER BY position', [file]);
+                            const stored = await this.all<{body: Uint8Array}>('SELECT body FROM partial_chunks WHERE path=? ORDER BY position', [file]);
                             line = Buffer.concat([...stored.map(r => r.body), tail]);
                             await this.run('DELETE FROM partial_chunks WHERE path=?', [file]);
                         }
