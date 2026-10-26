@@ -287,7 +287,7 @@ const SPAN_KIND_META = {
   STEP:      { namePattern: 'react step', operationName: 'react', multiplicity: 'one_or_more', parentKind: 'AGENT', allowedChildren: ['LLM', 'TOOL'],
                constraints: [{ rule: 'exactly_one_child_of_kind', kind: 'LLM' }, { rule: 'llm_starts_before_all_tools' }, { rule: 'no_time_overlap_between_siblings' }] },
   LLM:       { namePattern: '{gen_ai.operation.name} {gen_ai.request.model}', operationName: ['chat', 'generate_content', 'text_completion'], multiplicity: 'one_or_more', parentKind: 'STEP', allowedChildren: [] },
-  TOOL:      { namePattern: 'execute_tool {gen_ai.tool.name}', operationName: 'execute_tool', multiplicity: 'zero_or_more', parentKind: 'STEP', allowedChildren: ['AGENT'] },
+  TOOL:      { namePattern: 'execute_tool {gen_ai.tool.name}', operationName: 'execute_tool', multiplicity: 'zero_or_more', parentKind: 'STEP', localObservationException: 'Doubao Work TOOL with framework=doubao-work and loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled may be a direct child of its Doubao AGENT; no inferred STEP/LLM.', allowedChildren: ['AGENT'] },
   CHAIN:     { namePattern: 'chain {chain_name}', operationName: ['workflow', 'task'], multiplicity: 'zero_or_more', parentKind: null, allowedChildren: [] },
   RETRIEVER: { namePattern: '{gen_ai.operation.name} {gen_ai.data_source.id}', operationName: 'retrieval', multiplicity: 'zero_or_more', parentKind: null, allowedChildren: [] },
   RERANKER:  { namePattern: 'rerank {reranker.model_name}', operationName: 'rerank', multiplicity: 'zero_or_more', parentKind: null, allowedChildren: [] },

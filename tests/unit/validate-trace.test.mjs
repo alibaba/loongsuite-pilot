@@ -9,6 +9,7 @@ import {
   buildTraces,
   hasModelToolSpanForOutput,
   isRuntimeSkillLoadSpan,
+  isDoubaoLocalTool,
   unmatchedToolsForLlmOutput,
   validateMessageField,
   validateSemantic,
@@ -98,6 +99,32 @@ describe('semantic.tool_matches_llm_output runtime Skill handling', () => {
 });
 
 const traceRules = JSON.parse(readFileSync(new URL('../../docs/trace-validation-rules.json', import.meta.url), 'utf8'));
+
+describe('Doubao local execution observation contract', () => {
+  function sample(framework = 'doubao-work', marker = true) {
+    const attrs = { 'gen_ai.framework': framework, 'gen_ai.session.id': 'session' };
+    const raw = ['ENTRY', 'AGENT', 'TOOL'].map((kind, i) => ({
+      traceId: 'a'.repeat(32), spanId: String(i + 1).padStart(16, '0'),
+      ...(i ? { parentSpanId: String(i).padStart(16, '0') } : {}),
+      name: kind, startTimeUnixNano: '1792990000000000000', endTimeUnixNano: '1792990000001000000',
+      attributes: { ...attrs, 'gen_ai.span.kind': kind, ...(kind === 'TOOL' ? {
+        'gen_ai.tool.call.id': 'native-call',
+        ...(marker ? { 'loongsuite.doubao_work.tool_boundary': 'client_received_to_execution_settled' } : {}),
+      } : {}) },
+    }));
+    return [...buildTraces(raw).values()][0];
+  }
+  test('permits only the documented observed local TOOL under its Doubao AGENT', () => {
+    const trace = sample();
+    expect(isDoubaoLocalTool(trace.spans[2], trace.spans[1])).toBe(true);
+    expect(validateStructure(trace).filter(c => c.status === 'error')).toEqual([]);
+  });
+  test.each([['codex', true], ['doubao-work', false]])('does not exempt ordinary or unmarked tools (%s)', (framework, marker) => {
+    const trace = sample(framework, marker);
+    expect(isDoubaoLocalTool(trace.spans[2], trace.spans[1])).toBe(false);
+    expect(validateStructure(trace).some(c => c.id === 'structure.tool_under_step' && c.status === 'error')).toBe(true);
+  });
+});
 
 function delegatedTrace() {
   let nextId = 1;

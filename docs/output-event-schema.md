@@ -251,6 +251,8 @@ Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_w
 (`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
 See [scope and configuration](doubao-work.md).
 
+Local tools emit paired `tool.call` / `tool.result` events and TOOL spans directly under AGENT, marked `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled`. Selected identifiers use bounded `loongsuite.doubao_work.selected_skills` / `selected_partners` arrays; they do not prove runtime skill loading. No cloud/subagent execution timing is inferred.
+
 ## Finish Reasons
 
 | Value | Description |

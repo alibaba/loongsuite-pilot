@@ -17,6 +17,7 @@ import {
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertCodexTurn } from './codex-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
+import { convertDoubaoWorkTurn, enrichDoubaoWorkTools } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
@@ -1216,6 +1217,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
             : agentType === 'codex' ? convertCodexTurn
+            : agentType === 'doubao-work' ? convertDoubaoWorkTurn
             : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
             : convertEventLogToTrace;
           result = convert(
@@ -1269,6 +1271,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
       if (agentType === 'doubao-work') {
         this.enrichDoubaoWorkSpans(records, spans);
+        enrichDoubaoWorkTools(records, spans);
       }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
@@ -1299,6 +1302,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
       span.attributes['gen_ai.framework'] = 'doubao-work';
+      for (const key of ['loongsuite.doubao_work.selected_skills', 'loongsuite.doubao_work.selected_partners']) {
+        const values = terminal?.[key];
+        if (Array.isArray(values) && values.length <= 32 && values.every(value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(value))) span.attributes[key] = values as string[];
+      }
       // util beta.13 preserves trace_id via a virtual parent. A locally
       // identified turn has no external parent; retain only explicit linking.
       if (kind === 'ENTRY' && !hasUpstreamParent) {

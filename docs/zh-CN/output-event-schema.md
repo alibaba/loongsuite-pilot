@@ -237,6 +237,8 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 （`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
 见[支持范围与配置](doubao-work.md)。
 
+本地工具产生配对的 `tool.call` / `tool.result` 和 AGENT 下的 TOOL Span，以 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识。所选技能/伙伴使用受限 `loongsuite.doubao_work.selected_skills` / `selected_partners` 数组，仅表示选择上下文。云端子 Agent 时间不作推断。
+
 ## Finish Reasons
 
 | 值 | 说明 |

@@ -13,17 +13,20 @@ const READ_BYTES = 1024 * 1024;
 const CYCLE_BYTES = 8 * READ_BYTES;
 const MAX_PENDING = 512;
 const MAX_COMPLETED = 4096;
+const MAX_TOOLS = 4096;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPLETED_TTL_MS = 7 * PENDING_TTL_MS;
 
 interface FileCursor { identity: string; offset: number; anchor?: string; skippingLine?: boolean }
 interface PendingTurn extends DoubaoPendingTurn { startObserved: boolean; terminal?: DoubaoLogEvent }
+interface PendingTool { start?: DoubaoLogEvent; end?: DoubaoLogEvent; conflict?: boolean; updatedMs: number }
 interface Checkpoint {
   schema: 1;
   sinceMs: number;
   files: Record<string, FileCursor>;
   pending: Record<string, PendingTurn>;
   completed: Record<string, number>;
+  tools?: Record<string, PendingTool>;
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string }
@@ -130,11 +133,13 @@ export class DoubaoWorkInput extends BaseInput {
       return [];
     }
     const next: Checkpoint = JSON.parse(JSON.stringify(saved));
+    next.tools ??= {};
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
     let remainingBytes = CYCLE_BYTES;
+    let drained = true;
     for (const name of names) {
-      if (remainingBytes <= 0) break;
+      if (remainingBytes <= 0) { drained = false; break; }
       let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
       try {
         handle = await fs.open(path.join(this.logDir, name), 'r');
@@ -157,6 +162,7 @@ export class DoubaoWorkInput extends BaseInput {
           const { bytesRead } = await handle.read(buffer, 0, requested, cursor.offset);
           this.getInputRuntimeAccumulator()?.observeRead(bytesRead, requested, performance.now() - started);
           remainingBytes -= bytesRead;
+          if (bytesRead < unread) drained = false;
           const chunk = buffer.subarray(0, bytesRead);
           let from = 0;
           let records = 0;
@@ -187,7 +193,7 @@ export class DoubaoWorkInput extends BaseInput {
           }
           cursor.offset += from;
           const after = await handle.stat();
-          if (fileIdentity(after) !== identity || after.size < cursor.offset) continue;
+          if (fileIdentity(after) !== identity || after.size < cursor.offset) { drained = false; continue; }
           cursor.anchor = await boundaryAnchor(handle, cursor.offset, this.getInputRuntimeAccumulator());
           events.push(...fileEvents);
           this.getInputRuntimeAccumulator()?.observeCommittedBatch({
@@ -196,6 +202,7 @@ export class DoubaoWorkInput extends BaseInput {
         }
         next.files[name] = cursor;
       } catch {
+        drained = false;
         // Failed stat/read is not deletion. Do not mutate this file's committed cursor.
         this.logger.warn('Doubao Work log read unavailable; preserving file checkpoint');
       } finally {
@@ -203,7 +210,10 @@ export class DoubaoWorkInput extends BaseInput {
       }
     }
     events.sort((a, b) => BigInt(a.timeNano) < BigInt(b.timeNano) ? -1 : BigInt(a.timeNano) > BigInt(b.timeNano) ? 1 : 0);
-    for (const event of events) this.consume(next, event, entries);
+    for (const event of events) this.consume(next, event);
+    // Consume the whole source window first, including rotated/out-of-order tool
+    // records. A partial scan must not finalize requests ahead of unread tools.
+    if (drained) for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
     const selected = new Set(names);
@@ -211,19 +221,33 @@ export class DoubaoWorkInput extends BaseInput {
     const dropped = compact(next.pending, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
     if (dropped) this.logger.warn('Doubao Work incomplete requests expired or exceeded capacity; no trace inferred', { requests: dropped });
     compact(next.completed, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
+    const droppedTools = compact(next.tools!, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
+    if (droppedTools) this.logger.warn('Doubao Work unmatched local tools expired or exceeded capacity', { tools: droppedTools });
     this.setState({ extra: { doubaoWork: next } });
     return entries;
   }
 
   private consume(
-    state: Checkpoint, event: DoubaoLogEvent, entries: AgentActivityEntry[],
+    state: Checkpoint, event: DoubaoLogEvent,
   ): void {
+    if (event.tool) {
+      if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;
+      const key = JSON.stringify([event.tool.sandboxId, event.tool.id]);
+      const tool = state.tools![key] ?? { updatedMs: Date.now() };
+      const side = event.tool.phase === 'received' ? 'start' : 'end';
+      const prior = tool[side];
+      if (prior && (prior.turnId !== event.turnId || prior.tool?.name !== event.tool.name || prior.tool?.status !== event.tool.status)) tool.conflict = true;
+      // Re-delivery does not move the original observed boundary.
+      tool[side] ??= event;
+      tool.updatedMs = Date.now();
+      state.tools![key] = tool;
+      return;
+    }
     if (event.name === 'general_agent_message_id_mapping') {
       if (!event.localMessageId || !event.conversationId) return;
-      for (const [key, pending] of Object.entries(state.pending)) {
+      for (const pending of Object.values(state.pending)) {
         if (pending.localMessageId !== event.localMessageId) continue;
         pending.conversationId = event.conversationId;
-        this.complete(state, key, pending, entries);
       }
       return;
     }
@@ -247,16 +271,22 @@ export class DoubaoWorkInput extends BaseInput {
         updatedMs: Date.now(),
       };
     }
-    this.complete(state, key, pending, entries);
+    if (event.selectedSkills !== undefined) pending.selectedSkills = event.selectedSkills;
+    if (event.selectedPartners !== undefined) pending.selectedPartners = event.selectedPartners;
   }
 
   private complete(state: Checkpoint, key: string, pending: PendingTurn, entries: AgentActivityEntry[]): void {
     if (pending.startObserved && pending.terminal) {
-      const complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now());
+      const matched = Object.entries(state.tools ?? {}).filter(([, tool]) => tool.start?.turnId === pending.turnId);
+      const pairs = matched.flatMap(([, tool]) => !tool.conflict && tool.start && tool.end ? [{ start: tool.start, end: tool.end }] : []);
+      const complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
       if (complete.length === 0) return;
+      const omitted = matched.length - (complete.length - 2) / 2;
+      if (omitted) this.logger.warn('Doubao Work local tools lack a complete unambiguous in-request boundary; omitted', { tools: omitted });
       entries.push(...complete);
       delete state.pending[key];
       state.completed[key] = Date.now();
+      for (const [toolKey] of matched) delete state.tools![toolKey];
     }
   }
 }

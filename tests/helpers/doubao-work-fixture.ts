@@ -18,3 +18,15 @@ export function doubaoLine(name: string, meta: Record<string, unknown> = {}, ela
   };
   return `[100:200:${clock}:INFO:FRONTEND(0)] [neotix] [office-api-logger] "[webview][unknown][flow-web][logifier-report]: ${JSON.stringify(payload)}", source: (0)\n`;
 }
+
+export function doubaoToolLine(
+  data: Record<string, unknown>, elapsedMs: number, extraMicros = 123,
+): string {
+  const at = new Date(DOUBAO_EPOCH + elapsedMs);
+  const clock = `${pad(at.getMonth() + 1)}${pad(at.getDate())}/${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}.${pad(at.getMilliseconds(), 3)}${pad(extraMicros, 3)}`;
+  const level = data.status === 'error' ? 'ERROR' : 'INFO';
+  return `[100:200:${clock}:${level}:FRONTEND(0)] [neotix] [agent-task] "${JSON.stringify({ event: 'toolcall', data: {
+    name: 'Read', sandbox_id: 'synthetic-sandbox', status: 'received',
+    tcid: 'synthetic-call', agent_id: 'synthetic-turn', ...data,
+  } })}", source: local-file-local-tools-sse-wiring.ts (0)\n`;
+}

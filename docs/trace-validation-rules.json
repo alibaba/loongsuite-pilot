@@ -412,6 +412,7 @@
       "operationName": "execute_tool",
       "multiplicity": "zero_or_more",
       "parentKind": "STEP",
+      "localObservationException": "Doubao Work TOOL with framework=doubao-work and loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled may be a direct child of its Doubao AGENT; no inferred STEP/LLM.",
       "allowedChildren": [
         "AGENT"
       ],
