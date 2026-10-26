@@ -1,0 +1,12 @@
+{
+  "id": "doubao-work",
+  "displayName": "Doubao Work (macOS, experimental)",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["~/Library/Application Support/DoubaoWork/sdk_storage/log"],
+    "commands": []
+  },
+  "input": {
+    "type": "doubao-work-client-log"
+  }
+}

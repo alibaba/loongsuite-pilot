@@ -220,6 +220,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `gcp.gen_ai` | Google GenAI endpoint，具体后端未知时使用。 |
 | `deepseek` | DeepSeek。 |
 | `qwen` | 阿里云通义千问。 |
+| `bytedance.doubao` | 豆包工作原生服务；客户端轮次观测不表示已采集模型内部调用。 |
 | `groq` | Groq。 |
 | `mistral_ai` | Mistral AI。 |
 | `cohere` | Cohere。 |
@@ -228,6 +229,13 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `ibm.watsonx.ai` | IBM Watsonx AI。 |
 
 如果以上值都不适用，使用小写 dotted provider 名称，例如 `baidu.ernie` 或 `zhipu.chatglm`。
+
+## 豆包工作客户端轮次元数据
+
+实验性 `doubao-work` 事件与 OTLP Resource 包含 `loongsuite.doubao_work.observation_scope=client_message`、
+`loongsuite.doubao_work.business_outcome=unknown` 和 `loongsuite.doubao_work.client_outcome`
+（`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
+见[支持范围与配置](doubao-work.md)。
 
 ## Finish Reasons
 
