@@ -4,6 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CopilotLogInput } from '../../../../src/inputs/copilot-log/copilot-log-input.js';
+import { InputManager } from '../../../../src/core/input-manager.js';
+import { MockFlusher } from '../../../helpers/mock-flusher.js';
 import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
 const dirs:string[]=[];
 const inputs:CopilotLogInput[]=[];
@@ -144,6 +146,23 @@ describe('Copilot incremental recovery',()=>{
   await fs.writeFile(x.file,lines(f.events.slice(0,1)));expect(await collect(x.input)).toEqual([]);
   await fs.appendFile(x.file,lines(f.events.slice(1)));expect(await collect(x.input)).toEqual([]);
  });
+ it('replays a batch rejected when another input freezes the shared checkpoint during collect',async()=>{
+  const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));
+  const manager=new InputManager(),flusher=new MockFlusher();manager.setFlusher(flusher);manager.registerInput(x.input);
+  const original=(x.input as any).collect.bind(x.input);let expected:string[]=[];
+  vi.spyOn(x.input as any,'collect').mockImplementation(async()=>{
+   const batch=await original();expected=batch.map((r:any)=>r['event.id']);
+   x.state.holdSaveUntil(Promise.reject(new Error('another input output failed')));await Promise.resolve();return batch;
+  });
+  await x.input.start();await manager.stopAll();
+  expect(x.state.saveFailed).toBe(true);expect(flusher.batchCalls.flat()).toEqual([]);
+  const restored=new StateStore(x.stateFile);await restored.load();
+  const next=tracked(new CopilotLogInput({stateStore:restored,sessionDir:x.sessions,dataDir:x.dir,otelDir:x.otel}));
+  const replay=await collect(next);expect(expected.length).toBeGreaterThan(0);expect(replay.map((r:any)=>r['event.id'])).toEqual(expected);
+  expect(await (next as any).index.all('SELECT * FROM delivered')).toEqual([]);
+  await queued(next);expect(await collect(next)).toEqual([]);
+ });
+
  it('commits only after queue acceptance through the shared input lifecycle',async()=>{
   const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));await fs.writeFile(x.native,lines(f.spans));
   const reject=()=>{throw new Error('queue rejected')};x.input.on('entries',reject);

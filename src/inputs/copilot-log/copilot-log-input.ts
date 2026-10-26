@@ -129,6 +129,9 @@ export class CopilotLogInput extends BaseSessionInput {
     return [];
   }
   protected override async onEntriesQueued(): Promise<void> {
+    // Another input may freeze the shared checkpoint during our async collect.
+    // InputManager then rejects this batch without throwing; leave SQLite pending.
+    if (this.checkpointFailed) return;
     await this.index.markDelivered(this.queuedKeys);
     this.queuedKeys = [];
   }

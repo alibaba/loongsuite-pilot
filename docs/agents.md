@@ -33,6 +33,7 @@ type differences are called out in the notes.
 |-------|----|-------|
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
+| GitHub Copilot CLI | `copilot` | Native plugin plus transcript/native OTel collection, including exact per-call tokens. Automatic deployment supports Unix shells; Windows and subagents are not supported. See [telemetry details](zh-CN/copilot-native-telemetry.md). |
 | Cursor | `cursor` | Hook integration. |
 | Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. |
 | DeepSeek Harness | `dsh` | User-level YAML patch plugin plus local per-session JSONL polling. Captures native LLM, reasoning, tool, token, and TTFT data. Detection paths follow DSH's `DSH_HOME` (default `~/.dsh`). |

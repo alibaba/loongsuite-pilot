@@ -1741,34 +1741,25 @@ INTERCEPTBLOCK
 
 # Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
 remove_copilot_plugin() {
-    command -v node >/dev/null 2>&1 || return 0
-    node - "$HOME/.copilot" <<'COPILOT_CLEANUP'
-const fs = require('fs'), path = require('path');
-const home = process.argv[2];
-let ok = true;
-for (const name of ['settings.json', 'config.json']) {
-  const file = path.join(home, name);
-  if (!fs.existsSync(file)) continue;
-  try {
-    const raw = fs.readFileSync(file, 'utf8');
-    // Copilot rewrites config.json as JSONC after a real session. Preserve
-    // quoted URLs/escapes while removing comments and optional trailing commas.
-    const clean = raw.replace(/("(?:\\.|[^"\\])*")|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g, (match, string) => string || '')
-      .replace(/("(?:\\.|[^"\\])*")|,\s*(?=[}\]])/g, (match, string) => string || '');
-    const data = JSON.parse(clean);
-    let changed = false;
-    if (data.enabledPlugins && Object.hasOwn(data.enabledPlugins, 'loongsuite-pilot@loongsuite-pilot')) {
-      delete data.enabledPlugins['loongsuite-pilot@loongsuite-pilot']; changed = true;
-    }
-    if (Array.isArray(data.installedPlugins)) {
-      const next = data.installedPlugins.filter(p => !(p?.name === 'loongsuite-pilot' && p?.marketplace === 'loongsuite-pilot'));
-      if (next.length !== data.installedPlugins.length) { data.installedPlugins = next; changed = true; }
-    }
-    if (changed) fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
-  } catch { ok = false; console.error('Copilot config cleanup skipped: ' + file); }
-}
-if (ok) fs.rmSync(path.join(home, 'installed-plugins/loongsuite-pilot/loongsuite-pilot'), {recursive:true,force:true});
-COPILOT_CLEANUP
+    local copilot_home="$HOME/.copilot"
+    [ -d "$copilot_home" ] || return 0
+    local node_bin="${NODE_BIN:-}" helper="" version="" cache="$HOME/.loongsuite-pilot"
+    if [ ! -x "$node_bin" ] && [ -f "$cache/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$cache/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -f "$cache/current" ]; then version=$(tr -d '\r\n' < "$cache/current"); fi
+    local candidate
+    for candidate in "$cache/versions/$version/dist/copilot-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/copilot-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then helper="$candidate"; break; fi
+    done
+    if [ -z "$node_bin" ] || [ -z "$helper" ]; then
+        echo "Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved" >&2
+        return 0
+    fi
+    if ! "$node_bin" "$helper" "$copilot_home"; then
+        echo "Copilot cleanup incomplete; config and plugin assets preserved for retry" >&2
+    fi
 }
 
 remove_copilot_otel_environment() {

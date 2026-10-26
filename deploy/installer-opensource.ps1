@@ -3519,27 +3519,28 @@ function Remove-DshYamlPatch {
 # ============================================================
 function Remove-CopilotPlugin {
     $copilotHome = Join-Path $env:USERPROFILE '.copilot'
-    $cleaned = $true
-    foreach ($name in @('settings.json', 'config.json')) {
-        $file = Join-Path $copilotHome $name
-        if (-not (Test-Path -LiteralPath $file)) { continue }
-        try {
-            $raw = Get-Content -LiteralPath $file -Raw
-            $clean = [regex]::Replace($raw, '("(?:\\.|[^"\\])*")|//[^\r\n]*|/\*[\s\S]*?\*/', { param($m) if ($m.Groups[1].Success) { $m.Value } else { '' } })
-            $clean = [regex]::Replace($clean, '("(?:\\.|[^"\\])*")|,\s*(?=[}\]])', { param($m) if ($m.Groups[1].Success) { $m.Value } else { '' } })
-            $data = $clean | ConvertFrom-Json
-            $changed = $false
-            if ($data.enabledPlugins -and $data.enabledPlugins.PSObject.Properties['loongsuite-pilot@loongsuite-pilot']) {
-                $data.enabledPlugins.PSObject.Properties.Remove('loongsuite-pilot@loongsuite-pilot'); $changed = $true
-            }
-            if ($null -ne $data.installedPlugins) {
-                $next = @($data.installedPlugins | Where-Object { -not ($_.name -eq 'loongsuite-pilot' -and $_.marketplace -eq 'loongsuite-pilot') })
-                if ($next.Count -ne @($data.installedPlugins).Count) { $data.installedPlugins = $next; $changed = $true }
-            }
-            if ($changed) { [System.IO.File]::WriteAllText($file, ($data | ConvertTo-Json -Depth 100)) }
-        } catch { $cleaned = $false; Write-Warning "Copilot config cleanup skipped: $file" }
+    if (-not (Test-Path -LiteralPath $copilotHome)) { return }
+    $helper = $null
+    $candidates = @((Join-Path $script:PERMANENT_DIR 'dist/copilot-cleanup.cjs'))
+    $currentFile = Join-Path $CACHE_DIR 'current'
+    if (Test-Path -LiteralPath $currentFile) {
+        $version = (Get-Content -LiteralPath $currentFile -Raw -Encoding UTF8).Trim()
+        $candidates = @((Join-Path $CACHE_DIR "versions/$version/dist/copilot-cleanup.cjs")) + $candidates
     }
-    if ($cleaned) { Remove-Item -LiteralPath (Join-Path $copilotHome 'installed-plugins/loongsuite-pilot/loongsuite-pilot') -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { $helper = $candidate; break }
+    }
+    if (-not $script:NODE_BIN -or -not $helper) {
+        Write-Warning 'Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved'
+        return
+    }
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $script:NODE_BIN $helper $copilotHome
+        $cleanupExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($cleanupExit -ne 0) { Write-Warning 'Copilot cleanup incomplete; config and plugin assets preserved for retry' }
 }
 
 function Remove-CopilotOtelEnvironment {

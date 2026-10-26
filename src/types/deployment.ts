@@ -344,6 +344,8 @@ export interface DeployResult {
   /** Set whenever `skipped` is true. */
   reason?: DeploySkipReason;
   error?: string;
+  /** Deployment mutated owned files before failing; cleanup must remain retryable. */
+  cleanupRequired?: boolean;
   /** Absolute config file PluginInjectStrategy actually wrote or confirmed. */
   pluginInjectConfigPath?: string;
 }
@@ -362,6 +364,9 @@ export interface DeployStrategy {
 export interface DeployedAgentRecord {
   deployMode: DeployMode;
   deployedAt: string;
+  /** Partial deployment, not a healthy installation. Cleared after successful repair. */
+  cleanupRequired?: boolean;
+  copilotPluginTargets?: Pick<CopilotPluginHookConfig, 'pluginRoot' | 'settingsPath' | 'configPath'>;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
   /** Resolved external target for managed directory plugins. */

@@ -87,6 +87,9 @@ export function applyPersistedDeployTargets(
   if (!record) return def;
 
   let next = def;
+  if (def.copilotPlugin && record.copilotPluginTargets) {
+    next = { ...next, copilotPlugin: { ...def.copilotPlugin, ...record.copilotPluginTargets } };
+  }
   const hookSettingsPath = absolutePath(record.hookSettingsPath);
   if (!opts?.preserveHookSettings && hookSettingsPath && def.hook) {
     next = {

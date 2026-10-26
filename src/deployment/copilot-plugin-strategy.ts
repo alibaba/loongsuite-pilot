@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import { parse, modify, applyEdits, type ParseError } from 'jsonc-parser';
+import { removeCopilotRegistrations } from './copilot-config-cleanup.js';
 import { readCopilotFile, writeCopilotFile } from './copilot-config-file.js';
 import * as path from 'node:path';
 import type {
@@ -147,7 +148,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
     const cfg = def.copilotPlugin;
-    if (!cfg) return true;
+    if (!cfg || _record?.cleanupRequired) return true;
 
     const manifestPath = path.join(resolveHome(cfg.pluginRoot), 'plugin.json');
     const hooksPath = path.join(resolveHome(cfg.pluginRoot), 'hooks', 'hooks.json');
@@ -203,6 +204,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
       return { success: false, agentId: def.id, deployMode: 'copilot-plugin', error: 'missing copilotPlugin config' };
     }
 
+    let mutated = false;
     try {
       if (process.platform === 'win32') throw new Error('Copilot automatic deployment currently supports Unix shells only');
       // Validate both user files before changing either one.
@@ -213,6 +215,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
       if (config?.[CONFIG_INSTALLED_PLUGINS_KEY] !== undefined && !Array.isArray(config[CONFIG_INSTALLED_PLUGINS_KEY])) throw new Error('Invalid Copilot installedPlugins array');
       const pluginRoot = resolveHome(cfg.pluginRoot);
       const hooksDir = path.join(pluginRoot, 'hooks');
+      mutated = true; // Even an interrupted mkdir/write may leave owned assets.
       await ensureDir(pluginRoot);
       await ensureDir(hooksDir);
 
@@ -232,7 +235,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
       });
       return { success: true, agentId: def.id, deployMode: 'copilot-plugin' };
     } catch (err) {
-      return { success: false, agentId: def.id, deployMode: 'copilot-plugin', error: String(err) };
+      return { success: false, agentId: def.id, deployMode: 'copilot-plugin', error: String(err), cleanupRequired: mutated };
     }
   }
 
@@ -247,8 +250,7 @@ export class CopilotPluginStrategy implements DeployStrategy {
       const enabled = settings?.[SETTINGS_ENABLED_PLUGINS_KEY];
       if (enabled !== undefined && (!enabled || typeof enabled !== 'object' || Array.isArray(enabled))) throw new Error('Invalid Copilot enabledPlugins map');
       if (config?.[CONFIG_INSTALLED_PLUGINS_KEY] !== undefined && !Array.isArray(config[CONFIG_INSTALLED_PLUGINS_KEY])) throw new Error('Invalid Copilot installedPlugins array');
-      await this.unregisterFromSettings(cfg);
-      await this.unregisterFromConfig(cfg);
+      await removeCopilotRegistrations(resolveHome(cfg.settingsPath), resolveHome(cfg.configPath ?? '~/.copilot/config.json'), cfg.pluginId);
       await removeCopilotShellIntegration(this.dataDir(cfg), this.options.homeDir);
       await fs.rm(resolveHome(cfg.pluginRoot), { recursive: true, force: true });
       return true;
@@ -271,15 +273,6 @@ export class CopilotPluginStrategy implements DeployStrategy {
       data[SETTINGS_ENABLED_PLUGINS_KEY] = { ...(enabled as object ?? {}), [this.pluginKey(cfg)]: true };
     });
   }
-  private async unregisterFromSettings(cfg: CopilotPluginHookConfig): Promise<void> {
-    await updateConfig(resolveHome(cfg.settingsPath), data => {
-      const enabled = data[SETTINGS_ENABLED_PLUGINS_KEY];
-      if (enabled && typeof enabled === 'object' && !Array.isArray(enabled)) {
-        delete (enabled as Record<string, unknown>)[this.pluginKey(cfg)];
-        if (!Object.keys(enabled).length) delete data[SETTINGS_ENABLED_PLUGINS_KEY];
-      } else if (enabled !== undefined) throw new Error('Invalid Copilot enabledPlugins map');
-    });
-  }
   private async registerInConfig(cfg: CopilotPluginHookConfig): Promise<void> {
     await updateConfig(resolveHome(cfg.configPath ?? '~/.copilot/config.json'), data => {
       const installed = data[CONFIG_INSTALLED_PLUGINS_KEY];
@@ -288,16 +281,6 @@ export class CopilotPluginStrategy implements DeployStrategy {
       entries.push({ name: cfg.pluginId, marketplace: cfg.pluginId, installed_at: new Date().toISOString(),
         enabled: true, version: DEFAULT_PLUGIN_VERSION, cache_path: resolveHome(cfg.pluginRoot) });
       data[CONFIG_INSTALLED_PLUGINS_KEY] = entries;
-    });
-  }
-  private async unregisterFromConfig(cfg: CopilotPluginHookConfig): Promise<void> {
-    await updateConfig(resolveHome(cfg.configPath ?? '~/.copilot/config.json'), data => {
-      const entries = data[CONFIG_INSTALLED_PLUGINS_KEY];
-      if (entries === undefined) return;
-      if (!Array.isArray(entries)) throw new Error('Invalid Copilot installedPlugins array');
-      const next = entries.filter(e => !(e?.name === cfg.pluginId && e.marketplace === cfg.pluginId));
-      if (next.length) data[CONFIG_INSTALLED_PLUGINS_KEY] = next;
-      else delete data[CONFIG_INSTALLED_PLUGINS_KEY];
     });
   }
 }

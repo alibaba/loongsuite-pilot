@@ -17,7 +17,7 @@ import { CopilotPluginStrategy } from './copilot-plugin-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
   applyPersistedDeployTargets,
@@ -492,6 +492,14 @@ export class DeploymentManager {
         newRecord.dshPatchPath = dshTarget.patchPath;
       }
 
+      if (def.copilotPlugin) {
+        newRecord.cleanupRequired = false;
+        newRecord.copilotPluginTargets = {
+          pluginRoot: resolveHome(def.copilotPlugin.pluginRoot),
+          settingsPath: resolveHome(def.copilotPlugin.settingsPath),
+          configPath: resolveHome(def.copilotPlugin.configPath ?? '~/.copilot/config.json'),
+        };
+      }
       Object.assign(newRecord, lifecycleFieldsForDeploy(def, result));
       if (def.id === 'grok-build') {
         const written = newRecord.hookSettingsPath ?? def.hook?.settingsPath;
@@ -502,6 +510,19 @@ export class DeploymentManager {
       this.state[def.id] = newRecord;
       this.touchedIds.add(def.id);
     } else if (!result.skipped) {
+      if (def.deployMode === 'copilot-plugin' && result.cleanupRequired && def.copilotPlugin) {
+        this.state[def.id] = {
+          ...record, deployMode: def.deployMode, deployedAt: record?.deployedAt ?? new Date().toISOString(),
+          cleanupRequired: true,
+          copilotPluginTargets: {
+            pluginRoot: resolveHome(def.copilotPlugin.pluginRoot),
+            settingsPath: resolveHome(def.copilotPlugin.settingsPath),
+            configPath: resolveHome(def.copilotPlugin.configPath ?? '~/.copilot/config.json'),
+          },
+          ...(this.installedBy ? { installedBy: this.installedBy } : {}),
+        };
+        this.touchedIds.add(def.id);
+      }
       // A strategy that RETURNS {success:false, error} used to vanish here: only a
       // thrown error was logged, and deployAll just added it to the `failed` tally.
       // So "deployAll complete {failed:1}" was the entire record of dsh failing every
