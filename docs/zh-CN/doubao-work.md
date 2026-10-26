@@ -47,7 +47,7 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 ## 子 Agent 的时间与父子关系
 
-原生数据源增加 `Default/.doubaowork/agent_mode/workspace/.sessions/<conversation>/agents/*/system/trajectory.jsonl`，相对客户端数据根目录解析。只读本次日志已经确认的 conversation，不扫描历史会话。`create_agent` 必须有同调用 ID 的成功结果，结果的 `parent_id` 必须匹配调用者文件；循环、多父、半行、临时不可读或超限时保留工具状态并等待。
+原生数据源为 `<profile>/.doubaowork/agent_mode/workspace/.sessions/<conversation>/agents/*/system/trajectory.jsonl`，相对客户端数据根目录解析。支持 `Default` 和账号切换后的 `Profile N`，最多检查 16 个 Profile 中本次日志已确认的同一个 conversation；同一会话存在于多个 Profile 时不猜测归属，不扫描历史会话或读取登录存储。`create_agent` 必须有同调用 ID 的成功结果，结果的 `parent_id` 必须匹配调用者文件；循环、多父、半行、临时不可读或超限时保留工具状态并等待。
 
 同一 sandbox 的原生命令 actor 必须有且仅有一个已采集主请求，子工具及各层祖先 actor 必须存在于该 sandbox，委派图必须能回到唯一 main Agent。关联不依靠目录排序、文件 mtime 或“离哪个请求最近”。主请求结束后保留其上下文，root AGENT 使用确定性 Span ID。
 

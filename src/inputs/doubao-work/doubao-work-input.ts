@@ -6,7 +6,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
-import { buildNativeToolFragment, readNativeGraph } from './doubao-work-native.js';
+import { buildNativeToolFragment, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
@@ -54,6 +54,7 @@ export class DoubaoWorkInput extends BaseInput {
   private readonly logDir: string | undefined;
   private readonly scope: string;
   private readonly sessionsRoot: string | undefined;
+  private readonly userDataRoot: string | undefined;
   private readonly snapshotRoot: string | undefined;
   private watcher: FSWatcher | undefined;
   private wakeup: ReturnType<typeof setTimeout> | undefined;
@@ -65,7 +66,8 @@ export class DoubaoWorkInput extends BaseInput {
     super(opts);
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : DoubaoWorkInput.defaultLogDir();
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
-    this.sessionsRoot = opts.sessionsRoot ?? (this.logDir ? path.resolve(this.logDir, '../../Default/.doubaowork/agent_mode/workspace/.sessions') : undefined);
+    this.sessionsRoot = opts.sessionsRoot;
+    this.userDataRoot = this.logDir ? path.resolve(this.logDir, '../..') : undefined;
     this.snapshotRoot = opts.snapshotRoot ?? (this.logDir ? path.resolve(this.logDir, '../../coding/snapshot') : undefined);
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
   }
@@ -379,7 +381,7 @@ export class DoubaoWorkInput extends BaseInput {
   }
 
   private async completeNative(state: Checkpoint, entries: AgentActivityEntry[]): Promise<void> {
-    if (!this.sessionsRoot) return;
+    if (!this.sessionsRoot && !this.userDataRoot) return;
     let scannedConversation: string | undefined;
     let graph: Awaited<ReturnType<typeof readNativeGraph>>;
     let considered = 0;
@@ -401,7 +403,7 @@ export class DoubaoWorkInput extends BaseInput {
       if (!scannedConversation) {
         scannedConversation = root.conversationId;
         state.nativeScanCursor = key;
-        try { graph = await readNativeGraph(this.sessionsRoot, root.conversationId); }
+        try { graph = await this.readConversationGraph(root.conversationId); }
         catch { this.logger.warn('Doubao Work native graph temporarily unavailable; preserving child tools'); }
       }
       if (!graph) continue;
@@ -420,7 +422,7 @@ export class DoubaoWorkInput extends BaseInput {
   }
 
   private async completeNativeExecutions(state: Checkpoint, entries: AgentActivityEntry[]): Promise<void> {
-    if (!this.sessionsRoot || !this.snapshotRoot) return;
+    if ((!this.sessionsRoot && !this.userDataRoot) || !this.snapshotRoot) return;
     const roots = Object.values(state.roots ?? {}).filter(root => root.conversationId && root.localMessageId);
     const conversations = [...new Set(roots.map(root => root.conversationId!))].sort();
     if (!conversations.length) return;
@@ -433,7 +435,7 @@ export class DoubaoWorkInput extends BaseInput {
       // native source. No cursor, mtime or polling time becomes a span boundary.
       executions = await readNativeExecutions(this.snapshotRoot, conversationId);
       if (!executions.length) return;
-      graph = await readNativeGraph(this.sessionsRoot, conversationId);
+      graph = await this.readConversationGraph(conversationId);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.logger.warn('Doubao Work native execution metadata unavailable; preserving checkpoint');
       return;
@@ -473,6 +475,12 @@ export class DoubaoWorkInput extends BaseInput {
       state.executionsCompleted![execution.executionKey] = { digest, updatedMs: Date.now() };
       delete state.executionFirstSeen![execution.executionKey];
     }
+  }
+
+  private readConversationGraph(conversationId: string): Promise<Awaited<ReturnType<typeof readNativeGraph>>> {
+    return this.sessionsRoot
+      ? readNativeGraph(this.sessionsRoot, conversationId)
+      : readNativeProfileGraph(this.userDataRoot!, conversationId);
   }
 }
 

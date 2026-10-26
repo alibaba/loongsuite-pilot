@@ -9,6 +9,33 @@ const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const MAX_AGENTS = 64;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_SCAN_BYTES = 8 * 1024 * 1024;
+const MAX_PROFILES = 16;
+
+/** Account switches use Chromium Profile N folders on Windows. Resolve only
+ * the exact fresh conversation; never select an account by mtime or read its
+ * login store. Duplicate conversations remain ambiguous and are not linked. */
+export async function readNativeProfileGraph(userDataRoot: string, conversationId: string): Promise<NativeGraph | undefined> {
+  if (!ID.test(conversationId)) return undefined;
+  const canonical = await fs.realpath(userDataRoot);
+  const profiles = (await fs.readdir(userDataRoot, { withFileTypes: true }))
+    .filter(item => item.name === 'Default' || /^Profile \d+$/.test(item.name));
+  if (profiles.length > MAX_PROFILES) return undefined;
+  const matches: string[] = [];
+  for (const profile of profiles) {
+    if (!profile.isDirectory() || profile.isSymbolicLink()) return undefined;
+    const sessions = path.join(userDataRoot, profile.name, '.doubaowork', 'agent_mode', 'workspace', '.sessions');
+    const conversation = path.join(sessions, conversationId);
+    try {
+      const stat = await fs.lstat(conversation);
+      if (!stat.isDirectory() || stat.isSymbolicLink()
+        || !(await fs.realpath(conversation)).startsWith(`${canonical}${path.sep}`)) return undefined;
+      matches.push(sessions);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return matches.length === 1 ? readNativeGraph(matches[0], conversationId) : undefined;
+}
 
 /** Only native create_agent call/result identities are retained. Neither agent
  * prose nor filesystem/assignment timestamps are execution boundaries. */
