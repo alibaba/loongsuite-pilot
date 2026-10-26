@@ -16,6 +16,15 @@ export interface DoubaoLogEvent {
   conversationId?: string;
   localMessageId?: string;
   clientOutcome?: 'received' | 'ended' | 'error' | 'cancelled';
+  selectedSkills?: string[];
+  selectedPartners?: string[];
+  tool?: {
+    id: string;
+    name: string;
+    sandboxId: string;
+    phase: 'received' | 'settled';
+    status?: 'success' | 'error' | 'cancelled';
+  };
 }
 
 /** Only bounded identifiers are retained; no log payload, prompt or error text. */
@@ -28,10 +37,19 @@ function epoch(value: unknown): number | undefined {
     && value >= MIN_EPOCH_MS && value < MAX_EPOCH_MS ? value : undefined;
 }
 
+function selectedNames(value: unknown): string[] | undefined {
+  if (typeof value !== 'string' || value.length > 8192) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length > 32 || parsed.some(item => !identifier(item))) return undefined;
+    return [...new Set(parsed as string[])];
+  } catch { return undefined; }
+}
+
 /** Chromium's header is local wall time; the filename supplies the missing year. */
 function sourceTime(line: string, fileName: string): string | undefined {
   const fileDate = /^saman_frontend_(\d{4})\.(\d{2})(\d{2})\.\d+\.log$/.exec(fileName);
-  const header = /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}):INFO:FRONTEND\(0\)\]/.exec(line);
+  const header = /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]/.exec(line);
   if (!fileDate || !header) return undefined;
   const [, month, day, hour, minute, second, micros] = header.map(Number);
   const fileYear = Number(fileDate[1]);
@@ -45,6 +63,33 @@ function sourceTime(line: string, fileName: string): string | undefined {
 
 /** Parse the embedded logger object, not the outer Chromium log wrapper. */
 export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEvent | undefined {
+  // This exact producer reports local dispatch receipt and execution settlement.
+  // Ignore sandbox API payloads, cloud commands and all other log namespaces.
+  if (line.includes('[neotix] [agent-task]')
+    && line.endsWith(', source: local-file-local-tools-sse-wiring.ts (0)')) {
+    const begin = line.indexOf('"{');
+    const end = line.lastIndexOf('}", source:');
+    if (begin < 0 || end < begin) return undefined;
+    let object;
+    try { object = JSON.parse(line.slice(begin + 1, end + 1)); } catch { return undefined; }
+    const data = object?.data;
+    if (object?.event !== 'toolcall' || !data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+    const name = identifier(data.name);
+    const sandboxId = identifier(data.sandbox_id);
+    const received = data.status === 'received' && data.phase === undefined;
+    const id = identifier(received ? data.tcid : data.toolCallID);
+    const turnId = identifier(data.agent_id);
+    const timeNano = sourceTime(line, fileName);
+    const status = data.status === 'success' ? 'success'
+      : data.status === 'error' || data.status === 'failed' ? 'error'
+      : data.status === 'cancelled' ? 'cancelled' : undefined;
+    if (!name || !sandboxId || !id || !timeNano || (received ? !turnId : data.phase !== 'execution_settled' || !status)) return undefined;
+    return {
+      name: received ? 'local_tool_received' : 'local_tool_settled', timeNano,
+      ...(received ? { turnId } : {}),
+      tool: { id, name, sandboxId, phase: received ? 'received' : 'settled', ...(status ? { status } : {}) },
+    };
+  }
   if (!line.includes('[office-api-logger]')) return undefined;
   const begin = line.indexOf('{"version":');
   const end = line.lastIndexOf('}');
@@ -71,6 +116,8 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
     name: object.eventName, timeNano, queryMs, turnId, clientOutcome,
     conversationId: identifier(meta.conversation_id ?? meta.conversationId),
     localMessageId: identifier(meta.send_local_message_id ?? meta.localMessageId),
+    selectedSkills: selectedNames(meta.mention_skill_list),
+    selectedPartners: selectedNames(meta.mention_partner_list),
   };
 }
 
@@ -80,7 +127,11 @@ export interface DoubaoPendingTurn {
   conversationId?: string;
   localMessageId?: string;
   updatedMs: number;
+  selectedSkills?: string[];
+  selectedPartners?: string[];
 }
+
+export interface DoubaoToolPair { start: DoubaoLogEvent; end: DoubaoLogEvent }
 
 export function doubaoDigest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -89,6 +140,7 @@ export function doubaoDigest(value: string): string {
 /** A client-message observation deliberately contains no synthetic model step. */
 export function buildDoubaoTaskEvents(
   scope: string, pending: DoubaoPendingTurn, terminal: DoubaoLogEvent, observedMs: number,
+  tools: DoubaoToolPair[] = [],
 ): AgentActivityEntry[] {
   const conversationId = terminal.conversationId ?? pending.conversationId;
   if (!conversationId || terminal.queryMs !== pending.queryMs) return [];
@@ -97,6 +149,10 @@ export function buildDoubaoTaskEvents(
   if (end <= start) return [];
   const identity = JSON.stringify([scope, conversationId, pending.turnId, pending.queryMs]);
   const outcome = terminal.clientOutcome ?? 'ended';
+  const context = {
+    ...(pending.selectedSkills?.length ? { 'loongsuite.doubao_work.selected_skills': pending.selectedSkills } : {}),
+    ...(pending.selectedPartners?.length ? { 'loongsuite.doubao_work.selected_partners': pending.selectedPartners } : {}),
+  };
   const common: AgentActivityEntry = {
     time_unix_nano: start.toString(),
     observed_time_unix_nano: (BigInt(observedMs) * 1_000_000n).toString(),
@@ -113,12 +169,45 @@ export function buildDoubaoTaskEvents(
     'loongsuite.doubao_work.observation_scope': 'client_message',
     'loongsuite.doubao_work.business_outcome': 'unknown',
     'loongsuite.doubao_work.client_outcome': outcome,
+    ...context,
     resourceAttributes: {
       'loongsuite.doubao_work.observation_scope': 'client_message',
       'loongsuite.doubao_work.business_outcome': 'unknown',
       'loongsuite.doubao_work.client_outcome': outcome,
+      ...context,
     },
   };
+  const toolEvents: AgentActivityEntry[] = tools.flatMap(pair => {
+    const call = pair.start.tool;
+    const result = pair.end.tool;
+    if (!call || !result || call.phase !== 'received' || result.phase !== 'settled'
+      || !result.status || call.id !== result.id || call.name !== result.name
+      || call.sandboxId !== result.sandboxId || pair.start.turnId !== pending.turnId) return [];
+    const toolStart = BigInt(pair.start.timeNano);
+    const toolEnd = BigInt(pair.end.timeNano);
+    // Do not stretch a client request to include background or orphan activity.
+    if (toolStart < start || toolEnd > end || toolEnd <= toolStart) return [];
+    const toolIdentity = `${identity}:tool:${call.sandboxId}:${call.id}`;
+    const attributes = {
+      ...common,
+      span_id: doubaoDigest(toolIdentity).slice(0, 16),
+      'gen_ai.tool.name': call.name,
+      'gen_ai.tool.call.id': call.id,
+      'gen_ai.tool.type': 'function',
+      'loongsuite.doubao_work.tool_boundary': 'client_received_to_execution_settled',
+    };
+    return [
+      { ...attributes, 'event.name': 'tool.call', 'event.id': doubaoDigest(`${toolIdentity}:call`), time_unix_nano: pair.start.timeNano },
+      {
+        ...attributes, 'event.name': 'tool.result', 'event.id': doubaoDigest(`${toolIdentity}:result`), time_unix_nano: pair.end.timeNano,
+        'gen_ai.tool.call.duration': Number(toolEnd - toolStart) / 1_000_000,
+        'tool.result.status': result.status,
+        ...(result.status === 'success' ? {} : {
+          'error.type': result.status === 'cancelled' ? 'doubao.local_tool_cancelled' : 'doubao.local_tool_failed',
+        }),
+      },
+    ];
+  });
   return [
     {
       ...common, 'event.id': doubaoDigest(`${identity}:start`),
@@ -126,6 +215,7 @@ export function buildDoubaoTaskEvents(
       // Existing converter contract: a content-free input boundary, not a prompt.
       'gen_ai.input.messages_delta': [],
     },
+    ...toolEvents.sort((a, b) => BigInt(a.time_unix_nano) < BigInt(b.time_unix_nano) ? -1 : 1),
     {
       ...common, time_unix_nano: end.toString(),
       'event.id': doubaoDigest(`${identity}:end`), 'gen_ai.turn.end': true,

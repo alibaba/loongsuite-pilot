@@ -49,6 +49,17 @@ export function hasModelToolSpanForOutput(tools, expectedToolCall) {
   });
 }
 
+// A bounded local execution observation has no observed LLM/React step. This
+// contract is specific to Doubao's native received/settled producer; it does
+// not relax ordinary model/tool or delegated-agent topology checks.
+export function isDoubaoLocalTool(tool, parent) {
+  return tool?.attributes?.['gen_ai.framework'] === 'doubao-work'
+    && tool.attributes['loongsuite.doubao_work.tool_boundary'] === 'client_received_to_execution_settled'
+    && Boolean(tool.attributes['gen_ai.tool.call.id'])
+    && parent?._kind === 'AGENT'
+    && parent.attributes?.['gen_ai.framework'] === 'doubao-work';
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -278,11 +289,11 @@ export function validateStructure(trace) {
 
   for (const t of byKind('TOOL')) {
     const pk = parentKind(t);
-    if (pk !== 'STEP') {
+    if (pk !== 'STEP' && !isDoubaoLocalTool(t, spanMap.get(t.parentSpanId))) {
       checks.push(error('structure.tool_under_step', `TOOL parent is ${pk || 'none'}, expected STEP`, t.spanId, t.name));
     }
   }
-  if (byKind('TOOL').length > 0 && byKind('TOOL').every(t => parentKind(t) === 'STEP')) {
+  if (byKind('TOOL').length > 0 && byKind('TOOL').every(t => parentKind(t) === 'STEP' || isDoubaoLocalTool(t, spanMap.get(t.parentSpanId)))) {
     checks.push(pass('structure.tool_under_step'));
   } else if (byKind('TOOL').length === 0) {
     checks.push(pass('structure.tool_under_step'));

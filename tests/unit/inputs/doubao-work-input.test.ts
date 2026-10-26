@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { DoubaoWorkInput } from '../../../src/inputs/doubao-work/doubao-work-input.js';
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine } from '../../helpers/doubao-work-fixture.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
 
 class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
 const temporary: string[] = [];
@@ -28,6 +28,72 @@ async function setup(initial = '') {
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it('pairs parallel local tools by native ID and retains selected skills only in that request', async () => {
+    const { file, input } = await setup();
+    await appendFile(file, doubaoLine('on_message_sending_start', { mention_skill_list: '["synthetic-analysis"]' }, 10)
+      + doubaoToolLine({ tcid: 'call-a', arguments: 'PRIVATE_ARGUMENT' }, 100)
+      + doubaoToolLine({ tcid: 'call-b', name: 'Write' }, 110)
+      + doubaoToolLine({ toolCallID: 'call-b', name: 'Write', status: 'success', phase: 'execution_settled', result: 'PRIVATE_RESULT' }, 120)
+      + doubaoToolLine({ toolCallID: 'call-a', status: 'failed', phase: 'execution_settled', error: 'PRIVATE_ERROR' }, 150)
+      + doubaoLine('on_message_session_end'));
+    const entries = await input.poll();
+    expect(entries).toHaveLength(6);
+    expect(entries.map(e => e['event.name'])).toEqual(['other', 'tool.call', 'tool.call', 'tool.result', 'tool.result', 'other']);
+    expect(entries.every(e => e['loongsuite.doubao_work.selected_skills']?.[0] === 'synthetic-analysis')).toBe(true);
+    const results = entries.filter(e => e['event.name'] === 'tool.result');
+    expect(results.map(e => [e['gen_ai.tool.call.id'], e['tool.result.status'], e['gen_ai.tool.call.duration']])).toEqual([
+      ['call-b', 'success', 10], ['call-a', 'error', 50],
+    ]);
+    expect(results[1]['error.type']).toBe('doubao.local_tool_failed');
+    expect(JSON.stringify(entries)).not.toMatch(/PRIVATE_|gen_ai\.tool\.call\.(arguments|result)/);
+    await appendFile(file, doubaoLine('on_message_sending_start', { chat_session_id: 'next-turn' }, 4000)
+      + doubaoLine('on_message_session_end', { chat_session_id: 'next-turn' }, 5000));
+    const next = await input.poll();
+    expect(next).toHaveLength(2);
+    expect(next.every(e => e['loongsuite.doubao_work.selected_skills'] === undefined)).toBe(true);
+  });
+
+  it('restores an in-flight tool and a half result line without duplicating its call', async () => {
+    const { file, input, stateStore, statePath, logs } = await setup();
+    await appendFile(file, doubaoLine('on_message_sending_start', {}, 10) + doubaoToolLine({}, 100));
+    expect(await input.poll()).toEqual([]);
+    const result = doubaoToolLine({ toolCallID: 'synthetic-call', status: 'success', phase: 'execution_settled' }, 101, 456);
+    await appendFile(file, result.slice(0, 80));
+    expect(await input.poll()).toEqual([]);
+    await stateStore.save();
+    const restored = new StateStore(statePath);
+    await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs });
+    await appendFile(file, result.slice(80) + doubaoLine('on_message_session_end'));
+    const entries = await restarted.poll();
+    expect(entries).toHaveLength(4);
+    expect(entries[2]['gen_ai.tool.call.duration']).toBe(1.333);
+    await appendFile(file, doubaoToolLine({}, 100) + result + doubaoLine('on_message_session_end'));
+    expect(await restarted.poll()).toEqual([]);
+  });
+
+  it('does not guess tools from orphan results, conflicting starts or background completion', async () => {
+    const { file, input } = await setup();
+    await appendFile(file, doubaoLine('on_message_sending_start', {}, 10)
+      + doubaoToolLine({}, 100)
+      + doubaoToolLine({ agent_id: 'different-turn' }, 101)
+      + doubaoToolLine({ toolCallID: 'synthetic-call', status: 'success', phase: 'execution_settled' }, 200)
+      + doubaoToolLine({ toolCallID: 'orphan', status: 'success', phase: 'execution_settled' }, 200)
+      + doubaoToolLine({ tcid: 'background' }, 200)
+      + doubaoLine('on_message_session_end')
+      + doubaoToolLine({ toolCallID: 'background', status: 'success', phase: 'execution_settled' }, 4000));
+    const entries = await input.poll();
+    expect(entries).toHaveLength(2);
+    expect(entries.map(e => e['event.name'])).toEqual(['other', 'other']);
+  });
+
+  it('handles a result received in a previous scan before its matching dispatch record', async () => {
+    const { file, input } = await setup();
+    await appendFile(file, doubaoToolLine({ toolCallID: 'synthetic-call', status: 'success', phase: 'execution_settled' }, 200));
+    expect(await input.poll()).toEqual([]);
+    await appendFile(file, doubaoLine('on_message_sending_start', {}, 10) + doubaoToolLine({}, 100) + doubaoLine('on_message_session_end'));
+    expect(await input.poll()).toHaveLength(4);
+  });
   it('baselines history, then associates temporary IDs and returns a content-free pair', async () => {
     const start = doubaoLine('on_message_sending_start', { conversation_id: '' }, 10);
     const end = doubaoLine('on_message_session_end');
@@ -180,6 +246,18 @@ describe('Doubao Work passive client-message input', () => {
 });
 
 describe('Doubao Work log protocol', () => {
+  it('accepts only the exact local tool lifecycle producer and allowlisted metadata', () => {
+    const line = doubaoToolLine({ arguments: { command: 'PRIVATE_COMMAND' }, result: 'PRIVATE_RESULT' }, 100).trimEnd();
+    const parsed = parseDoubaoLogLine(line, DOUBAO_FILE)!;
+    expect(parsed.tool).toMatchObject({ id: 'synthetic-call', name: 'Read', sandboxId: 'synthetic-sandbox', phase: 'received' });
+    expect(JSON.stringify(parsed)).not.toContain('PRIVATE');
+    expect(parseDoubaoLogLine(line.replace('local-file-local-tools-sse-wiring.ts', 'other.ts'), DOUBAO_FILE)).toBeUndefined();
+    expect(parseDoubaoLogLine(line.replace('"received"', '"pending"'), DOUBAO_FILE)).toBeUndefined();
+    expect(parseDoubaoLogLine(line.replace('synthetic-call', '../unsafe'), DOUBAO_FILE)).toBeUndefined();
+    expect(parseDoubaoLogLine(doubaoLine('on_message_sending_start', {
+      mention_skill_list: '["safe","../PRIVATE"]', mention_partner_list: '{}',
+    }), DOUBAO_FILE)!.selectedSkills).toBeUndefined();
+  });
   it.each([
     [{ session_success: '1', receive_success: '1' }, 'received'],
     [{ session_success: undefined, receive_success: undefined }, 'ended'],
