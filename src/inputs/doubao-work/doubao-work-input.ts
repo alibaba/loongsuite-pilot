@@ -9,7 +9,7 @@ import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPen
 import { buildNativeToolFragment, readNativeGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
 
-const FILE_PATTERN = /^saman_frontend_\d{4}\.\d{4}\.\d+\.log$/;
+const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
 const READ_BYTES = 1024 * 1024;
 const CYCLE_BYTES = 8 * READ_BYTES;
@@ -46,7 +46,7 @@ export interface DoubaoWorkInputOptions extends InputOptions {
   nativeScanIntervalMs?: number;
 }
 
-/** Read-only macOS adapter for Doubao Work 2.33.10's frontend message lifecycle. */
+/** Read-only adapter for observed macOS and Windows client lifecycle logs. */
 export class DoubaoWorkInput extends BaseInput {
   readonly id = 'doubao-work';
   readonly agentType = ClientType.DoubaoWork;
@@ -71,6 +71,10 @@ export class DoubaoWorkInput extends BaseInput {
   }
 
   static defaultLogDir(): string | undefined {
+    if (process.platform === 'win32') {
+      const local = process.env.LOCALAPPDATA || path.win32.join(homedir(), 'AppData', 'Local');
+      return path.win32.join(local, 'DoubaoWork', 'User Data', 'sdk_storage', 'log');
+    }
     return process.platform === 'darwin'
       ? path.join(homedir(), 'Library', 'Application Support', 'DoubaoWork', 'sdk_storage', 'log')
       : undefined;

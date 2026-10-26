@@ -1,10 +1,10 @@
 # Doubao Work task, tool and subagent observations (experimental)
 
-The `doubao-work` adapter passively reads macOS Doubao Work frontend logs. It installs no host hooks, plugins or connectors and does not change authentication or client settings. The observed protocol baseline is DoubaoWork 2.33.10. Ordinary Doubao, Windows and cloud-internal execution are outside this initial scope.
+The `doubao-work` adapter passively reads Doubao Work client logs on macOS and Windows. It installs no host hooks, plugins or connectors and does not change authentication or client settings. The observed protocol baselines are macOS 2.33.10 and Windows 2.25.18. Ordinary Doubao and cloud-internal execution are outside this scope. Advanced native capabilities depend on the evidence exposed by the installed client version.
 
 ## Observed behavior
 
-Pilot associates client request submission with the corresponding client message-session end, producing two `other` boundary events and an ENTRY → AGENT trace. Source submission and client log timestamps define the boundaries; Submission retains source millisecond precision and log boundaries retain source microsecond precision. This observes a client request, not completion of every cloud task or internal step.
+Pilot associates client request submission with the corresponding client message-session end, producing two `other` boundary events and an ENTRY → AGENT trace. Source submission and client log timestamps define the boundaries. Submission retains source millisecond precision; log boundaries retain microseconds on macOS and milliseconds on Windows. This observes a client request, not completion of every cloud task or internal step.
 
 The adapter does not extract prompts, replies, reasoning or tool arguments/results. An evidenced first-output observation can produce STEP → LLM spans as described below. Model identifiers, tokens, cost and model TTFT remain unavailable. The automatic model selector is not a model identifier.
 
@@ -67,7 +67,14 @@ Only a known fresh conversation is read, with limits of eight account directorie
 
 ## Configuration
 
-The default source is `~/Library/Application Support/DoubaoWork/sdk_storage/log/saman_frontend_YYYY.MMDD.N.log`. The client must already produce frontend logs; Pilot does not enable debug logging. On first activation, existing logs are baselined; only subsequently observed request boundaries are collected.
+Default sources:
+
+| Platform | Log directory | File and header |
+|---|---|---|
+| macOS | `~/Library/Application Support/DoubaoWork/sdk_storage/log` | `saman_frontend_YYYY.MMDD.N.log`, `FRONTEND(0)`, six fractional digits |
+| Windows | `%LOCALAPPDATA%\\DoubaoWork\\User Data\\sdk_storage\\log` | `saman_YYYY.MMDD.N.log`, `CONSOLE(0)`, three fractional digits |
+
+Windows falls back to `~/AppData/Local` when `LOCALAPPDATA` is absent. The client must already produce these logs; Pilot does not enable debug logging. On first activation, existing logs are baselined; only subsequently observed request boundaries are collected.
 
 ```json
 {

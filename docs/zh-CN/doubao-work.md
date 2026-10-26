@@ -1,10 +1,10 @@
 # 豆包工作任务、本地工具与子 Agent 观测（实验性）
 
-`doubao-work` 被动读取 macOS 豆包工作的前端日志，不向客户端注入 Hook、插件或连接器，不修改登录状态和设置。协议基线为 DoubaoWork 2.33.10；普通豆包、Windows 和云端内部执行不在本阶段支持范围内。
+`doubao-work` 被动读取 macOS 和 Windows 豆包工作的客户端日志，不向客户端注入 Hook、插件或连接器，不修改登录状态和设置。已观察的协议基线为 macOS 2.33.10 和 Windows 2.25.18；普通豆包和云端内部执行不在本阶段支持范围内。高阶原生能力取决于所安装客户端版本实际暴露的证据。
 
 ## 能力范围
 
-Pilot 关联客户端消息提交和结束事件，输出同一会话、轮次下的一对任务边界事件（`other`）和 ENTRY → AGENT Trace。边界采用源提交时间和客户端会话结束日志时间；提交时间保留源毫秒精度，日志时间保留源微秒精度。它表示客户端请求轮次，不能用来声称云端任务及其内部步骤已全部完成。
+Pilot 关联客户端消息提交和结束事件，输出同一会话、轮次下的一对任务边界事件（`other`）和 ENTRY → AGENT Trace。边界采用源提交时间和客户端会话结束日志时间；提交时间保留源毫秒精度，日志时间在 macOS 上保留微秒、Windows 上保留毫秒精度。它表示客户端请求轮次，不能用来声称云端任务及其内部步骤已全部完成。
 
 不提取 Prompt、回答、reasoning、工具参数/结果。满足下述原生依据时，可生成首输出观测的 STEP → LLM；模型、Token、成本和模型 TTFT 仍不可得。`自动` 模型选项不是真实模型 ID。
 
@@ -71,7 +71,14 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 ## 配置与发现
 
-默认数据源：`~/Library/Application Support/DoubaoWork/sdk_storage/log/saman_frontend_YYYY.MMDD.N.log`。客户端须已产生该日志；Pilot 不自动启用调试日志。首次启用跳过已有历史，此后仅采集新增且起止均被观察到的轮次。
+默认数据源：
+
+| 平台 | 日志目录 | 文件与头部 |
+|---|---|---|
+| macOS | `~/Library/Application Support/DoubaoWork/sdk_storage/log` | `saman_frontend_YYYY.MMDD.N.log`，`FRONTEND(0)`，六位小数 |
+| Windows | `%LOCALAPPDATA%\\DoubaoWork\\User Data\\sdk_storage\\log` | `saman_YYYY.MMDD.N.log`，`CONSOLE(0)`，三位小数 |
+
+Windows 未设置 `LOCALAPPDATA` 时使用 `~/AppData/Local`。客户端须已产生这些日志；Pilot 不自动启用调试日志。首次启用跳过已有历史，此后仅采集新增且起止均被观察到的轮次。
 
 ```json
 {

@@ -437,11 +437,11 @@ describe('Doubao Work passive client-message input', () => {
       .toBe((await readFile(file)).length);
   });
 
-  it('detects only frontend log files and never creates a missing source directory', async () => {
+  it('ignores repair logs and never creates a missing source directory', async () => {
     const { logs, file, input } = await setup();
     expect(await DoubaoWorkInput.checkAvailability(logs)).toBe(true);
     await rm(file);
-    await writeFile(path.join(logs, 'saman_2026.1025.0.log'), 'native log');
+    await writeFile(path.join(logs, 'saman_repair_2026.1025.0.log'), 'repair log');
     expect(await DoubaoWorkInput.checkAvailability(logs)).toBe(false);
     await rm(logs, { recursive: true });
     await input.poll();

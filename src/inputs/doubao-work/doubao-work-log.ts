@@ -52,12 +52,18 @@ function selectedNames(value: unknown): string[] | undefined {
 
 /** Chromium's header is local wall time; the filename supplies the missing year. */
 function sourceTime(line: string, fileName: string): string | undefined {
-  const fileDate = /^saman_frontend_(\d{4})\.(\d{2})(\d{2})\.\d+\.log$/.exec(fileName);
-  const header = /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]/.exec(line);
-  if (!fileDate || !header) return undefined;
-  const [, month, day, hour, minute, second, micros] = header.map(Number);
-  const fileYear = Number(fileDate[1]);
-  const fileAnchor = new Date(fileYear, Number(fileDate[2]) - 1, Number(fileDate[3])).getTime();
+  const fileDate = /^saman(_frontend)?_(\d{4})\.(\d{2})(\d{2})\.\d+\.log$/.exec(fileName);
+  if (!fileDate) return undefined;
+  // Match the observed producer and precision for each source family. Other
+  // Chromium/repair logs are not evidence of a client lifecycle boundary.
+  const header = fileDate[1]
+    ? /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]/.exec(line)
+    : /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{3}):(?:INFO|WARNING|ERROR):CONSOLE\(0\)\]/.exec(line);
+  if (!header) return undefined;
+  const [, month, day, hour, minute, second, fraction] = header.map(Number);
+  const micros = fileDate[1] ? fraction : fraction * 1000;
+  const fileYear = Number(fileDate[2]);
+  const fileAnchor = new Date(fileYear, Number(fileDate[3]) - 1, Number(fileDate[4])).getTime();
   const candidates = [fileYear - 1, fileYear, fileYear + 1].map(year =>
     new Date(year, month - 1, day, hour, minute, second, Math.floor(micros / 1000)));
   const date = candidates.sort((a, b) => Math.abs(a.getTime() - fileAnchor) - Math.abs(b.getTime() - fileAnchor))[0];
