@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { DoubaoWorkInput } from '../../../src/inputs/doubao-work/doubao-work-input.js';
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
 
 class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
 const temporary: string[] = [];
@@ -20,14 +20,98 @@ async function setup(initial = '') {
   await writeFile(file, initial);
   const statePath = path.join(root, 'state.json');
   const stateStore = new StateStore(statePath);
-  const input = new ProbeInput({ stateStore, logDir: logs });
+  const sessionsRoot = path.join(root, 'native');
+  const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot });
   const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1);
   expect(await input.poll()).toEqual([]);
   clock.mockRestore();
-  return { root, logs, file, input, statePath, stateStore };
+  return { root, logs, file, input, statePath, stateStore, sessionsRoot };
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it('links late nested native tools, retries incomplete graph reads and restores without duplicates', async () => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot } = await setup();
+    await appendFile(file, doubaoLine('on_message_sending_start', {}, 10)
+      + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox') + doubaoLine('on_message_session_end'));
+    expect(await input.poll()).toHaveLength(2);
+    await appendFile(file, doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000)
+      + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 4050)
+      + doubaoToolLine({ agent_id: 's_nativeLeaf', tcid: 'late-child' }, 5000));
+    expect(await input.poll()).toEqual([]);
+    await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot });
+    const end = doubaoToolLine({ toolCallID: 'late-child', phase: 'execution_settled', status: 'success' }, 6000);
+    await appendFile(file, end);
+    expect(await restarted.poll()).toEqual([]); // Graph has not synchronized yet.
+    for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const dir = path.join(sessionsRoot, 'synthetic-conversation', 'agents', id, 'system');
+      await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), source);
+    }
+    const fragments = await restarted.poll();
+    expect(fragments).toHaveLength(4);
+    expect(fragments[0]['gen_ai.agent.id']).toBe('s_nativeLeaf');
+    expect(fragments[0]['loongsuite.doubao_work.native_creation_call_ids']).toEqual(['native-child-create', 'native-root-create']);
+    expect(fragments[3].time_unix_nano).toBe(parseDoubaoLogLine(end.trimEnd(), DOUBAO_FILE)!.timeNano);
+    await appendFile(file, doubaoToolLine({ agent_id: 's_nativeLeaf', tcid: 'late-child' }, 5000) + end);
+    expect(await restarted.poll()).toEqual([]);
+    // Same native agent, new sandbox and new root request: a separate fragment.
+    await appendFile(file, doubaoLine('on_message_sending_start', { chat_session_id: 'reuse-root' }, 7000)
+      + doubaoCommandLine('reuse-root', 'reuse-sandbox', 7050)
+      + doubaoLine('on_message_session_end', { chat_session_id: 'reuse-root' }, 8000)
+      + doubaoCommandLine('s_nativeLeaf', 'reuse-sandbox', 9000)
+      + doubaoCommandLine('o_nativeOrg', 'reuse-sandbox', 9050)
+      + doubaoToolLine({ agent_id: 's_nativeLeaf', sandbox_id: 'reuse-sandbox', tcid: 'reuse-tool' }, 9100)
+      + doubaoToolLine({ sandbox_id: 'reuse-sandbox', toolCallID: 'reuse-tool', phase: 'execution_settled', status: 'success' }, 9200));
+    const reused = await restarted.poll();
+    expect(reused).toHaveLength(6);
+    const child = reused.find(e => e['gen_ai.agent.scope'] === 'subagent')!;
+    expect(child['gen_ai.agent.id']).toBe(fragments[0]['gen_ai.agent.id']);
+    expect(child.trace_id).not.toBe(fragments[0].trace_id);
+    expect(child['gen_ai.turn.id']).not.toBe(fragments[0]['gen_ai.turn.id']);
+  });
+
+  it('does not assign a child to a sandbox containing two root actors', async () => {
+    const { file, input, sessionsRoot } = await setup();
+    for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const dir = path.join(sessionsRoot, 'synthetic-conversation', 'agents', id, 'system');
+      await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), source);
+    }
+    await appendFile(file, doubaoLine('on_message_sending_start', {}, 10)
+      + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
+      + doubaoCommandLine('unidentified-root', 'synthetic-sandbox', 60)
+      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 70)
+      + doubaoToolLine({ agent_id: 's_nativeLeaf' }, 100)
+      + doubaoToolLine({ toolCallID: 'synthetic-call', phase: 'execution_settled', status: 'success' }, 200)
+      + doubaoLine('on_message_session_end'));
+    const events = await input.poll();
+    expect(events).toHaveLength(2);
+    expect(events.some(event => event['gen_ai.agent.scope'] === 'subagent')).toBe(false);
+  });
+
+  it('does not let one unavailable native conversation starve a different valid child', async () => {
+    const { file, input, sessionsRoot } = await setup();
+    for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const dir = path.join(sessionsRoot, 'valid-conversation', 'agents', id, 'system');
+      await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), source);
+    }
+    let log = '';
+    for (const [index, conversation] of ['missing-conversation', 'valid-conversation'].entries()) {
+      const actor = `root-${index}`, box = `box-${index}`;
+      log += doubaoLine('on_message_sending_start', { chat_session_id: actor, conversation_id: conversation }, 10 + index)
+        + doubaoCommandLine(actor, box, 20 + index)
+        + doubaoCommandLine('o_nativeOrg', box, 30 + index)
+        + doubaoCommandLine('s_nativeLeaf', box, 40 + index)
+        + doubaoLine('on_message_session_end', { chat_session_id: actor, conversation_id: conversation })
+        + doubaoToolLine({ agent_id: 's_nativeLeaf', sandbox_id: box, tcid: `tool-${index}` }, 4000)
+        + doubaoToolLine({ sandbox_id: box, toolCallID: `tool-${index}`, phase: 'execution_settled', status: 'success' }, 5000);
+    }
+    await appendFile(file, log);
+    expect(await input.poll()).toHaveLength(4);
+    const child = await input.poll();
+    expect(child).toHaveLength(4);
+    expect(child.every(event => event['gen_ai.session.id'] === 'valid-conversation')).toBe(true);
+  });
   it('pairs parallel local tools by native ID and retains selected skills only in that request', async () => {
     const { file, input } = await setup();
     await appendFile(file, doubaoLine('on_message_sending_start', { mention_skill_list: '["synthetic-analysis"]' }, 10)
