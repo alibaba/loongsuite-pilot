@@ -55,7 +55,7 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 客户端 `entry-moa` 的执行管理器为本地 Agent 上下文生成独立 UUID，并在 `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json` 的 `execution` 中保存 `startedAtMs`、`endedAtMs`、`queryMessageId` 和 `sandboxId`。这是另一类可验证的数据源：开始是 `getOrCreateSandbox` 返回后的原生回调，结束是释放上下文时完成文件捕获后的原生回调。起止直接取这两个毫秒字段；文件 mtime、首次读到时间和工具区间均不参与计算。
 
-只有客户端实际落盘的完整记录才能生成 `observation_scope=native_sandbox_execution` 的独立 AGENT Span。`native_execution_id` 区分同一 Agent 的不同执行；`native_query_message_id` 必须精确匹配新采集主请求的 local message ID，同一 sandbox 的原生命令 actor 也必须一致。创建轨迹提供原生父 Agent 身份；同一 query、sandbox 中只有一个覆盖子执行的父执行记录时，才链接其独立 Span。为父执行落盘最多等待 30 秒（等待状态可恢复）；仍缺失或有歧义时链接已观察的主请求，标记 `parent_resolution=root_request_ancestor` 并保留真实父 Agent ID 与祖先链，不制造中间 Span。已导出的父边不因后续落盘而重写。
+只有客户端实际落盘的完整记录才能生成 `observation_scope=native_sandbox_execution` 的独立 AGENT Span。`native_execution_id` 区分同一 Agent 的不同执行；`native_query_message_id` 必须精确匹配新采集主请求的 local message ID，同一 sandbox 的原生命令 actor 也必须一致。创建轨迹提供原生父 Agent 身份；同一 query、sandbox 中只有一个覆盖子执行的父执行记录时，才链接其独立 Span。子快照先到且同一 sandbox 的父 Agent 已有成功 Write/Edit 工具证据时，保留该证据并等待父执行记录，受既有 24 小时/4096 项关联状态及主请求保留上限约束；不以 30 秒观察窗口推断父执行已结束。没有父变更证据时保留 30 秒等待窗口；父记录仍缺失、已到但有歧义或不覆盖子执行时链接已观察的主请求，标记 `parent_resolution=root_request_ancestor` 并保留真实父 Agent ID 与祖先链，不制造中间 Span。已导出的父边不因后续落盘而重写。
 
 该记录的边界为 `agent_boundary=native_sandbox_get_or_create_to_release`，时间依据为 `timing_basis=native_execution_startedAtMs_endedAtMs`。客户端只持久化具有被跟踪文件变更的执行；纯 Read/Bash、无本地工具或未保存记录的云端子 Agent 没有完整执行覆盖。此 Span 表达本地 sandbox 生命周期，包含释放时的捕获开销，不能视为云端完整推理耗时或逐次云端 dispatch 证明。现有 `native_local_tool_fragment` 继续表达工具观测；两种 scope 不可混为调用次数或累计耗时。
 
