@@ -97,7 +97,8 @@ export class DoubaoWorkInput extends BaseInput {
     let allNames: string[];
     try {
       allNames = (await fs.readdir(this.logDir, { withFileTypes: true }))
-        .filter(entry => entry.isFile() && FILE_PATTERN.test(entry.name)).map(entry => entry.name).sort();
+        .filter(entry => entry.isFile() && FILE_PATTERN.test(entry.name)).map(entry => entry.name)
+        .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
     } catch {
       this.logger.warn('Doubao Work log directory unavailable; preserving checkpoint');
       return [];
@@ -203,9 +204,10 @@ export class DoubaoWorkInput extends BaseInput {
     }
     events.sort((a, b) => BigInt(a.timeNano) < BigInt(b.timeNano) ? -1 : BigInt(a.timeNano) > BigInt(b.timeNano) ? 1 : 0);
     for (const event of events) this.consume(next, event, entries);
-    // A successful directory enumeration is positive evidence of which paths disappeared.
-    const present = new Set(allNames);
-    for (const name of Object.keys(next.files)) if (!present.has(name)) delete next.files[name];
+    // Confirmed absence or the explicit capacity window may evict a cursor;
+    // transient stat/read errors for selected files still preserve their state.
+    const selected = new Set(names);
+    for (const name of Object.keys(next.files)) if (!selected.has(name)) delete next.files[name];
     const dropped = compact(next.pending, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
     if (dropped) this.logger.warn('Doubao Work incomplete requests expired or exceeded capacity; no trace inferred', { requests: dropped });
     compact(next.completed, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
