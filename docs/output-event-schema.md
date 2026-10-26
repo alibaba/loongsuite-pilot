@@ -234,6 +234,7 @@ Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, DeepSeek Harness, MiMo Cod
 | `gcp.gen_ai` | Google GenAI endpoint when the concrete backend is unknown |
 | `deepseek` | DeepSeek |
 | `qwen` | Alibaba Cloud Qwen |
+| `bytedance.doubao` | Doubao Work native service; client-message observations do not imply model-level telemetry. |
 | `groq` | Groq |
 | `mistral_ai` | Mistral AI |
 | `cohere` | Cohere |
@@ -242,6 +243,13 @@ Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, DeepSeek Harness, MiMo Cod
 | `ibm.watsonx.ai` | IBM Watsonx AI |
 
 If none of the above values apply, use a lowercase dotted provider name such as `baidu.ernie` or `zhipu.chatglm`.
+
+## Doubao Work client-message metadata
+
+Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_work.observation_scope=client_message`,
+`loongsuite.doubao_work.business_outcome=unknown` and `loongsuite.doubao_work.client_outcome`
+(`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
+See [scope and configuration](doubao-work.md).
 
 ## Finish Reasons
 

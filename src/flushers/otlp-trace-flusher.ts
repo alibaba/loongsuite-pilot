@@ -953,6 +953,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // The passive Doubao adapter observes client message completion, not a
+    // model finish reason. Only its explicit terminal boundary closes the turn.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'doubao-work') {
+      return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
+    }
     // Incremental Hermes producers emit errors/stop per API invocation. Only
     // their explicit lifecycle marker closes a turn (which may retry or run
     // tools after a model completion). Keep old installed producers compatible.
@@ -1262,6 +1267,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (agentType === 'grok-build') {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
+      if (agentType === 'doubao-work') {
+        this.enrichDoubaoWorkSpans(records, spans);
+      }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
@@ -1277,6 +1285,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } finally {
       convertState.active -= 1;
       this.evictConvertStates();
+    }
+  }
+
+  private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const terminal = [...records].reverse().find(record => record['gen_ai.turn.end'] === true);
+    const outcome = terminal?.['loongsuite.doubao_work.client_outcome'];
+    for (const span of spans) {
+      const kind = span.attributes['gen_ai.span.kind'];
+      if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
+      // A received reply (including capacity/entitlement notices) says nothing
+      // about business success. No native model finish reason is synthesized.
+      const failed = outcome === 'error' || outcome === 'cancelled';
+      Object.assign(span.status, { code: failed ? SpanStatusCode.ERROR : SpanStatusCode.UNSET });
+      if (failed) {
+        span.attributes['error.type'] = outcome === 'cancelled'
+          ? 'doubao.client_request_cancelled' : 'doubao.client_request_failed';
+      }
     }
   }
 

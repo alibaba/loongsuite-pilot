@@ -4,6 +4,7 @@ import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-in
 import * as path from 'node:path';
 import type {
   AgentsConfig,
+  ListenerConfig,
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
@@ -137,6 +138,7 @@ export interface ConfigFile {
   listeners?: Record<string, {
     enabled?: boolean;
     pollInterval?: number;
+    logDir?: string;
   }>;
 
   retention?: {
@@ -799,8 +801,8 @@ function buildMaskConfig(file: ConfigFile | null): MaskConfig {
 
 function buildListenersConfig(
   file: ConfigFile | null,
-): Record<string, { enabled: boolean; pollInterval: number }> {
-  const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
+): Record<string, ListenerConfig> {
+  const defaults: Record<string, ListenerConfig> = {
     qoder: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qoder-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qoder-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
@@ -820,6 +822,7 @@ function buildListenersConfig(
     'opencode-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
@@ -831,6 +834,8 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
+        ...(key === 'doubao-work' && typeof val.logDir === 'string' && val.logDir.trim()
+          ? { logDir: path.resolve(resolveHome(val.logDir.trim())) } : {}),
       };
     }
   }

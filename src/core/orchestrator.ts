@@ -73,6 +73,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -156,6 +157,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
   };
 
@@ -1819,6 +1821,22 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
+
+    // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
+    const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoWorkInput = new DoubaoWorkInput({
+      stateStore: this.stateStore,
+      logDir: doubaoLogDir,
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    });
+    this.inputManager.registerInput(doubaoWorkInput);
+    entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir),
+      enabled: () => this.isAgentGatedEnabled('doubao-work')
+        && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    }));
 
     return entries;
   }
