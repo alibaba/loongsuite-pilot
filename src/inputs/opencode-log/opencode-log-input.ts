@@ -29,6 +29,14 @@ export class OpenCodeLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.OpenCode, 'opencode');
+    // V1 serializes structured tool payloads into JSON strings; V2 emits
+    // native JSON. Preserve their content with one canonical representation.
+    const normalized = { ...record };
+    for (const key of ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']) {
+      const value = normalized[key];
+      if (typeof value !== 'string' || !/^\s*[\[{]/.test(value)) continue;
+      try { normalized[key] = JSON.parse(value); } catch { /* Plain/truncated tool text is retained verbatim. */ }
+    }
+    return transformHookRecord(normalized, ClientType.OpenCode, 'opencode');
   }
 }

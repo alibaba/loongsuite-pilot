@@ -122,6 +122,9 @@ describe('postinstall installs every asset tree', () => {
       // Floors, not exact counts: 68 hooks / 19 skills / 16 plugins at the time of
       // writing. A tree that collapses to a handful of files is the failure mode here.
       expect(walk(path.join(dataDir, 'hooks')).length).toBeGreaterThanOrEqual(30);
+      // Codex's new self-monitoring dependency must ship with the hook assets.
+      expect(readFileSync(path.join(dataDir, 'hooks', 'shared', 'hook-metrics.mjs'), 'utf8'))
+        .toBe(read('assets/hooks/shared/hook-metrics.mjs'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

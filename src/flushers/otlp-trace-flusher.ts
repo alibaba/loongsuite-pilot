@@ -1003,6 +1003,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
+    // V2 step completion (including a failed/retried model request) is not
+    // execution completion. Preserve V1's existing finish-reason behavior.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'
+      && entry['agent.opencode.collection'] === 'v2') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     // Incremental Hermes producers emit errors/stop per API invocation. Only
     // their explicit lifecycle marker closes a turn (which may retry or run
     // tools after a model completion). Keep old installed producers compatible.

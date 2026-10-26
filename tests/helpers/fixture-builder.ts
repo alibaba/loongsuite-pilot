@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -19,7 +19,7 @@ type TestEntryOverrides = Partial<AgentActivityEntry> & {
 };
 
 export function buildTestEntry(overrides: TestEntryOverrides = {}): AgentActivityEntry {
-  const eventId = overrides['event.id'] ?? overrides.uuid ?? uuidv4();
+  const eventId = overrides['event.id'] ?? overrides.uuid ?? randomUUID();
   const timestamp = overrides.timestamp ?? Date.now();
   return {
     time_unix_nano: overrides.time_unix_nano ?? `${timestamp}000000`,
