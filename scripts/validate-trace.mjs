@@ -65,6 +65,8 @@ export function isDoubaoLocalTool(tool, parent) {
 export function isDoubaoNativeAgent(child, parent) {
   const attrs = child?.attributes || {};
   const parentAttrs = parent?.attributes || {};
+  const parentScope = parentAttrs['loongsuite.doubao_work.observation_scope']
+    ?? parent?.resource?.['loongsuite.doubao_work.observation_scope'];
   if (child?._kind !== 'AGENT' || parent?._kind !== 'AGENT'
     || attrs['gen_ai.framework'] !== 'doubao-work' || parentAttrs['gen_ai.framework'] !== 'doubao-work'
     || attrs['loongsuite.doubao_work.observation_scope'] !== 'native_local_tool_fragment'
@@ -73,11 +75,11 @@ export function isDoubaoNativeAgent(child, parent) {
     || !['own_local_tool', 'descendant_local_tool'].includes(attrs['loongsuite.doubao_work.timing_basis'])
     || !/^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
     || !/^[0-9a-f]{64}$/.test(attrs['loongsuite.doubao_work.fragment_id'] || '')) return false;
-  if (parentAttrs['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment') {
+  if (parentScope === 'native_local_tool_fragment') {
     return attrs['gen_ai.agent.parent.id'] === parentAttrs['gen_ai.agent.id']
       && attrs['loongsuite.doubao_work.fragment_id'] === parentAttrs['loongsuite.doubao_work.fragment_id'];
   }
-  return parentAttrs['loongsuite.doubao_work.observation_scope'] === 'client_message'
+  return parentScope === 'client_message'
     && attrs['gen_ai.agent.parent.id'] === attrs['loongsuite.doubao_work.root_agent_id']
     && Boolean(attrs['loongsuite.doubao_work.root_agent_id'])
     && attrs['loongsuite.doubao_work.root_turn_id'] === parentAttrs['gen_ai.turn.id'];

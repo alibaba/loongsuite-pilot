@@ -134,6 +134,16 @@ describe('Doubao local execution observation contract', () => {
     expect(validateStructure(trace).filter(check => check.status === 'error')).toEqual([]);
     expect(validateTime(trace, traceRules).filter(check => check.status === 'error')).toEqual([]);
   });
+  test('reads the documented root observation scope from Resource, and rejects a different scope', () => {
+    const trace = nativeTrace();
+    delete trace.spans[1].attributes['loongsuite.doubao_work.observation_scope'];
+    trace.spans[1].resource = { 'loongsuite.doubao_work.observation_scope': 'client_message' };
+    expect(isDoubaoNativeAgent(trace.spans[2], trace.spans[1])).toBe(true);
+    expect(validateStructure(trace).filter(check => check.status === 'error')).toEqual([]);
+    expect(validateTime(trace, traceRules).filter(check => check.status === 'error')).toEqual([]);
+    trace.spans[1].resource['loongsuite.doubao_work.observation_scope'] = 'different_observation';
+    expect(isDoubaoNativeAgent(trace.spans[2], trace.spans[1])).toBe(false);
+  });
   test.each([
     ['gen_ai.framework', 'codex'],
     ['gen_ai.agent.parent.id', 'unrelated'],
