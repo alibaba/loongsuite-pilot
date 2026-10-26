@@ -88,7 +88,14 @@ export function isDoubaoNativeAgent(child, parent) {
 
 function hasDoubaoExecutionIdentity(attrs) {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const ancestors = attrs['loongsuite.doubao_work.native_ancestor_ids'];
+  let ancestors = attrs['loongsuite.doubao_work.native_ancestor_ids'];
+  // CMS trace search preserves array attributes as canonical JSON strings.
+  // Accept only that exact bounded encoding, not CSV or coerced identifiers.
+  if (typeof ancestors === 'string' && ancestors.length <= 2048) {
+    try { const parsed = JSON.parse(ancestors); ancestors = JSON.stringify(parsed) === ancestors ? parsed : undefined; }
+    catch { ancestors = undefined; }
+  }
+  const resolution = attrs['loongsuite.doubao_work.parent_resolution'];
   return attrs['gen_ai.framework'] === 'doubao-work'
     && attrs['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
     && attrs['loongsuite.doubao_work.agent_boundary'] === 'native_sandbox_get_or_create_to_release'
@@ -98,6 +105,11 @@ function hasDoubaoExecutionIdentity(attrs) {
     && uuid.test(attrs['loongsuite.doubao_work.native_query_message_id'] || '')
     && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
     && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_sandbox_id'] || '')
+    && /^\d{1,30}$/.test(attrs['loongsuite.doubao_work.native_thread_id'] || '')
+    && ['root_request_ancestor', 'same_query_native_execution'].includes(resolution)
+    && (resolution === 'root_request_ancestor' ? !attrs['loongsuite.doubao_work.native_parent_execution_id']
+      : uuid.test(attrs['loongsuite.doubao_work.native_parent_execution_id'] || '')
+        && attrs['loongsuite.doubao_work.native_parent_execution_id'] !== attrs['loongsuite.doubao_work.native_execution_id'])
     && Array.isArray(ancestors) && ancestors.length > 0 && ancestors.length <= 8
     && ancestors.every(value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value))
     && ancestors[0] === attrs['gen_ai.agent.parent.id']
