@@ -13,6 +13,7 @@ import {
 import type {
   BlobToUriParams,
   PathToUriOptions,
+  StorageBaseResult,
   Uploader,
   UriConvertMeta,
   UriResult,
@@ -29,6 +30,9 @@ import {
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
+const DELEGATED_OSS_RETRY_BASE_MS = 1_000;
+const DELEGATED_OSS_RETRY_MAX_MS = 60_000;
+const DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS = 60_000;
 
 /** Race a promise; timeout does not cancel the underlying work. */
 export async function withDeadline<T>(
@@ -89,21 +93,33 @@ export class MultimodalProcessor {
   private readonly pendingKeys = new Set<string>();
   private pendingBytes = 0;
   private shuttingDown = false;
-  private readonly storageBasePath: string;
+  private uploader: Uploader;
+  private storageBasePath = '';
+  private readonly resolveStorageBase?: () => Promise<StorageBaseResult>;
+  private sniffTimer: ReturnType<typeof setTimeout> | undefined;
+  private sniffFailureCount = 0;
+  private lastMismatchRediscoveryAt: number | undefined;
   /** path→uri cache keyed by path + event day + mtime + size. */
   private readonly pathUriCache = new LruMap<PathUriCacheEntry>(MULTIMODAL_LRU_LIMIT);
   /** In-flight path reads. */
   private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
 
   constructor(
-    storageBasePath: string,
-    private readonly uploader: Uploader,
+    storageBasePath: string | undefined,
+    uploader: Uploader,
+    resolveStorageBase?: () => Promise<StorageBaseResult>,
   ) {
     const base = (storageBasePath ?? '').trim().replace(/\/+$/, '');
-    if (!base) {
+    if (!base && !resolveStorageBase) {
       throw new Error('multimodal storageBasePath is required');
     }
+    if (!uploader) {
+      throw new Error('multimodal uploader is required');
+    }
     this.storageBasePath = base;
+    this.uploader = uploader;
+    this.resolveStorageBase = resolveStorageBase;
+    if (!base) this.scheduleDelegatedOssSniff();
   }
 
   /** Local image path → uri. */
@@ -112,6 +128,7 @@ export class MultimodalProcessor {
     timeUnixMs?: number,
     opts?: PathToUriOptions,
   ): Promise<UriResult | null> {
+    if (!this.storageBasePath) return null;
     if (this.shuttingDown) {
       logger.warn('multimodal pathToUri rejected', { reason: 'shutting_down' });
       return null;
@@ -227,6 +244,7 @@ export class MultimodalProcessor {
   /** Raw base64 → uri (upload async). */
   blobToUri(params: BlobToUriParams): UriResult | null {
     try {
+      if (!this.storageBasePath) return null;
       if (this.shuttingDown) {
         logger.warn('multimodal blob rejected', { reason: 'shutting_down' });
         return null;
@@ -327,19 +345,9 @@ export class MultimodalProcessor {
       },
       data: bytes,
       expectedSize: size,
-    }).then(ok => {
-      if (!ok) {
-        logger.warn('multimodal upload failed (uri may be dangling)', {
-          uri,
-          size,
-        });
-      }
-    }).catch(err => {
-      logger.warn('multimodal upload failed (uri may be dangling)', {
-        uri,
-        error: String(err),
-      });
-    });
+    }, {
+      onStorageBaseInvalidated: () => this.noteOriginMismatch(),
+    }).then(() => undefined, () => undefined);
     this.pending.add(uploadPromise);
     void uploadPromise.finally(() => {
       this.pending.delete(uploadPromise);
@@ -356,6 +364,8 @@ export class MultimodalProcessor {
       return;
     }
     this.shuttingDown = true;
+    if (this.sniffTimer) clearTimeout(this.sniffTimer);
+    this.sniffTimer = undefined;
     this.pathUriCache.clear();
     this.pathUriInflight.clear();
 
@@ -379,4 +389,54 @@ export class MultimodalProcessor {
       logger.warn('multimodal uploader shutdown failed', { error: String(err) });
     }
   }
+
+  /** Re-learn the delegatedOss bucket after the presign origin changes. */
+  private noteOriginMismatch(): void {
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    const now = performance.now();
+    if (
+      this.lastMismatchRediscoveryAt !== undefined
+      && now - this.lastMismatchRediscoveryAt < DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS
+    ) return;
+    this.lastMismatchRediscoveryAt = now;
+    this.storageBasePath = '';
+    this.pathUriCache.clear();
+    this.scheduleDelegatedOssSniff();
+  }
+
+  private scheduleDelegatedOssSniff(): void {
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    if (this.storageBasePath) return;
+    const exponent = Math.min(this.sniffFailureCount, 6);
+    const delayMs = Math.min(DELEGATED_OSS_RETRY_BASE_MS * (2 ** exponent), DELEGATED_OSS_RETRY_MAX_MS);
+    this.sniffFailureCount += 1;
+    this.sniffTimer = setTimeout(() => {
+      void this.sniffDelegatedOss();
+    }, delayMs);
+  }
+
+  private async sniffDelegatedOss(): Promise<void> {
+    if (!this.resolveStorageBase) return;
+    let sniffed: StorageBaseResult;
+    try {
+      sniffed = await this.resolveStorageBase();
+    } catch (err) {
+      sniffed = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      this.sniffTimer = undefined;
+    }
+    if (this.shuttingDown) return;
+    if (!sniffed.ok) {
+      logger.warn('delegatedOss storage sniff failed; retrying', { error: sniffed.error });
+      this.scheduleDelegatedOssSniff();
+      return;
+    }
+    this.storageBasePath = sniffed.storageBasePath;
+    this.sniffFailureCount = 0;
+    logger.info('multimodal processor enabled', {
+      type: 'delegatedOss',
+      storageBasePath: sniffed.storageBasePath,
+    });
+  }
+
 }

@@ -213,6 +213,7 @@ export abstract class BaseHookInput extends BaseInput {
           continue;
         }
 
+        if (!this.workspacePolicy.allows(record, this.agentType)) continue;
         try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);

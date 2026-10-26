@@ -43,7 +43,7 @@ upgrades, and uninstall cleanup. If an `AgentSession` already exists, restart
 the custom Agent or call `session.reload()` after registration.
 
 The `agentDir` must be dedicated to this custom Agent. Do not reuse the built-in
-PI directory (`~/.pi/agent`) or share one directory between custom Agents:
+PI directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) or share one directory between custom Agents:
 PI loads every configured extension in that directory, which would duplicate
 telemetry and mix Agent identities. This does not change the custom Agent's
 normal startup command or SDK call.
@@ -144,6 +144,13 @@ Important fields:
 `plugin` / `plugins` fields (for example Pi Coding Agent uses `extensions`). Set
 `pluginInject.createIfMissing` to create the first configured JSON file when
 the agent supports an empty settings file.
+
+String fields may include `$PILOT_DIR`, `$PILOT_DATA`, `$HERMES_HOME` /
+`$HERMES_CLI`, `$PI_CODING_AGENT_DIR`, `$GROK_HOME`, and `$DSH_HOME`. Unset or
+blank Agent-home variables expand to the documented defaults (`~/.hermes`,
+`~/.pi/agent`, `~/.grok`, `~/.dsh`). Workspace-directory variables such as
+`GROK_WORKSPACE_DIR` and `DSH_WORKSPACE_DIR` are not Agent homes and are not
+substituted.
 
 > When adding a `plugin-inject` agent, also register it in the uninstaller (`deploy/installer-opensource.sh` / `.ps1`) so its injected spec is removed on uninstall. Plugin-inject agents are additionally self-healed at runtime by the hook watchdog, which re-injects the spec if another tool overwrites the config.
 
@@ -361,7 +368,7 @@ An integration is ready only after all applicable gates below pass.
 
 ### Privacy and fixtures
 
-- Support `captureMessageContent: false` for prompts, completions, reasoning, tool arguments, and tool results when the agent exposes those fields.
+- Send exposed prompts, completions, reasoning, tool arguments, and tool results through the reporting and masking pipeline.
 - Keep secrets out of source-specific extension fields unless they are required and subject to masking.
 - Verify `mask.mode: all` masks supported secrets and personal sensitive data in emitted output. See [Data Masking](masking.md).
 - Hook and plugin code must fail open so telemetry cannot block the source agent.
@@ -370,7 +377,7 @@ An integration is ready only after all applicable gates below pass.
 
 ### Required scenarios
 
-Cover detection/deployment, hook or plugin record generation, checkpointing, content capture disabled, and masking. Exercise at least:
+Cover detection/deployment, hook or plugin record generation, checkpointing, content reporting, and masking. Exercise at least:
 
 - a text-only turn;
 - one tool call;

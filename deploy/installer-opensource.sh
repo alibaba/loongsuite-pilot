@@ -13,7 +13,8 @@
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
-#     --sls-api-key "your-api-key"
+#     --sls-api-key "your-api-key" \
+#     --multimodal-mode all
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -64,15 +65,24 @@ LOG_LEVEL=""
 USER_ID=""
 COLLECT_LOG=""
 COLLECT_TRACE=""
+ENABLE_STATUS_BAR_APP=""
 CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
+ALL_AGENTS=0
+MULTIMODAL_MODE=""
+MULTIMODAL_MODE_SET=0
+# Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
+INTERCEPTOR_MODE=""
+INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -124,10 +134,37 @@ while [[ $# -gt 0 ]]; do
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
+        --exclude-workspace)
+            if [ "$#" -lt 2 ] || [[ "$2" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$2"); shift 2 ;;
+        --exclude-workspace=*)
+            excluded_workspace="${1#*=}"
+            if [[ "$excluded_workspace" != /* ]]; then
+                echo "--exclude-workspace requires an absolute local directory" >&2
+                exit 1
+            fi
+            EXCLUDE_WORKSPACES+=("$excluded_workspace"); shift ;;
         --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
         --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
         --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
         --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
+        --enable-status-bar-app|--enable-status-bar-app=*)
+            if [[ "$1" == *=* ]]; then
+                ENABLE_STATUS_BAR_APP="${1#*=}"; shift
+            else
+                if [ "$#" -lt 2 ]; then
+                    echo "--enable-status-bar-app requires true or false" >&2
+                    exit 1
+                fi
+                ENABLE_STATUS_BAR_APP="$2"; shift 2
+            fi
+            case "$ENABLE_STATUS_BAR_APP" in
+                true|false) ;;
+                *) echo "--enable-status-bar-app requires true or false" >&2; exit 1 ;;
+            esac ;;
         --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
         --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
         --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
@@ -138,12 +175,19 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --all-agents)         ALL_AGENTS=1; shift ;;
+        --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
+        --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --mask-replacement-mode) MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
+        --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
+        --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
+        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
+        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -155,6 +199,11 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
+    echo "--enable-status-bar-app is only supported with install" >&2
+    exit 1
+fi
 
 if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
     if ! [[ "$DASHBOARD_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DASHBOARD_PORT < 1 || 10#$DASHBOARD_PORT > 65535 )); then
@@ -183,9 +232,48 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
     echo "❌ Unknown mask replacement mode: $MASK_REPLACEMENT_MODE (use 'placeholder' or 'preview')" >&2
     exit 1
 fi
+if [ -n "$INTERCEPTOR_MODE" ]; then
+    case "$INTERCEPTOR_MODE" in
+        all|none|custom) ;;
+        *)
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            exit 1 ;;
+    esac
+fi
+if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
+    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
+    exit 1
+fi
+if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
+    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
+    exit 1
+fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
+fi
+if [ "$MULTIMODAL_MODE_SET" -eq 1 ]; then
+    if [ -z "$MULTIMODAL_MODE" ]; then
+        echo "❌ --multimodal-mode requires 'none', 'input', 'output', or 'all'" >&2
+        exit 1
+    fi
+    case "$MULTIMODAL_MODE" in
+        none|input|output|all) ;;
+            *)
+            echo "❌ Unknown multimodal mode: $MULTIMODAL_MODE (use 'none', 'input', 'output', or 'all')" >&2
+            exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "❌ --multimodal-mode is only supported with install (got $COMMAND)" >&2
+        exit 1
+    fi
+    if [ "$MULTIMODAL_MODE" != "none" ]; then
+        if [[ "$SLS_ENDPOINT" != *[![:space:]]* ]] || [[ "$SLS_PROJECT" != *[![:space:]]* ]] \
+            || [[ "$SLS_LOGSTORE" != *[![:space:]]* ]] || [[ "$SLS_API_KEY" != *[![:space:]]* ]]; then
+            echo "❌ --multimodal-mode $MULTIMODAL_MODE requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # Validate current user and sudo access on Linux
@@ -251,15 +339,18 @@ _node_is_app_bundle() {
     return 1
 }
 
+# node:sqlite is unflagged from 22.13 and 23.4. A major-version check accepts
+# Node 20 and 22.12, whose require('node:sqlite') throws, so install would
+# succeed and SQLite collection would not. The require is the check.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -520,7 +611,12 @@ check_deps() {
 
     NODE_BIN=""
     if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
-        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        NODE_BIN=$(resolve_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" \
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        fi
     else
         NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
         if [ -z "$NODE_BIN" ]; then
@@ -530,15 +626,16 @@ check_deps() {
         fi
     fi
     if [ -z "$NODE_BIN" ]; then
-        msg "❌ 缺少依赖: node，请先安装后重试" \
-            "❌ Missing dependency: node — please install it first"
+        msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" \
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     fi
 
-    NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
-    if [ "$NODE_MAJOR" -lt 18 ]; then
-        msg "❌ 需要 Node.js >= 18，当前版本: $("$NODE_BIN" --version)" \
-            "❌ Requires Node.js >= 18, current: $("$NODE_BIN" --version)"
+    if ! _node_supports_sqlite "$NODE_BIN"; then
+        local node_ver
+        node_ver="$("$NODE_BIN" --version 2>/dev/null || echo unknown)"
+        msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
+            "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     fi
 
@@ -644,6 +741,21 @@ probe_agents() {
 # Agent selection: interactive menu or --agents flag
 # ============================================================
 select_agents() {
+    # --all-agents: collect every agent. Skip selection entirely and leave no
+    # enabled gate in config (other agent settings survive), so pilot auto-detects
+    # all agents at runtime — including ones installed after this run.
+    if [ "$ALL_AGENTS" = "1" ]; then
+        if [ -n "$SELECTED_AGENTS" ]; then
+            msg "    ⚠️  --all-agents 已启用，忽略 --agents 指定的列表" \
+                "    ⚠️  --all-agents is set; ignoring the --agents list"
+            SELECTED_AGENTS=""
+        fi
+        msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" \
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        echo ""
+        return 0
+    fi
+
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
         echo ""
@@ -783,6 +895,21 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all'
+  ? INTERCEPTOR_TYPE_SET.slice()
+  : interceptorModeFinal === 'custom'
+    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
+    : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -800,9 +927,12 @@ const checks = [
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
-  { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: coveredMaskMode },
+  { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
+  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
+  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -811,8 +941,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1009,11 +1139,19 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
+    local excluded_workspaces_json=""
+    if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
+        excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
+    fi
     printf '%s' "$PROBE_RESULT" | \
+        LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
+        LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" \
+        LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
+        LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
         "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
@@ -1029,7 +1167,12 @@ const config = {
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }
+if (process.env.LP_EXCLUDE_WORKSPACES) {
+  config.privacy = { ...config.privacy, excludeWorkspaces: JSON.parse(process.env.LP_EXCLUDE_WORKSPACES) };
+}
 const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
+const enableStatusBarApp = process.env.LP_ENABLE_STATUS_BAR_APP || '';
+if (enableStatusBarApp) config.enableStatusBarApp = enableStatusBarApp === 'true';
 if (dashboardPort) config.dashboard.port = Number(dashboardPort);
 if (config.dashboard.port === undefined) config.dashboard.port = 8765;
 delete config.internal;
@@ -1092,9 +1235,13 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
+const allAgentsMode = '${ALL_AGENTS}';
+const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
+const interceptorMode = '${INTERCEPTOR_MODE}';
+const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1125,11 +1272,47 @@ if (maskReplacementMode) {
   config.mask.replacementMode = maskReplacementMode;
 }
 
-if (selectedAgents) {
+if (interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = interceptorMode;
+  if (interceptorMode === 'custom') {
+    config.interceptor.types = interceptorTypes
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+  } else {
+    delete config.interceptor.types;
+  }
+}
+
+const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all'
+    ? INTERCEPTOR_TYPE_SET.slice()
+    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
+      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
+      : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
+
+const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
+if (allAgentsMode === '1') {
+  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
+  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
+} else if (selectedAgents) {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.
@@ -1139,14 +1322,46 @@ if (selectedAgents) {
       continue;
     }
     config.agents[agent.id].enabled = selected.includes(agent.id);
-    if (agent.id === 'openclaw' && agent.detected && selected.includes(agent.id) && agent.openclawCliPath) {
-      const previousEntry = config.agents[agent.id].cliPath;
-      if (typeof previousEntry === 'string' && previousEntry !== agent.openclawCliPath) {
-        console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(agent.openclawCliPath));
-      }
-      config.agents[agent.id].cliPath = agent.openclawCliPath;
-    }
   }
+}
+const openclaw = allAgents.find(agent => agent.id === 'openclaw');
+if (openclaw && openclaw.detected && openclaw.openclawCliPath
+    && (allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
+  config.agents = config.agents || {};
+  config.agents.openclaw = config.agents.openclaw || {};
+  const previousEntry = config.agents.openclaw.cliPath;
+  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
+    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
+  }
+  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
+}
+
+if (multimodalMode) {
+  config.agents = config.agents || {};
+  const supported = (process.env.LP_MULTIMODAL_SUPPORTED_AGENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const selected = new Set(selectedAgents.split(',').map(s => s.trim()).filter(Boolean));
+  const allSupported = allAgentsMode === '1' && multimodalMode !== 'none';
+  for (const id of supported) {
+    if (allSupported) config.agents[id] = config.agents[id] || {};
+    else if (!config.agents[id]) continue;
+    if (multimodalMode === 'none') {
+      delete config.agents[id].multimodal;
+      continue;
+    }
+    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
+      ? config.agents[id].multimodal
+      : {};
+    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? multimodalMode : 'none' };
+  }
+}
+
+if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
@@ -1245,7 +1460,7 @@ _rc_block_contains() {
 
 inject_qodercli_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1330,7 +1545,7 @@ remove_qodercli_token_intercept() {
 # variable differ here — the wrapper and preload script are the same assets.
 inject_qoderclicn_token_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder-cn'; then remove_qoderclicn_token_intercept; return 0; fi
     if ! command -v qoderclicn >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
@@ -1458,7 +1673,7 @@ _rc_user_override_present() {
 
 inject_claude_code_fetch_intercept() {
     # Not selected: clean up any stale block from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
+    if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
     if ! command -v claude >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"
@@ -1639,11 +1854,10 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Remove OTel Claude plugin
+# Remove legacy Claude OTel plugin
 # ============================================================
 remove_otel_plugin() {
     local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
-    local OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
     # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
     # after the Claude plugin directory (and intercept.js) is deleted
@@ -1724,137 +1938,7 @@ try {
         fi
     fi
 
-    # --- Codex OTel plugin cleanup ---
-    if [ -f "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" ]; then
-        bash "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" 2>/dev/null || true
-        msg "    ✅ Codex 插件 hooks 已清理" \
-            "    ✅ Codex plugin hooks cleaned"
-    else
-        # Clean hooks.json (new format)
-        local codex_hooks_json="$HOME/.codex/hooks.json"
-        if [ -f "$codex_hooks_json" ] && grep -qE "otel-codex-hook|hook-entry\.sh" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
-            node -e "
-const fs = require('fs');
-const f = process.argv[1];
-const isOurs = c => c.includes('otel-codex-hook') || c.includes('hook-entry.sh');
-try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (d && d.hooks) {
-    for (const ev of Object.keys(d.hooks)) {
-      d.hooks[ev] = d.hooks[ev].filter(g => {
-        if (!g.hooks) return true;
-        g.hooks = g.hooks.filter(h => !(h.command && isOurs(h.command)));
-        return g.hooks.length > 0;
-      });
-      if (d.hooks[ev].length === 0) delete d.hooks[ev];
-    }
-    if (Object.keys(d.hooks).length === 0) {
-      fs.unlinkSync(f);
-    } else {
-      fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
-    }
-  }
-} catch {}
-" "$codex_hooks_json" 2>/dev/null || true
-        fi
 
-        # Clean config.toml (legacy hooks + trust block)
-        local codex_config="$HOME/.codex/config.toml"
-        if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-            # Remove legacy hook block (# OpenTelemetry instrumentation hooks ... stop)
-            local marker="# OpenTelemetry instrumentation hooks"
-            local end_str='command = "otel-codex-hook stop"'
-            if grep -q "$marker" "$codex_config" 2>/dev/null && grep -qF "$end_str" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v m="$marker" -v e="$end_str" '
-                    BEGIN { skip=0 }
-                    skip==0 && index($0, m) { skip=1; next }
-                    skip==1 { if (index($0, e)) { skip=2 }; next }
-                    skip==2 && /^[[:space:]]*$/ { next }
-                    { skip=0; print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Remove trust entries (逐条精确删除,不用 BEGIN/END 范围删以免误伤用户数据)
-            # Step a: 删 BEGIN/END marker 注释行(仅注释行本身)
-            if grep -qE "# (BEGIN|END) otel-codex-hook trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "# BEGIN otel-codex-hook trust\|# END otel-codex-hook trust" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step b: 删 bypass_hook_trust 行
-            if grep -q "bypass_hook_trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*bypass_hook_trust\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step c: 逐条删 [hooks.state."<hooks.json path>:<event>:<group>:0"] section
-            # 匹配 key 中包含 hooks.json 路径的条目(pilot 写的),不动其他 path 的条目
-            local codex_hooks_json_path
-            codex_hooks_json_path="$(cd "$HOME/.codex" 2>/dev/null && pwd)/hooks.json"
-            if grep -q "$codex_hooks_json_path" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v owned_path="$codex_hooks_json_path" '
-                    /^\[hooks\.state\."/ {
-                        if (index($0, owned_path) > 0) { skip=1; next }
-                    }
-                    /^\[/ && !/^\[hooks\.state\."/ { skip=0 }
-                    skip { next }
-                    { print }
-                ' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            # Step d: 删 otel-codex-hook 相关的剩余行(legacy catch-all,不删 hooks.state section)
-            if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up codex_hooks = true
-            if grep -q "codex_hooks" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*codex_hooks\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Clean up multiple blank lines
-            if [ -f "$codex_config" ]; then
-                local tmp; tmp=$(mktemp)
-                awk 'NF{blank=0} !NF{blank++} blank<=1' "$codex_config" > "$tmp"
-                mv "$tmp" "$codex_config"
-            fi
-            msg "    ✅ Codex hooks 已从 config.toml 清理" \
-                "    ✅ Codex hooks cleaned from config.toml"
-        fi
-    fi
-
-    local codex_otel_config="$HOME/.codex/otel-config.json"
-    if [ -f "$codex_otel_config" ] && command -v node &>/dev/null; then
-        node -e "
-const fs = require('fs');
-try {
-  const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
-  delete cfg.log_enabled;
-  delete cfg.log_dir;
-  delete cfg.log_filename_format;
-  fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2) + '\n');
-} catch {}
-" "$codex_otel_config" 2>/dev/null || true
-    fi
-
-    if [ -d "$OTEL_CODEX_DIR" ]; then
-        if [ "$PURGE" -eq 1 ]; then
-            rm -rf "$OTEL_CODEX_DIR"
-            msg "    ✅ Codex 插件目录已完全删除 (--purge): $OTEL_CODEX_DIR" \
-                "    ✅ Codex plugin directory fully removed (--purge): $OTEL_CODEX_DIR"
-        else
-            find "$OTEL_CODEX_DIR" -maxdepth 1 \
-              ! -name sessions \
-              ! -name "$(basename "$OTEL_CODEX_DIR")" \
-              -exec rm -rf {} + 2>/dev/null || true
-            msg "    ✅ Codex 插件文件已删除（sessions/ 已保留）" \
-                "    ✅ Codex plugin files removed (sessions/ preserved)"
-        fi
-    fi
 }
 
 print_summary() {
@@ -1981,6 +2065,32 @@ restore_pilot_after_deploy() {
 # ============================================================
 # CMD: install
 # ============================================================
+reject_multi_sls_config() {
+    local config_file="$DATA_DIR/config.json"
+    [ -f "$config_file" ] || return 0
+
+    local status
+    if "$NODE_BIN" -e '
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+' "$config_file"; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 12 ]; then
+        msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" \
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually." >&2
+    else
+        msg "❌ 无法检查现有 config.json，请检查文件后重试" \
+            "❌ Cannot inspect existing config.json; check the file and retry." >&2
+    fi
+    return 1
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -1988,6 +2098,7 @@ cmd_install() {
 
     validate_install_user
     check_deps
+    reject_multi_sls_config
 
     # Migrate legacy layout if needed
     migrate_legacy_layout
@@ -2242,9 +2353,21 @@ try {
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
+  const isCodex = cfg.endsWith('/.codex/hooks.json');
+  const isPilotCodex = c => typeof c === 'string' && c.includes(marker)
+    && new RegExp('(^|[ /])codex-loongsuite-pilot-hook[.](sh|mjs|ps1)([^A-Za-z0-9_.-]|$)', 'i').test(c);
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
-    const filtered = entries.filter(e => {
+    const candidates = isCodex ? entries.flatMap(e => {
+      if (!e || typeof e !== 'object') return [e];
+      if (isPilotCodex(e.command)) { changed = true; return []; }
+      if (!Array.isArray(e.hooks)) return [e];
+      const nested = e.hooks.filter(h => !isPilotCodex(h && h.command));
+      if (nested.length === e.hooks.length) return [e];
+      changed = true;
+      return nested.length ? [{ ...e, hooks: nested }] : [];
+    }) : entries;
+    const filtered = isCodex ? candidates : candidates.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
       const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
@@ -2284,7 +2407,22 @@ try {
 # script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
 # installations uninstall correctly, while unrelated hooks in the file remain.
 remove_grok_build_hook_config() {
-    local cfg="$HOME/.grok/hooks/loongsuite-pilot.json"
+    local grok_home="${GROK_HOME:-$HOME/.grok}"
+    local cfg="$grok_home/hooks/loongsuite-pilot.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["grok-build"]?.hookSettingsPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     [ -f "$cfg" ] || return 0
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: ~/.grok/hooks/loongsuite-pilot.json (无 Node.js，请手动清理 Grok Build Pilot hook)" \
@@ -2559,7 +2697,21 @@ try {
 # Remove Pi Coding Agent extension injection
 # ============================================================
 remove_pi_coding_agent_extension() {
-    local cfg="$HOME/.pi/agent/settings.json"
+    local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+        local persisted
+        persisted=$(node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
+  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+} catch {}
+' "$state_file")
+        if [ -n "$persisted" ]; then cfg="$persisted"; fi
+    fi
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -2933,7 +3085,7 @@ cmd_uninstall() {
     echo ""
 
     # Remove OTel Claude plugin
-    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     remove_otel_plugin
     echo ""
 

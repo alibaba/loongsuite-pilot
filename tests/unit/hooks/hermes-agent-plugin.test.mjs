@@ -339,10 +339,18 @@ class Context:
 
 ctx = Context()
 module.register(ctx)
+from concurrent.futures import ThreadPoolExecutor
+workers = {}
 for line in events_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
-    ctx.hooks[event["hook"]](**event["payload"])
-print(json.dumps(sorted(ctx.hooks)))
+    if event.get("thread"):
+        worker = workers.setdefault(event["thread"], ThreadPoolExecutor(max_workers=1))
+        worker.submit(ctx.hooks[event["hook"]], **event["payload"]).result()
+    else:
+        ctx.hooks[event["hook"]](**event["payload"])
+for worker in workers.values():
+    worker.shutdown()
+print(json.dumps({"hooks": sorted(ctx.hooks), "activeTurns": sum(len(state["turns"]) for state in module._SESSIONS.values()), "sessions": len(module._SESSIONS)}))
 `;
   const env = {
     ...process.env,
@@ -365,18 +373,23 @@ print(json.dumps(sorted(ctx.hooks)))
     encoding: 'utf8',
   });
   expect(run.status, run.stderr).toBe(0);
-  const hooks = JSON.parse(run.stdout.trim());
+  const { hooks, activeTurns, sessions } = JSON.parse(run.stdout.trim());
   const logDir = path.join(root, 'logs', 'hermes-agent');
   if (!expectLogFile) {
     return { hooks, records: [], raw: '', root, logDir, stderr: run.stderr };
   }
   const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-.*\.jsonl$/.test(file));
   expect(files).toHaveLength(1);
-  const records = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
+  const allRecords = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
     .trim()
     .split('\n')
     .map(line => JSON.parse(line));
-  return { hooks, records, raw: JSON.stringify(records), root, logDir, stderr: run.stderr };
+  // These old fixtures omit per-call response/history payloads. Responses can
+  // only be recovered at turn end; semantic assertions use event time. The
+  // realtime suite checks actual append order and cross-process visibility.
+  const records = allRecords.filter(record => record['event.name'] !== 'other')
+    .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+  return { hooks, records, allRecords, activeTurns, sessions, raw: JSON.stringify(allRecords), root, logDir, stderr: run.stderr };
 }
 
 function activeSessionEvictionEvents() {
@@ -429,6 +442,118 @@ afterEach(() => {
 });
 
 describe('Hermes Agent native plugin', () => {
+  it.each([[true, true], [false, true], [true, false], [true, 'legacy-thread']])('isolates overlapping turns in one IM session (capture=%s, observer=%s)', (captureMessageContent, observerIds) => {
+    // Synthetic payloads follow the observed foreground/background hook interleaving.
+    const makeTurn = (label, sender) => observerV1Turn()
+      .filter(event => !['on_session_start', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll('probe-sender', sender)
+          .replaceAll('approved files', `${label} files`)
+          .replaceAll('call_fixture_001', `call_${label}`)
+          .replaceAll('api-request-', `${label}-api-`));
+        if (observerIds === true) payload.turn_id = label;
+        else delete payload.turn_id;
+        payload.task_id = label;
+        payload.platform = 'dingtalk';
+        if (observerIds === 'legacy-thread' && (event.hook.includes('llm') || event.hook === 'on_session_end')) delete payload.task_id;
+        return { hook: event.hook, payload, ...(observerIds === 'legacy-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground', 'im-user-A');
+    const background = makeTurn('background', '');
+    // Foreground API is in flight when background pre_llm_call arrives.
+    const events = [...foreground.slice(0, 2), ...background.slice(0, 2),
+      ...foreground.slice(2),
+      // A duplicate finish for the completed foreground must not end background.
+      foreground.at(-1), ...background.slice(2)];
+    const { records } = replay(events, { configUser: '', captureMessageContent });
+    expect(records).toHaveLength(12);
+    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', 'im-user-A']]) {
+      const own = records.filter(record => record['gen_ai.turn.id'] === label);
+      expect(own).toHaveLength(6);
+      expect(new Set(own.map(record => record.trace_id)).size).toBe(1);
+      expect(own.every(record => record['user.id'] === sender)).toBe(true);
+      expect(own.filter(record => record['event.name'] === 'llm.request')
+        .map(record => record['gen_ai.request.id'])).toEqual([`${label}-api-1`, `${label}-api-2`]);
+      const input = JSON.stringify(own.find(record => record['event.name'] === 'llm.request')['gen_ai.input.messages']);
+      expect(input).toContain(`${label} files`);
+      expect(own.find(record => record['event.name'] === 'tool.call')['gen_ai.tool.call.id']).toBe(`call_${label}`);
+    }
+    expect(new Set(records.map(record => record.trace_id)).size).toBe(2);
+  });
+
+  it.each([
+    ['same-thread', 'on_session_end', 'none'],
+    ['cross-thread', 'on_session_end', 'none'],
+    ['same-thread', 'on_session_finalize', 'none'],
+    ['cross-thread', 'on_session_finalize', 'none'],
+    ['same-thread', 'on_session_end', 'stale-turn'],
+    ['same-thread', 'on_session_end', 'stale-task'],
+  ])('preserves pending background tools and response across %s %s (%s)', (threadMode, hook, identity) => {
+    const makeTurn = label => firstTurn()
+      .filter(event => !['on_session_start', 'on_session_end', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll(TURN_ONE, label)
+          .replaceAll('call_fixture_001', `call_${label}`));
+        // Same-thread cases leave observer IDs absent so stale tagged ends
+        // cannot adopt legacy turns; cross-thread cases use current observer IDs.
+        if (threadMode === 'cross-thread') payload.turn_id = label;
+        if (event.hook.includes('llm')) payload.task_id = label;
+        return { hook: event.hook, payload, ...(threadMode === 'cross-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground');
+    const background = makeTurn('background');
+    const pending = background.findIndex(event => event.hook === 'post_tool_call');
+    const end = {
+      hook,
+      payload: { session_id: SESSION_ID,
+        ...(identity === 'stale-turn' ? { turn_id: 'completed-foreground' } : {}),
+        ...(identity === 'stale-task' ? { task_id: 'completed-foreground' } : {}),
+      },
+      ...(threadMode === 'cross-thread' ? { thread: 'foreground' } : {}),
+    };
+    const { records, activeTurns, sessions } = replay([
+      ...foreground.slice(0, 3), ...background.slice(0, pending),
+      ...foreground.slice(3), end, end, ...background.slice(pending),
+    ]);
+    expect(activeTurns).toBe(0);
+    if (hook === 'on_session_finalize') expect(sessions).toBe(0);
+    expect(records).toHaveLength(12);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(12);
+    const own = records.filter(record => record['gen_ai.turn.id'] === 'background');
+    expect(own).toHaveLength(6);
+    expect(own.find(record => record['event.name'] === 'tool.result')['gen_ai.tool.call.result'])
+      .toMatchObject({ output: '17 /etc/hosts\n11 /etc/shells\n28 total', exit_code: 0 });
+    expect(JSON.stringify(own.filter(record => record['event.name'] === 'llm.response')))
+      .toContain('The files have 17 and 11 lines, for a total of 28.');
+  });
+
+  it.each(['turn_id', 'task_id'])('uses exact %s to end a failed turn in an overlapping session', idKey => {
+    const failed = failedApiTurn().filter(event => !['on_session_end', 'on_session_finalize'].includes(event.hook));
+    const events = failed.map(event => ({ ...event, payload: { ...event.payload, [idKey]: 'failed' } }));
+    const other = { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, turn_id: 'other', task_id: 'other', user_message: 'other' } };
+    const end = { hook: 'on_session_end', payload: { session_id: SESSION_ID, [idKey]: 'failed' } };
+    const { records, activeTurns } = replay([...events, other, end, end]);
+    expect(activeTurns).toBe(1);
+    expect(records).toHaveLength(2);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records.find(record => record['event.name'] === 'llm.response')['error.type']).toBeTruthy();
+  });
+
+  it('flushes completed APIs once at process exit without inventing unfinished API results', () => {
+    const turn = firstTurn();
+    const events = turn.slice(0, turn.findIndex(event => event.hook === 'post_tool_call'));
+    const { records } = replay([...events,
+      { hook: 'on_session_finalize', payload: { session_id: SESSION_ID } },
+      { hook: 'pre_api_request', payload: { ...apiPayload('unfinished', 1), turn_id: 'unfinished' } },
+    ]);
+    expect(records.map(record => record['event.name'])).toEqual([
+      'llm.request', 'llm.response', 'tool.call', 'llm.request',
+    ]);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
   it('registers all native callbacks and emits the canonical six-event tool turn', () => {
     const { hooks, records } = replay(firstTurn(), {
       pilotEnvUser: 'pilot-env-user',
@@ -612,7 +737,7 @@ describe('Hermes Agent native plugin', () => {
     ]);
   });
 
-  it('does not persist tool definitions when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for tool definitions', () => {
     const marker = 'private-tool-description-marker';
     const { records, raw } = replay(toolDefinitionsTurn({
       tools: [{
@@ -622,8 +747,10 @@ describe('Hermes Agent native plugin', () => {
     }), { captureMessageContent: false });
     const request = records.find(record => record['event.name'] === 'llm.request');
 
-    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
-    expect(raw).not.toContain(marker);
+    expect(request['gen_ai.tool.definitions']).toEqual([
+      expect.objectContaining({ name: 'private_tool', description: marker }),
+    ]);
+    expect(raw).toContain(marker);
   });
 
   it('normalizes each Hermes provider system prompt shape and ignores blank prompts', () => {
@@ -708,7 +835,7 @@ describe('Hermes Agent native plugin', () => {
     expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
   });
 
-  it('does not persist the system prompt when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for the system prompt', () => {
     const marker = 'private-system-prompt-marker';
     const { records, raw } = replay(
       toolDefinitionsTurn({ system: marker }),
@@ -716,19 +843,21 @@ describe('Hermes Agent native plugin', () => {
     );
     const request = records.find(record => record['event.name'] === 'llm.request');
 
-    expect(request).not.toHaveProperty('gen_ai.system_instructions');
-    expect(raw).not.toContain(marker);
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: marker },
+    ]);
+    expect(raw).toContain(marker);
   });
 
-  it('redacts provider error messages when message content capture is disabled', () => {
+  it('ignores legacy captureMessageContent=false for provider error messages', () => {
     const { records, raw } = replay(failedApiTurn(), {
       captureMessageContent: false,
     });
     const response = records.find(record => record['event.name'] === 'llm.response');
 
     expect(response['error.type']).toBe('RateLimitError');
-    expect(response['error.message']).toBe('provider request failed');
-    expect(raw).not.toContain('Too many requests');
+    expect(response['error.message']).toBe('Too many requests');
+    expect(raw).toContain('Too many requests');
   });
 
   it('does not consume the successful assistant response for a failed API retry', () => {
@@ -751,7 +880,7 @@ describe('Hermes Agent native plugin', () => {
       .toContain('The retried request succeeded.');
   });
 
-  it('adds skill metadata to skill_view even when message content capture is disabled', () => {
+  it('keeps skill metadata and content when legacy captureMessageContent is false', () => {
     const { records } = replay(skillViewTurn(), { captureMessageContent: false });
     const skillRecords = records.filter(record => record['gen_ai.tool.name'] === 'skill_view');
 
@@ -759,11 +888,13 @@ describe('Hermes Agent native plugin', () => {
     for (const record of skillRecords) {
       expect(record['gen_ai.skill.name']).toBe('loongsuite-pr-review');
       expect(record['gen_ai.skill.id']).toBe('loongsuite-pr-review');
-      expect(record['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
-      expect(record['gen_ai.skill.version']).toBe('1.2.3');
     }
-    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeUndefined();
-    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeUndefined();
+    // Description/version arrive in the tool result; the already-visible call
+    // cannot be retroactively enriched with future response fields.
+    expect(skillRecords[1]['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
+    expect(skillRecords[1]['gen_ai.skill.version']).toBe('1.2.3');
+    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeDefined();
   });
 
   it('uses Hermes 0.18 observer-v1 correlation and tool lifecycle fields', () => {
@@ -820,21 +951,21 @@ describe('Hermes Agent native plugin', () => {
     expect(partTypes(requests[2]['gen_ai.input.messages_delta'])).toEqual(expect.arrayContaining(['tool_call', 'tool_call_response']));
   });
 
-  it('keeps message and correlation structure while removing captured content', () => {
+  it('keeps message content and correlation when legacy boolean false is configured', () => {
     const { records, raw } = replay(firstTurn({ senderId: 'sender-user' }), { captureMessageContent: false });
     expect(records.every(record => record['user.id'] === 'sender-user')).toBe(true);
     expect(records.every(record =>
       record[INVOCATION_USER_ID_FIELD] === 'sender-user')).toBe(true);
     expect(records.every(record =>
       record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
-    expect(raw).not.toContain('approved files');
-    expect(raw).not.toContain('wc -l /etc/hosts');
-    expect(raw).not.toContain('17 /etc/hosts');
-    expect(raw).not.toContain('The files have');
+    expect(raw).toContain('approved files');
+    expect(raw).toContain('wc -l /etc/hosts');
+    expect(raw).toContain('17 /etc/hosts');
+    expect(raw).toContain('The files have');
     const toolCall = records.find(record => record['event.name'] === 'tool.call');
     const toolResult = records.find(record => record['event.name'] === 'tool.result');
-    expect(toolCall).not.toHaveProperty('gen_ai.tool.call.arguments');
-    expect(toolResult).not.toHaveProperty('gen_ai.tool.call.result');
+    expect(toolCall['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(toolResult['gen_ai.tool.call.result']).toBeDefined();
     expect(toolCall['gen_ai.tool.call.id']).toBe(toolResult['gen_ai.tool.call.id']);
     for (const record of records.filter(record => record['event.name'].startsWith('llm.'))) {
       const messages = record['event.name'] === 'llm.request'
@@ -847,21 +978,21 @@ describe('Hermes Agent native plugin', () => {
       ...(record['gen_ai.input.messages'] || []),
       ...(record['gen_ai.output.messages'] || []),
     ]).flatMap(message => message.parts);
-    expect(allParts.filter(part => part.type === 'text').every(part => part.content === '')).toBe(true);
-    expect(allParts.filter(part => part.type === 'tool_call').every(part => !('arguments' in part))).toBe(true);
-    expect(allParts.filter(part => part.type === 'tool_call_response').every(part => part.response === '')).toBe(true);
+    expect(allParts.some(part => part.type === 'text' && part.content !== '')).toBe(true);
+    expect(allParts.filter(part => part.type === 'tool_call').every(part => 'arguments' in part)).toBe(true);
+    expect(allParts.filter(part => part.type === 'tool_call_response').every(part => part.response !== '')).toBe(true);
   });
 
-  it('treats string false as disabled before writing the raw JSONL', () => {
+  it('ignores legacy string false before writing the raw JSONL', () => {
     const { records, raw } = replay(firstTurn(), { captureMessageContent: 'false' });
 
-    expect(raw).not.toContain('approved files');
-    expect(raw).not.toContain('wc -l /etc/hosts');
-    expect(raw).not.toContain('17 /etc/hosts');
+    expect(raw).toContain('approved files');
+    expect(raw).toContain('wc -l /etc/hosts');
+    expect(raw).toContain('17 /etc/hosts');
     expect(records.find(record => record['event.name'] === 'tool.call'))
-      .not.toHaveProperty('gen_ai.tool.call.arguments');
+      .toHaveProperty('gen_ai.tool.call.arguments');
     expect(records.find(record => record['event.name'] === 'tool.result'))
-      .not.toHaveProperty('gen_ai.tool.call.result');
+      .toHaveProperty('gen_ai.tool.call.result');
   });
 
   it.each(['marker', 'config'])(
@@ -896,12 +1027,13 @@ describe('Hermes Agent native plugin', () => {
   it('flushes completed API records before evicting an active session', () => {
     const { records } = replay(activeSessionEvictionEvents());
 
-    expect(records.map(record => record['event.name'])).toEqual([
-      'llm.request',
-      'llm.response',
-    ]);
-    expect(records.every(record =>
-      record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    // Eviction writes the first pair; interpreter exit drains the other 99
+    // completed APIs, but never the last session's unfinished request.
+    expect(records).toHaveLength(200);
+    expect(records.slice(0, 2).map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(records.slice(0, 2).every(record => record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(200);
+    expect(records.some(record => record['gen_ai.session.id'] === 'active-session-100')).toBe(false);
   });
 
   it('reports callback failures without exposing payload content', () => {

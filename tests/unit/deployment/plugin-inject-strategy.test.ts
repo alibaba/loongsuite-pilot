@@ -59,6 +59,24 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.needsDeploy(piDefinition())).toBe(false);
   });
 
+  it('reports the existing config path when an earlier candidate is missing', async () => {
+    const missingPath = path.join(tmpDir, 'missing-pi', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, '{}\n');
+
+    const result = await strategy.deploy(piDefinition({
+      configPaths: [missingPath, settingsPath],
+      createIfMissing: true,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(result.pluginInjectConfigPath).toBe(path.resolve(settingsPath));
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([
+      path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+    ]);
+    await expect(fs.access(missingPath)).rejects.toThrow();
+  });
+
   it('creates the first config path when createIfMissing is enabled', async () => {
     const result = await strategy.deploy(piDefinition());
 
@@ -228,6 +246,22 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
       plugins: { load: { paths: [`file://${dataDir}/plugins/openclaw`] }, entries: {} },
     }));
     expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+  });
+
+  it('adds only Pilot to an existing OpenClaw allowlist and remains idempotent', async () => {
+    await strategy.deploy(openclawDef());
+    const cfg = await readConfig();
+    (cfg.plugins as Record<string, unknown>).allow = ['openclaw-security-sdk', 'another-plugin'];
+    await fs.writeFile(configPath, JSON.stringify(cfg));
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    const updated = await readConfig();
+    expect((updated.plugins as Record<string, unknown>).allow).toEqual([
+      'openclaw-security-sdk', 'another-plugin', 'loongsuite-pilot-openclaw',
+    ]);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+    await strategy.deploy(openclawDef());
+    expect(await readConfig()).toEqual(updated);
   });
 
   it('needsDeploy returns true when entry enabled but path missing', async () => {

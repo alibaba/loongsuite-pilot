@@ -186,7 +186,12 @@ export class PluginInjectStrategy implements DeployStrategy {
       } else {
         logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
       }
-      return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
+      return {
+        success: true,
+        agentId: def.id,
+        deployMode: 'plugin-inject',
+        pluginInjectConfigPath: path.resolve(configPath),
+      };
     } catch (err) {
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
@@ -234,6 +239,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       logger.error('undeploy failed', { agentId: def.id, error: String(err) });
       return false;
     }
+  }
+
+  /** First existing config path the inject/undeploy loop will actually touch. */
+  async resolveExistingConfigPath(config: PluginInjectConfig): Promise<string | null> {
+    return this.findConfigFile(config, false);
   }
 
   private async findConfigFile(
@@ -430,7 +440,9 @@ export class PluginInjectStrategy implements DeployStrategy {
       && !Array.isArray(entry)
       && this.isDeepSubset(entry as Record<string, unknown>, desiredEntry);
 
-    return hasPath && entryConfigured;
+    const allowed = !Array.isArray(plugins.allow) || plugins.allow.length === 0
+      || plugins.allow.includes(pluginId);
+    return hasPath && entryConfigured && allowed;
   }
 
   private openclawInject(
@@ -457,6 +469,14 @@ export class PluginInjectStrategy implements DeployStrategy {
     const load = this.ensureLoadObject(plugins);
     let paths = this.ensurePathsArray(load);
     const entries = this.ensureEntriesObject(plugins);
+
+    // A non-empty host allowlist otherwise silently disables the installed
+    // integration. Preserve all existing entries, including company plugins.
+    if (Array.isArray(plugins.allow) && plugins.allow.length > 0
+      && !plugins.allow.includes(config.pluginId)) {
+      plugins.allow.push(config.pluginId);
+      mutated = true;
+    }
 
     for (const legacyEntry of legacyEntries) {
       const legacySpec = typeof legacyEntry === 'string'

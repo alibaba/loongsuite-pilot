@@ -41,6 +41,7 @@ export interface PostWebtrackingOptions {
 }
 
 export interface PostApiKeyOptions {
+  signal?: AbortSignal;
   topic?: string;
   source?: string;
   tags?: Array<Record<string, string>>;
@@ -113,6 +114,7 @@ export async function postApiKeyLogStoreLogs(
   logGroup: SlsLogGroupPayload,
   opts?: PostApiKeyOptions,
 ): Promise<void> {
+  opts?.signal?.throwIfAborted();
   const body = encodeSlsLogGroup({
     ...logGroup,
     topic: logGroup.topic ?? opts?.topic,
@@ -139,8 +141,9 @@ export async function postApiKeyLogStoreLogs(
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    opts?.signal?.throwIfAborted();
     try {
-      const resp = await postBuffer(requestTarget.url, body, headers, timeoutMs);
+      const resp = await postBuffer(requestTarget.url, body, headers, timeoutMs, opts?.signal);
       if (resp.status >= 200 && resp.status < 300) {
         logger.debug('batch sent via apiKey', {
           project: config.project,
@@ -156,6 +159,7 @@ export async function postApiKeyLogStoreLogs(
       }
       lastErr = err;
     } catch (err) {
+      opts?.signal?.throwIfAborted();
       lastErr = err;
       if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
       if (attempt === maxRetries - 1) break;
@@ -167,7 +171,7 @@ export async function postApiKeyLogStoreLogs(
       delayMs: delay,
       error: String(lastErr),
     });
-    await sleep(delay);
+    await sleep(delay, opts?.signal);
   }
 
   throw lastErr;
@@ -203,12 +207,14 @@ function postBuffer(
   body: Buffer,
   headers: Record<string, string | number>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === 'https:' ? https : http;
-    const req = transport.request(target, { method: 'POST', headers }, res => {
+    const req = transport.request(target, { method: 'POST', headers, ...(signal ? { signal } : {}) }, res => {
       const chunks: Buffer[] = [];
+      res.on('error', reject);
       res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       res.on('end', () => {
         resolve({
@@ -316,6 +322,19 @@ export async function persistFailedLogs(
   });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', cancel);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
 }

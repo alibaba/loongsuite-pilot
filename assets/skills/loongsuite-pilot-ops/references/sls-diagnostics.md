@@ -251,7 +251,7 @@ rm -f ~/.loongsuite-pilot/sls-failed-logs/*.jsonl
 | `403 Forbidden` | AK 对应的 RAM 角色无 SLS 写入权限。需要 `log:PostLogStoreLogs` 或 `log:PutWebtracking` 权限 |
 | `404 Not Found` | project 或 logstore 不存在。在 SLS 控制台确认名称拼写正确 |
 | `sls-failed-logs/` 目录持续增大 | 上报持续失败。先修复根因（网络/凭证/配置），修复后新数据会正常发送，历史失败数据保留在文件中 |
-| 数据到了 SLS 但部分字段缺失 | 检查 `config.json` 的 `agents.<agentType>.captureMessageContent` 是否为 `false`（会脱敏代码内容字段） |
+| 数据到了 SLS 但部分字段缺失 | 核对源 Agent 是否提供对应内容，并检查 `mask` 脱敏规则和采集日志 |
 | webtracking 模式下数据量大时部分丢失 | 单批超过 4096 条或 2.8MB 时会自动分片。若分片后仍失败，检查 `sls-failed-logs/` 中的错误详情 |
 | 多 endpoint 配置下部分 endpoint 失败 | 多个 endpoint 独立发送，互不影响。分别检查各自的网络和配置 |
 | 多个 endpoint 完全相同 | 自动去重，只发送一次（按 endpoint URL + project + logstore 三元组去重） |

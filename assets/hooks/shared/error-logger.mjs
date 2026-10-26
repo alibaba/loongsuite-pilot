@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { withSyncFileLock } from './sync-file-lock.mjs';
 
 function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
@@ -48,7 +49,10 @@ export function logHookError({ agentId, stage, errorType, errorMessage }) {
       'error.type': String(errorType || '_OTHER'),
       'error.message': String(errorMessage || ''),
     };
-    fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf-8');
+    const line = JSON.stringify(record) + '\n';
+    withSyncFileLock(`${file}.lock`, 15_000, 10_000, () => {
+      fs.appendFileSync(file, line, 'utf-8');
+    });
   } catch {
     // fail-open: never throw
   }

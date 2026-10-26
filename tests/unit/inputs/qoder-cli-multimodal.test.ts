@@ -96,6 +96,30 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     )).toEqual(['/tmp/chart,final.png']);
   });
 
+  it('parses Qoder CLI 1.1.61 文件： citations and ignores size-only Image blocks', () => {
+    const text = [
+      '附件引用：',
+      '- 文件：/tmp/a949604a.png',
+      '- 文件：/tmp/55cc677b.jpg',
+      '- 文件：/tmp/notes.txt',
+      '[Image: original 2516x1418, displayed at 2000x1127. Multiply coordinates by 1.26 to map to original image.]',
+    ].join('\n');
+    if (process.platform === 'win32') {
+      expect(extractInputImagePaths(
+        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\notes.txt',
+      )).toEqual([
+        path.win32.normalize('C:\\tmp\\a949604a.png'),
+        path.win32.normalize('C:\\tmp\\55cc677b.jpg'),
+      ]);
+      return;
+    }
+    expect(extractInputImagePaths(text)).toEqual([
+      '/tmp/a949604a.png',
+      '/tmp/55cc677b.jpg',
+    ]);
+    expect(extractInputImagePaths('文件: /tmp/clip.png')).toEqual(['/tmp/clip.png']);
+  });
+
   it('unions attachment filename with @ / Image:source and unique-resolves', () => {
     const filename = process.platform === 'win32'
       ? 'C:\\Users\\me\\workspace\\picture\\pipeline.jpg'
@@ -174,7 +198,7 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       'gen_ai.tool.call.result': listed.map(p => `Read image: ${p} (1KB)`).join('\n'),
     });
     const pathToUri = vi.fn(async () => null);
-    await enrichCliMultimodal([tool], { uploadMode: 'tool', pathToUri });
+    await enrichCliMultimodal([tool], { uploadMode: 'input', pathToUri });
     expect(pathToUri).toHaveBeenCalledTimes(MAX_MULTIMODAL_PARTS);
     expect(tool['gen_ai.tool.call.result']).toBe(listed.map(p => `Read image: ${p} (1KB)`).join('\n'));
   });
@@ -280,7 +304,7 @@ describe('enrichCliMultimodal', () => {
     )).toBe(false);
   });
 
-  it('tool mode rewrites Read image and ImageGen results; input/output skip tool', async () => {
+  it('rewrites Read image and ImageGen results', async () => {
     const dir = makeTempDir();
     const img = writePng(dir, 'read.png', 'read-img');
     const gen = writePng(dir, 'gen.png', 'gen-img');
@@ -296,24 +320,124 @@ describe('enrichCliMultimodal', () => {
         `Image generated successfully! The absolute path of the image is: ${gen}\nRequest ID: abc`,
     });
 
-    for (const mode of ['input', 'output'] as const) {
-      const tool = makeRead();
-      const before = tool['gen_ai.tool.call.result'];
-      await enrichCliMultimodal([tool], { uploadMode: mode, pathToUri: fakePathToUri });
-      expect(tool['gen_ai.tool.call.result'], mode).toBe(before);
-    }
-
     const read = makeRead();
-    await enrichCliMultimodal([read], { uploadMode: 'tool', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([read], { uploadMode: 'input', pathToUri: fakePathToUri });
     const readParts = read['gen_ai.tool.call.result'] as any[];
     expect(readParts[0]).toEqual({ type: 'text', content: `Read image: ${img} (31KB)` });
     expect(readParts.some((p: any) => p.type === 'uri' && p.uri === 'oss://test/read-img')).toBe(true);
 
     const genEntry = makeGen();
-    await enrichCliMultimodal([genEntry], { uploadMode: 'both', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([genEntry], { uploadMode: 'all', pathToUri: fakePathToUri });
     expect((genEntry['gen_ai.tool.call.result'] as any[]).some(
       (p: any) => p.type === 'uri' && p.uri === 'oss://test/gen-img',
     )).toBe(true);
+  });
+
+  it('uploadMode gates tool.result: output skips; input enriches', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'tool-gate.png', 'tool-gate');
+    const makeTool = () => cliEntry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.result': `Read image: ${img} (1KB)`,
+    });
+
+    const outputOnly = makeTool();
+    await enrichCliMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect(outputOnly['gen_ai.tool.call.result']).toBe(`Read image: ${img} (1KB)`);
+
+    const inputOnly = makeTool();
+    await enrichCliMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+    expect(Array.isArray(inputOnly['gen_ai.tool.call.result'])).toBe(true);
+    expect((inputOnly['gen_ai.tool.call.result'] as any[]).some(
+      (p: any) => p.type === 'uri' && p.uri === 'oss://test/tool-gate',
+    )).toBe(true);
+  });
+
+  it('rewrites Read tool.call file_path to text+uri parts', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'call.png', 'call-img');
+    const encoded = JSON.stringify({ file_path: img });
+    const tool = cliEntry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': encoded,
+    });
+
+    await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri: fakePathToUri });
+
+    const args = tool['gen_ai.tool.call.arguments'] as any[];
+    expect(args[0]).toEqual({ type: 'text', content: encoded });
+    expect(args[1]).toMatchObject({ type: 'uri', uri: 'oss://test/call-img', modality: 'image' });
+    expect(tool['gen_ai.output.multimodal_metadata']).toEqual([
+      { uri: 'oss://test/call-img', mime_type: 'image/png', modality: 'image' },
+    ]);
+  });
+
+  it('uploadMode gates tool.call: input skips; output enriches', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'call-gate.png', 'call-gate');
+    const makeCall = () => cliEntry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': { file_path: img },
+    });
+
+    const inputOnly = makeCall();
+    await enrichCliMultimodal([inputOnly], { uploadMode: 'input', pathToUri: fakePathToUri });
+    expect(inputOnly['gen_ai.tool.call.arguments']).toEqual({ file_path: img });
+
+    const outputOnly = makeCall();
+    await enrichCliMultimodal([outputOnly], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect(Array.isArray(outputOnly['gen_ai.tool.call.arguments'])).toBe(true);
+    expect((outputOnly['gen_ai.tool.call.arguments'] as any[]).some(
+      (p: any) => p.type === 'uri' && p.uri === 'oss://test/call-gate',
+    )).toBe(true);
+  });
+
+  it('resolves relative tool.call file_path against agent.qoder.cwd', async () => {
+    const dir = makeTempDir();
+    writePng(dir, 'rel.png', 'rel-call');
+    const tool = cliEntry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': { file_path: 'rel.png' },
+    });
+    (tool as Record<string, unknown>)['agent.qoder.cwd'] = dir;
+
+    await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect((tool['gen_ai.tool.call.arguments'] as any[]).some(
+      (p: any) => p.type === 'uri' && p.uri === 'oss://test/rel-call',
+    )).toBe(true);
+  });
+
+  it('does not extract tool.call file_path unless the tool is Read', async () => {
+    const dir = makeTempDir();
+    const img = writePng(dir, 'write.png', 'write-img');
+    const pathToUri = vi.fn(fakePathToUri);
+    const args = { file_path: img };
+
+    for (const name of ['Write', 'Writeable']) {
+      pathToUri.mockClear();
+      const tool = cliEntry({
+        'event.name': 'tool.call',
+        'gen_ai.tool.name': name,
+        'gen_ai.tool.call.arguments': args,
+      });
+      await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri });
+      expect(pathToUri, name).not.toHaveBeenCalled();
+      expect(tool['gen_ai.tool.call.arguments']).toEqual(args);
+      expect(tool['gen_ai.output.multimodal_metadata']).toBeUndefined();
+    }
+  });
+
+  it('leaves non-image tool.call arguments unchanged', async () => {
+    const tool = cliEntry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': { file_path: '/tmp/notes.ts' },
+    });
+    await enrichCliMultimodal([tool], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect(tool['gen_ai.tool.call.arguments']).toEqual({ file_path: '/tmp/notes.ts' });
   });
 
   it('uploadMode none / missing file / toUri null leave entries unchanged', async () => {
@@ -331,14 +455,14 @@ describe('enrichCliMultimodal', () => {
       'event.name': 'tool.result',
       'gen_ai.tool.call.result': 'Read image: /no/such/file.png (1KB)',
     });
-    await enrichCliMultimodal([missing], { uploadMode: 'tool', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([missing], { uploadMode: 'input', pathToUri: fakePathToUri });
     expect(missing['gen_ai.tool.call.result']).toBe('Read image: /no/such/file.png (1KB)');
 
     const nullUri = cliEntry({
       'event.name': 'tool.result',
       'gen_ai.tool.call.result': `Read image: ${img} (1KB)`,
     });
-    await enrichCliMultimodal([nullUri], { uploadMode: 'tool', pathToUri: async () => null });
+    await enrichCliMultimodal([nullUri], { uploadMode: 'input', pathToUri: async () => null });
     expect(nullUri['gen_ai.tool.call.result']).toBe(`Read image: ${img} (1KB)`);
   });
 
@@ -352,7 +476,7 @@ describe('enrichCliMultimodal', () => {
       'event.name': 'tool.result',
       'gen_ai.tool.call.result': paths.map(p => `Read image: ${p} (1KB)`).join('\n'),
     });
-    await enrichCliMultimodal([tool], { uploadMode: 'tool', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([tool], { uploadMode: 'input', pathToUri: fakePathToUri });
     const uriCount = (tool['gen_ai.tool.call.result'] as any[]).filter((p: any) => p.type === 'uri').length;
     expect(uriCount).toBe(MAX_MULTIMODAL_PARTS);
 
@@ -362,7 +486,7 @@ describe('enrichCliMultimodal', () => {
       'gen_ai.turn.id': 'dup-turn',
       'gen_ai.tool.call.result': `Read image: ${one} (1KB)\nImage file: ${one}`,
     });
-    await enrichCliMultimodal([dup], { uploadMode: 'tool', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([dup], { uploadMode: 'input', pathToUri: fakePathToUri });
     const dupUris = (dup['gen_ai.tool.call.result'] as any[]).filter((p: any) => p.type === 'uri');
     expect(dupUris).toHaveLength(1);
   });
@@ -377,7 +501,7 @@ describe('enrichCliMultimodal', () => {
     });
     const started = Date.now();
     await enrichCliMultimodal([tool], {
-      uploadMode: 'tool',
+      uploadMode: 'input',
       pathToUri: (filePath: string) =>
         withDeadline(
           (async () => {
@@ -408,7 +532,7 @@ describe('enrichCliMultimodal', () => {
       'gen_ai.tool.call.result': `Read image: ${img} (1KB)`,
     });
     await expect(enrichCliMultimodal([tool], {
-      uploadMode: 'tool',
+      uploadMode: 'input',
       pathToUri: async () => {
         throw new Error('processor boom');
       },
@@ -424,7 +548,7 @@ describe('enrichCliMultimodal', () => {
       'agent.qoder.cwd': dir as any,
       'gen_ai.tool.call.result': 'Read image: rel.png (1KB)',
     });
-    await enrichCliMultimodal([tool], { uploadMode: 'tool', pathToUri: fakePathToUri });
+    await enrichCliMultimodal([tool], { uploadMode: 'input', pathToUri: fakePathToUri });
     expect((tool['gen_ai.tool.call.result'] as any[]).some(
       (p: any) => p.type === 'uri' && p.uri === 'oss://test/rel-img',
     )).toBe(true);

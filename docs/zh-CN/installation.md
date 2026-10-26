@@ -10,7 +10,7 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 
 - `curl` 或 `wget`
 - Windows 下需要 PowerShell 5.1 或更高版本
-- Node.js 18+ 与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 运行时**（见下文），无需预装；Linux musl（Alpine）与 Windows ARM64 等不受支持平台仍需自备 Node.js 18+ 与 `npm`
+- 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 22.22 运行时**（见下文），无需预装。系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受；Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。Linux musl（Alpine）与 Windows ARM64 等没有托管运行时的平台，仍需自备满足该要求的 Node.js 与 `npm`
 
 ## 在 Linux 或 macOS 从公开包安装
 
@@ -72,8 +72,11 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
 | `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
+| `--all-agents` | 采集全部 Agent。不写 `enabled` 门禁，缺省即开。与 `--agents` 同时出现时忽略 `--agents`。Windows：`-AllAgents`。 |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`。与 `--all-agents` 同用且非 `none` 时，`codex`、`qoder` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
+| `--enable-status-bar-app <true\|false>` | 在 `install` 时设置是否自动启动 macOS 菜单栏。未传时保留已有配置，首次安装默认启用。Windows 对应 `-EnableStatusBarApp <true\|false>`（保存配置，菜单栏仅支持 macOS）。 |
 | `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
 | `--package-url <url>` | 从自定义 URL 或本地 `file://` 路径安装。 |
 | `--sls-endpoint <url>` | SLS endpoint。 |
@@ -85,6 +88,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
 | `--mask-replacement-mode <mode>` | 脱敏替换格式：`placeholder`（默认固定占位符）或 `preview`（星号预览）。Windows 对应 `-MaskReplacementMode`。 |
+| `--interceptor-mode <mode>` | 本地拦截模式：`all`、`none` 或 `custom`。启用的拦截类型会自动补进 `mask`。 |
+| `--interceptor-types <list>` | 逗号分隔的拦截类型（mask 密钥子集），`--interceptor-mode custom` 时必填。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
 | `--collect-trace <true\|false>` | 开启或关闭 Trace 上报。 |
 | `--cms-license-key <key>` | CMS 或 ARMS Trace license key。 |
@@ -92,7 +97,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--cms-workspace <name>` | CMS workspace 值。 |
 | `--service-name-prefix <name>` | 上报后端使用的 service name 前缀。 |
 | `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
-| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统没有可用 node 时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
+| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统 Node.js 缺失或无法加载 `node:sqlite`（需要 22.13+ 或 23.4+）时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
 例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
@@ -102,8 +107,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 为避免「用户环境删除/切换 node 导致采集中断」，安装器默认从 OSS 下载并固定一份**托管 Node.js 运行时**与**预编译 node_modules**，采集运行时不再依赖系统 node：
 
 1. `ensure_managed_node`：按平台/架构下载 `node-v<版本>-<os>-<arch>` 包，校验 `SHASUMS256.txt` 后解压到 `<数据目录>/runtime/`，并把该 node 路径写入 `<数据目录>/node-bin`。macOS 会执行 `xattr -dr com.apple.quarantine` 去除隔离属性。
-2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（含原生模块 `sqlite3`、`zstd-napi`），校验后替换安装目录下的 `node_modules`。
-3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`），都不会硬失败；彻底无路可走才报错退出。
+2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（生产依赖是纯 JavaScript；SQLite 读取走 Node 内置 `node:sqlite`（22.13 / 23.4 起无需 `--experimental-sqlite`，托管运行时已满足）），校验后替换安装目录下的 `node_modules`。
+3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`）。系统 node 必须能加载 `node:sqlite`，否则安装直接失败并保留原版本可用的运行时，不会在 SQLite 不可用时装成成功。
 
 平台覆盖与回退：
 
@@ -112,8 +117,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
 | Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
 | Windows x64 | ✅ | ✅ | 托管下载 |
-| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
-| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
+| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
+| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
 
 本地布局：
 
@@ -180,6 +185,14 @@ http://127.0.0.1:8765/
 
 ### 手动启动和停止 macOS 菜单栏
 
+如果希望首次启动采集服务时就不显示菜单栏，在安装命令中添加：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
+```
+
+安装器会在启动采集服务前将 `"enableStatusBarApp": false` 写入 `config.json`。显式传 `true` 可恢复自动启动，不传则保留已有值。该参数用于 `install`，也适用于覆盖安装；`upgrade` 保留已保存的配置。采集服务和本地 Dashboard 不受影响。运行时环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 仍优先于此配置。
+
 菜单栏默认随采集服务启动。菜单栏里的“退出”只会关闭菜单栏，采集服务继续运行；此时再次执行 `loongsuite-pilot start` 不会重新打开菜单栏。请执行：
 
 ```bash
@@ -242,6 +255,8 @@ loongsuite-pilot dashboard shortcut uninstall
 浏览器无法打开预期页面时，可用 `loongsuite-pilot status` 检查 Pilot 状态。
 
 ## 卸载
+
+Pilot 启动和卸载时保留第三方旧 Codex OTel Hook、配置及 `~/.cache/opentelemetry.instrumentation.codex` 目录，`--purge` 也不删除这些资产。
 
 卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。
 

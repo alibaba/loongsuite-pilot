@@ -52,6 +52,7 @@ export interface PipelineConfig {
 // --- Manager options ---
 
 export interface PipelineManagerOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
   configDir: string;
   stateDir: string;
   failedLogDir: string;
@@ -68,6 +69,7 @@ export interface PipelineToggle {
 // --- File pipeline options ---
 
 export interface FilePipelineOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
   config: PipelineConfig;
   stateDir: string;
   failedLogDir: string;
@@ -77,6 +79,7 @@ export interface FilePipelineOptions {
 // --- Qoder API pipeline options ---
 
 export interface QoderApiPipelineOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
   config: PipelineConfig;
   stateDir: string;
   failedLogDir: string;

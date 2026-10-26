@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { filterWorkspaceJsonLines } from './workspace-privacy.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -14,6 +15,7 @@ import {
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
 import { decodePayload } from './decode-payload.mjs';
+import { withSyncFileLock } from './sync-file-lock.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -163,40 +165,6 @@ function isLineRecordNewer(candidate, existing) {
     && (!existingUpdated || candidateUpdated > existingUpdated);
 }
 
-const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
-
-function withSyncFileLock(lockFile, waitMs, staleMs, action) {
-  const deadline = Date.now() + waitMs;
-  let acquired = false;
-  try {
-    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-    while (!acquired) {
-      try {
-        const fd = fs.openSync(lockFile, 'wx');
-        fs.closeSync(fd);
-        acquired = true;
-      } catch (err) {
-        if (err?.code !== 'EEXIST') return { acquired: false };
-        try {
-          const stat = fs.statSync(lockFile);
-          if (Date.now() - stat.mtimeMs > staleMs) {
-            fs.unlinkSync(lockFile);
-            continue;
-          }
-        } catch { /* retry acquisition */ }
-        if (Date.now() >= deadline) return { acquired: false };
-        Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
-      }
-    }
-
-    return { acquired: true, value: action() };
-  } finally {
-    if (acquired) {
-      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
-    }
-  }
-}
-
 function updateAggregateShadow(file, transcriptPath, record) {
   const result = withSyncFileLock(`${file}.lock`, 1_000, 30_000, () => {
     const records = readJsonObject(file) || {};
@@ -264,12 +232,21 @@ export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
 export function getTranscriptLineCount(transcriptPath) {
   try {
     if (!fs.existsSync(transcriptPath)) return 0;
-    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    // Byte scan over the raw Buffer: decoding a multi-MB transcript into a UTF-16
+    // string and walking it per-character costs ~35ms on a 13MB file, paid on the
+    // user's interactive path every event. 0x0A only ever encodes U+000A in UTF-8
+    // (it never appears as a continuation byte), so counting the byte is exactly
+    // equivalent to counting '\n' in the decoded string -- including the +1 for a
+    // final line with no trailing newline, which drives the persisted cursor.
+    const buf = fs.readFileSync(transcriptPath);
+    if (buf.length === 0) return 0;
     let count = 0;
-    for (let i = 0; i < content.length; i++) {
-      if (content[i] === '\n') count++;
+    let idx = buf.indexOf(10);
+    while (idx !== -1) {
+      count++;
+      idx = buf.indexOf(10, idx + 1);
     }
-    if (content.length > 0 && content[content.length - 1] !== '\n') count++;
+    if (buf[buf.length - 1] !== 10) count++;
     return count;
   } catch {
     return 0;
@@ -329,20 +306,39 @@ export function getLineRange(agentId, transcriptPath, sessionId) {
   return info ? [info.startLine, info.endLine] : null;
 }
 
-export function readTranscriptLines(transcriptPath, startLine, endLine) {
-  const lines = [];
+// Reads the transcript exactly once and returns both its line count and the raw
+// split lines. A caller can feed lineCount to getLineRangeInfo (as
+// knownCurrentCount) and slice the new range from allLines, so the QoderWork /
+// QwenWorkCN processors no longer read the whole file twice per hook event. The
+// lineCount rule matches getTranscriptLineCount byte-for-byte: a final line with
+// no trailing newline still counts.
+export function readTranscriptSnapshotLines(transcriptPath) {
   try {
-    if (!fs.existsSync(transcriptPath)) return lines;
+    if (!fs.existsSync(transcriptPath)) return { lineCount: 0, allLines: [] };
     const content = fs.readFileSync(transcriptPath, 'utf-8');
+    if (content.length === 0) return { lineCount: 0, allLines: [] };
     const allLines = content.split('\n');
-    for (let i = startLine; i < endLine && i < allLines.length; i++) {
-      const trimmed = allLines[i].trim();
-      if (trimmed) lines.push(trimmed);
-    }
+    const lineCount = content[content.length - 1] !== '\n'
+      ? allLines.length
+      : Math.max(0, allLines.length - 1);
+    return { lineCount, allLines };
   } catch {
-    // best-effort
+    return { lineCount: 0, allLines: [] };
+  }
+}
+
+export function sliceTranscriptLines(allLines, startLine, endLine) {
+  const lines = [];
+  for (let i = startLine; i < endLine && i < allLines.length; i++) {
+    const trimmed = allLines[i].trim();
+    if (trimmed) lines.push(trimmed);
   }
   return lines;
+}
+
+export function readTranscriptLines(transcriptPath, startLine, endLine) {
+  const { allLines } = readTranscriptSnapshotLines(transcriptPath);
+  return sliceTranscriptLines(allLines, startLine, endLine);
 }
 
 export function parseTranscriptLine(line, agentId, runtimeConfig, turnId) {
@@ -370,9 +366,10 @@ export function getHistoryLogFile(agentId, logPrefix) {
 }
 
 export function appendRowsToHistory(agentId, logPrefix, rows) {
-  if (!rows.length) return true;
-  const logFile = getHistoryLogFile(agentId, logPrefix);
   try {
+    rows = filterWorkspaceJsonLines(rows, agentId);
+    if (!rows.length) return true;
+    const logFile = getHistoryLogFile(agentId, logPrefix);
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     const result = withSyncFileLock(`${logFile}.lock`, 15_000, 10_000, () => {
       fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
@@ -441,7 +438,10 @@ export async function parseStdinPayload(agentId) {
   }
 
   const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
-  return { transcriptPath, sessionId, cwd };
+  const extra = payload.extra && typeof payload.extra === 'object' && !Array.isArray(payload.extra)
+    ? payload.extra
+    : undefined;
+  return { transcriptPath, sessionId, cwd, extra };
 }
 
 // --- Re-export normalizer utilities -----------------------------------------

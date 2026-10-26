@@ -3,8 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
-import sqlite3 from 'sqlite3';
 import { ClientType } from '../../types/index.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { directoryExists } from '../../utils/fs-utils.js';
@@ -12,6 +12,7 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
   parseSdkLogLine,
   resolveQoderWorkRoot,
@@ -120,7 +121,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       stateStore: opts.stateStore,
       sessionDir: path.join(dataRoot, 'logs'),
       filePattern: 'sdk-*.log',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.agentType = agentType;
     this.id = `${agentType}-trace`;
@@ -1009,21 +1010,6 @@ function extractUserText(msg: Record<string, unknown>): string {
 function safeParseJson(value: string): JsonValue | undefined {
   if (!value) return undefined;
   try { return JSON.parse(value); } catch { return value; }
-}
-
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) { reject(queryErr); return; }
-          if (closeErr) { reject(closeErr); return; }
-          resolve(rows);
-        });
-      });
-    });
-  });
 }
 
 async function findLastResultBoundary(filePath: string, size: number): Promise<number> {

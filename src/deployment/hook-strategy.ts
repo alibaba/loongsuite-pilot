@@ -19,6 +19,7 @@ import {
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
   CODEX_HOOK_EVENT_KEYS,
   type InstalledCodexCommandHandler,
@@ -136,7 +137,10 @@ export class HookStrategy implements DeployStrategy {
       return this.kiroAgentNeedsDeploy(def);
     }
 
-    const hookDefs = this.buildHookDefinitions(def);
+    const hookDefs = [
+      ...this.buildInterceptorDefinitions(def),
+      ...this.buildHookDefinitions(def),
+    ];
     for (const hookDef of hookDefs) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
         return true;
@@ -257,7 +261,10 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
-      const hookDefs = this.buildHookDefinitions(def);
+      const hookDefs = [
+        ...this.buildInterceptorDefinitions(def),
+        ...this.buildHookDefinitions(def),
+      ];
       for (const hookDef of hookDefs) {
         const installed = await this.hookManager.isHookInstalled(hookDef);
         if (!installed) {
@@ -354,7 +361,11 @@ export class HookStrategy implements DeployStrategy {
     // that was first deployed by an old build leaves those retired hooks
     // firing, since current events don't cover them.
     const retiredHookDefs = this.buildRetiredHookDefinitions(def);
-    const hookDefs = [...this.buildHookDefinitions(def), ...retiredHookDefs];
+    const hookDefs = [
+      ...this.buildInterceptorDefinitions(def),
+      ...this.buildHookDefinitions(def),
+      ...retiredHookDefs,
+    ];
     let ownedTrustKeys: string[] = [];
     if (def.hook?.trustToml) {
       try {
@@ -460,6 +471,37 @@ export class HookStrategy implements DeployStrategy {
       result[eventName] = matches[0]!;
     }
     return result;
+  }
+
+  private interceptorTimeout(event: string, timeout?: number | Record<string, number>): number | undefined {
+    if (typeof timeout === 'number') return timeout;
+    if (timeout && typeof timeout[event] === 'number') return timeout[event];
+    if (event === 'UserPromptSubmit' || event === 'PreToolUse' || event === 'PostToolUse') {
+      return INTERCEPTOR_EVENT_TIMEOUT_SEC[event];
+    }
+    return undefined;
+  }
+
+  private buildInterceptorDefinitions(def: AgentDefinition): HookDefinition[] {
+    const hookConfig = def.hook;
+    const interceptor = hookConfig?.interceptor;
+    if (!hookConfig || !interceptor) return [];
+
+    return interceptor.events.map(event => ({
+      agentId: def.id,
+      settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
+      hookJsonPath: ['hooks', event],
+      hookCommand: formatHookCommand(
+        interceptor.hookCommand, event, hookConfig.eventSubcommand, def.id,
+      ),
+      matcher: interceptor.eventMatchers?.[event] ?? interceptor.matcher ?? hookConfig.matcher,
+      useNestedFormat: hookConfig.format === 'nested',
+      shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      timeout: this.interceptorTimeout(event, interceptor.timeout),
+      insert: interceptor.insert ?? 'head',
+      replaceHookCommands: interceptor.replaceHookCommands ?? [],
+    }));
   }
 
   private buildHookDefinitions(def: AgentDefinition): HookDefinition[] {
@@ -614,20 +656,19 @@ export class HookStrategy implements DeployStrategy {
     // Make pilot-kiro the default agent so users can run `kiro-cli` without
     // `--agent pilot-kiro`. Only set when missing — don't override a user's
     // explicit choice (they can still pass --agent for a one-off override).
-    await this.setKiroDefaultAgentIfMissing(agent.name);
+    await this.setKiroDefaultAgentIfMissing(agent.name, resolveHome(hookConfig.settingsPath));
   }
 
   /**
-   * Set `chat.defaultAgent = <agentName>` in ~/.kiro/settings/cli.json when not
+   * Set `chat.defaultAgent = <agentName>` in `<home>/settings/cli.json` when not
    * already set, so kiro-cli launches with the pilot agent by default.
+   * Home is the parent of the agent file's `agents/` directory, so `--home`
+   * and the default `~/.kiro` stay on the same tree.
    */
-  private async setKiroDefaultAgentIfMissing(agentName: string): Promise<void> {
-    // NOTE: distinct from hookConfig.settingsPath (~/.kiro/agents/pilot-kiro.json).
-    // This is Kiro's CLI-level settings file — a different concern (default-agent
-    // selection, not the agent definition). Kiro fixes both paths; if the config
-    // root ever moves, update this literal alongside settingsPath rather than
-    // coupling them via a new config field (they're not 1:1 related).
-    const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
+  private async setKiroDefaultAgentIfMissing(agentName: string, agentSettingsPath: string): Promise<void> {
+    const agentsDir = path.dirname(agentSettingsPath);
+    const kiroRoot = path.basename(agentsDir) === 'agents' ? path.dirname(agentsDir) : path.dirname(agentSettingsPath);
+    const cliSettingsPath = path.join(kiroRoot, 'settings', 'cli.json');
     try {
       await ensureDir(path.dirname(cliSettingsPath));
       const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};

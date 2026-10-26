@@ -28,7 +28,6 @@ import {
   toJsonValue,
   loadHookRuntimeConfig,
   resolveUserId,
-  applyHookContentPolicy,
 } from './agent-event-normalizer.mjs';
 import {
   loadState,
@@ -74,30 +73,6 @@ function deterministicHex(value, length) {
 function deterministicEventId(value) {
   const hex = deterministicHex(value, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function applyGrokContentPolicy(record, runtimeConfig) {
-  const cleaned = applyHookContentPolicy(record, runtimeConfig);
-  const configured = runtimeConfig?.agents?.[AGENT_ID]?.captureMessageContent;
-  const disabled = configured === false
-    || (typeof configured === 'string' && configured.trim().toLowerCase() === 'false');
-  if (!disabled || !cleaned || typeof cleaned !== 'object') return cleaned;
-
-  // The shared recursive policy can leave empty semantic containers such as
-  // `[{type:"text"}]`. For Grok, remove the top-level content fields entirely
-  // so a disabled policy cannot reveal shape or be mistaken for captured data.
-  for (const key of [
-    'gen_ai.input.messages',
-    'gen_ai.input.messages_delta',
-    'gen_ai.output.messages',
-    'gen_ai.system_instructions',
-    'gen_ai.tool.definitions',
-    'gen_ai.tool.call.arguments',
-    'gen_ai.tool.call.result',
-  ]) {
-    delete cleaned[key];
-  }
-  return cleaned;
 }
 
 function pilotDataDir() {
@@ -901,8 +876,7 @@ async function processHookLocked(trigger, event, sessionId) {
     state.turn_count = (state.turn_count || 0) + 1;
   }
 
-  const cleaned = allRecords.map((record) =>
-    applyGrokContentPolicy(sanitizeObject(record) || record, runtimeConfig));
+  const cleaned = allRecords.map((record) => sanitizeObject(record) || record);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
   state.initialized = true;

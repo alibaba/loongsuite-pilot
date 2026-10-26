@@ -17,7 +17,10 @@
 // bare node startup instead of the daemon's full module graph.
 //
 // It deliberately reuses HookStrategy/PluginInjectStrategy verbatim instead of
-// reimplementing injection synchronously. The hookCommand string those produce
+// reimplementing injection synchronously. `hook install` deploys through the
+// same strategies. This path does not write the hook-install result file, so an
+// eager inject cannot flip the container into recorded scope. The hookCommand
+// string those produce
 // must match the daemon's byte for byte, because the daemon's later pass asks
 // `isHookInstalled` — a one-character divergence reads as "not installed" and
 // appends a SECOND hook entry, making every event fire twice. Sharing the code
@@ -27,6 +30,10 @@ import { AgentDefLoader } from './deployment/agent-def-loader.js';
 import { HookManager } from './hooks/hook-manager.js';
 import { HookStrategy } from './deployment/hook-strategy.js';
 import { PluginInjectStrategy } from './deployment/plugin-inject-strategy.js';
+import {
+  applyPersistedDeployTargets,
+  lifecycleFieldsForDeploy,
+} from './deployment/persisted-deploy-paths.js';
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
@@ -229,6 +236,8 @@ async function main(): Promise<number> {
   // state record for an eagerly-installed hook and no-ops, so a later-disabled
   // agent's hook would fire forever (see DeploymentManager.undeployDisabledAgent).
   const newRecords: DeployedAgentsState = {};
+  const stateFile = path.join(dataDir, 'deployed-agents.json');
+  const existingState = (await readJsonFile<DeployedAgentsState>(stateFile)) ?? {};
 
   for (const entry of plan) {
     if (entry.action === 'unknown-id') {
@@ -242,7 +251,7 @@ async function main(): Promise<number> {
       continue;
     }
 
-    const def = byId.get(entry.agentId)!;
+    const def = applyPersistedDeployTargets(byId.get(entry.agentId)!, existingState[entry.agentId]);
 
     // Respect the enabled gate: an agent turned off in config.agents must not be
     // eagerly instrumented. Silent under sweep for the same reason "not detected"
@@ -274,7 +283,11 @@ async function main(): Promise<number> {
         injected.push(def.id);
         // Same record shape the daemon writes (DeploymentManager.deployAgent),
         // so the state file stays a single consistent schema.
-        newRecords[def.id] = { deployMode: def.deployMode, deployedAt: new Date().toISOString() };
+        newRecords[def.id] = {
+          deployMode: def.deployMode,
+          deployedAt: new Date().toISOString(),
+          ...lifecycleFieldsForDeploy(def, result),
+        };
       } else {
         failed++;
         warn(`failed to inject ${def.id}: ${result.error ?? 'unknown error'}`);
@@ -290,10 +303,8 @@ async function main(): Promise<number> {
   // crash mid-write. Best-effort — the hooks are already installed, and failing
   // to record only delays disabled-agent cleanup until the daemon reconciles.
   if (Object.keys(newRecords).length > 0) {
-    const stateFile = path.join(dataDir, 'deployed-agents.json');
     try {
-      const existing = (await readJsonFile<DeployedAgentsState>(stateFile)) ?? {};
-      await writeJsonFile(stateFile, { ...existing, ...newRecords });
+      await writeJsonFile(stateFile, { ...existingState, ...newRecords });
     } catch (err) {
       warn(`could not record deployment state: ${(err as Error).message}`);
     }

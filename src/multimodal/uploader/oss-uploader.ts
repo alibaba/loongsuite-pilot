@@ -1,5 +1,5 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalStorage, UploadItem, Uploader } from '../types.js';
+import type { MultimodalStorage, UploadItem, UploadOptions, Uploader } from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import { ossPutObject, parseOssStorageBasePath } from './oss-client.js';
 import {
@@ -9,11 +9,13 @@ import {
 } from './retry.js';
 
 const logger = createLogger('OssUploader');
+const UPLOAD_FAILURE_WARN_INTERVAL_MS = 60_000;
 
 export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private readonly failureWarnAt = new LruMap<number>(MULTIMODAL_LRU_LIMIT);
   private readonly abort = new AbortController();
   private closed = false;
 
@@ -25,7 +27,7 @@ export class OssUploader implements Uploader {
     this.prefix = parsed.prefix;
   }
 
-  async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
+  async upload(item: UploadItem, opts?: UploadOptions): Promise<boolean> {
     try {
       if (this.closed) {
         logger.warn('oss upload skipped: uploader closed');
@@ -72,13 +74,15 @@ export class OssUploader implements Uploader {
           retryable: put.retryable !== false,
           error: put.error,
           statusCode: put.statusCode,
+          requestId: put.requestId,
         };
       }, { signal: this.abort.signal });
 
       if (!result.ok) {
-        logger.warn('oss upload failed', {
+        this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
+          requestId: result.requestId,
           size: item.expectedSize,
         });
         return false;
@@ -98,9 +102,19 @@ export class OssUploader implements Uploader {
       });
       return true;
     } catch (err) {
-      logger.warn('oss upload failed', { error: String(err), size: item.expectedSize });
+      this.warnUploadFailure(undefined, { error: String(err), size: item.expectedSize });
       return false;
     }
+  }
+
+  private warnUploadFailure(statusCode: number | undefined, fields: Record<string, unknown>): void {
+    const reason = typeof fields.error === 'string' ? fields.error : '';
+    const key = `${statusCode ?? 'none'}\0${reason}`;
+    const now = Date.now();
+    const previous = this.failureWarnAt.get(key) ?? 0;
+    if (now - previous < UPLOAD_FAILURE_WARN_INTERVAL_MS) return;
+    this.failureWarnAt.set(key, now);
+    logger.warn('oss upload failed', fields);
   }
 
   async shutdown(): Promise<void> {

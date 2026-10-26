@@ -27,6 +27,8 @@ const CANONICAL_KEYS = new Set([
   'tool.result.status',
   'trace_id',
   'user.id',
+  'user.name',
+  'user.email',
 ]);
 
 export interface CanonicalHookRecordOptions {

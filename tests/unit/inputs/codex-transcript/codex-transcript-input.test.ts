@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
+import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
@@ -402,9 +403,8 @@ async function processTranscriptOnce(input: CodexTranscriptInput, transcript: st
   return (input as unknown as { processFile(filePath: string): Promise<number> }).processFile(transcript);
 }
 
-async function finalizeSubagentFusions(input: CodexTranscriptInput): Promise<number> {
-  return (input as unknown as { finalizeReadySubagentFusions(): Promise<number> })
-    .finalizeReadySubagentFusions();
+async function runInputCycle(input: CodexTranscriptInput): Promise<void> {
+  await (input as unknown as { runCycle(): Promise<void> }).runCycle();
 }
 
 function transcriptCheckpoint(
@@ -562,6 +562,73 @@ describe('CodexTranscriptInput', () => {
     expect(deltas[0].rawReadBytes).toBe(0);
   });
 
+  it('does not stat cold historical rollouts on the next default cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-historical-idle-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', (delta: InputRuntimeDelta) => deltas.push(delta));
+    const oldAt = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const oldPaths: string[] = [];
+    for (let index = 0; index < 12; index++) {
+      const day = String(index + 1).padStart(2, '0');
+      const filePath = path.join(sessionDir, '2024', '01', day, `rollout-old-${index}.jsonl`);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, record('2024-01-01T00:00:00.000Z', 'session_meta', {
+        id: `old-${index}`,
+        model_provider: 'openai',
+      }) + '\n', 'utf8');
+      await fs.utimes(filePath, oldAt, oldAt);
+      oldPaths.push(filePath);
+    }
+    const recent = await writeTranscript(sessionDir, completedTurn());
+
+    await input.start();
+    await waitFor(() => deltas.length >= 1);
+    const coldBefore = transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset;
+    const recentBefore = transcriptCheckpoint(stateStore, recent).scanOffset;
+    const requestCollection = () => (
+      input as unknown as { requestCollection(): void }
+    ).requestCollection();
+    const collectAfter = async (mutate: () => Promise<void>): Promise<InputRuntimeDelta> => {
+      await mutate();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const mark = deltas.length;
+      requestCollection();
+      await waitFor(() => deltas.length > mark);
+      return deltas[deltas.length - 1]!;
+    };
+
+    try {
+      const coldCycle = await collectAfter(() => fs.appendFile(oldPaths[0]!, record('2024-01-01T00:00:01.000Z', 'event_msg', {
+        type: 'task_started',
+        turn_id: 'late-turn',
+      }) + '\n', 'utf8'));
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+      expect(coldCycle.rawReadCalls).toBe(0);
+
+      await collectAfter(() => fs.appendFile(recent, record('2026-06-24T06:20:00.000Z', 'event_msg', {
+        type: 'task_started',
+        turn_id: 'turn-2',
+      }) + '\n', 'utf8'));
+      expect(transcriptCheckpoint(stateStore, recent).scanOffset).toBeGreaterThan(recentBefore);
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+
+      const created = path.join(sessionDir, '2026', '06', '25', 'rollout-new.jsonl');
+      await collectAfter(async () => {
+        await fs.mkdir(path.dirname(created), { recursive: true });
+        await fs.writeFile(created, record('2026-06-25T00:00:00.000Z', 'session_meta', {
+          id: 'new-session',
+          model_provider: 'openai',
+        }) + '\n', 'utf8');
+      });
+      expect(transcriptCheckpoint(stateStore, created)).toBeDefined();
+      expect(transcriptCheckpoint(stateStore, oldPaths[0]!).scanOffset).toBe(coldBefore);
+    } finally {
+      await input.stop();
+    }
+  });
+
   it('uses the actual file size as the metadata cache watermark during recovery', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-watermark-'));
     tempDirs.push(root);
@@ -698,6 +765,65 @@ describe('CodexTranscriptInput', () => {
     expect(internals.transcriptMetaCacheBytes).toBeLessThanOrEqual(internals.transcriptMetaCacheMaxBytes);
   });
 
+  it('keeps discovery scans from refreshing or evicting the active metadata working set', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-activity-'));
+    tempDirs.push(root);
+    const { input, sessionDir } = await createDormantInput(root);
+    const writeMeta = (name: string, threadId: string) => writeTranscriptNamed(
+      sessionDir,
+      name,
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: threadId,
+        model_provider: 'openai',
+      }) + '\n',
+      { bootstrapFork: false },
+    );
+    const [coldPath, hotPath, candidatePath] = await Promise.all([
+      writeMeta('rollout-cache-slot-a.jsonl', 'session-0001'),
+      writeMeta('rollout-cache-slot-b.jsonl', 'session-0002'),
+      writeMeta('rollout-cache-slot-c.jsonl', 'session-0003'),
+    ]);
+    const internals = input as unknown as {
+      transcriptMetaCacheMaxEntries: number;
+      transcriptMetaCacheByPath: Map<string, unknown>;
+      indexDiscoveredTranscriptOwners(
+        files: Array<{ filePath: string; baselineOnStart: boolean }>,
+      ): Promise<void>;
+      loadTranscriptOwnerMeta(
+        filePath: string,
+        inode: number,
+        fileSize: number,
+        ownerSessionMetaOffset: number,
+        runtime: InputRuntimeAccumulator,
+        cacheAccess?: 'discovery' | 'active',
+      ): Promise<CodexTranscriptMeta | null>;
+    };
+    const load = async (filePath: string, cacheAccess: 'discovery' | 'active') => {
+      const stat = await fs.stat(filePath);
+      return internals.loadTranscriptOwnerMeta(
+        filePath,
+        stat.ino,
+        stat.size,
+        0,
+        new InputRuntimeAccumulator(),
+        cacheAccess,
+      );
+    };
+
+    await load(coldPath, 'active');
+    await load(hotPath, 'active');
+    internals.transcriptMetaCacheMaxEntries = 2;
+
+    await internals.indexDiscoveredTranscriptOwners([
+      { filePath: coldPath, baselineOnStart: true },
+      { filePath: candidatePath, baselineOnStart: true },
+    ]);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([coldPath, hotPath]);
+
+    await processTranscriptOnce(input, candidatePath);
+    expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([hotPath, candidatePath]);
+  });
+
   it('moves the metadata cache when incremental scanning finds the owning session_meta', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-meta-cache-offset-'));
     tempDirs.push(root);
@@ -717,21 +843,21 @@ describe('CodexTranscriptInput', () => {
     );
 
     await input.start();
-    await waitFor(() => deltas.length >= 1);
+    await runInputCycle(input);
     const ownerMeta = record('2026-06-24T06:00:01.000Z', 'session_meta', {
       id: ownerId,
       model_provider: 'openai',
     }) + '\n';
     await fs.appendFile(transcript, ownerMeta, 'utf8');
-    (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 2);
-    (input as unknown as { requestCollection(): void }).requestCollection();
-    await waitFor(() => deltas.length >= 3);
+    await runInputCycle(input);
+    await runInputCycle(input);
 
     expect(transcriptCheckpoint(stateStore, transcript))
       .toMatchObject({ ownerSessionMetaOffset: Buffer.byteLength(copiedMeta) });
-    expect(deltas[2].rawReadCalls).toBe(0);
-    expect(deltas[2].rawReadBytes).toBe(0);
+    // Startup watcher notifications may add cycles; inspect the unchanged
+    // cycle we actually drained rather than a notification-dependent index.
+    expect(deltas.at(-1)!.rawReadCalls).toBe(0);
+    expect(deltas.at(-1)!.rawReadBytes).toBe(0);
     await input.stop();
   });
 
@@ -867,7 +993,7 @@ describe('CodexTranscriptInput', () => {
     expect(internals.reportedSubagentLinks.has('new-child')).toBe(true);
   });
 
-  it('holds the parent terminal and fuses completed child rollouts into the parent turn', async () => {
+  it('emits completed children with their own identity before the parent terminal', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-owner-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createInput(root);
@@ -886,11 +1012,11 @@ describe('CodexTranscriptInput', () => {
       const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
       childTranscripts.set(fixture.threadId, await writeTranscriptNamed(sessionDir, fixture.name, text));
     }
-    await waitFor(() => [...childTranscripts.values()].every(transcript =>
-      Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent)));
-    expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 0)).toBe(true);
+    await waitFor(() => CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 1));
+    expect(transcriptCheckpoint(stateStore, parentTranscript).activeTurn).not.toBeNull();
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
+    await waitFor(() => transcriptCheckpoint(stateStore, parentTranscript).activeTurn === null);
     await waitFor(() => CHILD_FIXTURES.every(fixture =>
       responsesForTurn(entries, fixture.turnId).length === 1));
     await input.stop();
@@ -901,13 +1027,13 @@ describe('CodexTranscriptInput', () => {
         entry['agent.codex.transcript_turn_id'] === fixture.turnId);
       expect(childEntries.length).toBeGreaterThan(0);
       expect(new Set(childEntries.map(entry => entry['gen_ai.session.id']))).toEqual(
-        new Set(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']),
+        new Set([fixture.threadId]),
       );
       expect(new Set(childEntries.map(entry => entry['gen_ai.agent.id']))).toEqual(
         new Set([fixture.threadId]),
       );
       expect(new Set(childEntries.map(entry => entry['gen_ai.turn.id']))).toEqual(
-        new Set(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:parent-turn-1']),
+        new Set([`${fixture.threadId}:${fixture.turnId}`]),
       );
       expect(transcriptCheckpoint(stateStore, childTranscripts.get(fixture.threadId)!)).toMatchObject({
         ownerSessionMetaOffset: 0,
@@ -917,7 +1043,20 @@ describe('CodexTranscriptInput', () => {
       expect(new Set(childEntries.map(entry => entry['gen_ai.subagent.parent_tool_call.id']))).toEqual(
         new Set([`call-subagent-${CHILD_FIXTURES.indexOf(fixture) + 1}`]),
       );
-      expect(childEntries.some(entry => entry['event.name'] === 'other')).toBe(false);
+      expect(childEntries.some(entry => entry['event.name'] === 'other')).toBe(true);
+      expect(childEntries.every(entry => entry['agent.codex.delegated'] === true)).toBe(true);
+      expect(new Set(childEntries.flatMap(entry => typeof entry['gen_ai.step.id'] === 'string'
+        ? [entry['gen_ai.step.id']] : []))).toEqual(new Set([`${fixture.threadId}:${fixture.turnId}:s1`]));
+      const tool = entries.find(entry => entry['event.name'] === 'tool.call'
+        && entry['gen_ai.tool.call.id'] === `call-subagent-${CHILD_FIXTURES.indexOf(fixture) + 1}`);
+      expect(tool?.span_id).toMatch(/^[a-f0-9]{16}$/);
+      expect(new Set(childEntries.map(entry => entry['agent.codex.parent_span_id'])))
+        .toEqual(new Set([tool!.span_id]));
+      const invoke = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+        && entry['gen_ai.tool.call.id'] === tool!['gen_ai.tool.call.id']);
+      expect(invoke).toBeDefined();
+      expect(new Set(childEntries.map(entry => entry['gen_ai.agent.parent.invocation.id'])))
+        .toEqual(new Set([invoke!['gen_ai.agent.invocation.id']]));
       expect(childEntries.find(entry => entry['event.name'] === 'llm.request')).toEqual(
         expect.objectContaining({
           'gen_ai.input.messages': expect.any(Array),
@@ -941,6 +1080,134 @@ describe('CodexTranscriptInput', () => {
         confidence: 'agent_path',
       })),
     });
+  });
+
+  it.each([
+    'collab spawn failed: agent thread limit reached',
+    JSON.stringify({ status: 'rejected', reason: 'dispatch rejected' }),
+  ])('records an actual failed delegation result without a child for %s', async failure => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-dispatch-failure-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const lines = simpleCompletedTurn('session-failed', 'failed-turn', 'delegate work', 'dispatch failed', 10, 2,
+      '2026-08-07T02:00:00.000Z');
+    lines.splice(4, 0,
+      record('2026-08-07T02:00:04.000Z', 'response_item', {
+        type: 'function_call', call_id: 'failed-spawn', name: 'spawn_agent', arguments: JSON.stringify({ message: 'child work' }),
+      }),
+      record('2026-08-07T02:00:04.500Z', 'response_item', {
+        type: 'function_call_output', call_id: 'failed-spawn', output: failure,
+      }),
+    );
+    const transcript = await writeTranscriptNamed(sessionDir, 'rollout-session-failed.jsonl', lines.join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invoke = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    const result = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result');
+    expect(invoke).toHaveLength(1);
+    expect(result).toHaveLength(1);
+    expect(result[0]!['gen_ai.agent.invocation.id']).toBe(invoke[0]!['gen_ai.agent.invocation.id']);
+    expect(result[0]!['error.type']).toBe('codex.delegation_failed');
+    expect(result[0]!['gen_ai.agent.peer.id']).toBeUndefined();
+    expect(result[0]!['tool.result.status']).toBeUndefined();
+    expect(entries.some(entry => entry['gen_ai.agent.parent.invocation.id'])).toBe(false);
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(1);
+  });
+
+  it('collects an ordinary turn without computing global subagent relationships', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-no-global-links-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const linker = (input as unknown as { subagentLinker: {
+      snapshot(): unknown; getDelegationsForParent(parent: string): unknown;
+    } }).subagentLinker;
+    const snapshot = vi.spyOn(linker, 'snapshot').mockImplementation(() => { throw new Error('global relationship scan on ordinary collection'); });
+    const scopedLookup = vi.spyOn(linker, 'getDelegationsForParent').mockImplementation(() => { throw new Error('result lookup without a result'); });
+    const transcript = await writeTranscript(sessionDir, completedTurn());
+    await processTranscriptOnce(input, transcript);
+    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(3);
+    expect(snapshot).not.toHaveBeenCalled();
+    expect(scopedLookup).not.toHaveBeenCalled();
+  });
+
+  it('audits dispatch intent before the tool acknowledgement or parent terminal', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-dispatch-boundary-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const source = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const lines = source.trimEnd().split('\n');
+    const acknowledgement = lines.findIndex(line => line.includes('function_call_output'));
+    const transcript = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, lines.slice(0, acknowledgement).join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invoked = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoked).toHaveLength(4);
+    expect(new Set(invoked.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(4);
+    for (const invoke of invoked) {
+      const call = lines.map(line => JSON.parse(line)).find(source => source.payload.type === 'function_call'
+        && source.payload.call_id === invoke['gen_ai.tool.call.id']);
+      expect(invoke['gen_ai.input.messages']).toEqual([{
+        role: 'user', parts: [{ type: 'text', content: JSON.parse(call.payload.arguments).message }],
+      }]);
+    }
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    await fs.appendFile(transcript, lines.slice(acknowledgement).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke').map(entry => entry['event.id']))
+      .toEqual(invoked.map(entry => entry['event.id']));
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+  });
+
+  it.each([
+    ['spawn_agent', { message: '  delegated task\nwith explicit context  ' }, '  delegated task\nwith explicit context  '],
+    ['spawn_agent', { prompt: 'prompt work' }, 'prompt work'],
+    ['spawn_agent', { input: 'input work' }, 'input work'],
+    ['followup_task', { target: '/root/child', message: 'new work for reused child' }, 'new work for reused child'],
+    ['send_input', { id: 'child', input: [{ type: 'text', text: 'first part' }, { type: 'text', text: 'second part' }] }, ['first part', 'second part']],
+  ])('maps %s delegation content to input messages', async (name, args, expected) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invoke-content-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const lines = simpleCompletedTurn('invoke-parent', 'invoke-turn', 'parent context is not the task', 'done', 10, 2,
+      '2026-08-07T02:00:00.000Z');
+    lines.splice(4, 0, record('2026-08-07T02:00:04.000Z', 'response_item', {
+      type: 'function_call', call_id: 'invoke-call', name, arguments: JSON.stringify(args),
+    }));
+    const transcript = await writeTranscriptNamed(sessionDir, 'rollout-invoke-parent.jsonl', lines.join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invoke = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke).toHaveLength(1);
+    expect(invoke[0]!['gen_ai.input.messages']).toEqual([{
+      role: 'user', parts: (Array.isArray(expected) ? expected : [expected]).map(content => ({ type: 'text', content })),
+    }]);
+    expect(invoke[0]!['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(invoke[0]).not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(entries.find(entry => entry['event.name'] === 'tool.call')!['gen_ai.tool.call.arguments']).toEqual(args);
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toEqual(invoke);
+  });
+
+  it.each(['agents', 'tasks'])('keeps %s batch invocation content separated by original work index', async batchField => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-invoke-batch-content-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const args = { [batchField]: [{ message: 'first work' }, null, { prompt: 'third work' }], message: 'batch envelope' };
+    const lines = simpleCompletedTurn('batch-parent', 'batch-turn', 'unrelated parent input', 'done', 10, 2,
+      '2026-08-07T02:00:00.000Z');
+    lines.splice(4, 0, record('2026-08-07T02:00:04.000Z', 'response_item', {
+      type: 'function_call', call_id: 'batch-call', name: 'spawn_agent', arguments: JSON.stringify(args),
+    }));
+    const transcript = await writeTranscriptNamed(sessionDir, 'rollout-batch-parent.jsonl', lines.join('\n') + '\n');
+    await processTranscriptOnce(input, transcript);
+    const invokes = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes).toHaveLength(3);
+    expect(invokes.map(entry => entry['gen_ai.input.messages'])).toEqual([
+      [{ role: 'user', parts: [{ type: 'text', content: 'first work' }] }],
+      undefined,
+      [{ role: 'user', parts: [{ type: 'text', content: 'third work' }] }],
+    ]);
+    expect(new Set(invokes.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(3);
+    expect(invokes.every(entry => entry['gen_ai.tool.call.arguments'] === undefined)).toBe(true);
+    expect(entries.find(entry => entry['event.name'] === 'tool.call')!['gen_ai.tool.call.arguments']).toEqual(args);
   });
 
   it('does not attach new children to a historical spawn in a long parent rollout', async () => {
@@ -997,7 +1264,7 @@ describe('CodexTranscriptInput', () => {
     ));
   });
 
-  it('captures child terminals before the parent terminal and keeps scanning later child turns', async () => {
+  it('ends child turns independently and keeps scanning later child turns', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-child-first-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createInput(root);
@@ -1025,27 +1292,21 @@ describe('CodexTranscriptInput', () => {
       }
       childTranscripts.push(await writeTranscriptNamed(sessionDir, fixture.name, text));
     }
-    await waitFor(() => childTranscripts.every(transcript =>
-      Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent)));
+    await waitFor(() => CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 1));
     for (const [index, transcript] of childTranscripts.entries()) {
       const childStat = await fs.stat(transcript);
       expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
         scanOffset: childStat.size,
-        pendingSubagent: {
-          parentTurnId: 'parent-turn-1',
-          parentToolCallId: `call-subagent-${index + 1}`,
-          confidence: 'agent_path',
-          activeTurn: { turnId: CHILD_FIXTURES[index]!.turnId },
-        },
+        pendingSubagent: null,
         activeTurn: null,
       });
     }
-    expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 0)).toBe(true);
+    expect(CHILD_FIXTURES.every(fixture => responsesForTurn(entries, fixture.turnId).length === 1)).toBe(true);
 
     const followupLines = simpleCompletedTurn(
       CHILD_FIXTURES[0].threadId,
       'child-followup-turn',
-      'follow up after the captured child terminal',
+      'direct user follow up after the child terminal',
       'followup complete',
       10,
       2,
@@ -1053,7 +1314,9 @@ describe('CodexTranscriptInput', () => {
     ).slice(1);
     await fs.appendFile(childTranscripts[0]!, followupLines.join('\n') + '\n', 'utf8');
     await waitFor(() => responsesForTurn(entries, 'child-followup-turn').length === 1);
-    expect(transcriptCheckpoint(stateStore, childTranscripts[0]!).pendingSubagent).not.toBeNull();
+    expect(transcriptCheckpoint(stateStore, childTranscripts[0]!).pendingSubagent).toBeNull();
+    expect(responsesForTurn(entries, 'child-followup-turn')[0])
+      .not.toHaveProperty('gen_ai.agent.parent.invocation.id');
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
     await waitFor(() => CHILD_FIXTURES.every(fixture =>
@@ -1067,7 +1330,7 @@ describe('CodexTranscriptInput', () => {
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({ pendingFusion: null });
   });
 
-  it('forces a reliably linked active child to finalize when the parent reaches task_complete', async () => {
+  it('keeps a reliably linked child running after its parent reaches task_complete', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-parent-barrier-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
@@ -1104,29 +1367,35 @@ describe('CodexTranscriptInput', () => {
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
     await processTranscriptOnce(input, parentTranscript);
-    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).not.toBeNull();
-
-    await finalizeSubagentFusions(input);
-
-    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
-    expect(responsesForTurn(entries, 'child-turn-1')[0]).toMatchObject({
-      'gen_ai.agent.scope': 'subagent',
-      'gen_ai.subagent.parent_tool_call.id': 'call-subagent-1',
-      'agent.codex.turn_status': 'interrupted',
-    });
+    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).toBeNull();
     expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(2);
+    await runInputCycle(input);
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(0);
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
-      activeTurn: null,
+      activeTurn: { turnId: 'child-turn-1' },
       pendingSubagent: null,
     });
-    expect(transcriptCheckpoint(stateStore, childTranscript).forkBootstrap).toBeUndefined();
+
+    await fs.appendFile(childTranscript, record('2026-08-07T02:05:00.000Z', 'event_msg', {
+      type: 'task_complete', turn_id: 'child-turn-1', last_agent_message: 'background complete',
+    }) + '\n', 'utf8');
+    await processTranscriptOnce(input, childTranscript);
+    expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.session.id': CHILD_FIXTURES[0].threadId,
+      'gen_ai.turn.id': `${CHILD_FIXTURES[0].threadId}:child-turn-1`,
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.subagent.parent_tool_call.id': 'call-subagent-1',
+    });
+    expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
+      activeTurn: null, pendingSubagent: null,
+    });
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
-      activeTurn: null,
-      pendingFusion: null,
+      activeTurn: null, pendingFusion: null,
     });
   });
 
-  it('releases the parent when a reliable child cannot be rebuilt and emits that child independently later', async () => {
+  it('emits a linked child arriving after the parent without changing its identity', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-missing-child-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
@@ -1151,9 +1420,9 @@ describe('CodexTranscriptInput', () => {
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
     await processTranscriptOnce(input, parentTranscript);
-    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).not.toBeNull();
+    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).toBeNull();
 
-    await finalizeSubagentFusions(input);
+    await runInputCycle(input);
 
     expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(2);
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({
@@ -1172,7 +1441,11 @@ describe('CodexTranscriptInput', () => {
     await processTranscriptOnce(input, childTranscript);
 
     expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
-    expect(responsesForTurn(entries, 'child-turn-1')[0]).not.toHaveProperty('gen_ai.agent.scope', 'subagent');
+    expect(responsesForTurn(entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.session.id': CHILD_FIXTURES[0].threadId,
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.parent.invocation.id': expect.any(String),
+    });
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
       activeTurn: null,
       pendingSubagent: null,
@@ -1198,7 +1471,7 @@ describe('CodexTranscriptInput', () => {
     });
   });
 
-  it('does not treat followup_task as a new child lifecycle that requires fusion', async () => {
+  it('collects followup_task work without waiting for parent fusion', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-followup-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
@@ -1217,6 +1490,540 @@ describe('CodexTranscriptInput', () => {
     expect(responsesForTurn(entries, 'child-turn-1')).toHaveLength(1);
     expect(transcriptCheckpoint(stateStore, parentTranscript)).toMatchObject({ pendingFusion: null });
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
+  });
+
+  it.each([false, true])('fills an already known path-only followup peer without replaying an unknown creation (restart=%s)', async restart => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-known-dispatch-peer-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const parent = 'peer-parent';
+    const child = 'peer-child';
+    const dispatch = (turn: string, name: string, callId: string, message: string, start: string): string[] => {
+      const lines = simpleCompletedTurn(parent, turn, 'delegate work', 'accepted', 10, 2, start);
+      const at = Date.parse(start);
+      lines.splice(4, 0,
+        record(new Date(at + 3_100).toISOString(), 'response_item', { type: 'function_call', call_id: callId, name,
+          arguments: JSON.stringify(name === 'spawn_agent' ? { task_name: 'known-child', message } : { target: '/root/known-child', message }) }),
+        record(new Date(at + 3_200).toISOString(), 'response_item', { type: 'function_call_output', call_id: callId,
+          output: JSON.stringify({ task_name: '/root/known-child', accepted: true }) }));
+      return lines;
+    };
+    const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-peer-parent.jsonl',
+      dispatch('first-parent', 'spawn_agent', 'create-child', 'first work', '2026-08-07T03:10:00.000Z').join('\n') + '\n');
+    await processTranscriptOnce(first.input, parentPath);
+    const creation = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!;
+    expect(creation['gen_ai.agent.peer.id']).toBeUndefined();
+    expect(creation['gen_ai.agent.peer.name']).toBeUndefined();
+    const childLines = simpleCompletedTurn(child, 'first-child', 'first work', 'done', 20, 3, '2026-08-07T03:10:10.000Z');
+    childLines[0] = record('2026-08-07T03:10:09.000Z', 'session_meta', { id: child, session_id: parent, thread_source: 'subagent',
+      source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/known-child', agent_nickname: 'Newton' } } } });
+    const childPath = await writeTranscriptNamed(first.sessionDir, 'rollout-peer-child.jsonl', childLines.join('\n') + '\n');
+    await processTranscriptOnce(first.input, childPath);
+    expect(responsesForTurn(first.entries, 'first-child')[0]!['gen_ai.agent.parent.invocation.id']).toBe(creation['gen_ai.agent.invocation.id']);
+    await first.stateStore.save();
+    const active = restart ? await createDormantInput(root) : first;
+    await fs.appendFile(parentPath, dispatch('second-parent', 'followup_task', 'reuse-child', 'second work', '2026-08-07T03:11:00.000Z').slice(1).join('\n') + '\n');
+    await processTranscriptOnce(active.input, parentPath);
+    const all = restart ? [...first.entries, ...active.entries] : active.entries;
+    const invokes = all.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes).toHaveLength(2);
+    expect(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'reuse-child')).toMatchObject({ 'gen_ai.agent.peer.id': child, 'gen_ai.agent.peer.name': 'Newton' });
+    expect(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'create-child')!['gen_ai.agent.peer.id']).toBeUndefined();
+    const count = active.entries.length;
+    await processTranscriptOnce(active.input, parentPath);
+    expect(active.entries).toHaveLength(count);
+  });
+
+  it.each([false, true].flatMap(restart => ['canonical', 'legacy'].flatMap(format =>
+    ['none', 'user', 'agent', 'result'].map(incoming => ({ restart, incoming, format })))))(
+    'distinguishes new work from an uncommitted creation input reread (restart=$restart, incoming=$incoming, format=$format)',
+    async ({ restart, incoming, format }) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-uncommitted-incoming-'));
+      tempDirs.push(root);
+      const first = await createDormantInput(root);
+      const parent = 'uncommitted-parent';
+      const child = 'uncommitted-child';
+      const at = (seconds: number) => new Date(Date.parse('2026-08-07T03:20:00.000Z') + seconds * 1_000).toISOString();
+      const parentLines = simpleCompletedTurn(parent, 'parent-turn', 'delegate', 'accepted', 10, 2, at(0));
+      parentLines.splice(4, 0,
+        record(at(3.1), 'response_item', { type: 'function_call', call_id: 'initial-spawn', name: 'spawn_agent',
+          arguments: JSON.stringify({ task_name: 'child', message: 'initial delegated work' }) }),
+        record(at(3.2), 'response_item', { type: 'function_call_output', call_id: 'initial-spawn', output: JSON.stringify({ agent_id: child }) }),
+        record(at(3.3), 'response_item', { type: 'function_call', call_id: 'queued-followup', name: 'followup_task',
+          arguments: JSON.stringify({ id: child, message: 'replacement work' }) }),
+        record(at(3.4), 'response_item', { type: 'function_call_output', call_id: 'queued-followup', output: JSON.stringify({ agent_id: child }) }));
+      const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-uncommitted-parent.jsonl', parentLines.join('\n') + '\n');
+      await processTranscriptOnce(first.input, parentPath);
+      const invocation = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!['gen_ai.agent.invocation.id'];
+      const childLines = simpleCompletedTurn(child, 'child-turn', 'initial delegated work', 'child done', 20, 3, at(10));
+      childLines[0] = record(at(10), 'session_meta', { id: child, session_id: parent, thread_source: 'subagent',
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/child' } } } });
+      if (format === 'legacy') childLines[3] = record(at(13), 'event_msg', {
+        type: 'user_message', message: 'initial delegated work',
+      });
+      const childPath = await writeTranscriptNamed(first.sessionDir, 'rollout-uncommitted-child.jsonl', childLines.slice(0, 4).join('\n') + '\n');
+      await processTranscriptOnce(first.input, childPath);
+      expect(transcriptCheckpoint(first.stateStore, childPath).activeTurn).toMatchObject({
+        emittedStepCount: 0, delegation: { invocationId: invocation },
+      });
+      // A growing rollout rereads the original ordinary user input until the first wave closes.
+      await fs.appendFile(childPath, record(at(13.1), 'response_item', { type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: 'additional runtime context' }] }) + '\n');
+      await processTranscriptOnce(first.input, childPath);
+      expect(transcriptCheckpoint(first.stateStore, childPath).activeTurn).toMatchObject({
+        emittedStepCount: 0, delegation: { invocationId: invocation },
+      });
+      await first.stateStore.save();
+      let active = restart ? await createDormantInput(root) : first;
+      if (format === 'canonical') {
+        // Codex persists canonical input before its separately emitted legacy mirror.
+        await fs.appendFile(childPath, record(at(13.15), 'event_msg', {
+          type: 'user_message', message: 'initial delegated work',
+        }) + '\n');
+        await processTranscriptOnce(active.input, childPath);
+        expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toMatchObject({
+          delegation: { invocationId: invocation },
+        });
+      }
+      if (incoming !== 'none') {
+        const payload = incoming === 'user'
+          ? format === 'canonical'
+            ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'initial delegated work' }] }
+            : { type: 'user_message', message: 'initial delegated work' }
+          : { type: 'agent_message', author: incoming === 'result' ? '/root/child/leaf' : '/root', recipient: '/root/child',
+            content: [{ type: 'input_text', text: incoming === 'result' ? 'Message Type: FINAL_ANSWER\nleaf done' : 'Message Type: NEW_TASK\nnew unobserved work' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 'child-turn' } };
+        await fs.appendFile(childPath, record(at(13.2), incoming === 'user' && format === 'legacy' ? 'event_msg' : 'response_item', payload) + '\n');
+        await processTranscriptOnce(active.input, childPath);
+      }
+      await fs.appendFile(childPath, [
+        record(at(14), 'response_item', { type: 'function_call', call_id: 'work-tool', name: 'exec_command', arguments: '{}' }),
+        record(at(14.1), 'response_item', { type: 'function_call_output', call_id: 'work-tool', output: 'ok' }),
+        record(at(14.2), 'event_msg', tokenUsage(20, 3)),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toMatchObject({ emittedStepCount: 1 });
+      const earlierResponses = responsesForTurn(active.entries, 'child-turn');
+      if (restart) {
+        await active.stateStore.save();
+        active = await createDormantInput(root);
+      }
+
+      await fs.appendFile(childPath, [
+        record(at(15), 'response_item', { type: 'function_call', call_id: 'second-tool', name: 'exec_command', arguments: '{}' }),
+        record(at(15.1), 'response_item', { type: 'function_call_output', call_id: 'second-tool', output: 'ok' }),
+        record(at(15.2), 'event_msg', tokenUsage(30, 4)),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      const responses = restart ? [...earlierResponses, ...responsesForTurn(active.entries, 'child-turn')]
+        : responsesForTurn(active.entries, 'child-turn');
+      expect(responses).toHaveLength(2);
+      for (const response of responses) expect(response['gen_ai.agent.parent.invocation.id']).toBe(
+        incoming === 'user' || incoming === 'agent' ? undefined : invocation);
+      const followup = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+        && entry['gen_ai.tool.call.id'] === 'queued-followup')!['gen_ai.agent.invocation.id'];
+      await fs.appendFile(childPath, [
+        record(at(16), 'response_item', { type: 'agent_message', author: '/root', recipient: '/root/child',
+          content: [{ type: 'input_text', text: 'replacement work' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'child-turn' } }),
+        record(at(17), 'event_msg', { type: 'agent_message', message: 'replacement done', phase: 'final' }),
+        record(at(17.1), 'event_msg', tokenUsage(40, 5)),
+        record(at(18), 'event_msg', { type: 'task_complete', turn_id: 'child-turn', last_agent_message: 'replacement done' }),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(active.input, childPath);
+      expect(responsesForTurn(active.entries, 'child-turn').at(-1)!['gen_ai.agent.parent.invocation.id']).toBe(followup);
+      expect(transcriptCheckpoint(active.stateStore, childPath).activeTurn).toBeNull();
+    },
+  );
+
+  it.each(['status', 'results'].flatMap(format => ['', 'actual result'].map(body => ({ format, body }))))(
+    'does not deliver a null-only completion before the real result (format=$format, body=$body)',
+    async ({ format, body }) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-null-result-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const session = 'null-result-parent';
+      const child = 'null-result-child';
+      const start = '2026-08-07T03:25:00.000Z';
+      const at = (seconds: number) => new Date(Date.parse(start) + seconds * 1_000).toISOString();
+      const lines = simpleCompletedTurn(session, 'parent-turn', 'delegate', 'accepted', 10, 2, start);
+      const status = (value: string | null) => format === 'status'
+        ? { status: { [child]: { completed: value } } }
+        : { results: [{ agent_id: child, status: 'completed', output: value }] };
+      lines.splice(4, 0,
+        record(at(3.1), 'response_item', { type: 'function_call', call_id: 'null-spawn', name: 'spawn_agent',
+          arguments: JSON.stringify({ task_name: 'child', message: 'work' }) }),
+        record(at(3.2), 'response_item', { type: 'function_call_output', call_id: 'null-spawn', output: JSON.stringify({ agent_id: child }) }),
+        record(at(3.3), 'response_item', { type: 'function_call', call_id: 'empty-wait', name: 'wait_agent', arguments: '{}' }),
+        record(at(3.4), 'response_item', { type: 'function_call_output', call_id: 'empty-wait', output: JSON.stringify(status(null)) }));
+      const transcript = await writeTranscriptNamed(sessionDir, 'rollout-null-result-parent.jsonl', lines.join('\n') + '\n');
+      await processTranscriptOnce(input, transcript);
+      expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+      const invocation = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!['gen_ai.agent.invocation.id'];
+      expect(stateStore.get('codex-transcript').extra?.codexResultInvocations ?? []).not.toContain(invocation);
+      expect(transcriptCheckpoint(stateStore, transcript).activeTurn).toBeNull();
+      const receipt = simpleCompletedTurn(session, 'receipt-turn', 'collect', 'received', 20, 3, at(10)).slice(1);
+      receipt.splice(3, 0,
+        record(at(13.1), 'response_item', { type: 'function_call', call_id: 'actual-wait', name: 'wait_agent', arguments: '{}' }),
+        record(at(13.2), 'response_item', { type: 'function_call_output', call_id: 'actual-wait', output: JSON.stringify(status(body)) }),
+        record(at(13.3), 'response_item', { type: 'agent_message', author: child, recipient: '/root',
+          content: [{ type: 'input_text', text: `Message Type: FINAL_ANSWER\n${body}` }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'receipt-turn', tool_call_id: 'null-spawn' } }));
+      await fs.appendFile(transcript, receipt.join('\n') + '\n');
+      await processTranscriptOnce(input, transcript);
+      const results = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result');
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ 'gen_ai.agent.invocation.id': invocation,
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: body }] }] });
+      expect(transcriptCheckpoint(stateStore, transcript).activeTurn).toBeNull();
+      await processTranscriptOnce(input, transcript);
+      expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(1);
+    },
+  );
+
+  it('binds agent_id-only spawn, reused child work and nested invocation to their immediate callers', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-reuse-nested-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    const parentId = 'parent-reuse';
+    const childId = 'child-reuse';
+    const grandchildId = 'grandchild-reuse';
+    const dispatchedTurn = (
+      session: string, turn: string, prompt: string, start: string,
+      callId: string, name: string, target: string, work: string,
+    ): string[] => {
+      const lines = simpleCompletedTurn(session, turn, prompt, 'delegated', 100, 10, start);
+      const base = Date.parse(start);
+      if (session !== parentId) lines[3] = record(new Date(base + 3_000).toISOString(), 'response_item', {
+        type: 'agent_message', author: '/root', recipient: '/root/reused',
+        content: [{ type: 'input_text', text: prompt }],
+        internal_chat_message_metadata_passthrough: { turn_id: turn },
+      });
+      lines.splice(4, 0,
+        record(new Date(base + 3_100).toISOString(), 'response_item', {
+          type: 'function_call', call_id: callId, name,
+          arguments: JSON.stringify({ id: target, message: work }),
+        }),
+        record(new Date(base + 3_200).toISOString(), 'response_item', {
+          type: 'function_call_output', call_id: callId,
+          output: JSON.stringify({ agent_id: target, nickname: target === grandchildId ? 'Euler' : 'Newton' }),
+        }),
+      );
+      return lines;
+    };
+    const childMeta = (id: string, parent: string, depth: number, timestamp: string): string =>
+      record(timestamp, 'session_meta', {
+        id, session_id: parentId, timestamp, thread_source: 'subagent', model_provider: 'openai',
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth, agent_nickname: id === childId ? 'Newton' : 'Euler' } } },
+      });
+
+    const parentTranscript = await writeTranscriptNamed(sessionDir, 'rollout-parent-reuse.jsonl', dispatchedTurn(
+      parentId, 'parent-first', 'delegate first', '2026-08-07T03:00:00.000Z',
+      'spawn-first', 'spawn_agent', childId, 'first child work',
+    ).join('\n') + '\n');
+    await processTranscriptOnce(input, parentTranscript);
+    const firstChild = simpleCompletedTurn(childId, 'child-first', 'first child work', 'first done',
+      80, 8, '2026-08-07T03:00:10.000Z');
+    firstChild[0] = childMeta(childId, parentId, 1, '2026-08-07T03:00:09.000Z');
+    const childTranscript = await writeTranscriptNamed(sessionDir, 'rollout-child-reuse.jsonl', firstChild.join('\n') + '\n');
+    await processTranscriptOnce(input, childTranscript);
+    const firstInvoke = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+      && entry['gen_ai.tool.call.id'] === 'spawn-first')!;
+    expect(firstInvoke).toMatchObject({ 'gen_ai.agent.peer.id': childId });
+    expect(responsesForTurn(entries, 'child-first')[0]).toMatchObject({
+      'gen_ai.session.id': childId,
+      'gen_ai.agent.parent.invocation.id': firstInvoke['gen_ai.agent.invocation.id'],
+      'agent.codex.parent_span_id': firstInvoke.span_id,
+    });
+    // An accepted dispatch is not a delivered child result.
+    expect(entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+
+    await fs.appendFile(parentTranscript, dispatchedTurn(
+      parentId, 'parent-second', 'delegate second', '2026-08-07T03:01:00.000Z',
+      'followup-second', 'followup_task', childId, 'second child work',
+    ).slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    await fs.appendFile(childTranscript, dispatchedTurn(
+      childId, 'child-second', 'second child work', '2026-08-07T03:01:10.000Z',
+      'nested-spawn', 'spawn_agent', grandchildId, 'nested work',
+    ).slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, childTranscript);
+    const secondInvoke = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+      && entry['gen_ai.tool.call.id'] === 'followup-second')!;
+    const nestedInvoke = entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+      && entry['gen_ai.tool.call.id'] === 'nested-spawn')!;
+    expect(secondInvoke['gen_ai.agent.invocation.id']).not.toBe(firstInvoke['gen_ai.agent.invocation.id']);
+    expect(firstInvoke['gen_ai.agent.peer.name']).toBe('Newton');
+    expect(secondInvoke['gen_ai.agent.peer.name']).toBe('Newton');
+    expect(nestedInvoke['gen_ai.agent.peer.name']).toBe('Euler');
+    expect(nestedInvoke['gen_ai.agent.name']).toBe('Newton');
+    expect(responsesForTurn(entries, 'child-second')[0]).toMatchObject({
+      'gen_ai.session.id': childId,
+      'gen_ai.turn.id': `${childId}:child-second`,
+      'gen_ai.agent.parent.invocation.id': secondInvoke['gen_ai.agent.invocation.id'],
+      'agent.codex.parent_span_id': secondInvoke.span_id,
+      trace_id: secondInvoke.trace_id,
+    });
+    expect(nestedInvoke).toMatchObject({
+      'gen_ai.session.id': childId,
+      'gen_ai.agent.parent.invocation.id': secondInvoke['gen_ai.agent.invocation.id'],
+      'gen_ai.agent.invocation.id': expect.any(String),
+    });
+    const nested = simpleCompletedTurn(grandchildId, 'grandchild-first', 'nested work', 'nested done',
+      30, 3, '2026-08-07T03:01:20.000Z');
+    nested[0] = childMeta(grandchildId, childId, 2, '2026-08-07T03:01:19.000Z');
+    const grandchildTranscript = await writeTranscriptNamed(sessionDir, 'rollout-grandchild-reuse.jsonl', nested.join('\n') + '\n');
+    await processTranscriptOnce(input, grandchildTranscript);
+    expect(responsesForTurn(entries, 'grandchild-first')[0]).toMatchObject({
+      'gen_ai.session.id': grandchildId,
+      'gen_ai.agent.parent.id': childId,
+      'gen_ai.agent.parent.invocation.id': nestedInvoke['gen_ai.agent.invocation.id'],
+      'agent.codex.parent_span_id': nestedInvoke.span_id,
+      'gen_ai.agent.depth': 2,
+    });
+    const invocations = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    expect(invocations).toHaveLength(3);
+    expect(new Set(invocations.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(3);
+    const receivingTurn = simpleCompletedTurn(parentId, 'parent-receives-result', 'collect result', 'received',
+      20, 2, '2026-08-07T03:02:00.000Z').slice(1);
+    receivingTurn.splice(3, 0, record('2026-08-07T03:02:03.500Z', 'event_msg', {
+      type: 'sub_agent_activity', kind: 'completed', event_id: 'followup-second',
+      agent_thread_id: childId, output: 'actual second child result',
+    }));
+    await fs.appendFile(parentTranscript, receivingTurn.join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, parentTranscript);
+    const results = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      'gen_ai.session.id': parentId,
+      'gen_ai.turn.id': `${parentId}:parent-receives-result`,
+      'gen_ai.agent.invocation.id': secondInvoke['gen_ai.agent.invocation.id'],
+      'gen_ai.agent.peer.id': childId,
+    });
+    expect(results[0]).not.toHaveProperty('span_id');
+    await fs.appendFile(childTranscript, simpleCompletedTurn(childId, 'direct-user-turn', 'first child work', 'direct response',
+      10, 1, '2026-08-07T03:03:00.000Z').slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, childTranscript);
+    const direct = responsesForTurn(entries, 'direct-user-turn')[0]!;
+    expect(direct['gen_ai.session.id']).toBe(childId);
+    expect(direct['gen_ai.agent.parent.invocation.id']).toBeUndefined();
+    expect(direct['agent.codex.parent_span_id']).toBeUndefined();
+    expect(direct.trace_id).not.toBe(firstInvoke.trace_id);
+    const count = entries.length;
+    await processTranscriptOnce(input, childTranscript);
+    await processTranscriptOnce(input, parentTranscript);
+    await processTranscriptOnce(input, grandchildTranscript);
+    expect(entries).toHaveLength(count);
+  });
+
+  it.each([false, true])('keeps a coordinator incoming invocation after a streamed nested FINAL_ANSWER (restart=%s)', async restart => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-streamed-nested-result-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const parent = 'streamed-parent';
+    const child = 'streamed-coordinator';
+    const base = Date.parse('2026-08-07T03:30:00.000Z');
+    const at = (seconds: number) => new Date(base + seconds * 1_000).toISOString();
+    const parentLines = simpleCompletedTurn(parent, 'parent-turn', 'delegate', 'accepted', 10, 2, at(0));
+    parentLines.splice(4, 0,
+      record(at(3.1), 'response_item', { type: 'function_call', call_id: 'coordinator-spawn', name: 'spawn_agent',
+        arguments: JSON.stringify({ task_name: 'coordinator', message: 'opaque-coordinator-work' }) }),
+      record(at(3.2), 'response_item', { type: 'function_call_output', call_id: 'coordinator-spawn', output: JSON.stringify({ agent_id: child }) }));
+    const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-streamed-parent.jsonl', parentLines.join('\n') + '\n');
+    await processTranscriptOnce(first.input, parentPath);
+    const invocation = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!;
+    const childPath = await writeTranscriptNamed(first.sessionDir, 'rollout-streamed-coordinator.jsonl', [
+      record(at(6), 'session_meta', { id: child, session_id: parent, thread_source: 'subagent', model_provider: 'openai',
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/coordinator' } } } }),
+      record(at(7), 'event_msg', { type: 'task_started', turn_id: 'coordinator-turn' }),
+      record(at(7.1), 'turn_context', { turn_id: 'coordinator-turn', model: 'gpt-test' }),
+      record(at(7.2), 'response_item', { type: 'agent_message', author: '/root', recipient: '/root/coordinator',
+        content: [{ type: 'input_text', text: 'Message Type: NEW_TASK' }, { type: 'encrypted_content', encrypted_content: 'opaque-coordinator-work' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'coordinator-turn' } }),
+      record(at(8), 'response_item', { type: 'function_call', call_id: 'leaf-spawn', name: 'spawn_agent',
+        arguments: JSON.stringify({ task_name: 'leaf', message: 'opaque-leaf-work' }) }),
+      record(at(9), 'response_item', { type: 'function_call_output', call_id: 'leaf-spawn', output: JSON.stringify({ agent_id: 'streamed-leaf' }) }),
+      record(at(9.1), 'event_msg', tokenUsage(20, 3)),
+    ].join('\n') + '\n', { bootstrapFork: false });
+    await writeWakeupMarker(first.wakeupDir, child, { session_id: child, initial_turn_id: 'coordinator-turn', turn_id: 'coordinator-turn',
+      transcript_path: childPath, hook_event: 'subagent-stop', received_at: new Date().toISOString() });
+    await processTranscriptOnce(first.input, childPath);
+    expect(responsesForTurn(first.entries, 'coordinator-turn')).toHaveLength(1);
+    expect(transcriptCheckpoint(first.stateStore, childPath).activeTurn).toMatchObject({ emittedStepCount: 1 });
+    await first.stateStore.save();
+    const active = restart ? await createDormantInput(root) : first;
+    await fs.appendFile(childPath, [
+      record(at(10), 'response_item', { type: 'agent_message', author: '/root/coordinator/leaf', recipient: '/root/coordinator',
+        content: [{ type: 'input_text', text: 'Message Type: FINAL_ANSWER\nTask name: /root/coordinator/leaf\nPayload:\nleaf done' },
+          { type: 'encrypted_content', encrypted_content: 'opaque-leaf-result' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'coordinator-turn' } }),
+      record(at(11), 'event_msg', { type: 'agent_message', message: 'coordinator done', phase: 'final' }),
+      record(at(11.1), 'event_msg', tokenUsage(30, 4)),
+      record(at(12), 'event_msg', { type: 'task_complete', turn_id: 'coordinator-turn', last_agent_message: 'coordinator done' }),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(active.input, childPath);
+    const all = restart ? [...first.entries, ...active.entries] : active.entries;
+    const childEntries = all.filter(entry => entry['gen_ai.session.id'] === child);
+    expect(responsesForTurn(all, 'coordinator-turn')).toHaveLength(2);
+    for (const entry of childEntries) expect(entry).toMatchObject({
+      'gen_ai.agent.parent.invocation.id': invocation['gen_ai.agent.invocation.id'],
+      'agent.codex.parent_span_id': invocation.span_id, trace_id: invocation.trace_id,
+    });
+    const nestedInvoke = childEntries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!;
+    expect(nestedInvoke['gen_ai.agent.invocation.id']).not.toBe(invocation['gen_ai.agent.invocation.id']);
+    expect(childEntries.find(entry => entry['gen_ai.turn.end'] === true)).toBeDefined();
+    const starts = childEntries.filter(entry => entry['gen_ai.turn.start'] === true);
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!['event.name']).toBe('other');
+    expect(entryTimestampMs(starts[0]!)).toBe(base + 7_000);
+    expect(childEntries.filter(entry => entry['event.name'] !== 'other')
+      .every(entry => entry['gen_ai.turn.start'] === undefined)).toBe(true);
+    const count = active.entries.length;
+    await processTranscriptOnce(active.input, childPath);
+    expect(active.entries).toHaveLength(count);
+  });
+
+  it.each([false, true])('resolves a parent-first pending result after interrupted child reuse arrives (restart=%s)', async restart => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-late-reused-result-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const parent = 'late-result-parent';
+    const child = 'late-result-child';
+    const base = Date.parse('2026-08-07T04:00:00.000Z');
+    const at = (seconds: number) => new Date(base + seconds * 1_000).toISOString();
+    const actualResult = 'actual completed second work';
+    const parentRecords = [
+      record(at(0), 'session_meta', { id: parent, thread_source: 'user', model_provider: 'openai' }),
+      record(at(1), 'turn_context', { turn_id: 'parent-work', model: 'gpt-test' }),
+      record(at(2), 'event_msg', { type: 'task_started', turn_id: 'parent-work' }),
+      record(at(3), 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'delegate twice' }] }),
+      record(at(4), 'response_item', { type: 'function_call', call_id: 'first-spawn', name: 'spawn_agent',
+        arguments: JSON.stringify({ task_name: 'late-child', message: 'opaque-first' }) }),
+      record(at(5), 'response_item', { type: 'function_call_output', call_id: 'first-spawn', output: JSON.stringify({ agent_id: child }) }),
+      record(at(10), 'response_item', { type: 'function_call', call_id: 'second-work', name: 'followup_task',
+        arguments: JSON.stringify({ target: '/root/late-child', message: 'opaque-second' }) }),
+      record(at(11), 'response_item', { type: 'function_call_output', call_id: 'second-work', output: JSON.stringify({ agent_id: child }) }),
+      record(at(18), 'response_item', { type: 'agent_message', author: '/root/late-child', recipient: '/root',
+        content: [{ type: 'input_text', text: `Message Type: FINAL_ANSWER\nTask name: /root/late-child\nSender: /root/late-child\nPayload:\n${actualResult}` }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'parent-work' } }),
+      record(at(19), 'event_msg', tokenUsage(10, 2)),
+      record(at(20), 'event_msg', { type: 'task_complete', turn_id: 'parent-work', last_agent_message: 'received' }),
+    ];
+    const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-late-result-parent.jsonl', parentRecords.join('\n') + '\n');
+    await processTranscriptOnce(first.input, parentPath);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(2);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect((first.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(1);
+    expect(JSON.stringify(first.stateStore.get('codex-transcript').extra?.codexPendingAgentResults)).not.toContain(actualResult);
+    await first.stateStore.save();
+    const active = restart ? await createDormantInput(root) : first;
+    const incoming = (turn: string, message: string, seconds: number) => record(at(seconds), 'response_item', {
+      type: 'agent_message', author: '/root', recipient: '/root/late-child',
+      content: [{ type: 'input_text', text: 'Message Type: NEW_TASK' }, { type: 'encrypted_content', encrypted_content: message }],
+      internal_chat_message_metadata_passthrough: { turn_id: turn },
+    });
+    const childRecords = [
+      record(at(4.5), 'session_meta', { id: child, session_id: parent, thread_source: 'subagent', model_provider: 'openai',
+        source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/late-child' } } } }),
+      record(at(5.5), 'turn_context', { turn_id: 'child-first', model: 'gpt-test' }),
+      record(at(5.6), 'event_msg', { type: 'task_started', turn_id: 'child-first' }),
+      incoming('child-first', 'opaque-first', 5.7),
+      record(at(6), 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial first' }] }),
+      record(at(8), 'event_msg', { type: 'turn_aborted', turn_id: 'child-first', reason: 'interrupted' }),
+      record(at(11.5), 'turn_context', { turn_id: 'child-second', model: 'gpt-test' }),
+      record(at(11.6), 'event_msg', { type: 'task_started', turn_id: 'child-second' }),
+      incoming('child-second', 'opaque-second', 11.7),
+      record(at(15), 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: actualResult }] }),
+      record(at(16), 'event_msg', tokenUsage(20, 3)),
+      record(at(17), 'event_msg', { type: 'task_complete', turn_id: 'child-second', last_agent_message: actualResult }),
+    ];
+    const childPath = await writeTranscriptNamed(active.sessionDir, 'rollout-late-result-child.jsonl', childRecords.join('\n') + '\n', { bootstrapFork: false });
+    await writeWakeupMarker(active.wakeupDir, child, { session_id: child, initial_turn_id: 'child-first', turn_id: 'child-second',
+      transcript_path: childPath, hook_event: 'subagent-stop', received_at: new Date().toISOString() });
+    await runInputCycle(active.input);
+    const allEntries = restart ? [...first.entries, ...active.entries] : active.entries;
+    const invokes = allEntries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke');
+    const result = allEntries.filter(entry => entry['event.name'] === 'gen_ai.agent.result');
+    expect(result).toHaveLength(1);
+    const second = invokes.find(entry => entry['gen_ai.tool.call.id'] === 'second-work')!;
+    expect(result[0]).toMatchObject({ 'gen_ai.session.id': parent, 'gen_ai.turn.id': `${parent}:parent-work`,
+      'gen_ai.agent.invocation.id': second['gen_ai.agent.invocation.id'], 'gen_ai.agent.peer.id': child });
+    expect(entryTimestampMs(result[0]!)).toBe(base + 18_000);
+    expect(result[0]).not.toHaveProperty('span_id');
+    expect((active.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(0);
+    expect(responsesForTurn(allEntries, 'child-first')[0]!['gen_ai.agent.parent.invocation.id'])
+      .toBe(invokes.find(entry => entry['gen_ai.tool.call.id'] === 'first-spawn')!['gen_ai.agent.invocation.id']);
+    const before = active.entries.length;
+    await runInputCycle(active.input);
+    expect(active.entries).toHaveLength(before);
+  });
+
+  it('retains a same-text receipt across restart while another candidate has no terminal evidence', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-identical-result-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const parent = 'same-result-parent';
+    const child = 'same-result-child';
+    const base = Date.parse('2026-08-07T05:00:00.000Z');
+    const firstWork = { parentThreadId: parent, parentTurnId: 'first-parent', parentTraceId: 'a'.repeat(32),
+      parentToolCallId: 'first-call', childThreadId: child, agentPath: '/root/same-child', invocationId: 'I1', spawnedAtMs: base - 1 };
+    const secondWork = { ...firstWork, parentTurnId: 'second-parent', parentToolCallId: 'second-call', invocationId: 'I2', spawnedAtMs: base + 60_000 };
+    const linker = (input: CodexTranscriptInput) => (input as unknown as { subagentLinker: {
+      registerSpawns(values: unknown[]): void;
+      registerCompletedWorkResult(link: unknown, turn: unknown, records: unknown[]): void;
+    } }).subagentLinker;
+    const terminal = (input: CodexTranscriptInput, work: typeof firstWork, turn: string, withBody = true) => linker(input).registerCompletedWorkResult(
+      { ...work, confidence: 'explicit_id' }, { sessionId: child, transcriptTurnId: turn, status: 'completed' },
+      [{ startOffset: 0, endOffset: 1, record: { type: 'event_msg', payload: {
+        type: 'task_complete', turn_id: turn, ...(withBody ? { last_agent_message: 'done' } : {}),
+      } } }],
+    );
+    const receiptTurn = (turn: string, seconds: number, explicitInvocation?: string) => {
+      const start = new Date(base + seconds * 1_000).toISOString();
+      const records = simpleCompletedTurn(parent, turn, 'receive result', 'received', 10, 1, start);
+      records.splice(4, 0, record(new Date(base + seconds * 1_000 + 3_500).toISOString(), 'response_item', {
+        type: 'agent_message', author: '/root/same-child', recipient: '/root',
+        content: [{ type: 'input_text', text: 'Message Type: FINAL_ANSWER\nPayload:\ndone' }],
+        internal_chat_message_metadata_passthrough: { turn_id: turn, ...(explicitInvocation ? { invocation_id: explicitInvocation } : {}) },
+      }));
+      return records;
+    };
+    linker(first.input).registerSpawns([firstWork]);
+    terminal(first.input, firstWork, 'child-one');
+    const parentPath = await writeTranscriptNamed(first.sessionDir, 'rollout-same-result-parent.jsonl', receiptTurn('first-parent', 0).join('\n') + '\n');
+    await processTranscriptOnce(first.input, parentPath);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result').map(entry => entry['gen_ai.agent.invocation.id'])).toEqual(['I1']);
+    linker(first.input).registerSpawns([secondWork]);
+    await fs.appendFile(parentPath, receiptTurn('second-parent', 70).slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(first.input, parentPath);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(1);
+    expect((first.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(1);
+    // A source-explicit duplicate remains safe to deduplicate even while I2 is unknown.
+    await fs.appendFile(parentPath, receiptTurn('explicit-old-duplicate', 80, 'I1').slice(1).join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(first.input, parentPath);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(1);
+    await first.stateStore.save();
+    const recovered = await createDormantInput(root);
+    await runInputCycle(recovered.input);
+    expect(recovered.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect((recovered.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(1);
+    terminal(recovered.input, secondWork, 'child-two', false);
+    await runInputCycle(recovered.input);
+    // A completed terminal without a body still cannot exclude same-text I2.
+    expect(recovered.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect((recovered.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(1);
+    terminal(recovered.input, secondWork, 'child-two');
+    await runInputCycle(recovered.input);
+    // Both real completions say done, so author/path alone still cannot choose I2.
+    expect(recovered.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect((recovered.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(1);
+    await fs.appendFile(parentPath, receiptTurn('explicit-new-result', 90, 'I2').slice(1).join('\n') + '\n', 'utf8');
+    await runInputCycle(recovered.input);
+    expect(recovered.entries.filter(entry => entry['event.name'] === 'gen_ai.agent.result').map(entry => entry['gen_ai.agent.invocation.id'])).toEqual(['I2']);
+    expect((recovered.stateStore.get('codex-transcript').extra?.codexPendingAgentResults as unknown[])).toHaveLength(0);
+    const before = recovered.entries.length;
+    await runInputCycle(recovered.input);
+    expect(recovered.entries).toHaveLength(before);
   });
 
   it('degrades an ambiguous repeated agent path to an independent child trace', async () => {
@@ -1249,7 +2056,7 @@ describe('CodexTranscriptInput', () => {
     }));
   });
 
-  it('releases a captured agent_path candidate if a later spawn makes the path ambiguous', async () => {
+  it('does not replay a completed child if a later spawn makes its path ambiguous', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-late-ambiguity-'));
     tempDirs.push(root);
     const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
@@ -1272,10 +2079,8 @@ describe('CodexTranscriptInput', () => {
     const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
     await processTranscriptOnce(input, childTranscript);
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({
-      pendingSubagent: {
-        parentToolCallId: 'call-subagent-1',
-        confidence: 'agent_path',
-      },
+      pendingSubagent: null,
+      activeTurn: null,
     });
 
     await fs.appendFile(parentTranscript, [
@@ -1349,23 +2154,18 @@ describe('CodexTranscriptInput', () => {
     }
 
     expect(transcriptCheckpoint(stateStore, childTranscripts[0]!)).toMatchObject({
-      pendingSubagent: {
-        parentToolCallId: 'call-subagent-1',
-        confidence: 'explicit_id',
-      },
+      pendingSubagent: null,
+      activeTurn: null,
     });
     expect(transcriptCheckpoint(stateStore, childTranscripts[1]!)).toMatchObject({
-      pendingSubagent: {
-        parentToolCallId: 'call-subagent-2',
-        confidence: 'explicit_id',
-      },
+      pendingSubagent: null,
+      activeTurn: null,
     });
 
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
     await processTranscriptOnce(input, parentTranscript);
-    expect((transcriptCheckpoint(stateStore, parentTranscript).pendingFusion as { children: unknown[] }).children)
-      .toHaveLength(2);
-    await finalizeSubagentFusions(input);
+    expect(transcriptCheckpoint(stateStore, parentTranscript).pendingFusion).toBeNull();
+    await runInputCycle(input);
 
     expect(responsesForTurn(entries, CHILD_FIXTURES[0].turnId)).toHaveLength(1);
     expect(responsesForTurn(entries, CHILD_FIXTURES[1].turnId)).toHaveLength(1);
@@ -1411,44 +2211,108 @@ describe('CodexTranscriptInput', () => {
     expect(transcriptCheckpoint(stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
   });
 
-  it('recovers a persisted parent fusion when child rollouts appear before restart', async () => {
+  it('restores a running child and its delegation after the parent finishes across restart', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-restart-'));
     tempDirs.push(root);
-    const first = await createInput(root);
+    const first = await createDormantInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+    const parentTranscript = await writeTranscriptNamed(first.sessionDir, PARENT_FIXTURE_NAME, parentFixture);
+    await processTranscriptOnce(first.input, parentTranscript);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    const childTerminal = childLines.pop()!;
+    const childTranscript = await writeTranscriptNamed(first.sessionDir, CHILD_FIXTURE_NAME, childLines.join('\n') + '\n');
+    await processTranscriptOnce(first.input, childTranscript);
+    const invoke = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+      && entry['gen_ai.tool.call.id'] === 'call-subagent-1')!;
+    expect(invoke).toBeDefined();
+    expect(responsesForTurn(first.entries, 'child-turn-1')).toHaveLength(0);
+    await first.stateStore.save();
+
+    const restarted = await createInput(root);
+    try {
+      await processTranscriptOnce(restarted.input, childTranscript);
+      expect(responsesForTurn(restarted.entries, 'child-turn-1')).toHaveLength(0);
+      await fs.appendFile(childTranscript, childTerminal + '\n', 'utf8');
+      await waitFor(() => responsesForTurn(restarted.entries, 'child-turn-1').length === 1);
+    } finally { await restarted.input.stop(); }
+
+    expect(responsesForTurn(restarted.entries, 'parent-turn-1')).toHaveLength(0);
+    expect(responsesForTurn(restarted.entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.session.id': CHILD_FIXTURES[0].threadId,
+      'gen_ai.turn.id': `${CHILD_FIXTURES[0].threadId}:child-turn-1`,
+      'gen_ai.agent.parent.invocation.id': invoke['gen_ai.agent.invocation.id'],
+      'agent.codex.parent_span_id': invoke.span_id,
+      trace_id: invoke.trace_id,
+    });
+    expect(transcriptCheckpoint(restarted.stateStore, childTranscript)).toMatchObject({
+      pendingSubagent: null, activeTurn: null,
+    });
+  });
+
+  it('migrates legacy pending child and parent checkpoints into independent terminal emission', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-legacy-pending-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
     const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
     const parentLines = parentFixture.trimEnd().split('\n');
     const parentTerminal = parentLines.pop()!;
-    const parentTranscript = await writeTranscriptNamed(
-      first.sessionDir,
-      PARENT_FIXTURE_NAME,
-      parentLines.join('\n') + '\n',
-    );
-    await waitFor(() => first.input.getSubagentLinkSnapshot().detectedSpawns === 4);
-    for (const fixture of CHILD_FIXTURES) {
-      const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
-      await writeTranscriptNamed(first.sessionDir, fixture.name, text);
-    }
-    await waitFor(() => CHILD_FIXTURES.every(fixture => {
-      const transcript = path.join(first.sessionDir, '2026', '06', '24', fixture.name);
-      return Boolean(transcriptCheckpoint(first.stateStore, transcript)?.pendingSubagent);
-    }));
-    await first.input.stop();
-    await first.stateStore.save();
+    const parentTranscript = await writeTranscriptNamed(first.sessionDir, PARENT_FIXTURE_NAME, parentLines.join('\n') + '\n');
+    await processTranscriptOnce(first.input, parentTranscript);
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    const childTerminal = childLines.pop()!;
+    const childTranscript = await writeTranscriptNamed(first.sessionDir, CHILD_FIXTURE_NAME, childLines.join('\n') + '\n');
+    await processTranscriptOnce(first.input, childTranscript);
+    const invoke = first.entries.find(entry => entry['event.name'] === 'gen_ai.agent.invoke'
+      && entry['gen_ai.tool.call.id'] === 'call-subagent-1')!;
+    const parentCheckpoint = transcriptCheckpoint(first.stateStore, parentTranscript);
+    const childCheckpoint = transcriptCheckpoint(first.stateStore, childTranscript);
     await fs.appendFile(parentTranscript, parentTerminal + '\n', 'utf8');
-
-    const restarted = await createInput(root);
-    await waitFor(() => CHILD_FIXTURES.every(fixture =>
-      responsesForTurn(restarted.entries, fixture.turnId).length === 1));
-    await restarted.input.stop();
-
-    expect(transcriptCheckpoint(restarted.stateStore, parentTranscript)).toMatchObject({
-      pendingFusion: null,
-      activeTurn: null,
+    await fs.appendFile(childTranscript, childTerminal + '\n', 'utf8');
+    const parentEnd = (await fs.stat(parentTranscript)).size;
+    const childEnd = (await fs.stat(childTranscript)).size;
+    const childActive = { ...(childCheckpoint.activeTurn as Record<string, unknown>) };
+    delete childActive.delegation;
+    delete childActive.emittedTraceId;
+    first.stateStore.update(`codex-transcript:${childTranscript}`, {
+      lastOffset: childEnd,
+      extra: { codexTranscript: { ...childCheckpoint, scanOffset: childEnd, activeTurn: null,
+        pendingSubagent: {
+          turnId: 'child-turn-1', parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          parentTurnId: 'parent-turn-1', parentTraceId: invoke.trace_id,
+          parentToolCallId: 'call-subagent-1', confidence: 'agent_path',
+          terminalEndOffset: childEnd, activeTurn: childActive,
+        },
+      } },
     });
-    expect(restarted.entries.filter(entry => entry['gen_ai.agent.scope'] === 'subagent').length)
-      .toBeGreaterThan(0);
-    expect(restarted.entries.every(entry => entry['gen_ai.session.id'] === 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))
-      .toBe(true);
+    first.stateStore.update(`codex-transcript:${parentTranscript}`, {
+      lastOffset: parentEnd,
+      extra: { codexTranscript: { ...parentCheckpoint, scanOffset: parentEnd,
+        pendingFusion: {
+          turnId: 'parent-turn-1', parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          parentTraceId: invoke.trace_id, terminalEndOffset: parentEnd, children: [{
+            parentToolCallId: 'call-subagent-1', parentTraceId: invoke.trace_id,
+            spawnedAtMs: Date.parse('2026-08-07T02:00:04.000Z'),
+            childThreadId: CHILD_FIXTURES[0].threadId,
+          }],
+        },
+      } },
+    });
+    await first.stateStore.save();
+    const recovered = await createInput(root);
+    try {
+      await waitFor(() => responsesForTurn(recovered.entries, 'child-turn-1').length === 1);
+      await waitFor(() => transcriptCheckpoint(recovered.stateStore, parentTranscript).activeTurn === null);
+    } finally { await recovered.input.stop(); }
+    expect(responsesForTurn(recovered.entries, 'child-turn-1')[0]).toMatchObject({
+      'gen_ai.session.id': CHILD_FIXTURES[0].threadId,
+      'gen_ai.turn.id': `${CHILD_FIXTURES[0].threadId}:child-turn-1`,
+    });
+    expect([...first.entries, ...recovered.entries].filter(entry => entry['event.name'] === 'llm.response'
+      && entry['agent.codex.transcript_turn_id'] === 'parent-turn-1')).toHaveLength(2);
+    expect(transcriptCheckpoint(recovered.stateStore, parentTranscript)).toMatchObject({ pendingFusion: null });
+    expect(transcriptCheckpoint(recovered.stateStore, childTranscript)).toMatchObject({ pendingSubagent: null });
   });
 
   it('rebuilds owning metadata instead of trusting a legacy latest-meta checkpoint', async () => {
@@ -1710,6 +2574,44 @@ describe('CodexTranscriptInput', () => {
     const response = entries.find(entry => entry['event.name'] === 'llm.response')!;
     expect(entryTimestampMs(request)).toBe(Date.parse('2026-06-24T06:00:03.000Z'));
     expect(entryTimestampMs(response)).toBe(Date.parse('2026-06-24T06:00:08.000Z'));
+  });
+
+  it('prefers token_usage_record response_id over response item ids', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-response-id-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'check it' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'response_item', {
+        type: 'reasoning', id: 'rs-provider-item', summary: [], content: null, encrypted_content: null,
+      }),
+      record('2026-06-24T06:00:05.000Z', 'response_item', {
+        type: 'message', id: 'msg-provider-item', role: 'assistant',
+        content: [{ type: 'output_text', text: 'done' }],
+      }),
+      record('2026-06-24T06:00:06.000Z', 'token_usage_record', {
+        thread_id: 'session-1', turn_id: 'turn-1', session_id: 'session-1',
+        response_id: 'resp-provider-response',
+        usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+      }),
+      record('2026-06-24T06:00:07.000Z', 'event_msg', tokenUsage(100, 10)),
+      record('2026-06-24T06:00:08.000Z', 'event_msg', {
+        type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+      }),
+    ].join('\n') + '\n');
+
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'llm.response'));
+    await input.stop();
+
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    expect(request?.['gen_ai.response.id']).toBe('resp-provider-response');
+    expect(response?.['gen_ai.response.id']).toBe('resp-provider-response');
   });
 
   it('rebuilds completed transcript waves without collapsing reasoning or token usage', async () => {
@@ -2923,7 +3825,6 @@ describe('CodexTranscriptInput', () => {
     expect(responses[0]?.['agent.codex.turn_status']).toBeUndefined();
     expect(entries).toContainEqual(expect.objectContaining({
       'event.name': 'other',
-      'agent.codex.turn_status': 'completed',
       'gen_ai.turn.end': true,
     }));
     const finalRequest = entries.find(entry => (
@@ -3146,6 +4047,52 @@ describe('CodexTranscriptInput', () => {
     });
   });
 
+  it.each(['completed', 'interrupted'] as const)('keeps the %s marker identity and native terminal time across segmented and terminal-only recovery', async status => {
+    const original = completedTurn().trimEnd().split('\n');
+    const terminalAt = '2026-06-24T06:30:00.000Z';
+    original[original.length - 1] = record(terminalAt, 'event_msg', {
+      type: status === 'completed' ? 'task_complete' : 'turn_aborted',
+      turn_id: 'turn-1', ...(status === 'completed' ? { last_agent_message: 'fixed' } : { reason: 'user interruption' }),
+    });
+    const prefix = original.slice(0, -1).join('\n') + '\n';
+    const complete = original.join('\n') + '\n';
+    const markers: AgentActivityEntry[] = [];
+    for (const mode of ['full', 'segmented', 'terminal-only'] as const) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), `codex-terminal-${mode}-`));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+      const transcript = await writeTranscript(sessionDir, mode === 'segmented' ? prefix : complete);
+      if (mode === 'terminal-only') {
+        const inode = (await fs.stat(transcript)).ino;
+        stateStore.update(`codex-transcript:${transcript}`, {
+          extra: { codexTranscript: {
+            inode, scanOffset: Buffer.byteLength(complete), ownerSessionMetaOffset: 0,
+            activeTurn: { turnId: 'turn-1', startOffset: Buffer.byteLength(prefix),
+              startedAtMs: Date.parse('2026-06-24T06:00:02.000Z'), emittedPrompt: true, emittedStepCount: 3,
+              emittedTraceId: markers[0]!.trace_id, model: 'gpt-5.5', cwd: '/tmp/project' },
+            pendingTerminal: { turnId: 'turn-1', terminalEndOffset: Buffer.byteLength(complete) },
+            pendingFusion: null, pendingSubagent: null,
+          } },
+        });
+      }
+      await processTranscriptOnce(input, transcript);
+      if (mode === 'segmented') {
+        expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+        await fs.appendFile(transcript, original.at(-1)! + '\n', 'utf8');
+        await processTranscriptOnce(input, transcript);
+      }
+      const marker = entries.filter(entry => entry['gen_ai.turn.end'] === true);
+      expect(marker).toHaveLength(1);
+      expect(entryTimestampMs(marker[0]!)).toBe(Date.parse(terminalAt));
+      expect(marker[0]!['agent.codex.turn_status']).toBe(status);
+      markers.push(marker[0]!);
+    }
+    expect(new Set(markers.map(entry => entry['event.id'])).size).toBe(1);
+    expect(new Set(markers.map(entry => entry.span_id)).size).toBe(1);
+    expect(markers[0]!.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(new Set(markers.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['session-1:turn-1']));
+  });
+
   it('retains an incomplete suffix after a closed wave and recovers it after restart', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-partial-suffix-'));
     tempDirs.push(root);
@@ -3208,7 +4155,6 @@ describe('CodexTranscriptInput', () => {
     expect(secondResponse?.['gen_ai.tool.definitions']).toBeUndefined();
     expect(restarted.entries.find(entry => entry['gen_ai.turn.end'] === true)).toMatchObject({
       'agent.codex.cwd': '/tmp/project',
-      'agent.codex.turn_status': 'completed',
     });
   });
 
@@ -4623,7 +5569,7 @@ describe('Codex transcript multimodal extraction', () => {
     ]);
   });
 
-  it('gates input vs tool image conversion by uploadMode', () => {
+  it('gates user vs tool-result image conversion by uploadMode', () => {
     const png = Buffer.from('fake-png-mode').toString('base64');
     const fixture = multimodalRecords([
       userContentItem([
@@ -4649,17 +5595,18 @@ describe('Codex transcript multimodal extraction', () => {
     expect(JSON.stringify(off!.steps)).not.toContain('"type":"uri"');
     expect(JSON.stringify(off)).not.toContain(png);
 
-    const inputOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
-    expect(userParts(inputOnly!)[1]).toMatchObject({ type: 'uri' });
-    const inputToolOut = inputOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    const inputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
+    expect(userParts(inputMode!)[1]).toMatchObject({ type: 'uri' });
+    const inputToolOut = inputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(true);
 
-    const toolOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'tool' });
-    expect(userParts(toolOnly!).some((p: any) => p.type === 'uri')).toBe(false);
-    const toolOut = toolOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
-    expect(toolOut?.some(p => p.type === 'uri')).toBe(true);
+    const outputMode = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'output' });
+    expect(userParts(outputMode!).some((p: any) => p.type === 'uri')).toBe(false);
+    const outputToolOut = outputMode!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(outputToolOut?.some(p => p.type === 'uri')).toBe(false);
+    expect(JSON.stringify(outputMode)).not.toContain(png);
 
-    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
+    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'all' });
     expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });
     const bothToolOut = both!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
     expect(bothToolOut?.some(p => p.type === 'uri')).toBe(true);
@@ -4743,5 +5690,91 @@ describe('Codex transcript multimodal extraction', () => {
     expect(userParts(second!)[1]).toEqual(userParts(first!)[1]);
     expect(decodeCount).toBe(1);
     expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
+  });
+});
+
+// Exercise real rollout discovery, reliable linking, recovery and event rewriting.
+describe('workspace privacy during independent Codex subagent collection', () => {
+  it.each([
+    ['completed child, blocked parent', true, true, false],
+    ['running child, blocked parent', false, true, false],
+    ['completed child, public parent', true, false, false],
+    ['running child, public parent', false, false, false],
+    ['completed child, blocked child', true, false, true],
+    ['running child, blocked child', false, false, true],
+  ] as const)('%s checks privacy before attachment upload', async (_name, childTerminal, blockedParent, blockedChild) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fusion-privacy-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const upload = vi.fn().mockReturnValue({ uri: 'oss://test/child-image', mimeType: 'image/png', modality: 'image' });
+    const input = new CodexTranscriptInput({
+      stateStore, sessionDir, wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'), pollIntervalMs: 10,
+      multimodal: { enabled: true, uploadMode: 'all', processor: { blobToUri: upload } as any },
+    });
+    const policy = new WorkspacePolicy(['/private-project']);
+    input.setWorkspacePolicy(policy);
+    const parentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    if (blockedParent) {
+      // A prior text-only turn has already excluded the parent session.
+      expect(policy.allows({ 'gen_ai.session.id': parentId, cwd: '/private-project' }, input.agentType)).toBe(false);
+    }
+    const raw: AgentActivityEntry[] = [];
+    const output: AgentActivityEntry[] = [];
+    input.on('entries', batch => {
+      raw.push(...batch);
+      // InputManager applies the workspace policy after collection.
+      output.push(...policy.filter(batch, input.agentType));
+    });
+    await input.start();
+    try {
+      const parentText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+      const parentLines = parentText.trimEnd().split('\n');
+      const terminal = parentLines.pop()!;
+      const parentPath = await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentLines.join('\n') + '\n');
+      await waitFor(() => input.getSubagentLinkSnapshot().detectedSpawns === 4);
+      const childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+      const childRecords = childText.trimEnd().split('\n').map(line => JSON.parse(line));
+      for (const item of childRecords) {
+        if (item.type === 'turn_context' && item.payload.turn_id === 'child-turn-1') {
+          item.payload.cwd = blockedChild ? '/private-project' : '/public-project';
+        }
+        if (item.type === 'response_item' && item.payload.role === 'user'
+          && item.payload.content?.some((part: any) => part.text === 'synthetic child task')) {
+          item.payload.content.push({ type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' });
+        }
+      }
+      if (!childTerminal) childRecords.pop();
+      const childPath = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childRecords.map(item => JSON.stringify(item)).join('\n') + '\n');
+      await waitFor(() => {
+        const checkpoint = transcriptCheckpoint(stateStore, childPath);
+        return childTerminal ? checkpoint?.activeTurn === null && Boolean(checkpoint?.scanOffset)
+          : Boolean(checkpoint?.activeTurn && checkpoint.scanOffset > checkpoint.activeTurn.startOffset);
+      });
+      if (!childTerminal) {
+        expect(responsesForTurn(raw, 'child-turn-1')).toHaveLength(0);
+      }
+      await fs.appendFile(parentPath, terminal + '\n', 'utf8');
+      await waitFor(() => transcriptCheckpoint(stateStore, parentPath)?.activeTurn === null);
+      if (!childTerminal) {
+        expect(responsesForTurn(raw, 'child-turn-1')).toHaveLength(0);
+        await fs.appendFile(childPath, JSON.stringify(childText.trimEnd().split('\n')
+          .map(line => JSON.parse(line)).at(-1)) + '\n', 'utf8');
+      }
+      await waitFor(() => transcriptCheckpoint(stateStore, childPath)?.activeTurn === null);
+      const childEntries = raw.filter(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1');
+      if (blockedParent || blockedChild) {
+        expect(upload).not.toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(false);
+      } else {
+        expect(childEntries.length).toBeGreaterThan(0);
+        expect(childEntries.every(entry => entry['gen_ai.session.id'] === CHILD_FIXTURES[0].threadId
+          && entry['gen_ai.agent.scope'] === 'subagent')).toBe(true);
+        expect(upload).toHaveBeenCalled();
+        expect(output.some(entry => entry['agent.codex.transcript_turn_id'] === 'child-turn-1')).toBe(true);
+      }
+    } finally { await input.stop(); }
   });
 });
