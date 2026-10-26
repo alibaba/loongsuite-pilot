@@ -30,6 +30,57 @@ async function setup(initial = '') {
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it.each([['success', true], ['error', false], ['cancelled', false]] as const)('preserves native parent evidence across restart (Write status=%s)', async (status, mutationExpected) => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
+    const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
+    for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const folder = path.join(sessionsRoot, conv, 'agents', id, 'system');
+      await mkdir(folder, { recursive: true }); await writeFile(path.join(folder, 'trajectory.jsonl'), source);
+    }
+    const child = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv, queryMessageId: query,
+      agentId: 's_nativeLeaf', agentType: 'sub_agent', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 3000, endedAtMs: DOUBAO_EPOCH + 4000 };
+    const save = async (e: typeof child) => {
+      const folder = path.join(snapshotRoot, '123', conv, e.executionKey); await mkdir(folder, { recursive: true });
+      await writeFile(path.join(folder, `${e.agentId}.json`), JSON.stringify({ execution: e }));
+    };
+    await save(child);
+    const meta = { conversation_id: conv, send_local_message_id: query };
+    await appendFile(file, doubaoLine('on_message_session_start', meta, 10)
+      + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
+      + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 100)
+      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 200)
+      + doubaoToolLine({ agent_id: 'o_nativeOrg', name: 'Write', tcid: 'parent-mutation' }, 1000)
+      + doubaoToolLine({ name: 'Write', toolCallID: 'parent-mutation', phase: 'execution_settled', status }, 2000)
+      + doubaoLine('on_message_session_end', meta));
+    expect((await input.poll()).filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution')).toEqual([]);
+    await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 90_000);
+    // A real successful parent Write is evidence that its execution snapshot
+    // may still arrive; 30 seconds of observation is not a completion boundary.
+    const afterGrace = (await restarted.poll()).filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution');
+    if (!mutationExpected) {
+      expect(afterGrace).toHaveLength(2);
+      expect(afterGrace[0]['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
+      expect(afterGrace[0]['loongsuite.doubao_work.native_parent_execution_id']).toBeUndefined();
+      clock.mockRestore(); return;
+    }
+    expect(afterGrace).toEqual([]);
+    const parent = { ...child, executionKey: '00000000-0000-4000-8000-000000000003', agentId: 'o_nativeOrg', agentType: 'organizer',
+      startedAtMs: DOUBAO_EPOCH + 900, endedAtMs: DOUBAO_EPOCH + 5000 };
+    await save(parent);
+    const events = (await restarted.poll()).filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution');
+    expect(events).toHaveLength(4);
+    const childStart = events.find(e => e['gen_ai.agent.id'] === child.agentId && e['gen_ai.turn.start'] === true)!;
+    const parentStart = events.find(e => e['gen_ai.agent.id'] === parent.agentId && e['gen_ai.turn.start'] === true)!;
+    expect(childStart.parent_span_id).toBe(parentStart['loongsuite.doubao_work.agent_span_id']);
+    expect(childStart['loongsuite.doubao_work.native_parent_execution_id']).toBe(parent.executionKey);
+    expect(childStart.time_unix_nano).toBe((BigInt(child.startedAtMs) * 1_000_000n).toString());
+    expect(await restarted.poll()).toEqual([]);
+    clock.mockRestore();
+  });
+
   it('recovers late complete execution metadata after restart without replaying history or guessing missing boundaries', async () => {
     const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
     const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';

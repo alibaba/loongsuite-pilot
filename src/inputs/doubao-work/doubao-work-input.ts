@@ -37,6 +37,7 @@ interface Checkpoint {
   executionsCompleted?: Record<string, { digest: string; updatedMs: number }>;
   executionScanCursor?: string;
   executionFirstSeen?: Record<string, number>;
+  nativeMutationActors?: Record<string, { callId: string; updatedMs: number }>;
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string; sessionsRoot?: string; snapshotRoot?: string }
@@ -153,6 +154,7 @@ export class DoubaoWorkInput extends BaseInput {
     next.nativeCompleted ??= {};
     next.executionsCompleted ??= {};
     next.executionFirstSeen ??= {};
+    next.nativeMutationActors ??= {};
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
     let remainingBytes = CYCLE_BYTES;
@@ -251,6 +253,7 @@ export class DoubaoWorkInput extends BaseInput {
     compact(next.nativeCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
     compact(next.executionsCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item.updatedMs);
     compact(next.executionFirstSeen, MAX_COMPLETED, PENDING_TTL_MS, item => item);
+    compact(next.nativeMutationActors, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
     this.setState({ extra: { doubaoWork: next } });
     return entries;
   }
@@ -280,6 +283,21 @@ export class DoubaoWorkInput extends BaseInput {
       tool[side] ??= event;
       tool.updatedMs = Date.now();
       state.tools![key] = tool;
+      const start = tool.start, end = tool.end;
+      if (start?.turnId && start.tool && end?.tool) {
+        const actorKey = JSON.stringify([start.tool.sandboxId, start.turnId]);
+        if (tool.conflict && state.nativeMutationActors![actorKey]?.callId === start.tool.id) delete state.nativeMutationActors![actorKey];
+        if (!tool.conflict && /^[os]_[a-zA-Z0-9]+$/.test(start.turnId)
+          && ['Write', 'Edit'].includes(start.tool.name) && start.tool.name === end.tool.name
+          && start.tool.id === end.tool.id && start.tool.sandboxId === end.tool.sandboxId
+          && start.tool.phase === 'received' && end.tool.phase === 'settled' && end.tool.status === 'success'
+          && BigInt(end.timeNano) > BigInt(start.timeNano)) {
+          // The native writer persists mutation-bearing executions only when
+          // they release. Retain this content-free witness after tool emission
+          // so child snapshots can wait for a long-running real parent.
+          state.nativeMutationActors![actorKey] = { callId: start.tool.id, updatedMs: Date.now() };
+        }
+      }
       return;
     }
     if (event.name === 'general_agent_message_id_mapping') {
@@ -414,12 +432,18 @@ export class DoubaoWorkInput extends BaseInput {
       const events = buildNativeExecutionEvents(this.scope, root, graph, execution, eligible, Date.now());
       if (!events.length) continue;
       const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
-      // Child snapshots may persist before their parent's release. Give the
-      // native parent a bounded opportunity to arrive, across collector restarts.
-      // This affects emission latency only, never either execution timestamp.
-      if (graph.edges[execution.agentId]?.parent !== graph.main
-        && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'
-        && Date.now() - firstSeen < EXECUTION_PARENT_GRACE_MS) continue;
+      const parentId = graph.edges[execution.agentId]?.parent;
+      if (parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
+        const hasParentRecord = eligible.some(candidate => candidate.agentId === parentId && candidate.queryMessageId === execution.queryMessageId
+          && candidate.conversationId === execution.conversationId && candidate.sandboxId === execution.sandboxId);
+        const parentMutation = state.nativeMutationActors![JSON.stringify([execution.sandboxId, parentId])];
+        // A successful native Write/Edit means the parent may release much
+        // later than its children. Wait within the existing 24h/4096 checkpoint
+        // bounds, rather than committing an irreversible fallback at 30s.
+        // Without such evidence the short grace still allows a late snapshot;
+        // an existing but ambiguous/non-enclosing parent is never guessed.
+        if ((!hasParentRecord && parentMutation) || Date.now() - firstSeen < EXECUTION_PARENT_GRACE_MS) continue;
+      }
       entries.push(...events);
       state.executionsCompleted![execution.executionKey] = { digest, updatedMs: Date.now() };
       delete state.executionFirstSeen![execution.executionKey];
