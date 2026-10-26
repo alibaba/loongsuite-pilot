@@ -5,14 +5,16 @@ import { buildDoubaoTaskEvents, parseDoubaoLogLine } from '../../../../src/input
 import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine } from '../../../helpers/doubao-work-fixture.js';
 
 describe('Doubao Work task-level OTLP', () => {
-  it.each(['1', '0', 'cancelled'])('exports only one accurately timed ENTRY/AGENT pair (client=%s)', async result => {
+  it.each([
+    ['1', undefined], ['0', undefined], ['cancelled', undefined], ['1', '1234567890abcdef'],
+  ])('exports only one accurately timed ENTRY/AGENT pair (client=%s, parent=%s)', async (result, parent) => {
     const terminal = parseDoubaoLogLine(doubaoLine('on_message_session_end', {
       session_success: result === '0' ? '0' : '1',
       ...(result === 'cancelled' ? { cancel_source: 'stop_button' } : {}),
     }), DOUBAO_FILE)!;
     const events = buildDoubaoTaskEvents('synthetic-profile', {
       turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH,
-    }, terminal, Date.now()).map(entry => ({ ...entry, 'user.id': 'synthetic-user' }));
+    }, terminal, Date.now()).map(entry => ({ ...entry, 'user.id': 'synthetic-user', ...(parent ? { parent_span_id: parent } : {}) }));
     const exported: ReadableSpan[] = [];
     const flusher = new OtlpTraceFlusher({
       enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }],
@@ -32,6 +34,7 @@ describe('Doubao Work task-level OTLP', () => {
         const duration = BigInt(span.duration[0]) * 1_000_000_000n + BigInt(span.duration[1]);
         expect(duration).toBe(3_000_000_000n); // util currently has millisecond precision.
         expect(span.resource.attributes['gen_ai.framework']).toBe('doubao-work');
+        expect(span.attributes['gen_ai.framework']).toBe('doubao-work');
         expect(span.resource.attributes['gen_ai.agent.system']).toBe('doubao');
         expect(span.resource.attributes['loongsuite.doubao_work.business_outcome']).toBe('unknown');
         expect(span.resource.attributes['loongsuite.doubao_work.observation_scope']).toBe('client_message');
@@ -41,6 +44,7 @@ describe('Doubao Work task-level OTLP', () => {
       const root = exported.find(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')!;
       const agent = exported.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT')!;
       expect(agent.parentSpanId).toBe(root.spanContext().spanId);
+      expect(root.parentSpanId).toBe(parent);
       expect(root.spanContext().traceId).toBe(events[0].trace_id);
     } finally { await flusher.shutdown(); }
   });
