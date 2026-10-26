@@ -21,14 +21,58 @@ async function setup(initial = '') {
   const statePath = path.join(root, 'state.json');
   const stateStore = new StateStore(statePath);
   const sessionsRoot = path.join(root, 'native');
-  const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot });
+  const snapshotRoot = path.join(root, 'snapshots');
+  const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot, snapshotRoot });
   const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1);
   expect(await input.poll()).toEqual([]);
   clock.mockRestore();
-  return { root, logs, file, input, statePath, stateStore, sessionsRoot };
+  return { root, logs, file, input, statePath, stateStore, sessionsRoot, snapshotRoot };
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it('recovers late complete execution metadata after restart without replaying history or guessing missing boundaries', async () => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
+    const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
+    const e = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv,
+      queryMessageId: query, agentId: 's_nativeLeaf', agentType: 'sub_agent', sandboxId: 'synthetic-sandbox',
+      startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 5000 };
+    const dir = path.join(snapshotRoot, '123', conv, e.executionKey); await mkdir(dir, { recursive: true });
+    const metadata = path.join(dir, `${e.agentId}.json`); await writeFile(metadata, '{half');
+    for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const folder = path.join(sessionsRoot, conv, 'agents', id, 'system');
+      await mkdir(folder, { recursive: true }); await writeFile(path.join(folder, 'trajectory.jsonl'), source);
+    }
+    const meta = { conversation_id: conv, send_local_message_id: query };
+    await appendFile(file, doubaoLine('on_message_session_start', meta, 10)
+      + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
+      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000)
+      + doubaoLine('on_message_session_end', meta));
+    expect(await input.poll()).toHaveLength(2);
+    await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    await writeFile(metadata, JSON.stringify({ execution: { ...e, endedAtMs: undefined } }));
+    expect(await restarted.poll()).toEqual([]);
+    await writeFile(metadata, JSON.stringify({ execution: e, fileContents: 'SYNTHETIC_PRIVATE' }));
+    expect(await restarted.poll()).toEqual([]); // Native parent can still arrive.
+    const grace = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
+    const events = await restarted.poll(); expect(events).toHaveLength(2);
+    grace.mockRestore();
+    expect(events[0]['loongsuite.doubao_work.native_execution_id']).toBe(e.executionKey);
+    expect(events[0].time_unix_nano).toBe((BigInt(e.startedAtMs) * 1_000_000n).toString());
+    expect(events[1].time_unix_nano).toBe((BigInt(e.endedAtMs) * 1_000_000n).toString());
+    expect(JSON.stringify(events)).not.toContain('SYNTHETIC_PRIVATE');
+    expect(await restarted.poll()).toEqual([]);
+    await restored.save(); const again = new StateStore(statePath); await again.load();
+    expect(await new ProbeInput({ stateStore: again, logDir: logs, sessionsRoot, snapshotRoot }).poll()).toEqual([]);
+    // A metadata rewrite must not produce a second execution with the same ID.
+    await writeFile(metadata, JSON.stringify({ execution: { ...e, endedAtMs: e.endedAtMs + 1 } }));
+    expect(await restarted.poll()).toEqual([]);
+    // A fresh collector baselines the existing native conversation and snapshots.
+    const fresh = new ProbeInput({ stateStore: new StateStore(path.join(logs, 'fresh.json')), logDir: logs, sessionsRoot, snapshotRoot });
+    expect(await fresh.poll()).toEqual([]); expect(await fresh.poll()).toEqual([]);
+  });
+
   it('links late nested native tools, retries incomplete graph reads and restores without duplicates', async () => {
     const { file, input, stateStore, statePath, logs, sessionsRoot } = await setup();
     await appendFile(file, doubaoLine('on_message_sending_start', {}, 10)

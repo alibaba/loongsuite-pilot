@@ -11,6 +11,7 @@ import {
   isRuntimeSkillLoadSpan,
   isDoubaoLocalTool,
   isDoubaoNativeAgent,
+  isDoubaoNativeExecution,
   unmatchedToolsForLlmOutput,
   validateMessageField,
   validateSemantic,
@@ -100,6 +101,66 @@ describe('semantic.tool_matches_llm_output runtime Skill handling', () => {
 });
 
 const traceRules = JSON.parse(readFileSync(new URL('../../docs/trace-validation-rules.json', import.meta.url), 'utf8'));
+
+describe('Doubao native persisted sandbox execution contract', () => {
+  function sample() {
+    const rows = ['ENTRY', 'AGENT', 'AGENT', 'AGENT'].map((kind, i) => ({
+      traceId: 'd'.repeat(32), spanId: String(i + 1).padStart(16, '0'), ...(i ? { parentSpanId: String(i).padStart(16, '0') } : {}),
+      name: kind, startTimeUnixNano: String(i < 2 ? 1000 : i === 2 ? 5000 : 6000), endTimeUnixNano: String(i < 2 ? 2000 : i === 2 ? 9000 : 8000),
+      attributes: { 'gen_ai.span.kind': kind, 'gen_ai.framework': 'doubao-work',
+        ...(i === 1 ? { 'gen_ai.turn.id': 'root', 'loongsuite.doubao_work.observation_scope': 'client_message' } : {}),
+        ...(i > 1 ? {
+          'gen_ai.agent.id': i === 2 ? 'o_native' : 's_native', 'gen_ai.agent.parent.id': i === 2 ? 'm_native' : 'o_native',
+          'agent.pilot.parent.turn.id': 'root', 'loongsuite.doubao_work.root_turn_id': 'root', 'loongsuite.doubao_work.root_agent_id': 'm_native',
+          'loongsuite.doubao_work.native_ancestor_ids': i === 2 ? ['m_native'] : ['o_native', 'm_native'],
+          'loongsuite.doubao_work.observation_scope': 'native_sandbox_execution',
+          'loongsuite.doubao_work.agent_boundary': 'native_sandbox_get_or_create_to_release',
+          'loongsuite.doubao_work.timing_basis': 'native_execution_startedAtMs_endedAtMs',
+          'loongsuite.doubao_work.relation_basis': 'native_create_agent_ancestry',
+          'loongsuite.doubao_work.native_execution_id': `00000000-0000-4000-8000-00000000000${i}`,
+          'loongsuite.doubao_work.native_query_message_id': '00000000-0000-4000-8000-000000000001',
+          'loongsuite.doubao_work.native_sandbox_id': 'native-sandbox', 'loongsuite.doubao_work.native_creation_call_id': `create-${i}`,
+          'loongsuite.doubao_work.parent_resolution': i === 2 ? 'root_request_ancestor' : 'same_query_native_execution',
+          ...(i === 3 ? { 'loongsuite.doubao_work.native_parent_execution_id': '00000000-0000-4000-8000-000000000002' } : {}),
+        } : {}),
+      },
+    }));
+    return [...buildTraces(rows).values()][0];
+  }
+  test('accepts exact native execution context and root asynchronous observation', () => {
+    const trace = sample();
+    expect(isDoubaoNativeExecution(trace.spans[2], trace.spans[1])).toBe(true);
+    expect(isDoubaoNativeExecution(trace.spans[3], trace.spans[2])).toBe(true);
+    expect(validateStructure(trace).filter(c => c.status === 'error')).toEqual([]);
+    expect(validateTime(trace, traceRules).filter(c => c.status === 'error')).toEqual([]);
+  });
+  test.each([
+    ['loongsuite.doubao_work.native_execution_id', 'invented'],
+    ['loongsuite.doubao_work.native_query_message_id', 'missing'],
+    ['loongsuite.doubao_work.timing_basis', 'file_mtime'],
+    ['loongsuite.doubao_work.agent_boundary', 'cloud_lifetime'],
+    ['loongsuite.doubao_work.relation_basis', 'temporal_proximity'],
+    ['loongsuite.doubao_work.native_ancestor_ids', ['unrelated']],
+    ['loongsuite.doubao_work.root_turn_id', 'another'],
+  ])('rejects unproven execution evidence: %s', (key, value) => {
+    const trace = sample(); trace.spans[2].attributes[key] = value;
+    expect(isDoubaoNativeExecution(trace.spans[2], trace.spans[1])).toBe(false);
+    expect(validateStructure(trace).some(c => c.status === 'error')).toBe(true);
+    expect(validateTime(trace, traceRules).some(c => c.status === 'error')).toBe(true);
+  });
+  test('requires matching parent execution, query, sandbox and actual containment', () => {
+    for (const [key, value] of [
+      ['loongsuite.doubao_work.native_parent_execution_id', '00000000-0000-4000-8000-000000000007'],
+      ['loongsuite.doubao_work.native_query_message_id', '00000000-0000-4000-8000-000000000008'],
+      ['loongsuite.doubao_work.native_sandbox_id', 'another'],
+    ]) {
+      const trace = sample(); trace.spans[3].attributes[key] = value;
+      expect(isDoubaoNativeExecution(trace.spans[3], trace.spans[2])).toBe(false);
+    }
+    const trace = sample(); trace.spans[3].endTimeUnixNano = '10000';
+    expect(validateTime(trace, traceRules).some(c => c.id === 'time.parent_contains_children' && c.status === 'error')).toBe(true);
+  });
+});
 
 describe('Doubao local execution observation contract', () => {
   function nativeTrace() {

@@ -195,7 +195,8 @@
         ]
       },
       "externalParentContext": "A missing parent TOOL is allowed only with a valid parentSpanId and explicit parent invocation or parent tool call ID; report the local fragment boundary.",
-      "nativeObservationException": "Doubao native_local_tool_fragment with native creation-call, Agent/parent, fragment and root-request identities may be a direct AGENT child; its native_local_tool_interval is a partial observation, not full invocation timing."
+      "nativeObservationException": "Doubao native_local_tool_fragment with native creation-call, Agent/parent, fragment and root-request identities may be a direct AGENT child; its native_local_tool_interval is a partial observation, not full invocation timing.",
+      "nativeExecutionException": "Doubao native_sandbox_execution with native execution/query UUIDs, sandbox, creation ancestry and exact native_execution_startedAtMs_endedAtMs timing may be a direct AGENT child. Same-query parent executions require identity matching and time containment; unobserved ancestors collapse to the observed root_request_ancestor. Local sandbox lifecycle is not full cloud inference lifetime."
     },
     "STEP": {
       "namePattern": "react step",

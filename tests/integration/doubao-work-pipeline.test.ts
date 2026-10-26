@@ -13,6 +13,55 @@ import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doub
 
 class ProbeInput extends DoubaoWorkInput { baseline() { return this.collect(); } }
 
+it('routes a late native execution snapshot through masked installed-pipeline contracts without a second ENTRY', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'doubao-execution-pipeline-'));
+  const logs = path.join(root, 'logs'), sessionsRoot = path.join(root, 'native'), snapshotRoot = path.join(root, 'snapshots');
+  await mkdir(logs); const source = path.join(logs, DOUBAO_FILE); await writeFile(source, '');
+  const stateStore = new StateStore(path.join(root, 'state.json'));
+  const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot, snapshotRoot, pollIntervalMs: 100 });
+  const spans: ReadableSpan[] = [];
+  const trace = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-execution-pipeline' }, undefined, () => ({
+    export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
+  }));
+  const outputDir = path.join(root, 'output'), output = new MultiFlusher([new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false }), trace]);
+  const manager = new InputManager(); manager.setFlusher(output); manager.setConfiguredUserId('synthetic-employee');
+  manager.setUserId('synthetic-host'); manager.setMaskConfig({ mode: 'all', types: [] }); manager.registerInput(input);
+  const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
+  try {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1); await input.baseline(); clock.mockRestore();
+    await output.start(); await manager.startInput('doubao-work');
+    const meta = { conversation_id: conv, send_local_message_id: query };
+    await appendFile(source, doubaoLine('on_message_session_start', meta, 10) + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
+      + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 3500)
+      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000) + doubaoLine('on_message_session_end', meta));
+    await vi.waitFor(() => expect(spans).toHaveLength(2));
+    for (const [id, content] of Object.entries(DOUBAO_NATIVE_FILES)) {
+      const dir = path.join(sessionsRoot, conv, 'agents', id, 'system'); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), content);
+    }
+    const execution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv, queryMessageId: query,
+      agentId: 's_nativeLeaf', agentType: 'sub_agent', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 5000 };
+    const dir = path.join(snapshotRoot, '123', conv, execution.executionKey); await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, `${execution.agentId}.json`), JSON.stringify({ execution: { ...execution, userId: 'SYNTHETIC_PRIVATE_ACCOUNT' }, fileContents: 'SYNTHETIC_PRIVATE_BODY' }));
+    const parent = { ...execution, executionKey: '00000000-0000-4000-8000-000000000003', agentId: 'o_nativeOrg',
+      startedAtMs: DOUBAO_EPOCH + 3500, endedAtMs: DOUBAO_EPOCH + 5500 };
+    const parentDir = path.join(snapshotRoot, '123', conv, parent.executionKey); await mkdir(parentDir, { recursive: true });
+    await writeFile(path.join(parentDir, `${parent.agentId}.json`), JSON.stringify({ execution: parent }));
+    await vi.waitFor(() => expect(spans).toHaveLength(4)); await manager.stopAll(); await output.flush();
+    const native = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === execution.executionKey)!;
+    const rootAgent = spans.find(s => s.attributes['gen_ai.agent.id'] === 'doubao-work' && s.attributes['gen_ai.span.kind'] === 'AGENT')!;
+    const nativeParent = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === parent.executionKey)!;
+    expect(native.parentSpanId).toBe(nativeParent.spanContext().spanId);
+    expect(nativeParent.parentSpanId).toBe(rootAgent.spanContext().spanId);
+    expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
+    expect(native.startTime).toEqual([Math.floor(execution.startedAtMs / 1000), (execution.startedAtMs % 1000) * 1_000_000]);
+    const events = (await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(events).toHaveLength(9); expect(new Set(events.map(e => e['event.id'])).size).toBe(9);
+    expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
+    expect(native.attributes['loongsuite.doubao_work.parent_resolution']).toBe('same_query_native_execution');
+    expect(JSON.stringify({ events, attrs: spans.map(s => s.attributes) })).not.toContain('SYNTHETIC_PRIVATE');
+  } finally { vi.restoreAllMocks(); await manager.stopAll(); await output.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
+
 it('routes watched native-shaped metadata through identity, mask, JSONL projection and real trace conversion', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-pipeline-'));
   const logs = path.join(root, 'source');

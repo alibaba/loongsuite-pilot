@@ -15,7 +15,7 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
   }
   let steps = 0;
   let entries = 0;
-  const fragment = records.find(record => record['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment');
+  const fragment = records.find(record => ['native_local_tool_fragment', 'native_sandbox_execution'].includes(String(record['loongsuite.doubao_work.observation_scope'])));
   const parent = fragment && /^[0-9a-f]{32}$/.test(String(fragment.trace_id)) && /^[0-9a-f]{16}$/.test(String(fragment.parent_span_id))
     ? trace.setSpanContext(ROOT_CONTEXT, { traceId: String(fragment.trace_id), spanId: String(fragment.parent_span_id), traceFlags: TraceFlags.SAMPLED }) : undefined;
   const wrapped = new Proxy(options.handler, {
@@ -52,11 +52,33 @@ export function enrichDoubaoNativeFragments(records: AgentActivityEntry[], spans
   const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
   if (!marker || !agent) return;
   const native = marker['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment';
+  const execution = marker['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution';
   const old = agent.spanContext().spanId;
-  const id = native ? String(marker['loongsuite.doubao_work.agent_span_id']) : doubaoRootAgentSpanId(agent.spanContext().traceId);
+  const id = native || execution ? String(marker['loongsuite.doubao_work.agent_span_id']) : doubaoRootAgentSpanId(agent.spanContext().traceId);
   if (!/^[0-9a-f]{16}$/.test(id)) return;
   reserveSpanId(agent, id);
   for (const span of spans) if (span.parentSpanId === old) Object.assign(span, { parentSpanId: id });
+  if (execution) {
+    Object.assign(agent, { parentSpanId: marker.parent_span_id });
+    Object.assign(agent, { name: `invoke_agent ${String(marker['gen_ai.agent.id'])}` });
+    agent.attributes['gen_ai.agent.id'] = String(marker['gen_ai.agent.id']);
+    agent.attributes['gen_ai.agent.name'] = String(marker['gen_ai.agent.id']);
+    agent.attributes['gen_ai.agent.scope'] = 'subagent';
+    agent.attributes['gen_ai.agent.parent.id'] = String(marker['gen_ai.agent.parent.id']);
+    agent.attributes['agent.pilot.parent.turn.id'] = String(marker['loongsuite.doubao_work.root_turn_id']);
+    agent.attributes['gen_ai.agent.description'] = 'Native local sandbox lifecycle; cloud inference lifetime and business outcome are unknown';
+    const ancestors = marker['loongsuite.doubao_work.native_ancestor_ids'];
+    if (Array.isArray(ancestors) && ancestors.length <= 8 && ancestors.every(value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value))) {
+      agent.attributes['loongsuite.doubao_work.native_ancestor_ids'] = ancestors as string[];
+    }
+    for (const key of ['observation_scope', 'agent_boundary', 'timing_basis', 'relation_basis', 'parent_resolution',
+      'native_parent_execution_id', 'native_execution_id', 'native_query_message_id', 'native_sandbox_id',
+      'native_creation_call_id', 'native_thread_id', 'root_turn_id', 'root_agent_id']) {
+      const value = marker[`loongsuite.doubao_work.${key}`];
+      if (typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(value)) agent.attributes[`loongsuite.doubao_work.${key}`] = value;
+    }
+    return;
+  }
   if (!native) return;
   const ids = marker['loongsuite.doubao_work.native_agent_ids'];
   const parents = marker['loongsuite.doubao_work.native_parent_ids'];
