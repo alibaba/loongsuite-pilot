@@ -1,4 +1,4 @@
-import { v5 as uuidv5 } from 'uuid';
+import { uuidV5 } from '../../utils/uuid.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import { AGENT_INPUT_EVENT_NAMESPACE } from '../../normalization/agent-input-dual-write.js';
 import {
@@ -479,7 +479,7 @@ export function extractMarkdownImagePaths(text: string, cwd?: string): string[] 
 }
 
 export function deriveSyntheticIdeRequestEventId(responseEventId: string, requestId: string): string {
-  return uuidv5(
+  return uuidV5(
     `qoder-ide-synthetic-llm.request\0${responseEventId}\0${requestId}`,
     AGENT_INPUT_EVENT_NAMESPACE,
   );

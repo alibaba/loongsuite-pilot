@@ -1,8 +1,4 @@
-import { z } from 'zod';
-import { ClientType } from '../../src/types/index.js';
-
-const clientTypeValues = Object.values(ClientType) as [string, ...string[]];
-const eventNameValues = [
+const EVENT_NAMES = new Set([
   'llm.request',
   'llm.response',
   'tool.call',
@@ -17,17 +13,36 @@ const eventNameValues = [
   'tool.approve',
   'agent.input',
   'other',
-] as const;
+]);
 
-export const AgentActivityEntrySchema = z.object({
-  time_unix_nano: z.string().regex(/^\d+$/),
-  observed_time_unix_nano: z.string().regex(/^\d+$/).optional(),
-  'event.id': z.string().min(1),
-  'event.name': z.enum(eventNameValues),
-  'user.id': z.string(),
-  'gen_ai.session.id': z.string(),
-  'gen_ai.agent.type': z.enum(clientTypeValues).or(z.string().min(1)),
-  'gen_ai.provider.name': z.string().min(1),
-}).passthrough();
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
 
-export type ValidatedAgentActivityEntry = z.infer<typeof AgentActivityEntrySchema>;
+function isDigitString(value: unknown): boolean {
+  return typeof value === 'string' && /^\d+$/.test(value);
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0;
+}
+
+export const AgentActivityEntrySchema = {
+  safeParse(value: unknown): { success: boolean } {
+    if (!isRecord(value)) return { success: false };
+    if (!isDigitString(value.time_unix_nano)) return { success: false };
+    if (value.observed_time_unix_nano !== undefined && !isDigitString(value.observed_time_unix_nano)) {
+      return { success: false };
+    }
+    if (!isNonEmptyString(value['event.id'])) return { success: false };
+    if (typeof value['event.name'] !== 'string' || !EVENT_NAMES.has(value['event.name'])) {
+      return { success: false };
+    }
+    if (typeof value['user.id'] !== 'string') return { success: false };
+    if (typeof value['gen_ai.session.id'] !== 'string') return { success: false };
+    // The previous zod schema accepted the ClientType enum or any non-empty string.
+    if (!isNonEmptyString(value['gen_ai.agent.type'])) return { success: false };
+    if (!isNonEmptyString(value['gen_ai.provider.name'])) return { success: false };
+    return { success: true };
+  },
+};
