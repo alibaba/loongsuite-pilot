@@ -8,7 +8,12 @@ import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
 
 describe('OpenCode V2 event-to-trace contract', () => {
-  it('converts two model steps and parallel tools into one trace without changing V1', async () => {
+  it.each([
+    { label: 'complete', cache: { read: 2, write: 0 }, input: 12 },
+    { label: 'missing', cache: undefined, input: 10 },
+    { label: 'null', cache: null, input: 10 },
+    { label: 'partial', cache: { read: 2 }, input: 12 },
+  ])('converts two model steps and parallel tools with $label cache into one trace', async ({ cache, input }) => {
     const raw: Record<string, unknown>[] = [];
     const events: Record<string, unknown>[] = [];
     const now = Date.now() - 20000;
@@ -25,7 +30,7 @@ describe('OpenCode V2 event-to-trace contract', () => {
     }
     add('session.step.streamed', { assistantMessageID: 'msg_first' });
     for (const id of ['tool_b', 'tool_a']) add('session.tool.success', { assistantMessageID: 'msg_first', id, content: [{ type: 'text', text: 'synthetic result' }] });
-    const tokens = { input: 10, output: 5, reasoning: 0, cache: { read: 2, write: 0 } };
+    const tokens = { input: 10, output: 5, reasoning: 0, ...(cache === undefined ? {} : { cache }) };
     add('session.step.ended', { assistantMessageID: 'msg_first', finish: 'tool-calls', tokens, cost: 0 });
     add('session.step.started', { assistantMessageID: 'msg_last', model, agent: 'build', started: now + events.length * 100 });
     add('session.text.ended', { assistantMessageID: 'msg_last', ordinal: 0, text: 'synthetic answer' });
@@ -66,7 +71,7 @@ describe('OpenCode V2 event-to-trace contract', () => {
       const tools = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL');
       expect(tools).toHaveLength(2);
       expect(tools.map(s => s.attributes['gen_ai.tool.call.id']).sort()).toEqual(['tool_a', 'tool_b']);
-      expect(llms.every(s => s.attributes['gen_ai.usage.input_tokens'] === 12)).toBe(true);
+      expect(llms.every(s => s.attributes['gen_ai.usage.input_tokens'] === input)).toBe(true);
       expect([...llms, ...tools].every(s => s.duration[0] * 1e9 + s.duration[1] > 0)).toBe(true);
       const ids = new Set(spans.map(s => s.spanContext().spanId));
       expect(ids.size).toBe(spans.length);

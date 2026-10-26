@@ -60,6 +60,25 @@ function errorFields(error) {
   };
 }
 
+function usageFields(tokens) {
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return {};
+  // Match V1's missing-counter defaults, but never turn invalid numbers into
+  // valid-looking usage. Missing the entire usage object remains unknown.
+  const count = value => value == null ? 0 : (Number.isFinite(value) && value >= 0 ? value : undefined);
+  const cacheRead = count(tokens.cache?.read);
+  const cacheWrite = count(tokens.cache?.write);
+  const input = count(tokens.input) + cacheRead + cacheWrite;
+  const output = count(tokens.output);
+  return Object.fromEntries(Object.entries({
+    "gen_ai.usage.input_tokens": input,
+    "gen_ai.usage.output_tokens": output,
+    "gen_ai.usage.total_tokens": input + output,
+    "gen_ai.usage.cache_read.input_tokens": cacheRead,
+    "gen_ai.usage.cache_creation.input_tokens": cacheWrite,
+    "gen_ai.usage.reasoning_tokens": count(tokens.reasoning),
+  }).filter(([, value]) => Number.isFinite(value) && value >= 0));
+}
+
 export async function setupV2(ctx, shared) {
   const sessions = new Map();
   const prompts = new Map();
@@ -227,31 +246,25 @@ export async function setupV2(ctx, shared) {
     }
     if (type === "session.step.ended" || type === "session.step.failed") {
       if (step.ended) return;
-      step.ended = true;
       const failed = type === "session.step.failed";
       const reason = failed ? "error" : ({ "tool-calls": "tool_calls", "content-filter": "content_filter" }[data.finish] ?? data.finish);
       const output = [...step.content.values()];
       for (const [id, tool] of step.tools) {
         if (tool.called) output.push({ type: "tool_call", id, name: tool.name, arguments: json(tool.input) });
       }
-      const tokens = data.tokens;
-      const input = tokens ? tokens.input + tokens.cache.read + tokens.cache.write : undefined;
       // Keep Pilot's established accounting: output excludes separately exposed reasoning.
       emit(event, state, "llm.response", {
         ...step.fields, "gen_ai.response.id": data.assistantMessageID,
         "gen_ai.response.model": step.fields["gen_ai.request.model"],
         ...(reason ? { "gen_ai.response.finish_reasons": [reason] } : {}),
         ...(output.length ? { "gen_ai.output.messages": [{ role: "assistant", parts: output, finish_reason: reason }] } : {}),
-        ...(tokens ? {
-          "gen_ai.usage.input_tokens": input, "gen_ai.usage.output_tokens": tokens.output,
-          "gen_ai.usage.total_tokens": input + tokens.output,
-          "gen_ai.usage.cache_read.input_tokens": tokens.cache.read,
-          "gen_ai.usage.cache_creation.input_tokens": tokens.cache.write,
-          "gen_ai.usage.reasoning_tokens": tokens.reasoning,
-        } : {}),
+        ...usageFields(data.tokens),
         ...(typeof data.cost === "number" ? { cost_usd: data.cost } : {}),
         ...errorFields(data.error),
       }, step.streamedAt ?? event.created);
+      // An adapter exception must not suppress execution-level closure. The
+      // shared writer is still fail-open; this is not a durable write receipt.
+      step.ended = true;
       // The next model step sees the actual preceding output and tool results.
       state.inputs = output.length ? [{ role: "assistant", parts: output }] : [];
       for (const [id, tool] of step.tools) {

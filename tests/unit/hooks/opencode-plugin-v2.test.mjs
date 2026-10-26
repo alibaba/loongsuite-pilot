@@ -74,6 +74,85 @@ describe('OpenCode V2 adapter', () => {
     expect(results.every(r => r['gen_ai.tool.call.duration'] > 0)).toBe(true);
   });
 
+  describe.each(['session.step.ended', 'session.step.failed'])('%s token tolerance', (type) => {
+    it.each([
+      ['missing cache', { input: 10, output: 5 }, 10, 0, 0],
+      ['null cache', { input: 10, output: 5, cache: null }, 10, 0, 0],
+      ['empty cache', { input: 10, output: 5, cache: {} }, 10, 0, 0],
+      ['read-only cache', { input: 10, output: 5, cache: { read: 20 } }, 30, 20, 0],
+      ['write-only cache', { input: 10, output: 5, cache: { write: 3 } }, 13, 0, 3],
+    ])('preserves output and finite usage with %s', async (_name, tokens, input, read, write) => {
+      const h = await harness(); await h.start();
+      await h.send('session.text.ended', { assistantMessageID: 'msg_one', ordinal: 0, text: 'retained output' });
+      const terminal = await h.send(type, {
+        assistantMessageID: 'msg_one', finish: 'stop', tokens,
+        ...(type.endsWith('failed') ? { error: { name: 'APIError' } } : {}),
+      });
+      await h.send(type, {}, terminal);
+      await h.send(type.endsWith('failed') ? 'session.execution.failed' : 'session.execution.succeeded');
+      const responses = h.records.filter(r => r['event.name'] === 'llm.response');
+      expect(responses).toHaveLength(1);
+      expect(h.records.filter(r => r['event.name'] === 'llm.request')).toHaveLength(1);
+      expect(h.records.filter(r => r['gen_ai.turn.end'])).toHaveLength(1);
+      expect(responses[0]).toMatchObject({
+        'gen_ai.step.id': 'msg_one', 'gen_ai.usage.input_tokens': input,
+        'gen_ai.usage.output_tokens': 5, 'gen_ai.usage.total_tokens': input + 5,
+        'gen_ai.usage.cache_read.input_tokens': read, 'gen_ai.usage.cache_creation.input_tokens': write,
+        'gen_ai.response.finish_reasons': [type.endsWith('failed') ? 'error' : 'stop'],
+      });
+      expect(responses[0]['gen_ai.output.messages'][0].parts[0].content).toBe('retained output');
+      expect(Object.entries(responses[0]).filter(([key]) => key.startsWith('gen_ai.usage.'))
+        .every(([, value]) => Number.isFinite(value) && value >= 0)).toBe(true);
+      expect(h.errors).toEqual([]);
+    });
+
+    it.each([undefined, null])('does not fabricate usage when tokens is %s', async tokens => {
+      const h = await harness(); await h.start();
+      await h.send('session.text.ended', { assistantMessageID: 'msg_one', ordinal: 0, text: 'unmetered output' });
+      await h.send(type, { assistantMessageID: 'msg_one', finish: 'stop', tokens });
+      await h.send('session.execution.succeeded');
+      const responses = h.records.filter(r => r['event.name'] === 'llm.response');
+      expect(responses).toHaveLength(1);
+      expect(responses[0]['gen_ai.output.messages'][0].parts[0].content).toBe('unmetered output');
+      expect(Object.keys(responses[0]).filter(key => key.startsWith('gen_ai.usage.'))).toEqual([]);
+      expect(h.errors).toEqual([]);
+    });
+  });
+
+  it.each([NaN, Infinity, -1, '10'])('omits invalid token counts (%s) and dependent totals', async invalid => {
+    const h = await harness(); await h.start();
+    await h.send('session.step.ended', {
+      assistantMessageID: 'msg_one', finish: 'stop',
+      tokens: { input: 10, output: 5, reasoning: invalid, cache: { read: invalid, write: 3 } },
+    });
+    const response = h.records.find(r => r['event.name'] === 'llm.response');
+    expect(response).toMatchObject({ 'gen_ai.usage.output_tokens': 5, 'gen_ai.usage.cache_creation.input_tokens': 3 });
+    for (const key of ['input_tokens', 'total_tokens', 'cache_read.input_tokens', 'reasoning_tokens']) {
+      expect(response).not.toHaveProperty(`gen_ai.usage.${key}`);
+    }
+    expect(h.errors).toEqual([]);
+  });
+
+  it('keeps a step open for execution termination if response emission throws', async () => {
+    const records = [];
+    let fail = true;
+    const h = await harness({ writeRecord(record) {
+      if (record['event.name'] === 'llm.response' && fail) {
+        fail = false; throw new Error('synthetic emission failure');
+      }
+      records.push(record);
+    } });
+    await h.start();
+    await h.send('session.step.ended', { assistantMessageID: 'msg_one', finish: 'stop', tokens: usage });
+    expect(h.errors).toHaveLength(1);
+    await h.send('session.execution.interrupted', { reason: 'user' });
+    const responses = records.filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+    expect(responses[0]['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(records.filter(r => r['gen_ai.turn.end'])).toHaveLength(1);
+  });
+
   it('keeps retries inside one turn and seals observed requests on interruption', async () => {
     const h = await harness(); await h.start();
     await h.send('session.step.failed', { assistantMessageID: 'msg_one', error: { name: 'APIError' } });
