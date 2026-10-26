@@ -6,6 +6,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
+import { buildNativeToolFragment, readNativeGraph } from './doubao-work-native.js';
 
 const FILE_PATTERN = /^saman_frontend_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -27,9 +28,13 @@ interface Checkpoint {
   pending: Record<string, PendingTurn>;
   completed: Record<string, number>;
   tools?: Record<string, PendingTool>;
+  roots?: Record<string, PendingTurn & { terminal: DoubaoLogEvent }>;
+  sandboxes?: Record<string, { actors: string[]; conflict?: boolean; updatedMs: number }>;
+  nativeCompleted?: Record<string, number>;
+  nativeScanCursor?: string;
 }
 
-export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string }
+export interface DoubaoWorkInputOptions extends InputOptions { logDir?: string; sessionsRoot?: string }
 
 /** Read-only macOS adapter for Doubao Work 2.33.10's frontend message lifecycle. */
 export class DoubaoWorkInput extends BaseInput {
@@ -38,6 +43,7 @@ export class DoubaoWorkInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
   private readonly logDir: string | undefined;
   private readonly scope: string;
+  private readonly sessionsRoot: string | undefined;
   private watcher: FSWatcher | undefined;
   private wakeup: ReturnType<typeof setTimeout> | undefined;
   private warnedFileLimit = false;
@@ -46,6 +52,7 @@ export class DoubaoWorkInput extends BaseInput {
     super(opts);
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : DoubaoWorkInput.defaultLogDir();
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
+    this.sessionsRoot = opts.sessionsRoot ?? (this.logDir ? path.resolve(this.logDir, '../../Default/.doubaowork/agent_mode/workspace/.sessions') : undefined);
   }
 
   static defaultLogDir(): string | undefined {
@@ -134,6 +141,9 @@ export class DoubaoWorkInput extends BaseInput {
     }
     const next: Checkpoint = JSON.parse(JSON.stringify(saved));
     next.tools ??= {};
+    next.roots ??= {};
+    next.sandboxes ??= {};
+    next.nativeCompleted ??= {};
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
     let remainingBytes = CYCLE_BYTES;
@@ -213,7 +223,10 @@ export class DoubaoWorkInput extends BaseInput {
     for (const event of events) this.consume(next, event);
     // Consume the whole source window first, including rotated/out-of-order tool
     // records. A partial scan must not finalize requests ahead of unread tools.
-    if (drained) for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
+    if (drained) {
+      for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
+      await this.completeNative(next, entries);
+    }
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
     const selected = new Set(names);
@@ -223,6 +236,9 @@ export class DoubaoWorkInput extends BaseInput {
     compact(next.completed, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
     const droppedTools = compact(next.tools!, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
     if (droppedTools) this.logger.warn('Doubao Work unmatched local tools expired or exceeded capacity', { tools: droppedTools });
+    compact(next.roots, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
+    compact(next.sandboxes, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
+    compact(next.nativeCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
     this.setState({ extra: { doubaoWork: next } });
     return entries;
   }
@@ -230,6 +246,17 @@ export class DoubaoWorkInput extends BaseInput {
   private consume(
     state: Checkpoint, event: DoubaoLogEvent,
   ): void {
+    if (event.command) {
+      if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;
+      const box = state.sandboxes![event.command.sandboxId] ?? { actors: [], updatedMs: Date.now() };
+      if (!box.actors.includes(event.command.agentId)) {
+        if (box.actors.length >= 64) box.conflict = true;
+        else box.actors.push(event.command.agentId);
+      }
+      box.updatedMs = Date.now();
+      state.sandboxes![event.command.sandboxId] = box;
+      return;
+    }
     if (event.tool) {
       if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;
       const key = JSON.stringify([event.tool.sandboxId, event.tool.id]);
@@ -284,9 +311,56 @@ export class DoubaoWorkInput extends BaseInput {
       const omitted = matched.length - (complete.length - 2) / 2;
       if (omitted) this.logger.warn('Doubao Work local tools lack a complete unambiguous in-request boundary; omitted', { tools: omitted });
       entries.push(...complete);
+      // Keep the actual root boundary for late child fragments. The sandbox
+      // producer supplies request identity; native graph files supply ancestry.
+      const priorRoot = state.roots![pending.turnId];
+      if (!priorRoot || priorRoot.queryMs === pending.queryMs) state.roots![pending.turnId] = {
+        ...pending, conversationId: pending.terminal.conversationId ?? pending.conversationId, terminal: pending.terminal,
+      };
       delete state.pending[key];
       state.completed[key] = Date.now();
       for (const [toolKey] of matched) delete state.tools![toolKey];
+    }
+  }
+
+  private async completeNative(state: Checkpoint, entries: AgentActivityEntry[]): Promise<void> {
+    if (!this.sessionsRoot) return;
+    let scannedConversation: string | undefined;
+    let graph: Awaited<ReturnType<typeof readNativeGraph>>;
+    let considered = 0;
+    const pendingTools = Object.entries(state.tools ?? {});
+    const after = pendingTools.findIndex(([key]) => key === state.nativeScanCursor);
+    const ordered = after < 0 ? pendingTools : [...pendingTools.slice(after + 1), ...pendingTools.slice(0, after + 1)];
+    for (const [key, tool] of ordered) {
+      if (++considered > MAX_TOOLS) break;
+      if (state.nativeCompleted![key] !== undefined) { delete state.tools![key]; continue; }
+      if (tool.conflict || !tool.start?.tool || !tool.end?.tool || !tool.start.turnId) continue;
+      const sandbox = state.sandboxes![tool.start.tool.sandboxId];
+      if (!sandbox || sandbox.conflict || !sandbox.actors.includes(tool.start.turnId)) continue;
+      const rootActors = sandbox.actors.filter(actor => !/^[mos]_[a-zA-Z0-9]+$/.test(actor));
+      if (rootActors.length !== 1) continue;
+      const root = state.roots![rootActors[0]];
+      if (!root || !root.conversationId || root.turnId === tool.start.turnId) continue;
+      // At most one bounded native conversation scan per collection cycle.
+      if (scannedConversation && scannedConversation !== root.conversationId) continue;
+      if (!scannedConversation) {
+        scannedConversation = root.conversationId;
+        state.nativeScanCursor = key;
+        try { graph = await readNativeGraph(this.sessionsRoot, root.conversationId); }
+        catch { this.logger.warn('Doubao Work native graph temporarily unavailable; preserving child tools'); }
+      }
+      if (!graph) continue;
+      const visited = new Set<string>();
+      let actor = tool.start.turnId;
+      while (actor !== graph.main && graph.edges[actor] && sandbox.actors.includes(actor) && !visited.has(actor)) {
+        visited.add(actor); actor = graph.edges[actor].parent;
+      }
+      if (actor !== graph.main) continue;
+      const fragment = buildNativeToolFragment(this.scope, root, graph, { start: tool.start, end: tool.end }, Date.now());
+      if (!fragment.length) continue;
+      entries.push(...fragment);
+      state.nativeCompleted![key] = Date.now();
+      delete state.tools![key];
     }
   }
 }

@@ -1,4 +1,4 @@
-# 豆包工作任务与本地工具可观测（实验性）
+# 豆包工作任务、本地工具与子 Agent 观测（实验性）
 
 `doubao-work` 被动读取 macOS 豆包工作的前端日志，不向客户端注入 Hook、插件或连接器，不修改登录状态和设置。协议基线为 DoubaoWork 2.33.10；普通豆包、Windows 和云端内部执行不在本阶段支持范围内。
 
@@ -27,14 +27,29 @@ Agent type/framework 为 `doubao-work`，Agent system 为 `doubao`，provider �
 | 本地工具 | 精确匹配前端 `toolcall` 的 `received` 与 `execution_settled`，输出 `tool.call` / `tool.result` 和 AGENT 下的 TOOL Span；支持并行配对与采集中途重启 |
 | 所选技能/伙伴 | 原生 `mention_skill_list` / `mention_partner_list` 的受限标识数组，分别写入 `loongsuite.doubao_work.selected_skills` / `selected_partners`；仅表示该请求的选择上下文 |
 | Skill 实际加载 | 当前日志未提供可验证的独立加载起止，不把选中技能解释为 `skill.use` 或 SKILL/TOOL Span |
-| 云端工具及子 Agent | 已实测 `create_agent` → organizer → 两个并行子 Agent；本地轨迹有调用与父子 ID，但缺少执行时间及可靠轮次关联，不生成猜测的云端 TOOL/AGENT Span |
+| 子 Agent 本地执行片段 | 原生 sandbox actor 关联本次主请求；trajectory 中成对 `create_agent` 调用/结果证明祖先关系；每对本地工具回调生成独立子 AGENT 及祖先观测 Span，支持嵌套、复用、晚到和 checkpoint 恢复 |
+| 完整云端子 Agent 生命周期 | 仍缺少所有子 Agent 的完整执行起止；纯云端计算或无成对本地工具回调的 Agent 不生成生命周期 Span |
 | 独立“工作伙伴”页面 | 独立的 aily 云端任务入口；本地客户端消息日志不覆盖其任务生命周期，不声称支持其 Trace |
 
 本地工具时间表示客户端收到调用到本地执行结算的观察区间，包含分发/确认等待，不等于云端模型发起到接收结果的全链路耗时。原生工具名、调用 ID、受限状态与正的毫秒耗时被保留；不读取命令、参数、输出或原始错误。`success` 只表示原生本地执行结算状态，不推断业务结果或 Bash 命令退出码。
 
 TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` 标识这个边界。由于未观察到模型与 React 步骤，Trace 为 ENTRY → AGENT → TOOL，不补造 STEP/LLM。通用 validator 仅针对这个明确标识和 Doubao framework 接受 TOOL 直接挂 AGENT；其他 Agent 的 STEP/LLM 检查保持严格。该边界也明确不包含工具参数，缺少参数按源不适用记录。旧 validator 若要求 STEP → TOOL 或无条件要求参数，会报告契约不兼容；验收同时保留原始失败结果与本候选公开契约校验，普通工具的参数检查不放宽。
 
-缺少一端、ID/工具名冲突、没有唯一请求归属、超出客户端请求时间的后台调用均省略，记录有界告警。云端 `calculator`、`web.fetch`、`create_agent` 等仅在无时间的轨迹中出现时不生成工具耗时。子 Agent 的复用、嵌套、晚到完成和重启不能由普通任务 Trace 证明。
+普通任务内工具缺少一端、ID/工具名冲突、没有唯一请求归属或超出客户端请求时间时省略。能以原生 sandbox 与委派图唯一关联的子工具，可独立导出晚到片段；其他后台调用不补推归属。云端 `calculator`、`web.fetch`、`create_agent` 等仅在无时间的轨迹中出现时不生成工具耗时。子 Agent 验收需分别覆盖复用、嵌套、晚到与重启，不能仅由普通任务 Trace 证明。
+
+## 子 Agent 的时间与父子关系
+
+原生数据源增加 `Default/.doubaowork/agent_mode/workspace/.sessions/<conversation>/agents/*/system/trajectory.jsonl`，相对客户端数据根目录解析。只读本次日志已经确认的 conversation，不扫描历史会话。`create_agent` 必须有同调用 ID 的成功结果，结果的 `parent_id` 必须匹配调用者文件；循环、多父、半行、临时不可读或超限时保留工具状态并等待。
+
+同一 sandbox 的原生命令 actor 必须有且仅有一个已采集主请求，子工具及各层祖先 actor 必须存在于该 sandbox，委派图必须能回到唯一 main Agent。关联不依靠目录排序、文件 mtime 或“离哪个请求最近”。主请求结束后保留其上下文，root AGENT 使用确定性 Span ID。
+
+每次成对本地工具调用生成一个不可变观测片段，拓扑为 ENTRY → 主 AGENT → organizer AGENT → 子 AGENT → TOOL。没有可测量的委派工具起止，因此不插入 `create_agent` TOOL。片段起止精确保留该工具的原生 `received` / `execution_settled` 微秒时间；祖先 Span 覆盖相同的后代工具区间，并标记 `timing_basis=descendant_local_tool`，叶子为 `own_local_tool`。
+
+`observation_scope=native_local_tool_fragment`、`agent_boundary=native_local_tool_interval`、`fragment_id`、原生 Agent/parent/thread/creation-call ID，以及 `relation_basis=native_create_agent_ancestry` 标识此契约。这里表达原生创建祖先关系，不推断不可见的逐次云端 dispatch。一个 Agent 可有多个观测片段；这不是完整 Agent 调用总时长，也不能用祖先区间重复累计工具耗时。每片段有独立 turn ID 和确定性事件/Span ID；恢复或日志重投不移动原有时间。请求级选择技能不继承到子 Agent。
+
+`assignment.md` 的需求时间及 `board.md` 的全局更新时间不能普遍充当子 Agent 执行起止，线程面板补收也不是云端执行时间。这些字段没有被用来制造 Span。通用 validator 只对带完整原生关系与片段标识的 Doubao AGENT → AGENT 边接受异步结束，其他关系仍检查父子时间包含。
+
+每轮最多扫描一个已知会话、64 个 Agent、每文件 2 MiB、总计 8 MiB，最大祖先深度 8；源失败不删除已完成配对。主请求与 sandbox 上下文各保留 512 项/24 小时，片段去重最多 4096 项/7 天。缺少原生证据则不生成子 Span。
 
 ## 配置与发现
 
@@ -51,6 +66,6 @@ TOOL 的 `loongsuite.doubao_work.tool_boundary=client_received_to_execution_sett
 
 使用目录变更唤醒和轮询兜底。checkpoint 保留完整行 offset、文件边界指纹、待关联请求和已完成轮次。支持半行、重启、轮转、原地截断后增长和临时不可读；首次启用前的请求不从单独结束事件重建。单次读取最多 1 MiB，每轮最多 8 MiB，最多读取最新 128 个日志文件；超长行跳过至换行。待关联请求最多 512 个/24 小时，工具配对状态最多 4096 个/24 小时，完成去重最多 4096 个/7 天。超出边界不承诺完整采集或 exactly-once。
 
-日志缺失、协议变更或无稳定关联/时间时，不生成猜测的 Trace。适配器只保留受限身份与状态字段，不读取浏览器 Cookie、认证缓存、消息数据库或用户工作文件。仍遵循统一身份处理与脱敏配置。
+日志缺失、协议变更或无稳定关联/时间时，不生成猜测的 Trace。适配器只提取受限身份、状态与原生委派关系，不读取浏览器 Cookie、认证缓存或消息数据库；原生轨迹中的 Prompt、命令、输出及错误正文不进入事件或 Span。仍遵循统一身份处理与脱敏配置。
 
-验收使用真实 GUI 新交互，设置 `E2E_JSONL_STRICT=1` 和 `E2E_JSONL_AGENT_FILTER=doubao-work`。任务及本地工具校验通过不代表云端 LLM、Skill 加载或子 Agent Trace 接入通过；云端回读与本机源、事件、Span 和接收端验证分别记录。
+验收使用真实 GUI 新交互，设置 `E2E_JSONL_STRICT=1` 和 `E2E_JSONL_AGENT_FILTER=doubao-work`。任务及本地工具校验通过不代表云端 LLM、Skill 加载或完整子 Agent 生命周期接入通过；云端回读与本机源、事件、Span 和接收端验证分别记录。

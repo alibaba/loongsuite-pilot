@@ -282,6 +282,7 @@ const SCHEMA_MAP = {
 const SPAN_KIND_META = {
   ENTRY:     { namePattern: 'enter_ai_application_system', operationName: 'enter', multiplicity: 'exactly_one_or_external_delegated_fragment', parentKind: null, allowedChildren: ['AGENT'] },
   AGENT:     { namePattern: '{gen_ai.operation.name} {gen_ai.agent.name}', operationName: ['invoke_agent', 'create_agent'], multiplicity: 'one_root_per_entry_and_optional_delegated_agents', parentKind: ['ENTRY', 'TOOL'], allowedChildren: ['STEP'],
+               nativeObservationException: 'Doubao native_local_tool_fragment with native creation-call, Agent/parent, fragment and root-request identities may be a direct AGENT child; its native_local_tool_interval is a partial observation, not full invocation timing.',
                aggregation: { 'gen_ai.usage.input_tokens': { rule: 'sum', source: 'LLM', scope: 'own_agent_execution_excluding_delegated_agents' }, 'gen_ai.usage.output_tokens': { rule: 'sum', source: 'LLM', scope: 'own_agent_execution_excluding_delegated_agents' }, 'gen_ai.usage.total_tokens': { rule: 'sum', source: 'LLM', scope: 'own_agent_execution_excluding_delegated_agents' } },
                externalParentContext: 'A missing parent TOOL is allowed only with a valid parentSpanId and explicit parent invocation or parent tool call ID; report the local fragment boundary.' },
   STEP:      { namePattern: 'react step', operationName: 'react', multiplicity: 'one_or_more', parentKind: 'AGENT', allowedChildren: ['LLM', 'TOOL'],
@@ -365,7 +366,7 @@ function buildRulesJson(sections, operationKindMapping) {
       { id: 'time.non_zero_duration', applies: 'all', severity: 'error' },
       { id: 'time.no_step_overlap', applies: 'STEP', severity: 'error', scope: 'direct_steps_of_each_agent' },
       { id: 'time.parent_contains_children', applies: 'all', severity: 'error', toleranceMs: 0,
-        exception: 'TOOL to delegated AGENT requires causal start ordering but permits the child to finish after the tool.' },
+        exception: 'TOOL to delegated AGENT, or explicitly evidenced Doubao native local-tool AGENT ancestry, requires causal start ordering but permits asynchronous child completion.' },
       { id: 'time.reasonable_duration', applies: 'LLM', maxMs: 600000, severity: 'warn' },
       { id: 'time.chronological_steps', applies: 'STEP', severity: 'warn', scope: 'direct_steps_of_each_agent' },
     ],

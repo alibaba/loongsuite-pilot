@@ -30,3 +30,18 @@ export function doubaoToolLine(
     tcid: 'synthetic-call', agent_id: 'synthetic-turn', ...data,
   } })}", source: local-file-local-tools-sse-wiring.ts (0)\n`;
 }
+
+export function doubaoCommandLine(agent: string, sandbox: string, elapsedMs = 50): string {
+  return doubaoToolLine({ name: 'sandbox', agent_id: agent, sand_box_id: sandbox, command_id: `command-${agent}` }, elapsedMs)
+    .replace('"event":"toolcall"', '"event":"command"');
+}
+
+const createdAgent = (call: string, child: string, parent: string, thread: string) => [
+  { role: 'assistant', tool_calls: [{ id: call, function: { name: 'create_agent', arguments: { subtask: 'SYNTHETIC_PRIVATE' } } }] },
+  { role: 'tool', tool_call_id: call, content: `create_agent ok\nagent_id: ${child}\nparent_id: ${parent}\nthread_id: ${thread}\nagent_type: organizer\nsubtask: SYNTHETIC_PRIVATE` },
+].map(row => JSON.stringify(row)).join('\n') + '\n';
+
+export const DOUBAO_NATIVE_FILES = {
+  m_nativeMain: createdAgent('native-root-create', 'o_nativeOrg', 'main_agent', '101'),
+  o_nativeOrg: createdAgent('native-child-create', 's_nativeLeaf', 'o_nativeOrg', '102'),
+};

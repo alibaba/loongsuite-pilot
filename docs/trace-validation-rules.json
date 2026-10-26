@@ -194,7 +194,8 @@
           }
         ]
       },
-      "externalParentContext": "A missing parent TOOL is allowed only with a valid parentSpanId and explicit parent invocation or parent tool call ID; report the local fragment boundary."
+      "externalParentContext": "A missing parent TOOL is allowed only with a valid parentSpanId and explicit parent invocation or parent tool call ID; report the local fragment boundary.",
+      "nativeObservationException": "Doubao native_local_tool_fragment with native creation-call, Agent/parent, fragment and root-request identities may be a direct AGENT child; its native_local_tool_interval is a partial observation, not full invocation timing."
     },
     "STEP": {
       "namePattern": "react step",
@@ -703,7 +704,7 @@
       "applies": "all",
       "severity": "error",
       "toleranceMs": 0,
-      "exception": "TOOL to delegated AGENT requires causal start ordering but permits the child to finish after the tool."
+      "exception": "TOOL to delegated AGENT, or explicitly evidenced Doubao native local-tool AGENT ancestry, requires causal start ordering but permits asynchronous child completion."
     },
     {
       "id": "time.reasonable_duration",

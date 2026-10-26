@@ -18,6 +18,7 @@ export interface DoubaoLogEvent {
   clientOutcome?: 'received' | 'ended' | 'error' | 'cancelled';
   selectedSkills?: string[];
   selectedPartners?: string[];
+  command?: { agentId: string; sandboxId: string; id: string };
   tool?: {
     id: string;
     name: string;
@@ -73,6 +74,14 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
     let object;
     try { object = JSON.parse(line.slice(begin + 1, end + 1)); } catch { return undefined; }
     const data = object?.data;
+    if (object?.event === 'command' && data?.name === 'sandbox' && data.status === 'received') {
+      const agentId = identifier(data.agent_id);
+      const sandboxId = identifier(data.sand_box_id);
+      const id = identifier(data.command_id);
+      const timeNano = sourceTime(line, fileName);
+      return agentId && sandboxId && id && timeNano
+        ? { name: 'native_sandbox_actor', timeNano, command: { agentId, sandboxId, id } } : undefined;
+    }
     if (object?.event !== 'toolcall' || !data || typeof data !== 'object' || Array.isArray(data)) return undefined;
     const name = identifier(data.name);
     const sandboxId = identifier(data.sandbox_id);
@@ -135,6 +144,11 @@ export interface DoubaoToolPair { start: DoubaoLogEvent; end: DoubaoLogEvent }
 
 export function doubaoDigest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/** A reserved root AGENT identity lets late native fragments link after export. */
+export function doubaoRootAgentSpanId(traceId: string): string {
+  return doubaoDigest(`doubao-work:root-agent:${traceId}`).slice(0, 16);
 }
 
 /** A client-message observation deliberately contains no synthetic model step. */

@@ -10,6 +10,7 @@ import {
   hasModelToolSpanForOutput,
   isRuntimeSkillLoadSpan,
   isDoubaoLocalTool,
+  isDoubaoNativeAgent,
   unmatchedToolsForLlmOutput,
   validateMessageField,
   validateSemantic,
@@ -101,6 +102,58 @@ describe('semantic.tool_matches_llm_output runtime Skill handling', () => {
 const traceRules = JSON.parse(readFileSync(new URL('../../docs/trace-validation-rules.json', import.meta.url), 'utf8'));
 
 describe('Doubao local execution observation contract', () => {
+  function nativeTrace() {
+    const attrs = { 'gen_ai.framework': 'doubao-work', 'gen_ai.session.id': 'session' };
+    const raw = ['ENTRY', 'AGENT', 'AGENT', 'AGENT', 'TOOL'].map((kind, i) => ({
+      traceId: 'c'.repeat(32), spanId: String(i + 1).padStart(16, '0'),
+      ...(i ? { parentSpanId: String(i).padStart(16, '0') } : {}),
+      name: `${kind}-${i}`, startTimeUnixNano: String(i < 2 ? 1000 : 5000), endTimeUnixNano: String(i < 2 ? 2000 : 6000),
+      attributes: { ...attrs, 'gen_ai.span.kind': kind,
+        ...(i === 1 ? { 'gen_ai.turn.id': 'root-request', 'loongsuite.doubao_work.observation_scope': 'client_message' } : {}),
+        ...(i === 2 || i === 3 ? {
+          'gen_ai.agent.id': i === 2 ? 'o_native' : 's_native',
+          'gen_ai.agent.parent.id': i === 2 ? 'm_native' : 'o_native',
+          'loongsuite.doubao_work.root_agent_id': 'm_native',
+          'loongsuite.doubao_work.root_turn_id': 'root-request',
+          'loongsuite.doubao_work.observation_scope': 'native_local_tool_fragment',
+          'loongsuite.doubao_work.agent_boundary': 'native_local_tool_interval',
+          'loongsuite.doubao_work.relation_basis': 'native_create_agent_ancestry',
+          'loongsuite.doubao_work.native_creation_call_id': `native-create-${i}`,
+          'loongsuite.doubao_work.fragment_id': 'f'.repeat(64),
+          'loongsuite.doubao_work.timing_basis': i === 2 ? 'descendant_local_tool' : 'own_local_tool',
+        } : {}),
+        ...(i === 4 ? { 'gen_ai.tool.call.id': 'native-tool', 'loongsuite.doubao_work.tool_boundary': 'client_received_to_execution_settled' } : {}),
+      },
+    }));
+    return [...buildTraces(raw).values()][0];
+  }
+  test('accepts explicit native ancestry and late fragment timing without inventing a dispatch TOOL', () => {
+    const trace = nativeTrace();
+    expect(isDoubaoNativeAgent(trace.spans[2], trace.spans[1])).toBe(true);
+    expect(isDoubaoNativeAgent(trace.spans[3], trace.spans[2])).toBe(true);
+    expect(validateStructure(trace).filter(check => check.status === 'error')).toEqual([]);
+    expect(validateTime(trace, traceRules).filter(check => check.status === 'error')).toEqual([]);
+  });
+  test.each([
+    ['gen_ai.framework', 'codex'],
+    ['gen_ai.agent.parent.id', 'unrelated'],
+    ['loongsuite.doubao_work.agent_boundary', 'unproven'],
+    ['loongsuite.doubao_work.observation_scope', 'cloud_execution'],
+    ['loongsuite.doubao_work.fragment_id', 'not-an-id'],
+    ['loongsuite.doubao_work.native_creation_call_id', ''],
+    ['loongsuite.doubao_work.timing_basis', 'file_mtime'],
+    ['loongsuite.doubao_work.relation_basis', 'guessed_dispatch'],
+    ['loongsuite.doubao_work.root_turn_id', 'different-root'],
+  ])('rejects mismatched native evidence: %s', (key, value) => {
+    const trace = nativeTrace(); trace.spans[2].attributes[key] = value;
+    expect(isDoubaoNativeAgent(trace.spans[2], trace.spans[1])).toBe(false);
+    expect(validateStructure(trace).some(check => check.status === 'error')).toBe(true);
+    expect(validateTime(trace, traceRules).some(check => check.id === 'time.parent_contains_children' && check.status === 'error')).toBe(true);
+  });
+  test('rejects a different native parent fragment despite matching persistent Agent IDs', () => {
+    const trace = nativeTrace(); trace.spans[3].attributes['loongsuite.doubao_work.fragment_id'] = 'e'.repeat(64);
+    expect(isDoubaoNativeAgent(trace.spans[3], trace.spans[2])).toBe(false);
+  });
   function sample(framework = 'doubao-work', marker = true) {
     const attrs = { 'gen_ai.framework': framework, 'gen_ai.session.id': 'session' };
     const raw = ['ENTRY', 'AGENT', 'TOOL'].map((kind, i) => ({

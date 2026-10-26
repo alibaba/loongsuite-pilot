@@ -60,6 +60,29 @@ export function isDoubaoLocalTool(tool, parent) {
     && parent.attributes?.['gen_ai.framework'] === 'doubao-work';
 }
 
+// Native create_agent ancestry is observable without a timed dispatch TOOL.
+// These AGENTs explicitly describe a local tool fragment, not a full invocation.
+export function isDoubaoNativeAgent(child, parent) {
+  const attrs = child?.attributes || {};
+  const parentAttrs = parent?.attributes || {};
+  if (child?._kind !== 'AGENT' || parent?._kind !== 'AGENT'
+    || attrs['gen_ai.framework'] !== 'doubao-work' || parentAttrs['gen_ai.framework'] !== 'doubao-work'
+    || attrs['loongsuite.doubao_work.observation_scope'] !== 'native_local_tool_fragment'
+    || attrs['loongsuite.doubao_work.agent_boundary'] !== 'native_local_tool_interval'
+    || attrs['loongsuite.doubao_work.relation_basis'] !== 'native_create_agent_ancestry'
+    || !['own_local_tool', 'descendant_local_tool'].includes(attrs['loongsuite.doubao_work.timing_basis'])
+    || !/^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
+    || !/^[0-9a-f]{64}$/.test(attrs['loongsuite.doubao_work.fragment_id'] || '')) return false;
+  if (parentAttrs['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment') {
+    return attrs['gen_ai.agent.parent.id'] === parentAttrs['gen_ai.agent.id']
+      && attrs['loongsuite.doubao_work.fragment_id'] === parentAttrs['loongsuite.doubao_work.fragment_id'];
+  }
+  return parentAttrs['loongsuite.doubao_work.observation_scope'] === 'client_message'
+    && attrs['gen_ai.agent.parent.id'] === attrs['loongsuite.doubao_work.root_agent_id']
+    && Boolean(attrs['loongsuite.doubao_work.root_agent_id'])
+    && attrs['loongsuite.doubao_work.root_turn_id'] === parentAttrs['gen_ai.turn.id'];
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -206,7 +229,12 @@ function hasExternalDelegationParent(span, spanMap) {
     !/^0+$/.test(span.parentSpanId) &&
     !spanMap.has(span.parentSpanId) &&
     Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
-      span.attributes?.['gen_ai.subagent.parent_tool_call.id']);
+      span.attributes?.['gen_ai.subagent.parent_tool_call.id'] ||
+      (span.attributes?.['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment'
+        && span.attributes?.['loongsuite.doubao_work.relation_basis'] === 'native_create_agent_ancestry'
+        && /^[0-9a-f]{64}$/.test(span.attributes?.['loongsuite.doubao_work.fragment_id'] || '')
+        && span.attributes?.['loongsuite.doubao_work.native_creation_call_id']
+        && span.attributes?.['agent.pilot.parent.turn.id']));
 }
 
 // Stop at delegated AGENT boundaries: their identity, usage and STEP sequence
@@ -257,9 +285,9 @@ export function validateStructure(trace) {
 
   for (const a of agents) {
     const external = hasExternalDelegationParent(a, spanMap);
-    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external
+    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external || isDoubaoNativeAgent(a, spanMap.get(a.parentSpanId))
       ? pass('structure.agent_under_entry')
-      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, or explicit external delegation context`, a.spanId, a.name));
+      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, evidenced native observation, or explicit external delegation context`, a.spanId, a.name));
     if (external) {
       checks.push(warn('structure.external_parent_context',
         `delegation parent ${a.parentSpanId} is outside this local trace fragment`, a.spanId, a.name));
@@ -479,7 +507,7 @@ export function validateTime(trace, rules) {
     for (const c of children) {
       const cStart = BigInt(c.startTimeUnixNano);
       const cEnd = BigInt(c.endTimeUnixNano);
-      const delegatedAgent = s._kind === 'TOOL' && c._kind === 'AGENT';
+      const delegatedAgent = (s._kind === 'TOOL' && c._kind === 'AGENT') || isDoubaoNativeAgent(c, s);
       if (cStart < pStart || (!delegatedAgent && cEnd > pEnd)) {
         checks.push(error('time.parent_contains_children',
           `child ${c.name} [${cStart}-${cEnd}] outside parent ${s.name} [${pStart}-${pEnd}]`,
