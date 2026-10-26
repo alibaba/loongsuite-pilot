@@ -9,11 +9,14 @@ import { DoubaoWorkInput } from '../../src/inputs/doubao-work/doubao-work-input.
 import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoLine, doubaoToolLine } from '../helpers/doubao-work-fixture.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../helpers/doubao-work-fixture.js';
 
-class ProbeInput extends DoubaoWorkInput { baseline() { return this.collect(); } }
+class ProbeInput extends DoubaoWorkInput {
+  constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
+  baseline() { return this.collect(); }
+}
 
-it('routes a late native execution snapshot through masked installed-pipeline contracts without a second ENTRY', async () => {
+it('routes native first output and late execution snapshots through the masked pipeline without inventing child LLMs', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-execution-pipeline-'));
   const logs = path.join(root, 'logs'), sessionsRoot = path.join(root, 'native'), snapshotRoot = path.join(root, 'snapshots');
   await mkdir(logs); const source = path.join(logs, DOUBAO_FILE); await writeFile(source, '');
@@ -33,8 +36,9 @@ it('routes a late native execution snapshot through masked installed-pipeline co
     const meta = { conversation_id: conv, send_local_message_id: query };
     await appendFile(source, doubaoLine('on_message_session_start', meta, 10) + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
       + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 3500)
+      + doubaoFirstOutputLine({ prompt: 'SYNTHETIC_PRIVATE_PROMPT' })
       + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000) + doubaoLine('on_message_session_end', meta));
-    await vi.waitFor(() => expect(spans).toHaveLength(2));
+    await vi.waitFor(() => expect(spans).toHaveLength(4));
     for (const [id, content] of Object.entries(DOUBAO_NATIVE_FILES)) {
       const dir = path.join(sessionsRoot, conv, 'agents', id, 'system'); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), content);
     }
@@ -46,7 +50,7 @@ it('routes a late native execution snapshot through masked installed-pipeline co
       startedAtMs: DOUBAO_EPOCH + 3500, endedAtMs: DOUBAO_EPOCH + 5500 };
     const parentDir = path.join(snapshotRoot, '123', conv, parent.executionKey); await mkdir(parentDir, { recursive: true });
     await writeFile(path.join(parentDir, `${parent.agentId}.json`), JSON.stringify({ execution: parent }));
-    await vi.waitFor(() => expect(spans).toHaveLength(4)); await manager.stopAll(); await output.flush();
+    await vi.waitFor(() => expect(spans).toHaveLength(6)); await manager.stopAll(); await output.flush();
     const native = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === execution.executionKey)!;
     const rootAgent = spans.find(s => s.attributes['gen_ai.agent.id'] === 'doubao-work' && s.attributes['gen_ai.span.kind'] === 'AGENT')!;
     const nativeParent = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === parent.executionKey)!;
@@ -55,7 +59,12 @@ it('routes a late native execution snapshot through masked installed-pipeline co
     expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
     expect(native.startTime).toEqual([Math.floor(execution.startedAtMs / 1000), (execution.startedAtMs % 1000) * 1_000_000]);
     const events = (await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    expect(events).toHaveLength(9); expect(new Set(events.map(e => e['event.id'])).size).toBe(9);
+    expect(events).toHaveLength(11); expect(new Set(events.map(e => e['event.id'])).size).toBe(11);
+    const step = spans.find(s => s.attributes['gen_ai.span.kind'] === 'STEP')!;
+    const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM'); expect(llms).toHaveLength(1);
+    expect(step.parentSpanId).toBe(rootAgent.spanContext().spanId);
+    expect(llms[0].parentSpanId).toBe(step.spanContext().spanId);
+    expect(llms[0].attributes['gen_ai.user.id']).toBe('synthetic-employee');
     expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
     expect(native.attributes['loongsuite.doubao_work.parent_resolution']).toBe('same_query_native_execution');
     expect(JSON.stringify({ events, attrs: spans.map(s => s.attributes) })).not.toContain('SYNTHETIC_PRIVATE');

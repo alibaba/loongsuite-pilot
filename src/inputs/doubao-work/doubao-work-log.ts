@@ -4,7 +4,9 @@ import type { AgentActivityEntry } from '../../types/index.js';
 const EVENTS = new Set([
   'on_message_session_start', 'on_message_sending_start',
   'on_message_sending_end', 'general_agent_message_id_mapping', 'on_message_session_end',
+  'flow_message_time',
 ]);
+const EVENT_PREFILTER = /"eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time)"/;
 const MIN_EPOCH_MS = Date.UTC(2020, 0, 1);
 const MAX_EPOCH_MS = Date.UTC(2100, 0, 1);
 
@@ -18,6 +20,7 @@ export interface DoubaoLogEvent {
   clientOutcome?: 'received' | 'ended' | 'error' | 'cancelled';
   selectedSkills?: string[];
   selectedPartners?: string[];
+  firstOutput?: { eventId: string; durationMs: number; answerId: string; messageId: string };
   command?: { agentId: string; sandboxId: string; id: string };
   tool?: {
     id: string;
@@ -99,7 +102,9 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
       tool: { id, name, sandboxId, phase: received ? 'received' : 'settled', ...(status ? { status } : {}) },
     };
   }
-  if (!line.includes('[office-api-logger]')) return undefined;
+  // Most SDK lines are unrelated and may carry large payloads. Reject them
+  // before JSON allocation; the parsed event name is still checked below.
+  if (!line.includes('[office-api-logger]') || !EVENT_PREFILTER.test(line)) return undefined;
   const begin = line.indexOf('{"version":');
   const end = line.lastIndexOf('}');
   if (begin < 0 || end < begin) return undefined;
@@ -110,6 +115,19 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
   const timeNano = sourceTime(line, fileName);
   if (!timeNano) return undefined;
   const meta = object.meta as Record<string, unknown>;
+  if (object.eventName === 'flow_message_time') {
+    const turnId = identifier(meta.task_session_id);
+    const eventId = identifier(meta.event_instance_id);
+    const answerId = identifier(meta.answer_id), messageId = identifier(meta.message_id);
+    const durationMs = meta.duration;
+    if (!turnId || !eventId || !answerId || !messageId
+      || !eventId.startsWith(`${turnId}:sync:`) || !/^\d+:1$/.test(eventId.slice(`${turnId}:sync:`.length))
+      || meta.metric_scene !== 'sse' || meta.ev_name !== 'cot_first_token' || meta.ev_type !== 'query_duration'
+      || meta.task_stage !== 'sync' || meta.is_recovery !== false || meta.occurrence_index !== 1
+      || typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs <= 0 || durationMs > 86_400_000) return undefined;
+    return { name: 'native_first_model_output', turnId, timeNano,
+      firstOutput: { eventId, durationMs, answerId, messageId } };
+  }
   // These are per-request SDK sessions, not persistent conversations.
   const turnId = identifier(meta.chat_session_id);
   const queryMs = epoch(meta.query_send_timestamp);
@@ -138,6 +156,8 @@ export interface DoubaoPendingTurn {
   updatedMs: number;
   selectedSkills?: string[];
   selectedPartners?: string[];
+  firstOutput?: DoubaoLogEvent;
+  firstOutputConflict?: boolean;
 }
 
 export interface DoubaoToolPair { start: DoubaoLogEvent; end: DoubaoLogEvent }
@@ -151,7 +171,8 @@ export function doubaoRootAgentSpanId(traceId: string): string {
   return doubaoDigest(`doubao-work:root-agent:${traceId}`).slice(0, 16);
 }
 
-/** A client-message observation deliberately contains no synthetic model step. */
+/** Local tools and an optional first model-output observation. Missing native
+ * model boundaries never become inferred subsequent React rounds. */
 export function buildDoubaoTaskEvents(
   scope: string, pending: DoubaoPendingTurn, terminal: DoubaoLogEvent, observedMs: number,
   tools: DoubaoToolPair[] = [],
@@ -222,6 +243,32 @@ export function buildDoubaoTaskEvents(
       },
     ];
   });
+  const modelEvents: AgentActivityEntry[] = [];
+  const mark = !pending.firstOutputConflict && pending.firstOutput;
+  if (mark && mark.turnId === pending.turnId && mark.firstOutput) {
+    const output = mark.firstOutput;
+    // Installed producer: duration = SSE receiveTimestamp - querySendTimestamp.
+    // The logger header is only an upper bound; polling/render time is unused.
+    const response = start + BigInt(output.durationMs) * 1_000_000n;
+    if (response <= BigInt(mark.timeNano) && response <= end) {
+      const stepId = doubaoDigest(`${identity}:first-output:${output.eventId}`);
+      const attributes = {
+        ...common, span_id: stepId.slice(0, 16), 'gen_ai.step.id': stepId,
+        'loongsuite.doubao_work.observation_scope': 'native_first_model_output',
+        'loongsuite.doubao_work.llm_boundary': 'client_submit_to_first_cot_receipt',
+        'loongsuite.doubao_work.timing_basis': 'native_query_send_plus_sse_duration',
+        'loongsuite.doubao_work.llm_completeness': 'first_output_only',
+        'loongsuite.doubao_work.native_event_instance_id': output.eventId,
+        'loongsuite.doubao_work.native_answer_id': output.answerId,
+        'loongsuite.doubao_work.native_query_message_id': output.messageId,
+        'loongsuite.doubao_work.client_time_to_first_cot_ms': output.durationMs,
+      };
+      modelEvents.push(
+        { ...attributes, 'event.name': 'llm.request', 'event.id': doubaoDigest(`${stepId}:request`) },
+        { ...attributes, 'event.name': 'llm.response', 'event.id': doubaoDigest(`${stepId}:response`), time_unix_nano: response.toString() },
+      );
+    }
+  }
   return [
     {
       ...common, 'event.id': doubaoDigest(`${identity}:start`),
@@ -229,7 +276,7 @@ export function buildDoubaoTaskEvents(
       // Existing converter contract: a content-free input boundary, not a prompt.
       'gen_ai.input.messages_delta': [],
     },
-    ...toolEvents.sort((a, b) => BigInt(a.time_unix_nano) < BigInt(b.time_unix_nano) ? -1 : 1),
+    ...[...modelEvents, ...toolEvents].sort((a, b) => BigInt(a.time_unix_nano) < BigInt(b.time_unix_nano) ? -1 : 1),
     {
       ...common, time_unix_nano: end.toString(),
       'event.id': doubaoDigest(`${identity}:end`), 'gen_ai.turn.end': true,
