@@ -65,7 +65,8 @@ function addRecordToolEvents(span: Span, records: EventLogRecord[]): void {
     for (const key of ['gen_ai.tool.call.id', 'gen_ai.tool.name', `${PREFIX}native_decision_id`, `${PREFIX}local_executor_tool_name`]) {
       if (typeof call[key] === 'string') common[key] = call[key] as string;
     }
-    const args = call['gen_ai.tool.call.arguments'], output = result['gen_ai.tool.call.result'];
+    const rawArgs = call['gen_ai.tool.call.arguments'], output = result['gen_ai.tool.call.result'];
+    const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? JSON.stringify(rawArgs) : rawArgs;
     span.addEvent('gen_ai.tool.call', { ...common, ...(typeof args === 'string' ? { 'gen_ai.tool.call.arguments': args } : {}) }, nanoTime(call.time_unix_nano));
     span.addEvent('gen_ai.tool.result', { ...common,
       ...(typeof output === 'string' ? { 'gen_ai.tool.call.result': output } : {}),
@@ -109,7 +110,7 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     [`${PREFIX}trace_parent_resolution`]: hasLocalParent ? 'enclosing_local_execution' : 'owning_client_request',
   };
   for (const [key, value] of Object.entries(start)) {
-    if ((key.startsWith(PREFIX) || ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id'].includes(key))
+    if ((key.startsWith(PREFIX) || ['gen_ai.agent.id', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id'].includes(key))
       && typeof value === 'string') attributes[key] = value;
   }
   if (typeof start['user.id'] === 'string') attributes['gen_ai.user.id'] = start['user.id'];

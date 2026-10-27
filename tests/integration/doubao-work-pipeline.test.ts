@@ -181,6 +181,9 @@ it('captures current I/O and exact tool content through InputManager masking bef
     expect(agent.attributes['gen_ai.output.messages']).toContain('CURRENT_ANSWER');
     expect(agent.events[1].attributes?.['gen_ai.tool.call.result']).toContain('CURRENT_TOOL');
     expect(agent.events[0].attributes?.['gen_ai.tool.call.arguments']).toContain('synthetic-file');
+    const canonicalCall = events.trim().split('\n').map(line => JSON.parse(line)).find(event => event['event.name'] === 'tool.call');
+    expect(typeof canonicalCall['gen_ai.tool.call.arguments']).toBe('object');
+    expect(canonicalCall['gen_ai.tool.call.arguments'].file_path).toBe('synthetic-file');
     expect(JSON.stringify({ events, spans: spans.map(span => ({ attributes: span.attributes, events: span.events })) })).not.toContain(secret);
   } finally { vi.restoreAllMocks(); await manager.stopAll(); await output.shutdown(); await rm(root, { recursive: true, force: true }); }
 });

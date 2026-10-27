@@ -237,7 +237,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 （`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
 见[支持范围与配置](doubao-work.md)。
 
-本地工具产生配对的 `tool.call` / `tool.result` 日志；有可靠归属时附为请求 AGENT 或本地 TASK 的 Span events。完整原生 sandbox 执行映射为 TASK，以真实本地父执行或 Span Link 关联；不制造 TOOL、STEP、LLM 或子 AGENT 生命周期。需求及最终回复在有本次关联证据时采集并统一脱敏；模型与 Token 不猜测。所选技能/伙伴只表示选择上下文。
+本地工具产生配对的 `tool.call` / `tool.result` 日志；有可靠归属时附为请求 AGENT 或本地 TASK 的 Span events。完整原生 sandbox 执行在请求区间内映射为 TASK，按精确请求或本地父执行归属组成树；区间外后台执行仅保留日志，不拉长请求；不制造 TOOL、STEP、LLM 或子 AGENT 生命周期。需求及最终回复在有本次关联证据时采集并统一脱敏；模型与 Token 不猜测。所选技能/伙伴只表示选择上下文。
 
 ## Finish Reasons
 

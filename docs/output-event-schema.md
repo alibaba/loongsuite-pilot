@@ -251,7 +251,7 @@ Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_w
 (`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
 See [scope and configuration](doubao-work.md).
 
-Local tools produce paired `tool.call` / `tool.result` logs and, when ownership is proven, timestamped Span events on the client AGENT or local TASK. Complete native sandbox executions map to TASKs with evidenced local parents or Span Links. No TOOL, STEP, LLM or delegated AGENT lifecycle is fabricated. Current assignments/final answers are captured only with request correlation and normal masking; model/usage remain unknown. Selected Skill/partner IDs describe request context only.
+Local tools produce paired `tool.call` / `tool.result` logs and, when ownership is proven, timestamped Span events on the client AGENT or local TASK. Contained native sandbox executions map to TASKs under evidenced owning requests or local parents; out-of-request background facts remain logs without stretching the request. No TOOL, STEP, LLM or delegated AGENT lifecycle is fabricated. Current assignments/final answers are captured only with request correlation and normal masking; model/usage remain unknown. Selected Skill/partner IDs describe request context only.
 
 ## Finish Reasons
 

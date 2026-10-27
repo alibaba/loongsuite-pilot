@@ -41,7 +41,10 @@ export function parseNativeContent(files: Record<string, string>, assignments: R
           const raw = call.function?.arguments;
           let args: string | undefined;
           if (raw !== undefined) {
-            try { args = text(JSON.stringify(typeof raw === 'string' ? JSON.parse(raw) : raw)); }
+            try {
+              const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = text(JSON.stringify(parsed));
+            }
             catch { /* Non-JSON arguments are not promoted into a JSON field. */ }
           }
           result.calls[call.id] = { actor, name: call.function.name, decisionId, recordIndex: index,
@@ -102,7 +105,7 @@ export function enrichNativeToolEvents<T extends Record<string, unknown>>(entrie
     return { ...entry, 'gen_ai.tool.name': call.name,
       'loongsuite.doubao_work.local_executor_tool_name': entry['gen_ai.tool.name'],
       'loongsuite.doubao_work.native_decision_id': call.decisionId,
-      ...(entry['event.name'] === 'tool.call' && call.arguments !== undefined ? { 'gen_ai.tool.call.arguments': call.arguments } : {}),
+      ...(entry['event.name'] === 'tool.call' && call.arguments !== undefined ? { 'gen_ai.tool.call.arguments': JSON.parse(call.arguments) } : {}),
       ...(entry['event.name'] === 'tool.result' && call.result !== undefined ? { 'gen_ai.tool.call.result': call.result } : {}),
     };
   });
@@ -119,7 +122,7 @@ export function nativeToolObservations(pairs: DoubaoToolPair[], content?: Native
     return [{ callId: call.id, name: matched?.name ?? call.name, executorName: call.name,
       actor: pair.start.turnId, startNano: pair.start.timeNano, endNano: pair.end.timeNano, status: end.status,
       ...(matched?.decisionId ? { decisionId: matched.decisionId } : {}),
-      ...(matched?.arguments === undefined ? {} : { arguments: matched.arguments }),
+      ...(matched?.arguments === undefined ? {} : { arguments: JSON.parse(matched.arguments) }),
       ...(matched?.result === undefined ? {} : { result: matched.result }),
     }];
   });
