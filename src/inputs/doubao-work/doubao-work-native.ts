@@ -147,13 +147,14 @@ export function buildNativeToolEvents(
   }
   const common = buildDoubaoTaskEvents(scope, root, root.terminal, observedMs)[0];
   if (!common) return [];
-  const { 'gen_ai.turn.start': _start, 'gen_ai.input.messages_delta': _input, ...base } = common;
+  const { 'gen_ai.turn.start': _start, 'gen_ai.input.messages_delta': _input, 'gen_ai.turn.id': _turn, ...base } = common;
   const identity = doubaoDigest(JSON.stringify([scope, common.trace_id, call.sandboxId, actor, call.id]));
   const metadata = {
     ...base, 'gen_ai.agent.id': actor, 'gen_ai.agent.name': actor,
     'gen_ai.tool.name': call.name, 'gen_ai.tool.call.id': call.id, 'gen_ai.tool.type': 'function',
     'loongsuite.doubao_work.observation_scope': 'native_local_tool',
     'loongsuite.doubao_work.trace_role': 'log_only',
+    'loongsuite.doubao_work.root_turn_id': root.turnId,
     'loongsuite.doubao_work.tool_boundary': 'client_received_to_execution_settled',
     'loongsuite.doubao_work.native_creator_agent_id': graph.edges[actor].parent,
     'loongsuite.doubao_work.native_thread_id': graph.edges[actor].threadId,

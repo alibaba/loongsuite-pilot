@@ -82,8 +82,8 @@ function addRecordToolEvents(span: Span, records: EventLogRecord[]): void {
  * parent for contained work; never stretch it to accommodate background work.
  */
 function convertLocalExecution(records: EventLogRecord[], options: Options) {
-  const start = records.find(record => record['gen_ai.turn.start'] === true);
-  const end = records.find(record => record['gen_ai.turn.end'] === true);
+  const start = records.find(record => record[`${PREFIX}local_execution_phase`] === 'start');
+  const end = records.find(record => record[`${PREFIX}local_execution_phase`] === 'end');
   const traceId = start?.trace_id, spanId = start?.[`${PREFIX}local_execution_span_id`];
   if (!start || !end || !options.observationTracer || !validTime(start.time_unix_nano) || !validTime(end.time_unix_nano)
     || BigInt(end.time_unix_nano) <= BigInt(start.time_unix_nano)
@@ -108,9 +108,10 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     [`${PREFIX}observation_scope`]: 'native_sandbox_execution',
     [`${PREFIX}trace_completeness`]: 'local_execution_observation',
     [`${PREFIX}trace_parent_resolution`]: hasLocalParent ? 'enclosing_local_execution' : 'owning_client_request',
+    ...(typeof start[`${PREFIX}root_turn_id`] === 'string' ? { 'gen_ai.turn.id': start[`${PREFIX}root_turn_id`] as string } : {}),
   };
   for (const [key, value] of Object.entries(start)) {
-    if ((key.startsWith(PREFIX) || ['gen_ai.agent.id', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id'].includes(key))
+    if ((key.startsWith(PREFIX) || ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id'].includes(key))
       && typeof value === 'string') attributes[key] = value;
   }
   if (typeof start['user.id'] === 'string') attributes['gen_ai.user.id'] = start['user.id'];

@@ -441,7 +441,7 @@ export class DoubaoWorkInput extends BaseInput {
       const fragment = buildNativeToolEvents(this.scope, root, graph, { start: tool.start, end: tool.end }, Date.now());
       if (!fragment.length) continue;
       const observations = enrichNativeToolEvents(fragment.filter(entry => entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
-        .map(entry => ({ ...entry, 'gen_ai.turn.id': root.turnId,
+        .map(entry => ({ ...entry, 'loongsuite.doubao_work.root_turn_id': root.turnId,
           'loongsuite.doubao_work.trace_role': 'log_only' })), graph.content);
       for (const event of observations) {
         delete event.parent_span_id;
@@ -496,7 +496,7 @@ export class DoubaoWorkInput extends BaseInput {
       const io = nativeTaskContent(graph.content, execution.agentId, root.queryMs,
         (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id));
       for (const event of events) {
-        event['gen_ai.turn.id'] = root.turnId;
+        delete event['gen_ai.turn.id'];
         delete event['gen_ai.agent.scope'];
       }
       events[0]['agent.doubao_work.tool_observations'] = observations;

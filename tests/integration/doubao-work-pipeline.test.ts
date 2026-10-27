@@ -1,5 +1,7 @@
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { JSONL_VALIDATOR_JS } from '../../scripts/e2e/lib/e2e-scenarios.mjs';
 import { tmpdir } from 'node:os';
 import { expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -56,6 +58,7 @@ it('routes native first output and late execution snapshots through the masked p
     const nativeParent = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === parent.executionKey)!;
     expect(native.parentSpanId).toBe(nativeParent.spanContext().spanId);
     expect(native.attributes['gen_ai.span.kind']).toBe('TASK');
+    expect(native.attributes['gen_ai.agent.name']).toBe(rootAgent.attributes['gen_ai.agent.name']);
     expect(nativeParent.parentSpanId).toBe(rootAgent.spanContext().spanId);
     expect(nativeParent.links[0].context.spanId).toBe(rootAgent.spanContext().spanId);
     expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
@@ -63,6 +66,14 @@ it('routes native first output and late execution snapshots through the masked p
     const events = (await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(events).toHaveLength(10); expect(new Set(events.map(e => e['event.id'])).size).toBe(10);
     expect(events.filter(e => e['event.name'] === 'agent.input')).toHaveLength(3);
+    expect(events.filter(e => e['gen_ai.turn.start'] === true)).toHaveLength(1);
+    expect(events.filter(e => e['gen_ai.turn.end'] === true)).toHaveLength(1);
+    expect(events.filter(e => e['loongsuite.doubao_work.local_execution_phase'] === 'start' && e['event.name'] === 'other')).toHaveLength(2);
+    const validatorPath = path.join(root, 'jsonl-validator.cjs');
+    await writeFile(validatorPath, JSONL_VALIDATOR_JS);
+    const strict = spawnSync(process.execPath, [validatorPath], { encoding: 'utf8', env: { ...process.env, _JV_LOG_DIR: outputDir, E2E_JSONL_STRICT: '1', E2E_JSONL_AGENT_FILTER: 'doubao-work' } });
+    expect(strict.error).toBeUndefined();
+    expect(strict.status, strict.stdout + strict.stderr).toBe(0);
     expect(spans.filter(s => ['STEP', 'LLM', 'TOOL'].includes(String(s.attributes['gen_ai.span.kind'])))).toEqual([]);
     expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
     expect(native.attributes['loongsuite.doubao_work.parent_resolution']).toBe('same_query_native_execution');

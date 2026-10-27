@@ -134,10 +134,14 @@ export function buildNativeExecutionEvents(
   const identity = doubaoDigest(JSON.stringify([scope, traceId, e.executionKey]));
   const pending = { ...root, firstOutput: undefined, turnId: e.agentId, queryMs: e.startedAtMs, selectedSkills: undefined, selectedPartners: undefined };
   const terminal = { ...root.terminal, queryMs: e.startedAtMs, timeNano: (BigInt(e.endedAtMs) * 1_000_000n).toString(), clientOutcome: 'ended' as const };
-  return buildDoubaoTaskEvents(scope, pending, terminal, observedMs).map((event, index) => ({
-    ...event, trace_id: traceId, 'event.id': doubaoDigest(`${identity}:event:${index}`),
-    'gen_ai.turn.id': root.turnId,
-    'gen_ai.agent.id': e.agentId, 'gen_ai.agent.name': e.agentId,
+  return buildDoubaoTaskEvents(scope, pending, terminal, observedMs).map((event, index) => {
+    const { 'gen_ai.turn.start': _start, 'gen_ai.turn.end': _end, 'gen_ai.turn.id': _turn, ...observation } = event;
+    return {
+    ...observation, trace_id: traceId, 'event.id': doubaoDigest(`${identity}:event:${index}`),
+    'loongsuite.doubao_work.local_execution_phase': index === 0 ? 'start' : 'end',
+    // The client product name is known; a human-readable native actor name is
+    // not. Keep the exact actor ID without presenting it as an invented name.
+    'gen_ai.agent.id': e.agentId, 'gen_ai.agent.name': rootEvents[0]['gen_ai.agent.name'],
     'loongsuite.doubao_work.native_creator_agent_id': edge.parent,
     ...(parent ? { parent_span_id: nativeExecutionSpanId(scope, parent.executionKey) } : {}),
     'loongsuite.doubao_work.local_execution_span_id': nativeExecutionSpanId(scope, e.executionKey),
@@ -160,5 +164,6 @@ export function buildNativeExecutionEvents(
     'loongsuite.doubao_work.root_turn_id': root.turnId,
     'loongsuite.doubao_work.root_agent_id': graph.main,
     resourceAttributes: { ...event.resourceAttributes, 'loongsuite.doubao_work.observation_scope': 'native_sandbox_execution' },
-  }));
+  };
+  });
 }

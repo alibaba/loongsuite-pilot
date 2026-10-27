@@ -1013,6 +1013,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // The passive Doubao adapter observes client message completion, not a
     // model finish reason. Only its explicit terminal boundary closes the turn.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'doubao-work') {
+      if (entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution') {
+        return entry['event.name'] === 'other' && entry['loongsuite.doubao_work.local_execution_phase'] === 'end';
+      }
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
     // Incremental Hermes producers emit errors/stop per API invocation. Only

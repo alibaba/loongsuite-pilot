@@ -133,8 +133,8 @@ describe('Doubao Work passive client-message input', () => {
     await save(parent);
     const events = (await restarted.poll()).filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution');
     expect(events).toHaveLength(4);
-    const childStart = events.find(e => e['gen_ai.agent.id'] === child.agentId && e['gen_ai.turn.start'] === true)!;
-    const parentStart = events.find(e => e['gen_ai.agent.id'] === parent.agentId && e['gen_ai.turn.start'] === true)!;
+    const childStart = events.find(e => e['gen_ai.agent.id'] === child.agentId && e['loongsuite.doubao_work.local_execution_phase'] === 'start')!;
+    const parentStart = events.find(e => e['gen_ai.agent.id'] === parent.agentId && e['loongsuite.doubao_work.local_execution_phase'] === 'start')!;
     expect(childStart.parent_span_id).toBe(parentStart['loongsuite.doubao_work.local_execution_span_id']);
     expect(childStart['loongsuite.doubao_work.native_parent_execution_id']).toBe(parent.executionKey);
     expect(childStart.time_unix_nano).toBe((BigInt(child.startedAtMs) * 1_000_000n).toString());
@@ -227,7 +227,7 @@ describe('Doubao Work passive client-message input', () => {
     const child = reused.find(e => e['loongsuite.doubao_work.trace_role'] === 'log_only')!;
     expect(child['gen_ai.agent.id']).toBe(observations[0]['gen_ai.agent.id']);
     expect(child.trace_id).not.toBe(observations[0].trace_id);
-    expect(child['gen_ai.turn.id']).not.toBe(observations[0]['gen_ai.turn.id']);
+    expect(child['loongsuite.doubao_work.root_turn_id']).not.toBe(observations[0]['loongsuite.doubao_work.root_turn_id']);
   });
 
   it('does not assign a child to a sandbox containing two root actors', async () => {

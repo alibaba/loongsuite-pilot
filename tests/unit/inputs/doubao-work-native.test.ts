@@ -30,7 +30,8 @@ describe('Doubao native identity evidence and log-only tool observations', () =>
     expect(entries[0].time_unix_nano).toBe(pair.start.timeNano);
     expect(entries[1].time_unix_nano).toBe(pair.end.timeNano);
     expect(entries[1]['gen_ai.tool.call.duration']).toBe(0.124);
-    expect(entries[0]['gen_ai.turn.id']).toBe(root.turnId);
+    expect(entries[0]['gen_ai.turn.id']).toBeUndefined();
+    expect(entries[0]['loongsuite.doubao_work.root_turn_id']).toBe(root.turnId);
     expect(entries[0]['loongsuite.doubao_work.trace_role']).toBe('log_only');
     expect(entries.every(e => e['gen_ai.turn.start'] === undefined && e['gen_ai.turn.end'] === undefined)).toBe(true);
     expect(entries).toEqual(buildNativeToolEvents('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now()).map((entry, i) => ({ ...entry, observed_time_unix_nano: entries[i].observed_time_unix_nano })));

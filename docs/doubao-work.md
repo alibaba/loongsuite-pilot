@@ -55,3 +55,5 @@ Windows falls back to `~/AppData/Local`; macOS retains microsecond and Windows m
 The Agent definition is detection-only. Disabling the Agent/listener stops collection. Runtime Skill loading, the separate cloud partner page and complete cloud invocation lifecycles remain uncovered.
 
 Fresh native acceptance separately verifies source, canonical JSONL, OTLP and CMS, including I/O isolation, tool ID/time/ownership, unique TASKs and asynchronous links. The generic Trace validator retains strict ENTRY → AGENT, AGENT → STEP and STEP → LLM / TOOL rules, with no Doubao exemptions. Structural validity of the observed subset does not imply full ReAct coverage.
+
+Local observations use `local_execution_phase` and `root_turn_id`, without client `gen_ai.turn.start/end` or a synthetic client turn.

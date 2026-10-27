@@ -42,6 +42,8 @@ describe('native persisted sandbox execution evidence', () => {
   it('uses genuine execution start/end and stable execution IDs independently of poll time', () => {
     const events = buildNativeExecutionEvents('scope', root, graph, execution, [execution], DOUBAO_EPOCH + 50000);
     expect(events).toHaveLength(2);
+    expect(events.map(e => e['loongsuite.doubao_work.local_execution_phase'])).toEqual(['start', 'end']);
+    expect(events.every(e => e['gen_ai.turn.id'] === undefined && e['gen_ai.turn.start'] === undefined && e['gen_ai.turn.end'] === undefined)).toBe(true);
     expect(events.map(e => e.time_unix_nano)).toEqual([execution.startedAtMs, execution.endedAtMs].map(t => (BigInt(t) * 1_000_000n).toString()));
     expect(events[0]['loongsuite.doubao_work.local_execution_span_id']).toBe(nativeExecutionSpanId('scope', execution.executionKey));
     expect(events[0].parent_span_id).toBeUndefined();

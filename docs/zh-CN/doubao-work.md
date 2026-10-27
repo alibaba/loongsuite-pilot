@@ -61,3 +61,5 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 的选中不证明实际加载；独立工作伙伴页面、云端完整 Agent 生命周期仍无覆盖。
 
 真实验收分别核对源日志、标准 JSONL、OTLP 和 CMS 回读，确认 I/O 不串请求、工具 ID/时间/归属、TASK 唯一性与异步 Link。通用 Trace validator 保持 ENTRY → AGENT、AGENT → STEP、STEP → LLM / TOOL 的严格规则，不包含豆包例外。通过已输出数据的结构校验不代表完整 ReAct 覆盖，缺失层级必须单独报告。
+
+本地观测日志用 `local_execution_phase` 表示资源起止，以 `root_turn_id` 保留关联；不写客户端 `gen_ai.turn.start/end`，也不创建新的客户端 turn。
