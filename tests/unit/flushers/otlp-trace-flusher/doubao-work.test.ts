@@ -25,7 +25,7 @@ function localPair(actor = 'synthetic-turn', call = 'synthetic-call', start = 10
 }
 
 describe('Doubao Work truthful partial OTLP', () => {
-  it('keeps local tool facts on the real request without fabricating LLM or ReAct spans', async () => {
+  it('exports real local tool lifetimes without fabricating LLM or ReAct spans', async () => {
     const pair = localPair();
     const firstOutput = parseDoubaoLogLine(doubaoFirstOutputLine(), DOUBAO_FILE)!;
     const records = buildDoubaoTaskEvents('scope', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
@@ -35,17 +35,19 @@ describe('Doubao Work truthful partial OTLP', () => {
     records.at(-1)!['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: 'synthetic final answer' }] }];
     const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
-      await flusher.sendBatch(records); await vi.waitFor(() => expect(spans).toHaveLength(2));
+      await flusher.sendBatch(records); await vi.waitFor(() => expect(spans).toHaveLength(3));
       const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
-      expect(agent.events.map(event => event.name)).toEqual(['gen_ai.tool.call', 'gen_ai.tool.result']);
-      expect(agent.events.map(event => nano(event.time).toString())).toEqual([pair.start.timeNano, pair.end.timeNano]);
+      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
+      expect(agent.events).toHaveLength(0);
+      expect(tool.parentSpanId).toBe(agent.spanContext().spanId);
+      expect([nano(tool.startTime).toString(), nano(tool.endTime).toString()]).toEqual([pair.start.timeNano, pair.end.timeNano]);
       expect(agent.attributes['gen_ai.input.messages']).toContain('synthetic user input');
       expect(agent.attributes['gen_ai.output.messages']).toContain('synthetic final answer');
-      expect(agent.attributes['loongsuite.doubao_work.trace_completeness']).toBe('client_request_and_local_events');
+      expect(agent.attributes['loongsuite.doubao_work.trace_completeness']).toBe('client_request_and_local_observations');
       expect(agent.attributes['loongsuite.doubao_work.client_time_to_first_cot_ms']).toBe(1000);
-      expect(spans.some(span => ['LLM', 'STEP', 'TOOL'].includes(String(span.attributes['gen_ai.span.kind'])))).toBe(false);
+      expect(spans.some(span => ['LLM', 'STEP'].includes(String(span.attributes['gen_ai.span.kind'])))).toBe(false);
       expect(JSON.stringify(spans.map(span => span.attributes))).not.toMatch(/gen_ai.request.model|gen_ai.usage/);
-      await flusher.flush(); expect(spans).toHaveLength(2);
+      await flusher.flush(); expect(spans).toHaveLength(3);
     } finally { await flusher.shutdown(); }
   });
 
@@ -66,7 +68,7 @@ describe('Doubao Work truthful partial OTLP', () => {
         if (execution === leaf) records[0]['agent.doubao_work.tool_observations'] = nativeToolObservations([pair]);
         await flusher.sendBatch(records);
       }
-      await vi.waitFor(() => expect(spans).toHaveLength(4));
+      await vi.waitFor(() => expect(spans).toHaveLength(5));
       const tasks = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TASK');
       expect(tasks).toHaveLength(2);
       expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
@@ -75,22 +77,28 @@ describe('Doubao Work truthful partial OTLP', () => {
       expect(organizer.parentSpanId).toBe(doubaoRootAgentSpanId(organizer.spanContext().traceId));
       expect(organizer.links[0].context.spanId).toBe(doubaoRootAgentSpanId(organizer.spanContext().traceId));
       expect(owner.parentSpanId).toBe(nativeExecutionSpanId('scope', parent.executionKey));
-      expect(owner.events.map(event => event.attributes?.['gen_ai.tool.call.id'])).toEqual(['child-tool', 'child-tool']);
+      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
+      expect(tool.parentSpanId).toBe(owner.spanContext().spanId);
+      expect(tool.attributes['gen_ai.tool.call.id']).toBe('child-tool');
+      expect(owner.events).toHaveLength(0);
       expect(organizer.events).toHaveLength(0);
       const rules = JSON.parse(readFileSync(new URL('../../../../docs/trace-validation-rules.json', import.meta.url), 'utf8'));
       const actualTree = [...buildTraces(createReadableSpanToOtlpSpanJsonArray(spans).map(line => JSON.parse(line))).values()][0];
-      expect([...validateStructure(actualTree), ...validateTime(actualTree, rules)].filter(check => check.status === 'error')).toEqual([]);
-      const diagnostics = createReadableSpanToOtlpSpanJsonArray([organizer, owner]).map(line => JSON.parse(line));
+      // The complete Pilot ReAct contract remains strict. This observation
+      // source cannot supply the missing STEP/LLM; do not relax that validator.
+      expect(validateStructure(actualTree).filter(check => check.status === 'error').map(check => check.id)).toEqual(['structure.tool_under_step']);
+      expect(validateTime(actualTree, rules).filter(check => check.status === 'error')).toEqual([]);
+      const diagnostics = createReadableSpanToOtlpSpanJsonArray([organizer, owner, tool]).map(line => JSON.parse(line));
       expect(diagnostics[0].links[0].spanId).toBe(organizer.links[0].context.spanId);
-      expect(diagnostics[1].events[0].timeUnixNano).toBe(pair.start.timeNano);
-      expect(diagnostics[1].events[1].attributes['gen_ai.tool.call.id']).toBe('child-tool');
+      expect(diagnostics[2].startTimeUnixNano).toBe(pair.start.timeNano);
+      expect(diagnostics[2].attributes['gen_ai.tool.call.id']).toBe('child-tool');
       for (const e of [parent, leaf]) {
         const task = tasks.find(span => span.attributes['loongsuite.doubao_work.native_execution_id'] === e.executionKey)!;
         expect(nano(task.startTime)).toBe(BigInt(e.startedAtMs) * 1_000_000n);
         expect(nano(task.endTime)).toBe(BigInt(e.endedAtMs) * 1_000_000n);
         expect(task.status.code).toBe(0);
       }
-      await flusher.flush(); expect(spans).toHaveLength(4);
+      await flusher.flush(); expect(spans).toHaveLength(5);
     } finally { await flusher.shutdown(); }
   });
 
@@ -131,7 +139,7 @@ describe('Doubao Work truthful partial OTLP', () => {
     } finally { await flusher.shutdown(); }
   });
 
-  it('bounds tool Span events and reports the collected facts omitted from the Span', async () => {
+  it('bounds local TOOL spans and reports facts omitted from the trace', async () => {
     const pairs = Array.from({ length: 65 }, (_, i) => localPair('synthetic-turn', `bounded-${i}`, 1000 + i * 2, 1001 + i * 2));
     const records = buildDoubaoTaskEvents('scope', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
       conversationId: '12345678', updatedMs: DOUBAO_EPOCH },
@@ -140,7 +148,8 @@ describe('Doubao Work truthful partial OTLP', () => {
     try {
       await flusher.sendBatch(records);
       const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
-      expect(agent.events).toHaveLength(128);
+      expect(agent.events).toHaveLength(0);
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')).toHaveLength(64);
       expect(agent.attributes['loongsuite.doubao_work.tool_observations_count']).toBe(64);
       expect(agent.attributes['loongsuite.doubao_work.tool_observations_not_in_span']).toBe(1);
       expect(records.filter(record => record['event.name'] === 'tool.call')).toHaveLength(65);

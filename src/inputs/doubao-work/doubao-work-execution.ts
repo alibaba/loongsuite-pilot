@@ -105,6 +105,16 @@ export function nativeExecutionSpanId(scope: string, executionKey: string): stri
   return doubaoDigest(JSON.stringify(['doubao-native-execution', scope, executionKey])).slice(0, 16);
 }
 
+/** One tool interval must not be copied into overlapping reconnect lifetimes. */
+export function isUniqueNativeToolOwner(execution: NativeExecution, siblings: NativeExecution[], startNano: string, endNano: string): boolean {
+  const owners = siblings.filter(candidate => candidate.agentId === execution.agentId
+    && candidate.conversationId === execution.conversationId && candidate.queryMessageId === execution.queryMessageId
+    && candidate.sandboxId === execution.sandboxId
+    && BigInt(candidate.startedAtMs) * 1_000_000n <= BigInt(startNano)
+    && BigInt(candidate.endedAtMs) * 1_000_000n >= BigInt(endNano));
+  return owners.length === 1 && owners[0].executionKey === execution.executionKey;
+}
+
 /** One local TASK observation per genuine native execution key. This is not
  * a cloud Agent invocation. Missing local ancestors remain causal links. */
 export function buildNativeExecutionEvents(

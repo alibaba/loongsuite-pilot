@@ -157,7 +157,7 @@ it('routes watched native-shaped metadata through identity, mask, JSONL projecti
 });
 
 
-it('captures current I/O and exact tool content through InputManager masking before Span event serialization', async () => {
+it('captures current I/O and masks exact tool content before TOOL span serialization', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-content-pipeline-'));
   const logs = path.join(root, 'source'), sessionsRoot = path.join(root, 'native'), outputDir = path.join(root, 'output');
   await mkdir(logs); const source = path.join(logs, DOUBAO_FILE); await writeFile(source, '');
@@ -185,13 +185,15 @@ it('captures current I/O and exact tool content through InputManager masking bef
       + doubaoToolLine({ tcid: 'current-call', name: 'Read' }, 100)
       + doubaoToolLine({ toolCallID: 'current-call', name: 'Read', phase: 'execution_settled', status: 'success' }, 200)
       + doubaoLine('on_message_session_end'));
-    await vi.waitFor(() => expect(spans).toHaveLength(2)); await manager.stopAll(); await output.flush();
+    await vi.waitFor(() => expect(spans).toHaveLength(3)); await manager.stopAll(); await output.flush();
     const events = await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8');
     const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
     expect(agent.attributes['gen_ai.input.messages']).toContain('CURRENT_INPUT');
     expect(agent.attributes['gen_ai.output.messages']).toContain('CURRENT_ANSWER');
-    expect(agent.events[1].attributes?.['gen_ai.tool.call.result']).toContain('CURRENT_TOOL');
-    expect(agent.events[0].attributes?.['gen_ai.tool.call.arguments']).toContain('synthetic-file');
+    const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
+    expect(tool.parentSpanId).toBe(agent.spanContext().spanId);
+    expect(tool.attributes['gen_ai.tool.call.result']).toContain('CURRENT_TOOL');
+    expect(tool.attributes['gen_ai.tool.call.arguments']).toContain('synthetic-file');
     const canonicalCall = events.trim().split('\n').map(line => JSON.parse(line)).find(event => event['event.name'] === 'tool.call');
     expect(typeof canonicalCall['gen_ai.tool.call.arguments']).toBe('object');
     expect(canonicalCall['gen_ai.tool.call.arguments'].file_path).toBe('synthetic-file');

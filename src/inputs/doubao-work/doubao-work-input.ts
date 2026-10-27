@@ -7,7 +7,7 @@ import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, isDoubaoPresentationInspection, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
 import { buildNativeToolEvents, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
-import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
+import { buildNativeExecutionEvents, isUniqueNativeToolOwner, readNativeExecutions } from './doubao-work-execution.js';
 import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations } from './doubao-work-content.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
@@ -494,7 +494,10 @@ export class DoubaoWorkInput extends BaseInput {
       const pairs = Object.entries(state.tools ?? {}).filter(([, tool]) => !tool.conflict && tool.start?.turnId === execution.agentId
         && tool.start.tool?.sandboxId === execution.sandboxId && tool.end?.tool
         && BigInt(tool.start.timeNano) >= BigInt(execution.startedAtMs) * 1_000_000n
-        && BigInt(tool.end.timeNano) <= BigInt(execution.endedAtMs) * 1_000_000n);
+        && BigInt(tool.end.timeNano) <= BigInt(execution.endedAtMs) * 1_000_000n
+        // Reconnects can produce overlapping resource lifetimes for one actor.
+        // A tool must have exactly one native owner, not be copied into both.
+        && isUniqueNativeToolOwner(execution, eligible, tool.start!.timeNano, tool.end!.timeNano));
       const events = buildNativeExecutionEvents(this.scope, root, graph, execution, eligible, Date.now());
       if (!events.length) continue;
       const observations = nativeToolObservations(pairs.map(([, tool]) => ({ start: tool.start!, end: tool.end! })), graph.content);

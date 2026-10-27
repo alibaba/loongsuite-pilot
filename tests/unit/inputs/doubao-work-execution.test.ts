@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildNativeExecutionEvents, nativeExecutionSpanId, parseNativeExecution, readNativeExecutions, type NativeExecution } from '../../../src/inputs/doubao-work/doubao-work-execution.js';
+import { buildNativeExecutionEvents, isUniqueNativeToolOwner, nativeExecutionSpanId, parseNativeExecution, readNativeExecutions, type NativeExecution } from '../../../src/inputs/doubao-work/doubao-work-execution.js';
 import { parseNativeGraph } from '../../../src/inputs/doubao-work/doubao-work-native.js';
 import { doubaoRootAgentSpanId } from '../../../src/inputs/doubao-work/doubao-work-log.js';
 import { DOUBAO_EPOCH, DOUBAO_NATIVE_FILES } from '../../helpers/doubao-work-fixture.js';
@@ -27,6 +27,19 @@ async function save(r: string, e = execution, account = '123') {
 }
 
 describe('native persisted sandbox execution evidence', () => {
+  it('requires a unique contained native lifetime for tools even across reconnects and reused actors', () => {
+    const start = String(BigInt(execution.startedAtMs + 100) * 1_000_000n), end = String(BigInt(execution.endedAtMs - 100) * 1_000_000n);
+    const second = { ...execution, executionKey: '00000000-0000-4000-8000-000000000009' };
+    expect(isUniqueNativeToolOwner(execution, [execution], start, end)).toBe(true);
+    expect(isUniqueNativeToolOwner(execution, [execution, second], start, end)).toBe(false);
+    expect(isUniqueNativeToolOwner(second, [execution, second], start, end)).toBe(false);
+    for (const different of [{ ...second, queryMessageId: 'another-query' }, { ...second, agentId: 'another-actor' },
+      { ...second, sandboxId: 'another-sandbox' }, { ...second, conversationId: '87654321' },
+      { ...second, startedAtMs: execution.endedAtMs + 1 }]) {
+      expect(isUniqueNativeToolOwner(execution, [execution, different], start, end)).toBe(true);
+    }
+    expect(isUniqueNativeToolOwner(execution, [execution], String(BigInt(execution.startedAtMs - 1) * 1_000_000n), end)).toBe(false);
+  });
   it('projects only bounded execution metadata, never account, file paths or contents', () => {
     const row = parseNativeExecution({ execution: { ...execution, userId: 'SYNTHETIC_PRIVATE' }, fileContents: 'SYNTHETIC_PRIVATE' });
     expect(row).toEqual(execution); expect(JSON.stringify(row)).not.toContain('SYNTHETIC_PRIVATE');

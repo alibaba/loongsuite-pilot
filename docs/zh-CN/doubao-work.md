@@ -7,14 +7,14 @@
 | 原生证据 | 输出 |
 |---|---|
 | 精确关联的消息提交与结束日志 | 一对标准边界事件和 ENTRY → AGENT；表示客户端请求区间，保留源时间精度 |
-| 本地 `toolcall` 的 `received` / `execution_settled` | 以调用 ID、sandbox、actor 严格配对的 `tool.call` / `tool.result` 日志；已确认所属请求或本地 TASK 内另附同时间的 Span events |
+| 本地 `toolcall` 的 `received` / `execution_settled` | 以调用 ID、sandbox、actor 严格配对的 `tool.call` / `tool.result` 日志；有可靠起止且完整位于已确认请求或本地 TASK 内时，导出独立 `execute_tool` TOOL Span |
 | `assignment.md` 中本次请求窗口内唯一需求 | 根 AGENT 的 `gen_ai.input.messages`；本地 TASK 的 `input.value` |
 | `trajectory.jsonl` 的最终 assistant 回复 | 有本次需求及调用结果顺序证据时，根 AGENT 的 `gen_ai.output.messages` 或 TASK 的 `output.value` |
-| trajectory 的精确调用 ID、参数及结果 | 工具日志及 `gen_ai.tool.call` / `gen_ai.tool.result` Span events 的工具内容与原生决策批次 ID |
+| trajectory 的精确调用 ID、参数及结果 | 工具日志及 TOOL Span 的参数、结果与原生决策批次 ID |
 | 持久化的完整原生 sandbox execution UUID 和起止 | 一次本地执行对应一个 TASK，使用 `run_task`，不解释为云端 Agent invocation |
 | 请求选择的 Skill / 伙伴标识 | `selected_skills` / `selected_partners`，只表示本次选择上下文 |
 
-不能取得可靠起止的工具保留为日志，不生成 TOOL Span。没有真实模型名与每次模型调用起止，故不生成 STEP / LLM；不以工具间隙、需求文件时间、面板加载或首输出时间推断 ReAct。一个原生 assistant 批次中的并行工具共享 `native_decision_id`，它表示源批次而非定时 STEP。
+不能取得可靠起止的工具保留为日志，不生成 TOOL Span。没有每次模型调用的可靠身份与起止，故不生成 STEP / LLM；模型名与 Token 缺失另外报告；不以工具间隙、需求文件时间、面板加载或首输出时间推断 ReAct。一个原生 assistant 批次中的并行工具共享 `native_decision_id`，它表示源批次而非定时 STEP。
 
 正式版的 `present_files` 交付还会触发 ID 为 `present-files-path-inspection-<UUID>` 的 Bash 路径检查。该检查与 trajectory 中 `present_files` 的调用 ID 不同，属于交付实现细节；精确匹配该 ID 格式和 Bash 名称时跳过，避免额外统计为 Agent 的 Bash 决策。升级前 checkpoint 中待配对的同类检查也跳过。真实 Bash 和其他工具仍按原规则采集；`present_files` 本身缺少可靠起止时不补造 Span。
 
@@ -38,9 +38,9 @@
 
 只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史、不读取 Cookie、登录缓存或消息数据库，也不读取快照中的文件正文。
 
-本次需求必须在源请求窗口中唯一；复用会话的旧尾部、不同需求、未来需求或缺少当前调用结果时，不猜测输入输出。每个内容字段最多 64 KiB，超限省略。已取得本次需求而最终轨迹尚未落盘时，遥测管道最多等待 2 秒，随后有界降级；不阻塞客户端，也不改变 Span 源起止时间。Windows 本地回调名 `Bash` 可对应原生 `PowerShell`：两者分别保留，避免误报工具类型。新增内容均先走统一 InputManager 脱敏，再转换 Span events；不在脱敏后重新读取原文。
+本次需求必须在源请求窗口中唯一；复用会话的旧尾部、不同需求、未来需求或缺少当前调用结果时，不猜测输入输出。每个内容字段最多 64 KiB，超限省略。已取得本次需求而最终轨迹尚未落盘时，遥测管道最多等待 2 秒，随后有界降级；不阻塞客户端，也不改变 Span 源起止时间。Windows 本地回调名 `Bash` 可对应原生 `PowerShell`：两者分别保留，避免误报工具类型。新增内容均先走统一 InputManager 脱敏，再转换 TOOL Span；不在脱敏后重新读取原文。
 
-每个 Span 最多附 64 对工具事件，超出数量写入 `tool_observations_not_in_span`，完整已采集事实仍在 JSONL；缺失一端、身份冲突或非正时间的工具不导出完成事实。原生扫描每轮一个会话，最多 64 个 Agent、每文件 2 MiB、合计 8 MiB、祖先深度 8。快照另限 8 个账户、128 个执行/文件及 8 MiB，不跟随目录逃逸或符号链接。
+每个所属请求或本地 TASK 最多导出 64 个 TOOL Span，超出数量写入 `tool_observations_not_in_span`，完整已采集事实仍在 JSONL；缺失一端、身份冲突或非正时间的工具不导出完成事实。原生扫描每轮一个会话，最多 64 个 Agent、每文件 2 MiB、合计 8 MiB、祖先深度 8。快照另限 8 个账户、128 个执行/文件及 8 MiB，不跟随目录逃逸或符号链接。
 
 增量日志支持半行、重启、轮转、截断与临时不可读。首次启用跳过历史；日志每次最多读 1 MiB、每轮 8 MiB、最新 128 个文件。请求与 sandbox 状态各最多 512 项/24 小时，工具状态最多 4096 项/24 小时，完成去重最多 4096 项/7 天。原生扫描至少间隔 10 秒，日志唤醒每秒合并一次。超限不承诺完整覆盖或端到端 exactly-once。
 
@@ -62,7 +62,9 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 的选中不证明实际加载；独立工作伙伴页面、云端完整 Agent 生命周期仍无覆盖。
 
-真实验收分别核对源日志、标准 JSONL、OTLP 和 CMS 回读，确认 I/O 不串请求、工具 ID/时间/归属、TASK 唯一性与异步 Link。通用 Trace validator 保持 ENTRY → AGENT、AGENT → STEP、STEP → LLM / TOOL 的严格规则，不包含豆包例外。通过已输出数据的结构校验不代表完整 ReAct 覆盖，缺失层级必须单独报告。
+真实验收分别核对源日志、标准 JSONL、OTLP 和 CMS 回读，确认 I/O 不串请求、工具 ID/时间/归属、TASK 唯一性与异步 Link。当前部分观测使用 `loongsuite.trace.contract=genai.observed-tools.v1`：真实本地 TOOL 直接挂在所属 AGENT 或 TASK 下，起止为客户端收到调用至本地执行结算，包含本地排队/管理开销。此拓扑参照 [OTel Agent/Tool 示例](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/non-normative/examples-agent-calls.md)，不创建缺少来源的中间 STEP。标准事件日志保留 call/result，已导出为 TOOL 的内容不再复制为父 Span events。
+
+原有完整 Pilot ReAct validator 的 ENTRY → AGENT → STEP → LLM / TOOL 规则保持不变，不增加产品特例。它会对当前直接挂在 AGENT/TASK 下的 TOOL 报 `structure.tool_under_step`；该结果必须原样报告，不能声称完整 ReAct 验收通过。工具事实另核对精确调用 ID、唯一配对、父边、时间、状态与脱敏。LLM、未知云端工具和后台区间外执行仍明确报告覆盖缺口。
 
 本地观测日志用 `local_execution_phase` 表示资源起止，以 `root_turn_id` 保留关联；不写客户端 `gen_ai.turn.start/end`，也不创建新的客户端 turn。
 
@@ -74,7 +76,7 @@ Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 
 
 多 Agent 会在同步回复后使用 `/chat/async/chunk_stream`。本轮已抓到完整组织者异步流并核对子 Agent 的界面结果；异步接收身份与同步请求、线程身份不同。使用本次已观察回复中的 thread ID，结合该线程 SDK 的 `on_thread_message_session_start.session_id` 才能确定对应 async task。SDK 事件即使在新任务中也带 `resumed=1`，表示接收生命周期，不能解释为 Agent 或模型的真实执行起止。已观察的组织者异步回复仍跨越多个工具决策，没有暴露逐次模型身份。当前结论只针对已观察路径，不排除客户端其他接口能提供更多信息。
 
-同一分支采集产物通过隔离 dataDir 运行，在 CMS2 回读到四个客户端请求、八个 ENTRY/AGENT Span，本地与云端的身份、父子关系、当前输入输出、Skill 标识和已附工具事件一致，原始查询无重复。未修改的通用 validator 为 `PASS_WITH_WARNINGS`：零错误，仍缺 LLM、Token、部分推荐属性及输出消息 finish reason。后台晚到的工具事实保留在标准日志，不拉长同步请求或制造中间 STEP。该结果证明已导出部分的数据质量，不是完整 ReAct / LLM 验收。
+以下为工具 Span 改动前的历史基线。该版采集产物通过隔离 dataDir 运行，在 CMS2 回读到四个客户端请求、八个 ENTRY/AGENT Span，本地与云端的身份、父子关系、当前输入输出、Skill 标识和已附工具事件一致，原始查询无重复。未修改的通用 validator 为 `PASS_WITH_WARNINGS`：零错误，仍缺 LLM、Token、部分推荐属性及输出消息 finish reason。后台晚到的工具事实保留在标准日志，不拉长同步请求或制造中间 STEP。该结果证明已导出部分的数据质量，不是完整 ReAct / LLM 验收。
 
 Claude Code 的 fetch intercept 在真实 `/v1/messages` 请求上补充每次 HTTP attempt、SSE response ID 与起止，另有 transcript 的时间、模型和 usage。豆包页面则将消息请求交给缓存的自定义 fetch，再通过 `fetch-stream-for-im` 原生 MessagePort 发送。只包装全局 `window.fetch` 可能漏采；包装同一个收发入口也不会自动得到云端内部的逐次模型请求。
 
