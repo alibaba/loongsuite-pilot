@@ -106,8 +106,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
-| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder IDE 使用 Stop hook 的 `extra.user.name`；Qoder CLI 使用 `qodercli status` 返回的 `username`。 |
-| `user.email` | string | 源 Agent 暴露时 Recommended | Agent 账号邮箱。Qoder IDE 使用 Stop hook 的 `extra.user.email`；Qoder CLI 使用 `qodercli status` 返回的 `email`。CLI 未登录、查询失败或没有可用值时，两个字段都不写。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder / Qoder CN IDE 使用 Stop hook 的 `extra.user.name`；Qoder CLI 使用 `qodercli status` 返回的 `username`。Qoder / Qoder CN 桌面版在明确的 App 调用中优先使用 Hook 身份，否则分别读取 `~/.qoder/.qoder-app-status.json` / `~/.qoder-cn/.qoder-app-status.json` 的已登录账号公开快照；不会使用独立 CLI 的账号。该字段独立于 `user.id`。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | Agent 账号邮箱。Qoder IDE 使用 Stop hook 的 `extra.user.email`；Qoder CN IDE 还支持 `extra.email`；Qoder CLI 使用 `qodercli status` 返回的 `email`。Qoder / Qoder CN 桌面版优先使用 Hook 邮箱，否则使用各自公开账号快照中存在的邮箱。手机号注册等没有邮箱的账号只写用户名，不推导邮箱；退出登录、来源缺失或读取失败时省略无法获取的字段。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |
