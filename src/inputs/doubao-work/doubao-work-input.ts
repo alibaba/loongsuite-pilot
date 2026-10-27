@@ -378,6 +378,10 @@ export class DoubaoWorkInput extends BaseInput {
             complete = enrichNativeToolEvents(complete.map(event => ({ ...event, 'gen_ai.agent.id': graph.main })), graph.content);
             const io = nativeTaskContent(graph.content, graph.main, pending.queryMs, pending.terminal.timeNano,
               pairs.map(pair => pair.start.tool!.id));
+            // The client may persist its final trajectory row shortly after
+            // the real terminal log. Wait only in the telemetry pipeline,
+            // preserving the original source boundary and a bounded fallback.
+            if (io.input !== undefined && io.output === undefined && Date.now() - pending.updatedMs < 2_000) return;
             if (io.input !== undefined) complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
             if (io.output !== undefined) complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
           }

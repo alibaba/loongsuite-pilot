@@ -28,7 +28,7 @@ Late parent records receive a grace period; successful parent Write/Edit evidenc
 
 ## Content and reliability
 
-Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. No history enumeration, authentication stores, cookies or snapshot file bodies are read. Assignments must uniquely match the current request window. Old tails, future/different assignments and unprovable reuse omit I/O rather than carry content across requests. Each content field is limited to 64 KiB. Exact native tool names are retained separately from callback executor names (for example native PowerShell versus callback Bash).
+Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. No history enumeration, authentication stores, cookies or snapshot file bodies are read. Assignments must uniquely match the current request window. Old tails, future/different assignments and unprovable reuse omit I/O rather than carry content across requests. Each content field is limited to 64 KiB. A current assignment with a not-yet-persisted final row allows up to two seconds of telemetry-only settling, then falls back without changing source span times or blocking the app. Exact native tool names are retained separately from callback executor names (for example native PowerShell versus callback Bash).
 
 All content passes through InputManager's regular recursive masking before conversion. Each Span contains at most 64 tool pairs; `tool_observations_not_in_span` reports omitted observations, while collected canonical facts remain in JSONL. Partial, conflicting or nonpositive callback intervals are not completed observations.
 

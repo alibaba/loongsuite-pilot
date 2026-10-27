@@ -62,6 +62,24 @@ describe('Doubao Work passive client-message input', () => {
     expect((await input.poll()).filter(e => e['event.name'].startsWith('llm.'))).toEqual([]);
   });
 
+  it.each([true, false])('allows a bounded native final-row settle without changing invocation times (arrives=%s)', async arrives => {
+    const { file, input, sessionsRoot } = await setup();
+    const dir = path.join(sessionsRoot, 'synthetic-conversation', 'agents', 'm_current', 'system');
+    await mkdir(dir, { recursive: true });
+    const trajectory = path.join(dir, 'trajectory.jsonl');
+    await writeFile(trajectory, '');
+    await writeFile(path.join(dir, 'assignment.md'), `## [${new Date(DOUBAO_EPOCH + 10).toISOString()}] 需求\nCURRENT_REQUEST\n`);
+    const now = Date.now(); const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + doubaoLine('on_message_session_end'));
+    expect(await input.poll()).toEqual([]);
+    clock.mockReturnValue(now + (arrives ? 500 : 2001));
+    if (arrives) await writeFile(trajectory, JSON.stringify({ role: 'assistant', content: 'CURRENT_FINAL' }) + '\n');
+    const events = await input.poll(); expect(events).toHaveLength(2);
+    expect(events[1].time_unix_nano).toBe(parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!.timeNano);
+    expect(Boolean(events[1]['gen_ai.output.messages'])).toBe(arrives);
+    expect(await input.poll()).toEqual([]); clock.mockRestore();
+  });
+
   it('caps native metadata scans independently of repeated log polls', async () => {
     const { stateStore, logs, sessionsRoot, snapshotRoot, file } = await setup();
     const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot, snapshotRoot, nativeScanIntervalMs: 10_000 });
