@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { buildTraces, validateStructure, validateTime } from '../../../../scripts/validate-trace.mjs';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { buildDoubaoTaskEvents, doubaoRootAgentSpanId, parseDoubaoLogLine } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
@@ -50,7 +52,7 @@ describe('Doubao Work truthful partial OTLP', () => {
   it('exports one linked local TASK per execution, with child observations owned by the correct TASK', async () => {
     const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: conv, localMessageId: query, updatedMs: DOUBAO_EPOCH,
-      terminal: { ...parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, conversationId: conv } };
+      terminal: { ...parseDoubaoLogLine(doubaoLine('on_message_session_end', {}, 10000), DOUBAO_FILE)!, conversationId: conv } };
     const parent: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv, queryMessageId: query,
       agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 9000 };
     const leaf: NativeExecution = { ...parent, executionKey: '00000000-0000-4000-8000-000000000003', agentId: 's_nativeLeaf', agentType: 'sub_agent',
@@ -70,11 +72,14 @@ describe('Doubao Work truthful partial OTLP', () => {
       expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
       const owner = tasks.find(span => span.attributes['gen_ai.agent.id'] === leaf.agentId)!;
       const organizer = tasks.find(span => span.attributes['gen_ai.agent.id'] === parent.agentId)!;
-      expect(organizer.parentSpanId).toBeUndefined();
+      expect(organizer.parentSpanId).toBe(doubaoRootAgentSpanId(organizer.spanContext().traceId));
       expect(organizer.links[0].context.spanId).toBe(doubaoRootAgentSpanId(organizer.spanContext().traceId));
       expect(owner.parentSpanId).toBe(nativeExecutionSpanId('scope', parent.executionKey));
       expect(owner.events.map(event => event.attributes?.['gen_ai.tool.call.id'])).toEqual(['child-tool', 'child-tool']);
       expect(organizer.events).toHaveLength(0);
+      const rules = JSON.parse(readFileSync(new URL('../../../../docs/trace-validation-rules.json', import.meta.url), 'utf8'));
+      const actualTree = [...buildTraces(createReadableSpanToOtlpSpanJsonArray(spans).map(line => JSON.parse(line))).values()][0];
+      expect([...validateStructure(actualTree), ...validateTime(actualTree, rules)].filter(check => check.status === 'error')).toEqual([]);
       const diagnostics = createReadableSpanToOtlpSpanJsonArray([organizer, owner]).map(line => JSON.parse(line));
       expect(diagnostics[0].links[0].spanId).toBe(organizer.links[0].context.spanId);
       expect(diagnostics[1].events[0].timeUnixNano).toBe(pair.start.timeNano);
@@ -92,7 +97,7 @@ describe('Doubao Work truthful partial OTLP', () => {
   it('does not let a late local execution or log-only tools truncate an active request in the same session', async () => {
     const query = '00000000-0000-4000-8000-000000000002';
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: '12345678', localMessageId: query, updatedMs: DOUBAO_EPOCH,
-      terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
+      terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end', {}, 10000), DOUBAO_FILE)! };
     const records = buildDoubaoTaskEvents('scope', root, root.terminal, Date.now());
     const execution: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: '12345678', queryMessageId: query,
       agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 9000 };
@@ -105,6 +110,24 @@ describe('Doubao Work truthful partial OTLP', () => {
       await flusher.sendBatch(records.slice(1));
       await vi.waitFor(() => expect(spans).toHaveLength(3));
       expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+    } finally { await flusher.shutdown(); }
+  });
+
+  it('retains background execution facts without creating an orphan or stretching the ended client request', async () => {
+    const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: '12345678',
+      localMessageId: '00000000-0000-4000-8000-000000000002', updatedMs: DOUBAO_EPOCH,
+      terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
+    const e: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: '12345678', queryMessageId: root.localMessageId,
+      agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 2000, endedAtMs: DOUBAO_EPOCH + 9000 };
+    const facts = buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, e, [e], Date.now());
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
+    try {
+      await flusher.sendBatch(buildDoubaoTaskEvents('scope', root, root.terminal, Date.now()));
+      await flusher.sendBatch(facts); await flusher.flush();
+      expect(facts).toHaveLength(2);
+      expect(facts[1].time_unix_nano).toBe(String(BigInt(e.endedAtMs) * 1_000_000n));
+      expect(spans).toHaveLength(2);
+      expect(spans.every(span => nano(span.endTime) === BigInt(root.terminal.timeNano))).toBe(true);
     } finally { await flusher.shutdown(); }
   });
 

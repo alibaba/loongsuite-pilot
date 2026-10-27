@@ -22,7 +22,9 @@ Client success can accompany quota notices, so business outcome remains unknown.
 
 Only complete native `execution` metadata under `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json` supplies local start/end times. Those boundaries cover local sandbox acquisition through release/file capture, not the cloud Agent invocation. Query message ID, conversation, sandbox actors and successful native creation ancestry must all agree.
 
-A unique enclosing execution in the same query and sandbox provides a TASK → TASK parent. Otherwise the local root TASK has a Span Link to the origin AGENT; it neither invents a delegation TOOL/AGENT nor stretches the ended client request. The trace may therefore contain an ENTRY root and local TASK roots. Creator identity is metadata, not invocation-parent evidence. Tools attach only to their exact actor/sandbox within the observed execution; ancestors never duplicate descendant tools.
+A unique enclosing execution in the same query/sandbox and within the observed client interval provides a TASK → TASK parent. Other contained local TASKs use their exactly identified owning AGENT as parent, with explicit `trace_parent_resolution`. A redundant Span Link retains origin context, but the tree does not depend on backend Link storage. Creator identity remains metadata, not a fabricated cloud invocation parent.
+
+Executions extending outside the observed request retain their boundaries, identities, I/O and collected tools in canonical logs without exporting uncontained TASK spans. The adapter neither stretches the request nor invents ENTRY/AGENT ancestors. Late-arriving metadata whose actual interval is contained can still join the original tree; genuinely out-of-request background work is reported separately.
 
 Late parent records receive a grace period; successful parent Write/Edit evidence retains the wait within existing state limits. Missing/ambiguous parents retain source identity and resolution metadata without synthetic spans. The client persists executions with tracked file mutations only: read-only or cloud-only child work may have logs but no TASK.
 

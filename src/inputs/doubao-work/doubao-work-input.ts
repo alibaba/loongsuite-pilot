@@ -502,6 +502,8 @@ export class DoubaoWorkInput extends BaseInput {
       events[0]['agent.doubao_work.tool_observations'] = observations;
       if (io.input !== undefined) events[0]['agent.doubao_work.task_input'] = io.input;
       if (io.output !== undefined) events[0]['agent.doubao_work.task_output'] = io.output;
+      if (io.input !== undefined) events[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
+      if (io.output !== undefined) events[1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
       const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
       const parentId = graph.edges[execution.agentId]?.parent;
       if (parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {

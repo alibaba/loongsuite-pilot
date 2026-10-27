@@ -26,7 +26,9 @@
 
 必须同时匹配新请求的 conversation、local message ID、唯一主请求 sandbox actor，以及 trajectory 中成对 `create_agent` 的无歧义创建关系。一个 execution UUID 只导出一次 TASK；工具只归到时间范围内且 actor/sandbox 完全一致的 TASK，祖先不复制后代工具。
 
-同 query、sandbox 下唯一覆盖子执行的本地父执行构成 TASK → TASK。其他本地根 TASK 不制造委派 TOOL / AGENT，也不延长已结束的客户端请求，而以 Span Link 关联原根 AGENT；同一 trace 可有 ENTRY 和本地 TASK 两个根。`native_creator_agent_id` 表示创建者身份，不能当成逐次 invocation 父边。真实工具日志和不可推断的云端委派仍可分别核查。
+同 query、sandbox 下唯一覆盖子执行、且在根请求区间内的本地父执行构成 TASK → TASK。其余完全位于已观察请求区间内的本地 TASK，依据精确 query 归属挂到根 AGENT；`trace_parent_resolution` 区分本地父执行与所属请求。Span Link 另外保留原根关联，但树结构不依赖后端是否保存 Link。`native_creator_agent_id` 仅表示创建者身份，不充当云端逐次 invocation 父边。
+
+执行区间超出已观察客户端请求时，继续保留标准日志中的本地执行边界、身份及已采集工具事实，不导出无法被现有请求树容纳的 TASK Span。不延长请求、不复制祖先，也不制造新的 ENTRY / AGENT。元数据晚到而实际区间仍在请求内时，可以正常补上同一棵树；这与真正超出请求的后台执行分别报告。
 
 子记录先到时短暂等待父记录；已观察父 Write/Edit 成功时在既有关联状态上限内继续等待。没有完整或唯一父执行证据时保留原始身份和 `parent_resolution`，不制造中间 Span。客户端仅持久化有被跟踪文件变更的本地执行；纯 Read/Bash、纯云端或未落盘的子 Agent 不保证有 TASK。未归入 Span 的真实工具日志仍保留。
 

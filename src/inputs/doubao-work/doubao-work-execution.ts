@@ -141,6 +141,10 @@ export function buildNativeExecutionEvents(
     'loongsuite.doubao_work.native_creator_agent_id': edge.parent,
     ...(parent ? { parent_span_id: nativeExecutionSpanId(scope, parent.executionKey) } : {}),
     'loongsuite.doubao_work.local_execution_span_id': nativeExecutionSpanId(scope, e.executionKey),
+    'loongsuite.doubao_work.root_request_start_unix_nano': (BigInt(root.queryMs) * 1_000_000n).toString(),
+    'loongsuite.doubao_work.root_request_end_unix_nano': root.terminal.timeNano,
+    'loongsuite.doubao_work.native_parent_in_request': Boolean(parent
+      && BigInt(parent.endedAtMs) * 1_000_000n <= BigInt(root.terminal.timeNano)),
     'loongsuite.doubao_work.observation_scope': 'native_sandbox_execution',
     'loongsuite.doubao_work.local_execution_boundary': 'native_sandbox_get_or_create_to_release',
     'loongsuite.doubao_work.timing_basis': 'native_execution_startedAtMs_endedAtMs',

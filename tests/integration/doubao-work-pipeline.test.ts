@@ -37,7 +37,7 @@ it('routes native first output and late execution snapshots through the masked p
     await appendFile(source, doubaoLine('on_message_session_start', meta, 10) + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
       + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 3500)
       + doubaoFirstOutputLine({ prompt: 'SYNTHETIC_PRIVATE_PROMPT' })
-      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000) + doubaoLine('on_message_session_end', meta));
+      + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000) + doubaoLine('on_message_session_end', meta, 6000));
     await vi.waitFor(() => expect(spans).toHaveLength(2));
     for (const [id, content] of Object.entries(DOUBAO_NATIVE_FILES)) {
       const dir = path.join(sessionsRoot, conv, 'agents', id, 'system'); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), content);
@@ -56,7 +56,7 @@ it('routes native first output and late execution snapshots through the masked p
     const nativeParent = spans.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === parent.executionKey)!;
     expect(native.parentSpanId).toBe(nativeParent.spanContext().spanId);
     expect(native.attributes['gen_ai.span.kind']).toBe('TASK');
-    expect(nativeParent.parentSpanId).toBeUndefined();
+    expect(nativeParent.parentSpanId).toBe(rootAgent.spanContext().spanId);
     expect(nativeParent.links[0].context.spanId).toBe(rootAgent.spanContext().spanId);
     expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
     expect(native.startTime).toEqual([Math.floor(execution.startedAtMs / 1000), (execution.startedAtMs % 1000) * 1_000_000]);

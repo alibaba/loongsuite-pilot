@@ -77,8 +77,8 @@ function addRecordToolEvents(span: Span, records: EventLogRecord[]): void {
 }
 
 /** One TASK per actual local execution UUID. Its resource lifetime is known;
- * the cloud Agent's invocation is not. Link the root request rather than
- * inventing a timed delegation TOOL or stretching that request's lifetime.
+ * the cloud Agent's invocation is not. The exact owning request is a causal
+ * parent for contained work; never stretch it to accommodate background work.
  */
 function convertLocalExecution(records: EventLogRecord[], options: Options) {
   const start = records.find(record => record['gen_ai.turn.start'] === true);
@@ -90,9 +90,15 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     || typeof spanId !== 'string' || !/^[0-9a-f]{16}$/.test(spanId)) {
     return { spanCount: 0, traceIds: [], warnings: ['Invalid local execution observation; no TASK exported'] };
   }
+  const rootStart = start[`${PREFIX}root_request_start_unix_nano`], rootEnd = start[`${PREFIX}root_request_end_unix_nano`];
+  if (!validTime(rootStart) || !validTime(rootEnd) || BigInt(start.time_unix_nano) < BigInt(rootStart)
+    || BigInt(end.time_unix_nano) > BigInt(rootEnd)) {
+    return { spanCount: 0, traceIds: [], warnings: ['Local execution extends outside the observed client request; retained as canonical facts without inventing an enclosing invocation'] };
+  }
   const rootContext = { traceId, spanId: doubaoRootAgentSpanId(traceId), traceFlags: TraceFlags.SAMPLED };
   const parentId = start.parent_span_id;
   const hasLocalParent = start[`${PREFIX}parent_resolution`] === 'same_query_native_execution'
+    && start[`${PREFIX}native_parent_in_request`] === true
     && typeof parentId === 'string' && /^[0-9a-f]{16}$/.test(parentId);
   const context = trace.setSpanContext(ROOT_CONTEXT, hasLocalParent ? { ...rootContext, spanId: parentId as string } : rootContext);
   const attributes: Attributes = {
@@ -100,6 +106,7 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     'gen_ai.task.name': 'doubao.local_execution', 'gen_ai.framework': 'doubao-work',
     [`${PREFIX}observation_scope`]: 'native_sandbox_execution',
     [`${PREFIX}trace_completeness`]: 'local_execution_observation',
+    [`${PREFIX}trace_parent_resolution`]: hasLocalParent ? 'enclosing_local_execution' : 'owning_client_request',
   };
   for (const [key, value] of Object.entries(start)) {
     if ((key.startsWith(PREFIX) || ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id'].includes(key))
@@ -107,7 +114,10 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
   }
   if (typeof start['user.id'] === 'string') attributes['gen_ai.user.id'] = start['user.id'];
   for (const [source, target] of [['agent.doubao_work.task_input', 'input.value'], ['agent.doubao_work.task_output', 'output.value']]) {
-    if (typeof start[source] === 'string') attributes[target] = start[source] as string;
+    if (typeof start[source] === 'string') {
+      attributes[target] = start[source] as string;
+      attributes[target.replace('.value', '.mime_type')] = 'text/plain';
+    }
   }
   const span = options.observationTracer.startSpan('run_task doubao.local_execution', {
     kind: SpanKind.INTERNAL, startTime: nanoTime(start.time_unix_nano), attributes,
@@ -115,8 +125,6 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
   }, context);
   const originalContext = span.spanContext();
   Object.defineProperty(span, 'spanContext', { value: () => ({ ...originalContext, traceId, spanId }), configurable: true });
-  // The local root is causally linked, not an observed synchronous child.
-  if (!hasLocalParent) Object.assign(span, { parentSpanId: undefined });
   const observations = start['agent.doubao_work.tool_observations'];
   const toolRecords: EventLogRecord[] = [];
   if (Array.isArray(observations)) for (const raw of observations.slice(0, 64)) {
@@ -161,7 +169,7 @@ export function enrichDoubaoClientRequest(records: AgentActivityEntry[], spans: 
       duration: { value: nanoTime((BigInt(end.time_unix_nano) - BigInt(start.time_unix_nano)).toString()), configurable: true },
     });
     span.attributes[`${PREFIX}trace_completeness`] = 'client_request_and_local_events';
-    span.attributes[`${PREFIX}unsupported_trace_layers`] = ['react', 'llm', 'tool_span', 'full_delegated_agent'];
+    span.attributes[`${PREFIX}unsupported_trace_layers`] = ['react', 'llm', 'tool_span', 'full_delegated_agent', 'out_of_request_local_execution_span'];
     span.attributes[`${PREFIX}observed_local_tool_calls`] = records.filter(record => record['event.name'] === 'tool.call').length;
     const firstOutput = records.find(record => record['event.name'] === 'other'
       && record[`${PREFIX}observation_scope`] === 'native_first_model_output');
