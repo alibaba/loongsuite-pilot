@@ -75,6 +75,7 @@ describe('Doubao passive stream diagnostic', () => {
     }] }] }), nonce)).toBeUndefined();
     expect(scopedRequest('{"task_id":"unrelated"}', nonce, new Set(['owned']))).toBeUndefined();
     expect(scopedRequest('{"task_id":"owned"}', nonce, new Set(['owned']))).toEqual({ taskId: 'owned', basis: 'observed_fetch_stream' });
+    expect(scopedRequest('{"task_id":"sdk-owned"}', nonce, new Set(), new Set(['sdk-owned']))).toEqual({ taskId: 'sdk-owned', basis: 'explicit_task_scope' });
     const handoff = projectFrame({ event: 'FETCH_STREAM', id: '5', data: '{"fetch_key":"owned","fetch_type":2,"append_scene":4,"secret":"PRIVATE"}' });
     expect(handoff.taskId).toBe('owned');
     expect(JSON.stringify(handoff)).not.toContain('PRIVATE');

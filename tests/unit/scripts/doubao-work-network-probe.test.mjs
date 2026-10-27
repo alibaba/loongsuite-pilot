@@ -2,7 +2,7 @@ import { it, expect } from 'vitest';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url';
 it.skipIf(typeof WebSocket !== 'function')('keeps buffered prefix ordering, handles response-before-body and disconnects without interception', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-network-probe-'));
   const output = path.join(root, 'capture');
+  const taskScope = path.join(root, 'task-scope.json');
   const nonce = 'DBW_SYNTHETIC_NETWORK_TEST';
-  const methods = [], sockets = new Set();
+  const methods = [], streamed = [], sockets = new Set();
   let child, publish;
   const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -57,6 +58,7 @@ it.skipIf(typeof WebSocket !== 'function')('keeps buffered prefix ordering, hand
           send({ method: 'Network.responseReceived', params: { requestId: msg.params.requestId,
             timestamp: 1, type: 'Fetch', response: { status: 200, headers: { Cookie: 'PRIVATE_COOKIE' } } } });
         } else if (msg.method === 'Network.streamResourceContent') {
+          streamed.push(msg.params.requestId);
           const raw = Buffer.from('id: 1\r\nevent: CHUNK_DELTA\r\ndata: {"text":"中文🙂"}\r\n\r\n'
             + 'id: 2\nevent: SSE_REPLY_END\ndata: {"end_type":1,"msg_finish_attr":{"msgid":"same-answer"}}\n\n');
           const split = raw.indexOf(Buffer.from('中文')) + 1;
@@ -70,7 +72,7 @@ it.skipIf(typeof WebSocket !== 'function')('keeps buffered prefix ordering, hand
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     child = spawn(process.execPath, [fileURLToPath(new URL('../../../scripts/diagnostics/doubao-work-network-probe.mjs', import.meta.url)),
-      `http://127.0.0.1:${server.address().port}`, nonce, output, '10'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      `http://127.0.0.1:${server.address().port}`, nonce, output, '10', taskScope], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
     const deadline = Date.now() + 5000;
@@ -93,12 +95,34 @@ it.skipIf(typeof WebSocket !== 'function')('keeps buffered prefix ordering, hand
     expect(lines.filter(x => x.kind === 'sse' && x.event === 'CHUNK_DELTA').map(x => x.text)).toEqual(['中文🙂', '中文🙂']);
     expect(lines.filter(x => x.kind === 'sse' && x.event === 'SSE_REPLY_END').map(x => x.messageId)).toEqual(['same-answer', 'same-answer']);
     expect(JSON.stringify(lines)).not.toContain('PRIVATE_');
+    for (const taskId of ['owned-async', 'unrelated-async']) {
+      publish({ method: 'Network.requestWillBeSent', params: { requestId: taskId, timestamp: 3, wallTime: 1790000001,
+        request: { url: 'https://example.invalid/chat/async/chunk_stream', postData: JSON.stringify({ task_id: taskId, private: 'PRIVATE_ASYNC_BODY' }) },
+      } });
+      publish({ method: 'Network.responseReceived', params: { requestId: taskId, timestamp: 4, type: 'Fetch', response: { status: 200 } } });
+    }
+    // Native SDK correlation arrives after the async response. Until this
+    // explicit binding exists, neither response may be streamed or recorded.
+    await new Promise(r => setTimeout(r, 50));
+    expect(streamed).not.toContain('owned-async');
+    expect(streamed).not.toContain('unrelated-async');
+    await writeFile(taskScope, JSON.stringify(['owned-async']));
+    while (true) {
+      lines = (await readFile(path.join(output, 'network.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+      if (lines.filter(x => x.kind === 'sse').length === 6) break;
+      if (Date.now() > deadline) throw Error(`Late async binding was not captured: ${stderr}`);
+      await new Promise(r => setTimeout(r, 20));
+    }
+    expect(streamed).toContain('owned-async');
+    expect(streamed).not.toContain('unrelated-async');
+    expect(lines.find(x => x.requestId === 'owned-async' && x.kind === 'request').basis).toBe('explicit_task_scope');
+    expect(JSON.stringify(lines)).not.toContain('PRIVATE_');
     expect(methods.every(m => ['Network.enable', 'Network.getRequestPostData', 'Network.streamResourceContent'].includes(m))).toBe(true);
     const exited = new Promise(resolve => child.once('close', resolve));
     child.kill('SIGTERM');
     expect(await exited).toBe(0);
     const summary = JSON.parse(await readFile(path.join(output, 'summary.json'), 'utf8'));
-    expect(summary.counts.physicalRequests).toBe(2);
+    expect(summary.counts.physicalRequests).toBe(3);
     expect(summary.dropped).toBe(0);
     expect(summary.llmInvocationsProven).toBe(false);
   } finally {

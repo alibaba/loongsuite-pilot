@@ -9,6 +9,14 @@ const EVENTS = new Set([
 const EVENT_PREFILTER = /"eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time)"/;
 const MIN_EPOCH_MS = Date.UTC(2020, 0, 1);
 const MAX_EPOCH_MS = Date.UTC(2100, 0, 1);
+// Observed present_files implementation: path validation is dispatched through
+// Bash under a separate helper ID, rather than the trajectory's tool-call ID.
+// Do not count that implementation detail as another GenAI Bash invocation.
+const PRESENT_FILES_INSPECTION = /^present-files-path-inspection-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function isDoubaoPresentationInspection(name: string, id: string): boolean {
+  return name === 'Bash' && PRESENT_FILES_INSPECTION.test(id);
+}
 
 export interface DoubaoLogEvent {
   name: string;
@@ -102,6 +110,7 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
       : data.status === 'error' || data.status === 'failed' ? 'error'
       : data.status === 'cancelled' ? 'cancelled' : undefined;
     if (!name || !sandboxId || !id || !timeNano || (received ? !turnId : data.phase !== 'execution_settled' || !status)) return undefined;
+    if (isDoubaoPresentationInspection(name, id)) return undefined;
     return {
       name: received ? 'local_tool_received' : 'local_tool_settled', timeNano,
       ...(received ? { turnId } : {}),

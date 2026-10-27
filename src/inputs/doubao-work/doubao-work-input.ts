@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
-import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
+import { buildDoubaoTaskEvents, doubaoDigest, isDoubaoPresentationInspection, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
 import { buildNativeToolEvents, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
 import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations } from './doubao-work-content.js';
@@ -163,6 +163,11 @@ export class DoubaoWorkInput extends BaseInput {
     }
     const next: Checkpoint = JSON.parse(JSON.stringify(saved));
     next.tools ??= {};
+    // An older collector may have checkpointed this helper before upgrade.
+    // Apply the same source distinction to restored receipt/settlement facts.
+    for (const [key, pair] of Object.entries(next.tools)) {
+      if ([pair.start?.tool, pair.end?.tool].some(tool => tool && isDoubaoPresentationInspection(tool.name, tool.id))) delete next.tools[key];
+    }
     next.roots ??= {};
     next.sandboxes ??= {};
     next.nativeCompleted ??= {};

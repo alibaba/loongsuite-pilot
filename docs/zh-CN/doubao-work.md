@@ -1,6 +1,6 @@
 # 豆包工作客户端与本地执行观测（实验性）
 
-`doubao-work` 被动读取 macOS / Windows 正式版客户端的日志及本次新会话的原生文件，不安装 Hook、不修改客户端或登录状态。已观察的协议基线为 macOS 2.33.10、Windows 2.25.18。客户端可见信息不覆盖云端的完整 Agent、ReAct 或模型调用；采集结果明确标记这些缺口。
+`doubao-work` 被动读取 macOS / Windows 正式版客户端的日志及本次新会话的原生文件，不安装 Hook、不修改客户端或登录状态。已观察的协议基线为 macOS 2.33.10 / 2.34.1、Windows 2.25.18。客户端可见信息不覆盖云端的完整 Agent、ReAct 或模型调用；采集结果明确标记这些缺口。
 
 ## 数据与语义
 
@@ -15,6 +15,8 @@
 | 请求选择的 Skill / 伙伴标识 | `selected_skills` / `selected_partners`，只表示本次选择上下文 |
 
 不能取得可靠起止的工具保留为日志，不生成 TOOL Span。没有真实模型名与每次模型调用起止，故不生成 STEP / LLM；不以工具间隙、需求文件时间、面板加载或首输出时间推断 ReAct。一个原生 assistant 批次中的并行工具共享 `native_decision_id`，它表示源批次而非定时 STEP。
+
+正式版的 `present_files` 交付还会触发 ID 为 `present-files-path-inspection-<UUID>` 的 Bash 路径检查。该检查与 trajectory 中 `present_files` 的调用 ID 不同，属于交付实现细节；精确匹配该 ID 格式和 Bash 名称时跳过，避免额外统计为 Agent 的 Bash 决策。升级前 checkpoint 中待配对的同类检查也跳过。真实 Bash 和其他工具仍按原规则采集；`present_files` 本身缺少可靠起止时不补造 Span。
 
 首次 `cot_first_token` 的原生 SSE duration 仅写入自定义 `client_time_to_first_cot_ms`，表示提交到首个推理输出接收的客户端区间，不作为 LLM 耗时或模型 TTFT。模型、Token、成本、finish reason 和云端内部 reasoning 均不补造。
 
@@ -66,11 +68,13 @@ Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 
 
 ## Mac 消息流验证
 
-2026-10-27 在正式版 macOS 2.34.1 / Chromium 147 上进行了被动 CDP 验证。纯文本、顺序 Write → Read → Write → Read、组织者创建两个子 Agent 三个任务均有真实结果；子 Agent 两份新文件的内容已核对。连续四个工具调用只对应一个回复 ID，消息流的结束边界覆盖整个同步回复，不能据此拆出逐次 LLM 调用。
+2026-10-27 在正式版 macOS 2.34.1 / Chromium 147 上进行了八个真实场景验证：纯文本、顺序 Write → Read → Write → Read、双子 Agent、组织者异步委派、Skill 与会话复用、后台工具失败、用户取消、并行工具错误恢复。连续四个工具调用只对应一个回复 ID，消息流的结束边界覆盖整个同步回复，不能据此拆出逐次 LLM 调用。
 
 主页面与 launcher 各出现一次 `/chat/completion` 请求，但具有相同 local message ID 和回复 ID，必须识别为同一消息的两条物理传输。`STREAM_MSG_NOTIFY`、`STREAM_CHUNK` / `CHUNK_DELTA`、`SSE_REPLY_END` 提供消息和界面块的身份、内容与终止事实；工具界面块的 `is_finish` 不是模型调用的完成事件。模型字段 `38` 是内部枚举，`context_window_usage` 是上下文占用，两者均不转换为真实模型名或本次计费 Token。
 
-多 Agent 会在同步回复后使用 `/chat/async/chunk_stream`。本轮已确认后台执行和原生创建关系，但未完成异步流及全部子 Agent 界面验收；不能把同步结束作为后台完成，也不能声称有完整多 Agent 网络覆盖。当前结论只针对已观察的路径，不排除客户端其他接口能提供更多信息。
+多 Agent 会在同步回复后使用 `/chat/async/chunk_stream`。本轮已抓到完整组织者异步流并核对子 Agent 的界面结果；异步接收身份与同步请求、线程身份不同。使用本次已观察回复中的 thread ID，结合该线程 SDK 的 `on_thread_message_session_start.session_id` 才能确定对应 async task。SDK 事件即使在新任务中也带 `resumed=1`，表示接收生命周期，不能解释为 Agent 或模型的真实执行起止。已观察的组织者异步回复仍跨越多个工具决策，没有暴露逐次模型身份。当前结论只针对已观察路径，不排除客户端其他接口能提供更多信息。
+
+同一分支采集产物通过隔离 dataDir 运行，在 CMS2 回读到四个客户端请求、八个 ENTRY/AGENT Span，本地与云端的身份、父子关系、当前输入输出、Skill 标识和已附工具事件一致，原始查询无重复。未修改的通用 validator 为 `PASS_WITH_WARNINGS`：零错误，仍缺 LLM、Token、部分推荐属性及输出消息 finish reason。后台晚到的工具事实保留在标准日志，不拉长同步请求或制造中间 STEP。该结果证明已导出部分的数据质量，不是完整 ReAct / LLM 验收。
 
 Claude Code 的 fetch intercept 在真实 `/v1/messages` 请求上补充每次 HTTP attempt、SSE response ID 与起止，另有 transcript 的时间、模型和 usage。豆包页面则将消息请求交给缓存的自定义 fetch，再通过 `fetch-stream-for-im` 原生 MessagePort 发送。只包装全局 `window.fetch` 可能漏采；包装同一个收发入口也不会自动得到云端内部的逐次模型请求。
 
@@ -83,4 +87,6 @@ node scripts/diagnostics/doubao-work-network-probe.mjs \
 
 等待 `Ready` 后，在新任务正文加入相同的唯一测试标识。输出目录必须不存在。脚本只启用 Network 观察和 [CDP 响应流读取](https://chromedevtools.github.io/devtools-protocol/tot/Network/#method-streamResourceContent)，不暂停、重放或修改业务请求；只保存本次标识匹配的消息文本及白名单协议字段，不保存 headers、Cookie、签名 URL 或账号元数据。最多运行 300 秒、连接 16 个本产品页面、保存 4 MiB，每条流最多 1 MiB；超限或不支持流读取时明确记录缺口。
 
-`network.jsonl` 是诊断事实，不是标准 GenAI 事件或可直接上报的 Span。重复物理传输保留，使用消息身份对照；不按请求数、工具块数或 `SSE_REPLY_END` 数量统计 LLM。只有观察到 `FETCH_STREAM.fetch_key` 才跟随对应 async task；尚未证明的线程/任务映射不会猜测关联。未知协议仅记录事件名，异步 snapshot 正文尚未适配。该脚本不接入常驻 collector、不自动开启调试端口、不上报 CMS；正式采集仍使用上文的被动文件 Input。
+`network.jsonl` 是诊断事实，不是标准 GenAI 事件或可直接上报的 Span。重复物理传输保留，使用消息身份对照；不按请求数、工具块数或 `SSE_REPLY_END` 数量统计 LLM。观察到 `FETCH_STREAM.fetch_key` 时跟随对应 async task。也可提供第六个参数作为绝对路径的 task scope JSON 文件，内容为本次已有原生证据的 task ID 数组；最多 8 KiB / 128 项，每 250ms 刷新。已有 async 请求会在精确匹配后才开始读取流，其余正文不保留，绑定晚到或缓冲超限时可能缺失数据。
+
+对 scope 文件的关联必须先证明本次回复 thread ID 与 SDK 线程 session ID 的关系；人工 scope 的来源单独标为 `explicit_task_scope`，不充当 Agent 父边或模型调用身份。不猜测尚未证明的线程/任务映射。未知协议仅记录事件名，异步 snapshot 正文尚未适配。该脚本不接入常驻 collector、不自动开启调试端口、不上报 CMS；正式采集仍使用上文的被动文件 Input。测试结束后恢复普通启动并确认临时调试端口关闭。

@@ -4,11 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SseFrames, projectFrame, scopedRequest } from './doubao-work-stream.mjs';
 
-const [endpoint, nonce, output, duration = '120'] = process.argv.slice(2);
+const [endpoint, nonce, output, duration = '120', taskScopeFile] = process.argv.slice(2);
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint ?? '')
   || !/^DBW_[A-Z0-9_]{8,100}$/.test(nonce ?? '') || !output
-  || !/^\d+$/.test(duration) || Number(duration) < 10 || Number(duration) > 300) {
-  throw Error('Usage: node doubao-work-network-probe.mjs http://127.0.0.1:PORT DBW_UNIQUE_TEST_NONCE NEW_DIRECTORY [10..300 seconds]');
+  || !/^\d+$/.test(duration) || Number(duration) < 10 || Number(duration) > 300
+  || (taskScopeFile && !path.isAbsolute(taskScopeFile))) {
+  throw Error('Usage: node doubao-work-network-probe.mjs http://127.0.0.1:PORT DBW_UNIQUE_TEST_NONCE NEW_DIRECTORY [10..300 seconds] [ABSOLUTE_TASK_SCOPE_JSON]');
 }
 if (typeof WebSocket !== 'function') throw Error('This standalone diagnostic needs Node.js 22 or later');
 fs.mkdirSync(output, { recursive: false, mode: 0o700 }); // Never mix captures or overwrite evidence.
@@ -17,6 +18,17 @@ const fd = fs.openSync(file, 'wx', 0o600);
 const MAX_BYTES = 4 * 1024 * 1024, MAX_STREAM_BYTES = 1024 * 1024;
 let bytes = 0, dropped = 0, stopping = false;
 const links = new Map(), seen = new Set(), tasks = new Set();
+const explicitTasks = new Set();
+function refreshTaskScope() {
+  if (!taskScopeFile) return;
+  explicitTasks.clear();
+  try {
+    if (fs.statSync(taskScopeFile).size > 8192) return;
+    const ids = JSON.parse(fs.readFileSync(taskScopeFile, 'utf8'));
+    if (!Array.isArray(ids) || ids.length > 128) return;
+    for (const id of ids) if (typeof id === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(id)) explicitTasks.add(id);
+  } catch { /* A missing/partial file never broadens capture scope. */ }
+}
 const counts = {}, failures = [];
 const count = key => { counts[key] = (counts[key] ?? 0) + 1; };
 function record(value) {
@@ -50,6 +62,29 @@ async function connect(target) {
     if (request.parser?.dropped) count('incompleteOrOversizedSse');
     request.parser = undefined;
   };
+  const recordEnd = request => {
+    if (!request.end || request.endRecorded) return;
+    request.endRecorded = true;
+    record({ kind: 'transport_end', targetId: target.id, requestId: request.requestId, ...request.end });
+  };
+  const claim = (request, projection) => {
+    if (request.owned) return;
+    request.owned = true;
+    count('physicalRequests');
+    record({ kind: 'request', targetId: target.id, requestId: request.requestId, path: request.path,
+      timestamp: request.timestamp, wallTime: request.wallTime, ...projection });
+    recordEnd(request);
+    if (request.response) void startStream(request, request.response);
+  };
+  const refreshScope = () => {
+    for (const request of requests.values()) {
+      if (!request.owned && request.taskId) {
+        const basis = tasks.has(request.taskId) ? 'observed_fetch_stream'
+          : explicitTasks.has(request.taskId) ? 'explicit_task_scope' : undefined;
+        if (basis) claim(request, { taskId: request.taskId, basis });
+      }
+    }
+  };
   const close = () => {
     for (const request of requests.values()) finish(request);
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Error('Disconnected')); }
@@ -66,19 +101,24 @@ async function connect(target) {
     const p = msg.params ?? {};
     if (msg.method === 'Network.requestWillBeSent' && allowed(p.request?.url)) {
       if (requests.size >= 64) { count('requestLimit'); return; }
-      const request = { requestId: p.requestId, path: route(p.request.url), chunks: [], streamBytes: 0 };
+      const request = { requestId: p.requestId, path: route(p.request.url), timestamp: p.timestamp,
+        wallTime: p.wallTime, chunks: [], streamBytes: 0 };
       requests.set(p.requestId, request);
       void (async () => {
         let body = p.request.postData;
         if (body === undefined && p.request.hasPostData) body = (await call('Network.getRequestPostData', { requestId: p.requestId })).postData;
         if (typeof body !== 'string' || Buffer.byteLength(body) > 262144) { requests.delete(p.requestId); return; }
-        const projection = scopedRequest(body, nonce, tasks);
-        if (!projection) { count('unrelatedRequestsSkipped'); requests.delete(p.requestId); return; }
-        request.owned = true;
-        count('physicalRequests');
-        record({ kind: 'request', targetId: target.id, requestId: p.requestId, path: request.path,
-          timestamp: p.timestamp, wallTime: p.wallTime, ...projection });
-        if (request.response) await startStream(request, request.response);
+        const projection = scopedRequest(body, nonce, tasks, explicitTasks);
+        if (!projection) {
+          // Retain only an async task identity while an operator supplies its
+          // evidenced binding. Do not retain unrelated request bodies.
+          let parsed; try { parsed = JSON.parse(body); } catch {}
+          if (request.path === '/chat/async/chunk_stream' && typeof parsed?.task_id === 'string'
+            && /^[a-zA-Z0-9_.:-]{1,256}$/.test(parsed.task_id)) request.taskId = parsed.task_id;
+          else { count('unrelatedRequestsSkipped'); requests.delete(p.requestId); }
+          return;
+        }
+        claim(request, projection);
       })().catch(() => { count('requestBodyUnavailable'); requests.delete(p.requestId); });
       return;
     }
@@ -86,6 +126,10 @@ async function connect(target) {
     if (msg.method === 'Network.responseReceived') {
       request.response = p;
       if (request.owned) void startStream(request, p);
+    }
+    if (msg.method === 'Network.loadingFinished' || msg.method === 'Network.loadingFailed') {
+      request.ended = true;
+      request.end = { timestamp: p.timestamp, failed: msg.method === 'Network.loadingFailed', cancelled: p.canceled === true };
     }
     if (!request.owned) return;
     if (msg.method === 'Network.dataReceived' && p.data && request.streaming) {
@@ -99,9 +143,7 @@ async function connect(target) {
       else request.chunks.push(buffer); // Buffered prefix must precede these packets.
     }
     if (msg.method === 'Network.loadingFinished' || msg.method === 'Network.loadingFailed') {
-      request.ended = true;
-      record({ kind: 'transport_end', targetId: target.id, requestId: p.requestId, timestamp: p.timestamp,
-        failed: msg.method === 'Network.loadingFailed', cancelled: p.canceled === true });
+      recordEnd(request);
       if (request.parser) { finish(request); requests.delete(p.requestId); }
     }
   });
@@ -136,7 +178,7 @@ async function connect(target) {
     });
     ws.addEventListener('close', close, { once: true });
     await call('Network.enable', { maxTotalBufferSize: 2097152, maxResourceBufferSize: 1048576, maxPostDataSize: 262144 });
-    links.set(target.id, { close });
+    links.set(target.id, { close, refreshScope });
     record({ kind: 'attached', targetId: target.id, targetType: target.type });
   } catch (error) { close(); throw error; }
 }
@@ -152,7 +194,7 @@ async function discover() {
     try { await connect(target); } catch { failures.push({ targetId: target.id, reason: 'attach_failed' }); }
   }
 }
-let interval, resolveStop;
+let interval, scopeInterval, resolveStop;
 const stopped = new Promise(resolve => { resolveStop = resolve; });
 const stop = () => { stopping = true; resolveStop(); };
 process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -162,6 +204,10 @@ try {
   if (!links.size) throw Error('No supported Doubao page with Network enabled');
   fs.writeFileSync(path.join(output, 'ready.json'), JSON.stringify({ pid: process.pid, attached: links.size, nonce }), { mode: 0o600 });
   console.log(`Ready: ${links.size} Doubao targets. Submit only the new test task containing ${nonce}.`);
+  scopeInterval = setInterval(() => {
+    refreshTaskScope();
+    for (const link of links.values()) link.refreshScope();
+  }, 250);
   let discovering = false;
   interval = setInterval(() => {
     if (!stopping && !discovering) {
@@ -171,7 +217,7 @@ try {
   }, 2500);
   await stopped;
 } finally {
-  stopping = true; clearTimeout(timer); clearInterval(interval);
+  stopping = true; clearTimeout(timer); clearInterval(interval); clearInterval(scopeInterval);
   for (const link of links.values()) link.close();
   fs.closeSync(fd);
   const summary = { bytes, dropped, counts, failures, attached: links.size,

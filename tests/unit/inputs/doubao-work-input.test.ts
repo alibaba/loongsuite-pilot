@@ -34,6 +34,31 @@ async function setup(initial = '') {
 }
 
 describe('Doubao Work passive client-message input', () => {
+  it('drops presentation inspections restored from an older checkpoint while keeping a real Bash call', async () => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
+    const call = doubaoToolLine({ name: 'Bash', tcid: 'real-bash' }, 100);
+    const end = doubaoToolLine({ name: 'Bash', toolCallID: 'real-bash', status: 'success', phase: 'execution_settled' }, 300);
+    await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + call);
+    expect(await input.poll()).toEqual([]);
+    const state = stateStore.get('doubao-work');
+    const checkpoint = state.extra!.doubaoWork as any;
+    const helper = 'present-files-path-inspection-11111111-2222-4333-8444-555555555555';
+    const start = parseDoubaoLogLine(call.trimEnd(), DOUBAO_FILE)!;
+    const settled = parseDoubaoLogLine(end.trimEnd(), DOUBAO_FILE)!;
+    checkpoint.tools[JSON.stringify(['synthetic-sandbox', helper])] = {
+      start: { ...start, tool: { ...start.tool!, id: helper } },
+      end: { ...settled, tool: { ...settled.tool!, id: helper } }, updatedMs: Date.now(),
+    };
+    stateStore.set('doubao-work', state); await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    await appendFile(file, end + doubaoLine('on_message_session_end'));
+    const events = await restarted.poll();
+    expect(events.filter(e => e['event.name'] === 'tool.call').map(e => e['gen_ai.tool.call.id'])).toEqual(['real-bash']);
+    expect(JSON.stringify(restored.get('doubao-work'))).not.toContain(helper);
+    expect(await restarted.poll()).toEqual([]);
+  });
+
   it('retains a unique native first output across restart and emits it once with source time', async () => {
     const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
     await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + doubaoFirstOutputLine({ prompt: 'SYNTHETIC_PRIVATE' }));
@@ -490,6 +515,24 @@ describe('Doubao Work passive client-message input', () => {
 });
 
 describe('Doubao Work log protocol', () => {
+  it.each([
+    { status: 'received' },
+    { status: 'success', phase: 'execution_settled' },
+    { status: 'error', phase: 'execution_settled' },
+  ])('does not export present_files path inspections as separate GenAI Bash calls: %j', phase => {
+    const helper = 'present-files-path-inspection-11111111-2222-4333-8444-555555555555';
+    const line = (id: string, name = 'Bash') => doubaoToolLine({
+      name, tcid: id, toolCallID: id, ...phase,
+    }, 100).trimEnd();
+    expect(parseDoubaoLogLine(line(helper), DOUBAO_FILE)).toBeUndefined();
+    // Real model tool-call identities, other tools, and merely similar names
+    // remain observable. This is a source-protocol distinction, not a general
+    // exclusion of Bash or tools without trajectory content.
+    expect(parseDoubaoLogLine(line('11111111-2222-4333-8444-555555555555'), DOUBAO_FILE)?.tool?.name).toBe('Bash');
+    expect(parseDoubaoLogLine(line(helper, 'Read'), DOUBAO_FILE)?.tool?.name).toBe('Read');
+    expect(parseDoubaoLogLine(line('present-files-path-inspection-user-call'), DOUBAO_FILE)?.tool?.name).toBe('Bash');
+  });
+
   it('accepts only the exact local tool lifecycle producer and allowlisted metadata', () => {
     const line = doubaoToolLine({ arguments: { command: 'PRIVATE_COMMAND' }, result: 'PRIVATE_RESULT' }, 100).trimEnd();
     const parsed = parseDoubaoLogLine(line, DOUBAO_FILE)!;

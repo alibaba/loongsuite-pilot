@@ -130,10 +130,11 @@ export function projectFrame(frame) {
   }
 }
 
-export function scopedRequest(body, nonce, tasks = new Set()) {
+export function scopedRequest(body, nonce, tasks = new Set(), explicitTasks = new Set()) {
   let source;
   try { source = object(JSON.parse(body)); } catch { return undefined; }
   if (tasks.has(source.task_id)) return { taskId: id(source.task_id), basis: 'observed_fetch_stream' };
+  if (explicitTasks.has(source.task_id)) return { taskId: id(source.task_id), basis: 'explicit_task_scope' };
   const messages = Array.isArray(source.messages) ? source.messages : [];
   const visibleText = raw => {
     const m = object(raw);
