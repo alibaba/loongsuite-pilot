@@ -63,3 +63,24 @@ Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 
 真实验收分别核对源日志、标准 JSONL、OTLP 和 CMS 回读，确认 I/O 不串请求、工具 ID/时间/归属、TASK 唯一性与异步 Link。通用 Trace validator 保持 ENTRY → AGENT、AGENT → STEP、STEP → LLM / TOOL 的严格规则，不包含豆包例外。通过已输出数据的结构校验不代表完整 ReAct 覆盖，缺失层级必须单独报告。
 
 本地观测日志用 `local_execution_phase` 表示资源起止，以 `root_turn_id` 保留关联；不写客户端 `gen_ai.turn.start/end`，也不创建新的客户端 turn。
+
+## Mac 消息流验证
+
+2026-10-27 在正式版 macOS 2.34.1 / Chromium 147 上进行了被动 CDP 验证。纯文本、顺序 Write → Read → Write → Read、组织者创建两个子 Agent 三个任务均有真实结果；子 Agent 两份新文件的内容已核对。连续四个工具调用只对应一个回复 ID，消息流的结束边界覆盖整个同步回复，不能据此拆出逐次 LLM 调用。
+
+主页面与 launcher 各出现一次 `/chat/completion` 请求，但具有相同 local message ID 和回复 ID，必须识别为同一消息的两条物理传输。`STREAM_MSG_NOTIFY`、`STREAM_CHUNK` / `CHUNK_DELTA`、`SSE_REPLY_END` 提供消息和界面块的身份、内容与终止事实；工具界面块的 `is_finish` 不是模型调用的完成事件。模型字段 `38` 是内部枚举，`context_window_usage` 是上下文占用，两者均不转换为真实模型名或本次计费 Token。
+
+多 Agent 会在同步回复后使用 `/chat/async/chunk_stream`。本轮已确认后台执行和原生创建关系，但未完成异步流及全部子 Agent 界面验收；不能把同步结束作为后台完成，也不能声称有完整多 Agent 网络覆盖。当前结论只针对已观察的路径，不排除客户端其他接口能提供更多信息。
+
+Claude Code 的 fetch intercept 在真实 `/v1/messages` 请求上补充每次 HTTP attempt、SSE response ID 与起止，另有 transcript 的时间、模型和 usage。豆包页面则将消息请求交给缓存的自定义 fetch，再通过 `fetch-stream-for-im` 原生 MessagePort 发送。只包装全局 `window.fetch` 可能漏采；包装同一个收发入口也不会自动得到云端内部的逐次模型请求。
+
+仓库保留一个开发诊断命令，要求 Node.js 22+ 和已经启用的本机回环 CDP：
+
+```bash
+node scripts/diagnostics/doubao-work-network-probe.mjs \
+  http://127.0.0.1:9236 DBW_UNIQUE_TEST_20261027 /tmp/doubao-new-capture 120
+```
+
+等待 `Ready` 后，在新任务正文加入相同的唯一测试标识。输出目录必须不存在。脚本只启用 Network 观察和 [CDP 响应流读取](https://chromedevtools.github.io/devtools-protocol/tot/Network/#method-streamResourceContent)，不暂停、重放或修改业务请求；只保存本次标识匹配的消息文本及白名单协议字段，不保存 headers、Cookie、签名 URL 或账号元数据。最多运行 300 秒、连接 16 个本产品页面、保存 4 MiB，每条流最多 1 MiB；超限或不支持流读取时明确记录缺口。
+
+`network.jsonl` 是诊断事实，不是标准 GenAI 事件或可直接上报的 Span。重复物理传输保留，使用消息身份对照；不按请求数、工具块数或 `SSE_REPLY_END` 数量统计 LLM。只有观察到 `FETCH_STREAM.fetch_key` 才跟随对应 async task；尚未证明的线程/任务映射不会猜测关联。未知协议仅记录事件名，异步 snapshot 正文尚未适配。该脚本不接入常驻 collector、不自动开启调试端口、不上报 CMS；正式采集仍使用上文的被动文件 Input。
